@@ -286,6 +286,17 @@ def check_subset(name: str, node: Any, pointer: str) -> None:
         check_subset(name, variant, f"{pointer}/oneOf/{index}")
 
 
+def literal(values: list[Any]) -> str:
+    """A ``Literal`` of ``values``. Pydantic lets ``1`` match ``True`` and ``True`` match ``1``
+    in a ``Literal``, even in strict mode, so numbers and booleans also check their type."""
+
+    text = "Literal[" + ", ".join(repr(value) for value in values) + "]"
+    if not any(isinstance(value, int) for value in values):
+        return text
+    types = ", ".join(sorted({type(value).__name__ for value in values}))
+    return f"Annotated[{text}, BeforeValidator(exact_type({types}))]"
+
+
 def discriminator(name: str, pointer: str, node: dict[str, Any]) -> str:
     """The property whose ``const`` tells the alternatives of a ``oneOf`` apart."""
 
@@ -300,6 +311,8 @@ def discriminator(name: str, pointer: str, node: dict[str, Any]) -> str:
     if not all(key in variant.get("required", []) for variant in variants):
         raise ContractError(f"{name}{pointer}: every oneOf alternative requires its {key!r} property")
     values = [variant["properties"][key]["const"] for variant in variants]
+    if not all(isinstance(value, str) for value in values):
+        raise ContractError(f"{name}{pointer}: oneOf alternatives are told apart by strings")
     if len(set(values)) != len(values):
         raise ContractError(f"{name}{pointer}: oneOf const values must differ")
     return key
@@ -1221,9 +1234,9 @@ class ModelWriter:
             target_file, fragment = self.resolve(file, schema["$ref"])
             return self.named(target_file, fragment)
         if "const" in schema:
-            return f"Literal[{schema['const']!r}]"
+            return literal([schema["const"]])
         if "enum" in schema:
-            return "Literal[" + ", ".join(repr(value) for value in schema["enum"]) + "]"
+            return literal(schema["enum"])
         if "oneOf" in schema:
             return self.union(file, schema, hint)
         kind = schema.get("type")
@@ -1345,11 +1358,11 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
     models = header + (
         "from __future__ import annotations\n\n"
         "from typing import Annotated, Any, Literal, Union\n\n"
-        "from pydantic import MISSING, AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter\n\n"
-        "from custom_messages.wire.values import validate_timestamp\n\n\n"
+        "from pydantic import MISSING, AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, TypeAdapter\n\n"
+        "from custom_messages.wire.values import exact_type, validate_timestamp\n\n\n"
         "class WireModel(BaseModel):\n"
-        "    \"\"\"Strict, immutable and closed to unknown fields.\"\"\"\n\n"
-        "    model_config = ConfigDict(extra=\"forbid\", frozen=True, strict=True, populate_by_name=True)\n\n\n"
+        "    \"\"\"Strict, immutable and closed to unknown fields; fields are read only under their wire names.\"\"\"\n\n"
+        "    model_config = ConfigDict(extra=\"forbid\", frozen=True, strict=True)\n\n\n"
     )
     models += "\n\n".join(writer.blocks)
     adapters = []

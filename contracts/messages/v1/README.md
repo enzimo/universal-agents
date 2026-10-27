@@ -185,6 +185,10 @@ refuses anything else.
   value so omitted fields also remain absent when serialized. The runtime requires
   Pydantic 2.14.1 or later.
 - **Numbers** are integers only, within ±(2^53 - 1). Decimals travel as strings.
+- **Values keep their JSON type**, also where a `const` or `enum` names them: `true` is
+  not `1`, and `1` is not `true`. A field is read only under the name its schema gives it.
+  Generated Python models check both, since Pydantic otherwise lets `1` match a constant
+  `True` and accepts a field under its Python name (`from_` for `from`).
 - **Patterns** use only syntax that every common regular-expression engine reads the same
   way, including Python's `re`, Pydantic's validator and ECMAScript: literal characters,
   character classes (without nested `[`), escaped punctuation, groups and `(?:`,
@@ -194,8 +198,8 @@ refuses anything else.
   boundaries and possessive quantifiers are refused. Python's `re` also lets `$` match
   before a final newline, so a Python validator must refuse a value that ends with one
   (the tests replace a final `$` with `\Z`).
-- **Alternatives** (`oneOf`) are objects told apart by a `const` property that every
-  alternative requires.
+- **Alternatives** (`oneOf`) are objects told apart by a string `const` property that
+  every alternative requires.
 - **Generated names** must be unique: two kinds, definitions or nested objects that would
   produce one Python class name are refused.
 

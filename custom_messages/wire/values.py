@@ -1,6 +1,7 @@
 """Semantic validation shared by generated protocol models and frame checks."""
 
 from datetime import datetime, timezone
+from typing import Any, Callable
 
 
 def parse_timestamp(text: str) -> datetime:
@@ -14,3 +15,14 @@ def validate_timestamp(text: str) -> str:
 
     parse_timestamp(text)
     return text
+
+
+def exact_type(*types: type) -> Callable[[Any], Any]:
+    """A check that a value's type is one of ``types`` exactly: JSON's true is not 1, nor 1 true."""
+
+    def check(value: Any) -> Any:
+        if type(value) not in types:
+            raise ValueError(f"must be {' or '.join(kind.__name__ for kind in types)}, not {type(value).__name__}")
+        return value
+
+    return check
