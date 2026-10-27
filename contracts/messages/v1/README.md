@@ -568,6 +568,9 @@ A queued message can wait days, for example while a host is cut off.
 - **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
 - **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued (authorization plan 12.5). A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
+- **Longest lifetime.** A certificate, agent session or agreement ends no later than its record's `max_lifetime_seconds` (registry `state_records`: 90 days, a day and 366 days) after the record is written; a later end is refused (`invalid_body` at the body's end). A record that must last longer is renewed. A rewrite is written no earlier than the version it replaces.
+- **Forgetting.** A receiver forgets a certificate, agent session or agreement once its newest version was written longer ago than its `max_lifetime_seconds` plus `replay_ledger_retention_seconds` and the clock tolerance (`TrustStore.forget(now)`, at least daily). By then every version of it has ended and every frame it vouched for has expired, so its store stays bounded. A forgotten record is not taken back: the store ignores a record it would forget when it holds none under that key, so an older version cannot return either. The revocations record is never forgotten. Its writers delete a record from `UA1_CERTS` once receivers forget it.
+- **State reports outlive certificates.** Agent, placement and team-view records do not expire, but a receiver that forgot the certificate that signed one refuses it as `unknown_key`. Their writers write them again under a current certificate before an old one is forgotten, for example when a renewal's overlap ends.
 
 ## Installation traffic
 
@@ -637,7 +640,7 @@ Hosts, agents, placements and the team view are key-value records, not messages.
 - issue and expiry times;
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
 
-The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), and its body schema. The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
+The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), its body schema and, for trust records that end, how long after it is written a record may end (`max_lifetime_seconds`, "Trust over time"). The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
 - **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
 - **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current.
@@ -649,7 +652,7 @@ A reader refuses a state report with the first failing check, in the registry's 
 3. `bad_signature`, `bad_digest`, `revoked`, `epoch_too_old`;
 4. `wrong_issuer` for the writer's roles or installation, then `wrong_team` for the record's team, read from the key or the body as received;
 5. `expired`, `not_yet_valid`, `replayed`;
-6. `invalid_body`: the body schema, then the record's dates (its expiry, its bucket's lifetime, a trust record's single validity window), then its key and body rules.
+6. `invalid_body`: the body schema, then the record's dates (its expiry, its bucket's lifetime, a trust record's single validity window and its longest lifetime), then its key and body rules.
 
 Trust records (`TrustStore.add`) follow the same order without the reader's checks; their own-installation rules need the body and come with its rules. The two-defect examples under `examples/state/invalid/` (`also`) pin the order.
 

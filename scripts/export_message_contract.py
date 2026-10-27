@@ -124,7 +124,8 @@ COVERED_ONLY_REFUSALS = {"change_conflict", "needs_person_decision", "record_bus
 # one of them would never repeat and could not find the stored outcome.
 PER_FRAME_PARTS = {"/message_id", "/idempotency_key", "/issued_at", "/not_before", "/expires_at", "/body_digest",
                    "/signature"}
-STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "write_rule"}
+STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "max_lifetime_seconds",
+                "write_rule"}
 REQUIRED_STATE_FIELDS = {"description", "bucket", "key", "signer", "writers", "body", "write_rule"}
 SIGNERS = {"authority", "host"}
 
@@ -872,6 +873,9 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
         bucket_ttl = transport["key_value"][entry["bucket"]]["per_key_ttl_seconds"]
         if entry.get("ttl_seconds", 0) != bucket_ttl:
             raise ContractError(f"{where}: ttl_seconds is its bucket's per_key_ttl_seconds ({bucket_ttl}), and only then present")
+        lifetime = entry.get("max_lifetime_seconds", 1)
+        if type(lifetime) is not int or lifetime < 1 or ("max_lifetime_seconds" in entry and bucket_ttl):
+            raise ContractError(f"{where}: max_lifetime_seconds is a positive whole number, for records whose bucket keeps them")
 
 
 def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
@@ -1416,6 +1420,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
         f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
+        f"max_lifetime_seconds={entry.get('max_lifetime_seconds')!r}, "
         f"body_model=models.{class_name(name)}StateAdapter, "
         f"body_shape={shape(writer, entry['body'], schemas[entry['body']])!r}),"
         for name, entry, _body in states
@@ -1437,6 +1442,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
+        f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
         f"SUBJECT_PREFIX = {transport['subject_prefix']!r}\n"
         f"PEER_SENDER_SLOT = {transport['peer_sender_slot']!r}\n"
         f"REPLY_INBOX_PREFIX = {transport['reply_inbox_prefix']!r}\n"

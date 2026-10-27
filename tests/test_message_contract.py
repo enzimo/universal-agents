@@ -1500,6 +1500,100 @@ def test_a_host_that_joins_later_is_trusted_once_its_certificate_arrives() -> No
     assert fixtures.verify(data, frame, trust=store).certificate.runtime == "lead-host-2"
 
 
+# Trust records that end: the example record and the body field that says when.
+ENDING_RECORDS = {"certificate": ("certificates/lead-host-1.json", "expires_at"),
+                  "agent_session": ("sessions/lead.json", "ends_at"),
+                  "agreement": ("agreements/install_peer.json", "expires_at")}
+RETENTION = timedelta(seconds=kinds.REPLAY_LEDGER_RETENTION_SECONDS)
+
+
+def lifetime(record: str) -> timedelta:
+    return timedelta(seconds=kinds.STATE_RECORDS[record].max_lifetime_seconds)
+
+
+def trust_example(record: str) -> dict:
+    return json.loads((EXAMPLES / "trust" / ENDING_RECORDS[record][0]).read_text())
+
+
+def ending(record: str, after: timedelta) -> bytes:
+    """The example ``record`` written again (a higher sequence) to end ``after`` it is written."""
+
+    document = trust_example(record)
+    end = parse_timestamp(document["issued_at"]) + after
+    text = end.strftime("%Y-%m-%dT%H:%M:%S.") + f"{end.microsecond // 1000:03d}Z"
+    document["body"][ENDING_RECORDS[record][1]] = text
+    if "expires_at" in document:
+        document["expires_at"] = text
+    document["sequence"] += 1
+    return json.dumps(sign_state(document, fixtures.private_key(document["writer"]["key_id"]))).encode()
+
+
+def forgotten_from(record: str) -> object:
+    """When the example ``record`` is forgotten: its newest version's writing plus its lifetime, retention and tolerance."""
+
+    return parse_timestamp(trust_example(record)["issued_at"]) + lifetime(record) + RETENTION + SKEW
+
+
+@pytest.mark.parametrize("record", sorted(ENDING_RECORDS))
+def test_a_trust_record_ends_within_its_longest_lifetime(record: str) -> None:
+    assert fixtures.trust_store().add(ending(record, lifetime(record))) is True
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.trust_store().add(ending(record, lifetime(record) + timedelta(milliseconds=1)))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", f"/body/{ENDING_RECORDS[record][1]}")
+
+
+@pytest.mark.parametrize("record", sorted(ENDING_RECORDS))
+def test_a_trust_record_is_forgotten_when_nothing_can_still_need_it_and_does_not_come_back(record: str) -> None:
+    store = fixtures.trust_store()
+    held = store.held()
+    assert held == {"agreement": 1, "certificate": 8, "revocations": 1, "agent_session": 3}
+    store.forget(forgotten_from(record) - timedelta(milliseconds=1))
+    assert store.held().get(record, 0) >= 1
+    lookups = {"certificate": lambda: store.host_certificate("install_example", "lead-host-1", 3),
+               "agent_session": lambda: store.agent_session("install_example", "team_example", "s-lead-1"),
+               "agreement": lambda: store.agreement("install_peer")}
+    assert lookups[record]() is not None
+    forgotten = store.forget(forgotten_from(record))
+    assert forgotten >= 1 and lookups[record]() is None
+    # The record, and any version of it written no later, is ignored from now on.
+    assert store.add((EXAMPLES / "trust" / ENDING_RECORDS[record][0]).read_bytes()) is False
+    assert lookups[record]() is None
+    assert store.held()["revocations"] == 1
+
+
+def test_forgetting_needs_a_newer_version_to_be_forgotten_too() -> None:
+    """A renewal moves the moment a record is forgotten: it is measured from the newest version held."""
+
+    store = fixtures.trust_store()
+    renewed = trust_example("agent_session")
+    renewed["sequence"] += 1
+    later = parse_timestamp(renewed["issued_at"]) + timedelta(days=3)
+    renewed["issued_at"] = later.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    renewed["body"]["ends_at"] = (later + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    assert store.add(json.dumps(sign_state(renewed, fixtures.private_key(renewed["writer"]["key_id"]))).encode())
+    store.forget(forgotten_from("agent_session"))
+    assert store.agent_session("install_example", "team_example", "s-lead-1") is not None
+    store.forget(forgotten_from("agent_session") + timedelta(days=3))
+    assert store.agent_session("install_example", "team_example", "s-lead-1") is None
+
+
+def test_forgetting_keeps_a_replacement_whose_replaced_certificate_arrives_later() -> None:
+    """The renewal that arrives first still ends the old certificate's overlap once the old one is added."""
+
+    store = fixtures.trust_store(remove=["certificates/lead-host-1.json"])
+    store.add(renewed_lead_certificate(issued_at="2026-10-22T04:20:00.000Z"))
+    store.forget(fixtures.NOW)
+    store.add((EXAMPLES / "trust/certificates/lead-host-1.json").read_bytes())
+    pause = fixtures.example_frame("agent.pause")
+    refused = refusal(json.dumps(pause).encode(), pause, trust=store)
+    assert (refused.code, refused.at) == ("unknown_key", "/issued_at")
+
+
+def test_forgetting_needs_an_aware_time() -> None:
+    with pytest.raises(ValueError, match="time zone"):
+        fixtures.trust_store().forget(fixtures.NOW.replace(tzinfo=None))
+
+
 # -- frame rules ----------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("kind", ["task.stop", "agent.pause", "agent.pause.reply"])
@@ -1602,7 +1696,7 @@ def test_the_senders_own_expiry_counts_before_the_kinds_lifetime() -> None:
 
 def test_timestamp_extremes_do_not_overflow_lifetime_checks() -> None:
     store = fixtures.trust_store(extra_documents=[certificate_record(
-        "far-host", roles=("lead_host",), issued_at="9999-01-01T00:00:00.000Z", expires_at="9999-12-31T23:59:59.999Z")])
+        "far-host", roles=("lead_host",), issued_at="9999-10-02T23:59:59.999Z", expires_at="9999-12-31T23:59:59.999Z")])
     frame = signed_example()
     frame["issuer"] = {"installation": "install_example", "team": "team_example", "runtime": "far-host", "membership_epoch": 1,
                        "revocation_epoch": 1, "key_id": "test-worker-key-1"}
