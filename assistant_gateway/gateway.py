@@ -14,6 +14,7 @@ from assistant_gateway.status_page import StatusPage
 from assistant_gateway.file_retention import GatewayFileRetention
 from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cache_dir
 from assistant_gateway.upload_retention import UploadRetention
+from assistant_gateway.history_cleanup import GatewayHistoryCleanup
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
 from assistant_gateway.access_inbox import (
     GatewayAccessInbox,
@@ -936,6 +937,16 @@ class UserGateway:
             event_output=self._event_output,
             logger=logger,
         )
+        # The gateway's part of people's history clean-ups, in both
+        # authorization modes (assistant_gateway.history_cleanup).
+        self.history_cleanup = GatewayHistoryCleanup(
+            team_id=config.manager.team_id,
+            storage=config.manager_storage_settings,
+            state_store=self.state_store,
+            uploads_dir=config.layout.uploads_dir,
+            proactive_session_key=config.heartbeat.session_key,
+            send_notice_once=self.access_inbox.send_notice_once,
+        )
         self._task_progress_service = GatewayTaskProgressService(
             settings=GatewayTaskProgressSettings(
                 instance_name=config.instance_name,
@@ -1339,6 +1350,10 @@ class UserGateway:
                 asyncio.create_task(
                     self.upload_retention.run(self._stop_event),
                     name="gateway_upload_retention_loop",
+                ),
+                asyncio.create_task(
+                    self.history_cleanup.run(self._stop_event),
+                    name="gateway_history_cleanup_loop",
                 ),
             ]
             self._background_tasks.extend(

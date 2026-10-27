@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from functools import partial
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from access_control.ownership import conversation_continuation
 from custom_agents.conversation_summary import (
@@ -100,6 +100,41 @@ def _require_conversation_owner(
     )
 
 
+def _checked_followup(
+    conversation_store: Any,
+    followup_to_task_id: str,
+    *,
+    conversation_id: str,
+    person_id: Optional[str],
+    task_id: str,
+    deleted_by_cleanup: Optional[Callable[[Optional[str], str], bool]],
+) -> Optional[str]:
+    """The task a new turn follows up, checked to be in its conversation; ``ValueError`` otherwise.
+
+    None when the person deleted that whole conversation
+    (``custom_agents.history_cleanup``) and the gateway has not yet cleared its
+    pointer to the deleted last task: the conversation then starts afresh
+    instead of failing.
+    """
+
+    followup_turn = conversation_store.get_turn_by_task_id(followup_to_task_id)
+    if not followup_turn:
+        if deleted_by_cleanup is not None and deleted_by_cleanup(person_id, conversation_id):
+            logger.info(
+                "A message followed up a conversation the person deleted; it starts afresh. "
+                "event=followup_after_history_cleanup conversation_id=%s task_id=%s",
+                conversation_id,
+                task_id,
+            )
+            return None
+        raise ValueError(f"followup_to_task_id {followup_to_task_id} does not exist in the conversation store.")
+    if followup_turn.get("conversation_id") != conversation_id:
+        raise ValueError(
+            f"followup_to_task_id {followup_to_task_id} does not belong to conversation {conversation_id}."
+        )
+    return followup_to_task_id
+
+
 def build_turn_execution_history(task_manager: Any, task_id: str) -> str:
     return task_manager.summarize_task_history_markdown(
         task_id=task_id,
@@ -147,8 +182,14 @@ def ensure_task_conversation_context(
     msg_meta: MessageMeta,
     owner_person_id: Optional[str],
     owner_named_agent_type: Optional[str] = None,
+    deleted_by_cleanup: Optional[Callable[[Optional[str], str], bool]] = None,
 ) -> MessageMeta:
     """Record a top-level task as the next turn of its conversation (a new thread when there is none).
+
+    ``deleted_by_cleanup(person_id, conversation_id)`` says whether the
+    person deleted that whole conversation
+    (``custom_agents.history_cleanup.followup_conversation_deleted``); a
+    follow-up to a task it deleted then starts the conversation afresh.
 
     ``owner_person_id`` is the person the task verifiably works for (module
     docstring); None for work for no person. Raises ``ValueError`` (logged)
@@ -197,15 +238,14 @@ def ensure_task_conversation_context(
     )
 
     if followup_to_task_id:
-        followup_turn = conversation_store.get_turn_by_task_id(followup_to_task_id)
-        if not followup_turn:
-            raise ValueError(
-                f"followup_to_task_id {followup_to_task_id} does not exist in the conversation store."
-            )
-        if followup_turn.get("conversation_id") != normalized_meta.conversation_id:
-            raise ValueError(
-                f"followup_to_task_id {followup_to_task_id} does not belong to conversation {normalized_meta.conversation_id}."
-            )
+        followup_to_task_id = _checked_followup(
+            conversation_store,
+            followup_to_task_id,
+            conversation_id=str(normalized_meta.conversation_id or ""),
+            person_id=owner_canonical_user_id,
+            task_id=task_request.task_id,
+            deleted_by_cleanup=deleted_by_cleanup,
+        )
     elif (
         requester_type != RequesterType.TIMER_REQUESTER
         and latest_link

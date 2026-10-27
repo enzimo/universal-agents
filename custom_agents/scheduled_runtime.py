@@ -25,6 +25,7 @@ from custom_agents.conversation_runtime import (
     record_task_conversation_history,
     start_new_conversation,
 )
+from custom_agents.history_cleanup import followup_conversation_deleted
 from custom_agents.heartbeat_store import (
     HeartbeatStore,
     is_heartbeat_launcher,
@@ -1383,6 +1384,7 @@ def _with_conversation(
             msg_meta=meta,
             owner_person_id=owner_person_id,
             owner_named_agent_type=getattr(agent, "named_agent_type", None),
+            deleted_by_cleanup=partial(followup_conversation_deleted, agent),
         )
     except ValueError as exc:
         agent._logger.warning(

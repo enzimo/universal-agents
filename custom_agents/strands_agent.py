@@ -5082,6 +5082,11 @@ class UniversalAgent(BaseModel):
                 from custom_agents.person_departure_runtime import settle_departed_people_safely
 
                 await settle_departed_people_safely(self, when="manager_start")
+                # And finish history clean-ups a stopped run left part way
+                # (custom_agents.history_cleanup).
+                from custom_agents.history_cleanup import finish_unfinished_history_cleanups
+
+                await asyncio.to_thread(finish_unfinished_history_cleanups, self)
             from custom_agents.agent_instantiation_service import update_runtime_launch
             from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 

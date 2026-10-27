@@ -644,6 +644,20 @@ class _RelationalConversationRepository:
                 ON conversation_threads(owner_agent_id, updated_at DESC)
                 """
             )
+            # A person's own conversations and turns, by the person they belong
+            # to (history overview and clean-up, person departure).
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_threads_person
+                ON conversation_threads(owner_canonical_user_id, updated_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_task_links_person
+                ON conversation_task_links(owner_canonical_user_id, created_at)
+                """
+            )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_conversation_context_epochs_conversation

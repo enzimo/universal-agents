@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Sequence, cast
+from typing import Callable, Optional, Sequence, cast
 
 from assistant_gateway.domain.delivery import (
     AttachmentRecord,
     DeliveryRecord,
     ScheduledTargetRecord,
 )
+from assistant_gateway.domain.history import GatewayHistoryDeleted, GatewayHistoryScope
 from assistant_gateway.domain.identity import (
     GatewayTeamPersonRecord,
     GatewayUserChannelBindingRecord,
@@ -913,6 +914,11 @@ class GatewayStateStore:
 
     def forget_person_records(self, canonical_user_id: str) -> GatewayPersonRecordsDeleted:
         return self._repository.forget_person_records(canonical_user_id)
+
+    def delete_history_records(
+        self, scope: GatewayHistoryScope, *, removable_thread: Callable[[SessionRecord], bool]
+    ) -> GatewayHistoryDeleted:
+        return self._repository.delete_history_records(scope, removable_thread=removable_thread)
 
     def list_team_members(self, team_id: str) -> list[GatewayUserTeamMembershipRecord]:
         return self._repository.list_team_members(team_id)

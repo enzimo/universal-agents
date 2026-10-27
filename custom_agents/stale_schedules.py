@@ -325,9 +325,12 @@ async def check_schedules(agent: Any) -> str:
     moves the team's schedules they owned (module docstring).
     """
 
+    from custom_agents.history_cleanup import finish_unfinished_history_cleanups
     from custom_agents.person_departure_runtime import settle_departed_people_safely
 
     departures = await settle_departed_people_safely(agent, when="maintenance")
+    # History clean-ups a stopped run left part way (custom_agents.history_cleanup).
+    await asyncio.to_thread(finish_unfinished_history_cleanups, agent)
     report = await asyncio.to_thread(check_stale_schedules, agent)
     return f"{departures} {report.instruction_sentence()}"
 

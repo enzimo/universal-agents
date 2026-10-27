@@ -460,6 +460,13 @@ class AccessRequests:
             )
         # Raises HandDownRefused for targets outside the catalog.
         self.service.target_entities_for_ref(target)
+        if self.service.person_owned(target.id):
+            # A person's own tool is opened only by that person, never on an
+            # agent's request (AccessService.person_owned_refusal).
+            raise HandDownRefused(
+                f"Nobody asks for {target.id}: only the person opens it to TeamLead, in Settings > Access or with "
+                "/access grant. Without it, each change it covers is approved on its own when you apply it."
+            )
         if lifetime not in REQUESTABLE_LIFETIMES:
             raise ValueError(f"Unknown lifetime {lifetime!r}.")
         if lifetime in {GrantLifetime.TASK, GrantLifetime.ONE_TIME} and not task_id:
@@ -781,6 +788,12 @@ class AccessRequests:
             if request.person_id != person.person_id:
                 return False
             return self.service.holds(person, request.target, request.level, task_id=request.task_id)
+        if self.service.person_owned(request.target.id):
+            # A person's own tool belongs to the person the request is for,
+            # never to the reviewer (``AccessService.person_owner``).
+            return bool(request.person_id) and self.service.may_give(
+                person, request.target, request.level, task_id=request.task_id, for_person_id=request.person_id
+            )
         return self.service.may_give(person, request.target, request.level, task_id=request.task_id)
 
     def may_change_directly(self, person: PersonPrincipal, kind: str) -> bool:
@@ -1493,6 +1506,9 @@ class AccessRequests:
             reason=str(reason).strip(),
             created_at_utc=now,
         )
+        owned_refusal = self.service.person_owned_refusal(person, block)
+        if owned_refusal:
+            raise HandDownRefused(owned_refusal)
         created = self.service.store.replace_block(previous, block) if previous else self.service.store.create(block)
         logger.warning(
             "A person blocked access. event=access_blocked grant_id=%s by=%s subject=%s:%s target=%s expires_at=%s "

@@ -575,6 +575,10 @@ class ToolCatalog:
                 tool.kind is ToolKind.CODE or tool.owner_scope is not OwnerScope.TEAM
             ):
                 raise CatalogError(f"{tool.tool_id}: code, platform and administrator-only tools are never standard.")
+            # A person's own tool is opened to agents only by that person
+            # (OwnerScope.PERSON): a tool set would give it by role instead.
+            if tool.owner_scope is OwnerScope.PERSON and tool.tool_sets:
+                raise CatalogError(f"{tool.tool_id}: a person's own tool belongs to no tool set.")
         self._validate_prerequisites()
 
     def _validate_prerequisites(self) -> None:

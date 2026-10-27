@@ -27,6 +27,7 @@ from custom_tools.providers._user_scope import (
 from custom_tools.runtime_context import (
     get_agent_ref,
 )
+from custom_tools.tool_results import failed
 from id_generation import (
     new_id,
 )
@@ -170,6 +171,62 @@ def get_conversation_turns(
         )
     except Exception as exc:
         return json.dumps({"error": str(exc)})
+
+
+@tool
+def get_history_overview(limit: int = 20) -> str:
+    """
+    See how much chat history and how many finished tasks the person you work for has stored.
+
+    Lists their conversations (newest first, with ids, the start of the first
+    request as a title, turns, dates and size) and how much is older than 30,
+    90, 180 and 365 days. Use it before `plan_history_cleanup` and to tell the
+    person what they have. It only reads, and only this person's history.
+    """
+    from access_control.identity import IdentityRejected
+    from custom_agents.history_cleanup import HistoryCleanupRefused, history_overview
+
+    agent = get_agent_ref()
+    if agent is None:
+        return json.dumps({"error": "Agent reference not set"})
+    try:
+        return json.dumps(history_overview(agent, limit=limit), default=str)
+    except (HistoryCleanupRefused, IdentityRejected) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def plan_history_cleanup(what: str, older_than: str = "", conversation_ids: list[str] | None = None) -> str | dict[str, Any]:
+    """
+    Stage a clean-up of the person's own chat history; it deletes nothing yet.
+
+    Only when the person asks you to delete their history. `what` is
+    `conversations` (their chats everywhere, with summaries and saved tool
+    outputs), `tasks` (finished tasks) or `both`. Give `older_than` (a date,
+    YYYY-MM-DD: everything from before it) and/or `conversation_ids` (from
+    `get_history_overview`); with both, only those conversations' older part.
+    It always works on the history of the person this task is for. The
+    conversation you are answering in and conversations with work still
+    running are kept. Then show the person the result's `effect` and call
+    `apply_change(change_id, reason)`: it applies at once if they let you
+    clean up their history without asking (Settings > Access), otherwise they
+    approve this exact clean-up in the Inbox. Remembered facts are kept.
+    """
+    from access_control.identity import IdentityRejected
+    from custom_agents.history_cleanup import HistoryCleanupRefused, stage_history_cleanup
+
+    agent = get_agent_ref()
+    if agent is None:
+        return failed({"error": "Agent reference not set"})
+    try:
+        return json.dumps(
+            stage_history_cleanup(
+                agent, what=what, older_than=older_than, conversation_ids=list(conversation_ids or ())
+            ),
+            default=str,
+        )
+    except (HistoryCleanupRefused, IdentityRejected) as exc:
+        return failed({"status": "refused", "reason": str(exc)})
 
 
 def _conversation_turn_summary_payload(turn: dict[str, Any]) -> dict[str, Any]:
@@ -991,5 +1048,7 @@ CONVERSATIONS_PROVIDER = ToolProvider(
         get_conversation_context_slice,
         list_pending_after_action_reports,
         resolve_after_action_report_review,
+        get_history_overview,
+        plan_history_cleanup,
     ),
 )
