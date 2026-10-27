@@ -352,6 +352,49 @@ With authorization off (`authorization.enabled: false`, see
 without asking, the access tools are not given to agents, and the sandbox, the
 broker, and the protected folders still apply.
 
+## Cleaning up your chat history
+
+Your chats and finished tasks are kept until you delete them. To delete
+some, ask TeamLead, for example "delete my chats and finished tasks from before
+April" or "delete the trip planning conversation". TeamLead can show you what
+you have stored first: your conversations with their size and dates, and how
+much is older than 30, 90, 180 and 365 days.
+
+- **What is deleted.** For chats: the conversation in every chat app (Web
+  Chat, Telegram, Discord and the others), with its summaries, saved tool
+  outputs and uploaded files. A clean-up by date also deletes your older
+  messages outside conversations, including the **Updates** and **Memory
+  review** threads. For finished tasks: the tasks and the tasks delegated from
+  them. Remembered facts are kept; you manage them under **Memories**.
+- **What is kept.** The conversation you are asking in, conversations with
+  work still running, and everything newer than the date you name. A
+  conversation that is only partly deleted keeps its newer messages, and in
+  Web Chat it is then named after its earliest remaining message. A Web Chat
+  thread left empty disappears from the list; another chat continues, and its
+  next message starts a new conversation.
+- **Who decides.** Only you. Each clean-up waits for you in the Inbox, where
+  the card lists the conversations by the start of their first message, their
+  dates and size. Once you decide, the card keeps only their ids, dates and
+  counts. Administrators cannot approve your clean-ups, delete your history or
+  let TeamLead do it for you.
+- **Without asking each time.** Turn on **Let TeamLead clean up my history
+  without asking** under **Settings → Access → By Agent Type**, or send
+  `/access grant agent-type:TeamArchitect fn:history_cleanup full`. TeamLead
+  then applies each clean-up you ask for at once. It keeps this to itself and
+  never passes it to other agents. Turn the switch off, use **Remove** on the
+  row, or `/access revoke <grant id>` to go back to approving each clean-up.
+  It is never part of a starter profile.
+- **You are told every time.** After every clean-up your Inbox gets a notice
+  with what was deleted (counts and sizes, never the content) and how it was
+  approved; when TeamLead used your permission, the notice lets you remove
+  that permission. A schedule you made yourself can also ask TeamLead to clean
+  up regularly; the runtime's own schedules never do.
+- **Open pages.** A Web Chat page that is already open keeps showing deleted
+  messages until you reload it.
+
+With authorization off, TeamLead asks for your agreement in the chat before
+each clean-up.
+
 ## Access proposals
 
 Some access cannot be handed on or asked for one tool at a time: a service that
@@ -956,9 +999,12 @@ showing 20 items per page:
 
 - **By Agent Type** starts with **TeamLead's standing access for your work**:
   the three [profiles](#how-agents-get-access), the one in use marked **In
-  use**, and **Save**, which changes only your own work. Below it, one card per
-  agent type, and one per scheduled job that holds access (**Scheduled job
-  <name>**), shows its access in groups, with one row per tool:
+  use**, and **Save**, which changes only your own work. Below them is
+  **Cleaning up your chat history**, a switch that lets TeamLead delete your
+  old chats and finished tasks when you ask without approving each clean-up
+  (see [Cleaning up your chat history](#cleaning-up-your-chat-history)). Below
+  that, one card per agent type, and one per scheduled job that holds access
+  (**Scheduled job <name>**), shows its access in groups, with one row per tool:
     - **Standard for its role**: access that comes with the role, such as the
       tools every agent needs, internet access, and write access to `team/`
       and `agents/`. It cannot be removed, but a block can stop it.
