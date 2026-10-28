@@ -352,6 +352,33 @@ A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name
 plus a short hash.
 
+### Storage notices
+
+Chat transcripts and completed tasks are kept; nothing deletes them. So that
+nobody's stored data grows unnoticed, the gateway and the manager each
+measure once a day how much they store for each active person, and the
+gateway sends the person an Inbox notice each time the total passes another
+step: at 5 GB, 10 GB, 15 GB and so on (1 GB is 1,000,000,000 bytes). The notice lists what takes the space: their folder,
+their chats, their completed tasks and conversation records, long texts saved
+with their conversations, and chat uploads still kept.
+
+```yaml
+gateway:
+  storage_warnings:
+    person_step_gb: 5   # 0 turns these notices off
+```
+
+Each crossing is announced once, also across restarts. Someone whose data is
+first measured at 16 GB gets one notice, for 15 GB. When stored data falls
+below a step, for example after files were deleted from the person's folder,
+and later grows past it again, that is a new crossing and is announced again.
+If the manager has not measured a person's data for three days, the gateway
+sends them no notice, because the total would be incomplete, and the Status
+page warns administrators that the totals are out of date. The sizes are
+approximate: they count the stored text and files, not the space the
+databases and the disk use to hold them. Like other notices, these appear
+only in **Settings → Inbox**, not in a chat.
+
 ### Upgrading from the single workspace folder
 
 Earlier versions kept everything in `<instance_root>/workspace`. Upgrading the

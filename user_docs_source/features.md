@@ -820,7 +820,9 @@ Open **Settings → Inbox** in Web Chat to decide requests:
 - **Notices** need no decision: access TeamLead handed on without asking (with
   **Revoke**), team skill changes, updates that changed an agent one of your
   schedules runs, shares and files you received, credentials to choose
-  for tools you approved, schedules and tasks that are stuck, and (for
+  for tools you approved, schedules and tasks that are stuck, the data the
+  team stores for you passing another 5 GB (see
+  [Storage notices](configuration.md#storage-notices)), and (for
   administrators) MCP servers that stopped answering, after agents gave up
   retrying them. The list opens on **Unread** notices (**All** shows read
   ones too), 20 to a page. Mark one read with its **Mark as read** button,

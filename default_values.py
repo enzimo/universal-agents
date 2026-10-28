@@ -1053,6 +1053,11 @@ class GatewayDefaultValues:
         "Days a removed person's folder, personal memory, own knowledge pages and conversations are held so /user restore can bring them back; a maintenance run then deletes them.",
         onboarding_overridable=False,
     )
+    storage_warnings_person_step_gb: DefaultValue[int] = default_value(
+        5,
+        "Each person gets one Inbox notice when the data the team stores for them (chats, completed tasks, their files and folder) passes each multiple of this many gigabytes (1 GB = 1,000,000,000 bytes): 5, 10, 15 and so on. 0 turns these notices off.",
+        onboarding_overridable=False,
+    )
     manager_transition_notices_enabled: DefaultValue[bool] = default_value(
         False,
         "Whether the gateway emits proactive manager outage and recovery messages.",

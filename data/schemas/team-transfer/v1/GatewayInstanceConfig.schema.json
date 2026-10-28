@@ -3004,6 +3004,9 @@
         "storage": {
           "$ref": "#/$defs/StateStorageSettings"
         },
+        "storage_warnings": {
+          "$ref": "#/$defs/StorageWarningSettings"
+        },
         "team_id": {
           "default": "team_ua",
           "title": "Team Id",
@@ -4083,6 +4086,18 @@
         }
       },
       "title": "StateStorageSettings",
+      "type": "object"
+    },
+    "StorageWarningSettings": {
+      "description": "When people hear that the data the team stores for them has grown (``assistant_gateway.storage_usage``).",
+      "properties": {
+        "person_step_gb": {
+          "default": 5,
+          "title": "Person Step Gb",
+          "type": "integer"
+        }
+      },
+      "title": "StorageWarningSettings",
       "type": "object"
     },
     "ToolPolicySettings": {

@@ -423,6 +423,8 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "gateway.users.web_user_tokens_enabled": "Enable browser user tokens for authenticated Web Chat sessions.",
     "gateway.users.web_user_token_ttl_days": "Browser user-token lifetime in days. 0 disables automatic expiration.",
     "gateway.users.removed_data_retention_days": "Days a removed person's folder, personal memory, own knowledge pages and conversations are held for /user restore before a maintenance run deletes them. 0 deletes them at the next maintenance run.",
+    "gateway.storage_warnings": "When people hear that the data the team stores for them has grown.",
+    "gateway.storage_warnings.person_step_gb": "Each person gets one Inbox notice when their stored data (chats, completed tasks, their files and folder) passes each multiple of this many GB (1 GB = 1,000,000,000 bytes); the gateway measures it daily. 0 turns these notices off.",
     "state": "Manager, task-history, schedule, and heartbeat state settings.",
     "state.storage": "Manager/task-history/schedule persistence store.",
     "state.storage.backend": "Manager store backend: sqlite or postgres.",
@@ -1667,6 +1669,35 @@ class GatewayUsersSettings(BaseModel):
         return parsed
 
 
+# Ten terabytes; a larger step is almost certainly a typing mistake.
+MAX_STORAGE_WARNING_STEP_GB = 10_000
+
+
+def _whole_number(value: Any, *, name: str) -> int:
+    """An int, or a string of digits, as a whole number; refuses true/false and fractions."""
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    raise ValueError(f"{name} must be a whole number.")
+
+
+class StorageWarningSettings(BaseModel):
+    """When people hear that the data the team stores for them has grown (``assistant_gateway.storage_usage``)."""
+
+    person_step_gb: int = GATEWAY_DEFAULTS.storage_warnings_person_step_gb.value
+
+    @field_validator("person_step_gb", mode="before")
+    @classmethod
+    def _step_in_range(cls, value: Any) -> int:
+        name = "gateway.storage_warnings.person_step_gb"
+        parsed = _whole_number(value, name=name)
+        if not 0 <= parsed <= MAX_STORAGE_WARNING_STEP_GB:
+            raise ValueError(f"{name} must be from 0 (no notices) to {MAX_STORAGE_WARNING_STEP_GB}.")
+        return parsed
+
+
 class ManagerTargetSettings(BaseModel):
     team_id: str = AGENT_DEFAULTS.default_team_id.value
     named_agent_type: str = AGENT_DEFAULTS.named_agent_type.value
@@ -1680,6 +1711,7 @@ class ManagerTargetSettings(BaseModel):
     )
     storage: StateStorageSettings = Field(default_factory=StateStorageSettings)
     users: GatewayUsersSettings = Field(default_factory=GatewayUsersSettings)
+    storage_warnings: StorageWarningSettings = Field(default_factory=StorageWarningSettings)
 
     @field_validator("startup_agents")
     @classmethod

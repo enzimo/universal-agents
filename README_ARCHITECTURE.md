@@ -3067,6 +3067,53 @@ output retention apply after a restart, because the manager reads its
 settings when it starts. The team transfer's settings section is version 7
 for `tool_policy.output_retention_days`.
 
+Chat transcripts and completed tasks are kept indefinitely (owner's decision
+of 2026-10-27), so each person's stored data only grows, and each person hears
+as it does (`assistant_gateway/storage_usage.py`). That data is split between
+the gateway and the manager, which do not read each other's records (the
+gateway imports no manager store, `test_gateway_runtime_has_no_manager_repository_imports`),
+so each side measures its own share in bytes and writes one row per active
+person to a shared table in the manager's database, beside the access store
+and the departure records both already open
+(`storage/person_storage_usage_repository.py`: person, side, bytes by kind,
+when measured):
+
+- the manager (`custom_agents/storage_usage_runtime.py`) measures
+  conversation turns, summaries and completed tasks, the long texts saved as
+  files beside conversations (`dbs/conversation_artifacts/<conversation id>/`,
+  owned through the conversation) and the person's folder, at its start and
+  once a day. It runs as its own task in the team lead's process, started and
+  restarted by the scheduler loop, which lives as long as the process; not in
+  the maintenance schedule, which can be switched off, and not on the storage
+  lane, which a long scan would hold up;
+- the gateway measures chat transcripts, requests, replies and kept uploads
+  in its own database once a day, 15 minutes after it starts, writes its
+  row, adds the manager's and sends the notices.
+
+Each repository answers for its own tables with one aggregate per table and
+no row loading; the byte size comes from the database
+(`SqlDialect.text_bytes`: `LENGTH(CAST(x AS BLOB))` on SQLite, whose `LENGTH`
+counts characters, and `octet_length` on PostgreSQL). Folders are walked
+without following links (`safe_open.folder_bytes`). A side replaces all its
+rows at each measurement, so the table holds at most two rows per active
+person. When a person's total passes the next multiple of
+`gateway.storage_warnings.person_step_gb` above the highest step announced to
+them (5 GB by default, 0 off), they get one Inbox notice (`storage_usage`) for
+the highest step reached. The announced step and a count of announcements are
+kept on the person's gateway row; when the total falls below the announced
+step it is lowered to the step reached, so passing it again is announced
+again. A notice's id is `storage_usage:<person folder>:<step in bytes>:<announcement
+number>`, and the notice is stored before the step is written, so a restart in
+between finds the same id and the crossing is announced once. When the
+manager's row for a person is missing or more than three days old, the gateway
+sends that person no notice, because a partial total could hide a step, logs
+`event=storage_usage_totals_stale` with their folder name, and the Status page
+warns that the totals are out of date; a person whose standing changed less
+than three days ago only waits for the next daily measurement. The notices
+stay in the Inbox like all notices (decision D3); only stuck work is also sent
+to a chat, by a separate owner's decision. The team transfer's settings
+section is version 8 for `gateway.storage_warnings`.
+
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
 continues: a recurring schedule's report is filed under the schedule's own
