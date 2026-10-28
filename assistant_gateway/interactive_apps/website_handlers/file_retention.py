@@ -21,6 +21,7 @@ from typing import Any
 from aiohttp import web
 
 from assistant_gateway.application.file_retention_page import (
+    KEEP_SAVED_DAYS,
     MAX_RETENTION_DAYS,
     FileRetention,
     FileRetentionConflict,
@@ -65,7 +66,8 @@ class WebsiteFileRetentionHandlers(SignedInAccessHandlers):
                 person_id=person_id,
                 upload_days=payload.get("upload_days"),
                 scratch_days=payload.get("scratch_days"),
-                output_days=payload.get("output_days"),
+                # Missing (a page from before this setting): keep the saved number.
+                output_days=payload["output_days"] if "output_days" in payload else KEEP_SAVED_DAYS,
             )
         except FileRetentionRefused as exc:
             LOGGER.warning(

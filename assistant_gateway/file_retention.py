@@ -35,6 +35,7 @@ from threading import Lock
 from assistant_gateway.application.file_retention_page import (
     ADMINISTRATORS_ONLY_TEXT,
     CHANGED_MEANWHILE_TEXT,
+    KEEP_SAVED_DAYS,
     FileRetention,
     FileRetentionConflict,
     FileRetentionPage,
@@ -77,7 +78,10 @@ class GatewayFileRetention:
     def save(
         self, *, person_id: str, upload_days: object, scratch_days: object, output_days: object
     ) -> FileRetention:
-        """Save the numbers; raises ``FileRetentionRefused``, ``FileRetentionInvalid`` or ``FileRetentionConflict``."""
+        """Save the numbers; raises ``FileRetentionRefused``, ``FileRetentionInvalid`` or ``FileRetentionConflict``.
+
+        ``output_days`` may be ``KEEP_SAVED_DAYS`` to keep the saved number.
+        """
 
         with self._save_lock:
             return self._save(
@@ -89,12 +93,15 @@ class GatewayFileRetention:
     ) -> FileRetention:
         if not self._person_changes.may_change(person_id, RUNTIME_SETTINGS_CHANGE_KIND):
             raise FileRetentionRefused(ADMINISTRATORS_ONLY_TEXT)
-        wanted = FileRetention(
-            upload_days=checked_days(upload_days, what="chat uploads"),
-            scratch_days=checked_days(scratch_days, what="scratch files"),
-            output_days=checked_days(output_days, what="saved tool outputs"),
-        )
+        upload = checked_days(upload_days, what="chat uploads")
+        scratch = checked_days(scratch_days, what="scratch files")
+        output = None if output_days is KEEP_SAVED_DAYS else checked_days(output_days, what="saved tool outputs")
         config = GatewayInstanceConfig.load_saved(self._config_path)
+        wanted = FileRetention(
+            upload_days=upload,
+            scratch_days=scratch,
+            output_days=config.tool_policy.output_retention_days if output is None else output,
+        )
         path = config.config_path
         before = _retention(config)
         config.interactive_apps.internal_website.attachments.retention_days = wanted.upload_days

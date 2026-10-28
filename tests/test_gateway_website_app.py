@@ -1819,6 +1819,11 @@ async def test_file_retention_is_shown_to_members_and_saved_only_by_those_who_ma
         )
         saved_payload = await saved.json()
         admin_view = await (await client.get("/api/web-chat/file-retention", headers=read_headers)).json()
+        # A page from before the saved-output setting sends only the other two numbers.
+        without_outputs = await client.put(
+            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": 30, "scratch_days": 7}
+        )
+        without_outputs_payload = await without_outputs.json()
 
     assert member_view == {
         "status": "ok",
@@ -1841,6 +1846,7 @@ async def test_file_retention_is_shown_to_members_and_saved_only_by_those_who_ma
     assert reloaded.interactive_apps.internal_website.attachments.retention_days == 30
     assert reloaded.tool_policy.scratch_retention_days == 7
     assert reloaded.tool_policy.output_retention_days == 60
+    assert without_outputs.status == 200 and without_outputs_payload["output_days"] == 60
     assert uploads.retention_days == 30
 
 

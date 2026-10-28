@@ -263,3 +263,30 @@ def test_concurrent_retention_saves_keep_disk_and_live_values_in_the_same_order(
         first.result(timeout=10)
         second.result(timeout=10)
     assert service._uploads.retention_days == _saved(config).interactive_apps.internal_website.attachments.retention_days == 60
+
+
+def test_a_save_without_saved_tool_output_days_keeps_the_saved_number(tmp_path: Path) -> None:
+    """A page from before that setting sends only the other two numbers."""
+
+    from assistant_gateway.application.file_retention_page import KEEP_SAVED_DAYS
+
+    service, config, _ = _service(tmp_path, allowed=True)
+    service.save(person_id="usr_admin", upload_days=90, scratch_days=21, output_days=120)
+
+    saved = service.save(person_id="usr_admin", upload_days=30, scratch_days=7, output_days=KEEP_SAVED_DAYS)
+
+    assert saved == FileRetention(upload_days=30, scratch_days=7, output_days=120)
+    assert _saved(config).tool_policy.output_retention_days == 120
+
+
+@pytest.mark.parametrize("days", [3651, 1_000_000])
+def test_the_configuration_refuses_more_than_ten_years_of_saved_tool_outputs(days: int) -> None:
+    """Like the page's limit; a period reaching before the year 1 could not even be turned into a date."""
+
+    from pydantic import ValidationError
+
+    from runtime_settings.governance import ToolPolicySettings
+
+    assert ToolPolicySettings.model_validate({"output_retention_days": 3650}).output_retention_days == 3650
+    with pytest.raises(ValidationError):
+        ToolPolicySettings.model_validate({"output_retention_days": days})

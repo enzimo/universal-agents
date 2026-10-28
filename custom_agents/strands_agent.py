@@ -106,6 +106,7 @@ from custom_agents.memory_graph_embedding_profile_runtime import (
 )
 from custom_agents.memory_review_runtime import memory_review_notification_instruction
 from custom_agents.memory_plugins.manager import MemoryPluginManager
+from runtime_settings.governance import MAX_RETENTION_DAYS
 from runtime_settings.memory import MemoryConfig
 from custom_agents.automation_runtime import handle_automation_message
 from custom_agents.agent_instructions import MESSAGE_FILL_NAME
@@ -735,6 +736,7 @@ class UniversalAgent(BaseModel):
     output_retention_days: int = Field(
         default=TOOL_POLICY_DEFAULTS.output_retention_days.value,
         ge=0,
+        le=MAX_RETENTION_DAYS,
         description=(
             "``tool_policy.output_retention_days``: the manager deletes saved tool outputs written longer ago "
             "when the internal-improvement maintenance schedule fires, and the tools that read them say an "
