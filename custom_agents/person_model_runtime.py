@@ -67,6 +67,7 @@ from access_control.task_identity import resolve_task_identity
 from custom_agents.model_keys import ModelKeyError
 from custom_messages.contracts.person_settings_v1 import PersonModelProfileV1
 from model_providers.endpoints import EndpointKind, display_host
+from runtime_hosting.turn_context import turn_scoped
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
 
@@ -348,12 +349,21 @@ def apply_model(agent: Any, strands_agent: Any) -> None:
 
 
 def active_bundle(agent: Any) -> PersonModelBundle | None:
-    """The person's model the turn bound in this context uses, or None for the team's."""
+    """The person's model the turn bound in this context uses, or None for the team's.
+
+    A record whose handling finished supplies none: work that kept a copy of
+    the context after its turn ended, such as a timer, must not call a model
+    with that person's key for another task (PR #57 review). Background work
+    also starts without the turn's record (``runtime_hosting.turn_context``).
+    """
 
     from custom_tools.runtime_context import current_task_work
 
     work = current_task_work()
-    return getattr(work, "person_model", None) if work is not None else None
+    if work is None or work.handling_finished:
+        return None
+    bundle: PersonModelBundle | None = work.person_model
+    return bundle
 
 
 def person_model_active(agent: Any) -> bool:
@@ -412,7 +422,7 @@ def summary_model_for(agent: Any, meta: Any) -> Any | None:
 
 
 # The person's model for summaries made outside their turn (conversation finalization).
-_SUMMARY_MODEL: contextvars.ContextVar[Any] = contextvars.ContextVar("person_summary_model", default=None)
+_SUMMARY_MODEL: contextvars.ContextVar[Any] = turn_scoped(contextvars.ContextVar("person_summary_model", default=None), None)
 
 
 @contextmanager

@@ -248,3 +248,56 @@ async def test_a_delegation_takes_its_parent_from_the_turns_own_task():
     assert aborts[0]["failure_phase"] == "parent_task_missing"
     assert aborts[0]["parent_task_id"] == "task-b"
     assert current_task_work() is None
+
+
+@pytest.mark.asyncio
+async def test_background_work_started_in_a_turn_runs_without_that_turns_task_lane_or_model():
+    """Regression (PR #57 review): the queue drain and retry timers copied the context of the
+    turn that started them, so a drain replayed another request's saved delegation as a child
+    of that turn's request."""
+
+    from custom_agents import pending_work_runtime
+    from custom_agents.execution_lanes_runtime import ParallelLanes
+    from custom_tools.runtime_context import get_agent_ref, set_agent_ref
+    from runtime_hosting.agent_execution import AgentExecutionLanes, current_lane
+
+    seen: list[tuple[str, object, object, object]] = []
+
+    class Host(SimpleNamespace):
+        async def _continue_pending_work(self) -> bool:
+            seen.append(("drain", bound_task_id(), current_lane(), get_agent_ref()))
+            return True
+
+    host = Host(
+        id="lead",
+        paused=False,
+        _should_exit=asyncio.Event(),
+        _pending_work_requested=False,
+        _pending_work_task=None,
+        _pending_work_timers=set(),
+        _pending_work_failures=0,
+        _pending_work_retry=None,
+        _parallel_lanes=ParallelLanes(),
+        task_manager=SimpleNamespace(parallel_lanes_enabled=False),
+        main_lane_busy=False,
+        _logger=logging.getLogger("test_turn_work_isolation"),
+        _owned_tasks=set(),
+    )
+    set_agent_ref(host)
+    lanes = AgentExecutionLanes()
+    async with lanes.hold("parallel:task_A"):
+        with task_work("task_A") as work:
+            work.person_model = object()
+            pending_work_runtime.wake_pending_work_after(host, 0.01)
+            pending_work_runtime.schedule_pending_work(host)
+            assert active_bundle(host) is work.person_model
+    await asyncio.sleep(0.05)
+
+    assert seen == [("drain", None, None, host), ("drain", None, None, host)], "the agent reference is kept"
+    assert active_bundle(host) is None
+    # A record whose handling finished never lends its person's model.
+    assert work.handling_finished
+    with task_work("task_B") as other:
+        other.person_model = object()
+        other.handling_finished = True
+        assert active_bundle(host) is None

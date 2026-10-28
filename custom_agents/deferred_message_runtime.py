@@ -34,6 +34,7 @@ from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from storage.runtime_state_repository import DeferredMessageSnapshotRow, RuntimeStateRepository
 from default_values import AGENT_DEFAULTS
 from runtime_hosting.blocking_io import BlockingIOLane
+from runtime_hosting.turn_context import turn_scoped
 from custom_agents.task_operation_runtime import submitting_task
 
 
@@ -77,7 +78,7 @@ class DeferredHandoff:
         return not (self.committed or self.closed)
 
 
-_CURRENT_HANDOFF: ContextVar[Optional[DeferredHandoff]] = ContextVar("deferred_handoff", default=None)
+_CURRENT_HANDOFF: ContextVar[Optional[DeferredHandoff]] = turn_scoped(ContextVar("deferred_handoff", default=None), None)
 
 
 def pending_deferred_handoff() -> Optional[DeferredHandoff]:

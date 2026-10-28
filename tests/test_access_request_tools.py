@@ -594,3 +594,51 @@ async def test_a_notice_reaches_the_restarted_agent_of_the_same_type(storage, tm
     other_type = _restarted(worker)
     other_type.named_agent_type = "PersonalAdminAgent"
     assert access_request_runtime._decided_request(other_type, message) is None
+
+
+@pytest.mark.asyncio
+async def test_two_peoples_overlapping_turns_are_each_decided_for_their_own_person(storage, tmp_path) -> None:
+    """PR #57 review: the team lead runs two people's parallel requests at once. Each tool call is
+    decided by the real access check for the person of the turn's own task
+    (``runtime_context.task_work``), never the other turn's, even when the turns interleave."""
+
+    from datetime import datetime, timezone
+
+    from custom_messages.contracts.access_v2 import GrantV1
+    from custom_tools.runtime_context import task_work
+
+    member = PersonPrincipal("user-2", TEAM, ("member",))
+    lead = make_agent(storage, tmp_path, agent_type="TeamArchitect", lead=True, task_id="task-owner")
+    member_meta = MessageMeta(conversation_id="conv-2")
+    member_meta.gateway_context = SimpleNamespace(task_context=a_request(member))
+    lead.task_manager.add_task(
+        Task(task_id="task-member", task_type=MessageMetaType.REQUEST), MessageHeader(), member_meta, owner_person_id=None
+    )
+    # The team lead's lasting access to schedules, for the owner's work only.
+    access_runtime.runtime_requests(lead).service.store.create(
+        GrantV1(
+            grant_id="grant_owner_schedules",
+            team_id=TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"),
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=datetime.now(timezone.utc),
+            for_person_id=OWNER.person_id,
+        )
+    )
+    set_agent_ref(lead)
+    both_running = asyncio.Barrier(2)
+
+    async def turn(task_id: str) -> list[bool]:
+        with task_work(task_id):
+            decisions = []
+            for _ in range(3):
+                await both_running.wait()  # the other turn is in flight too
+                decisions.append(access_runtime.decide_call(lead, "create_scheduled_job", {}).allowed)
+                await asyncio.sleep(0)
+            return decisions
+
+    owner_turn, member_turn = await asyncio.gather(turn("task-owner"), turn("task-member"))
+
+    assert owner_turn == [True, True, True]
+    assert member_turn == [False, False, False]

@@ -2652,7 +2652,7 @@ class TaskManager(
             self._queue_backlog_warning_active = False
 
     def can_start_new_task(self) -> bool:
-        """Return whether the agent's single execution slot is free."""
+        """Return whether the main lane's task slot is free; parallel requests never take it (class docstring)."""
         return self.task_state.current_in_progress_task_id is None
 
     def get_waiting_top_level_task_ids(self) -> List[str]:
@@ -3606,6 +3606,31 @@ class TaskManager(
             raise
         return previous_state
 
+    def _take_main_slot(self, task_id: str, timestamp: str) -> None:
+        """Make ``task_id`` the main lane's running task, pausing another task that held the slot."""
+
+        old_task_id = self.task_state.current_in_progress_task_id
+        if old_task_id is not None and old_task_id != task_id:
+            self._logger.warning(f"Preempting task {old_task_id} to start {task_id}.")
+            old_task_info = self.get_task_info(old_task_id)
+            if old_task_info:
+                old_task_info.update_state(ProgressState.PAUSED, timestamp)
+                self.append_history_entry(
+                    old_task_id,
+                    f"Task paused because task {task_id} was preempted.",
+                    entry_type=TaskHistoryType.STATE_CHANGE,
+                    importance=TaskHistoryImportance.NORMAL,
+                    timestamp=timestamp,
+                    related_task_id=task_id,
+                    details={"to_state": ProgressState.PAUSED.value},
+                )
+                # Paused work stays tracked until an explicit resume makes
+                # it runnable; it must not block the next queue selection.
+                from custom_agents.task_queue_safety import remove_queue_entry
+
+                remove_queue_entry(self, old_task_id)
+        self.task_state.current_in_progress_task_id = task_id
+
     def update_main_task_state(
         self, task_id: str, new_state: ProgressState, timestamp: str
     ) -> bool:
@@ -3632,43 +3657,13 @@ class TaskManager(
 
         is_top_level = task_info.task.parent_task_id is None
         is_locally_executable = self.is_locally_executable_task(task_id)
-        # A parallel request runs in its own lane beside the main slot
-        # (custom_agents.execution_lanes): it neither takes nor preempts it.
-        in_parallel_lane = is_locally_executable and lane_for_task(self, task_id) != MAIN_LANE
-        if is_locally_executable and self.is_executing_state(new_state) and in_parallel_lane:
+        if is_locally_executable and self.is_executing_state(new_state):
             if new_state == ProgressState.IN_PROGRESS:
                 self.plan_state.final_review_pending_task_ids.discard(task_id)
-            if is_top_level:
-                self.task_state.waiting_top_level_task_ids.discard(task_id)
-        elif is_locally_executable and self.is_executing_state(new_state):
-            if new_state == ProgressState.IN_PROGRESS:
-                self.plan_state.final_review_pending_task_ids.discard(task_id)
-            if (
-                self.task_state.current_in_progress_task_id is not None
-                and self.task_state.current_in_progress_task_id != task_id
-            ):
-                old_task_id = self.task_state.current_in_progress_task_id
-                self._logger.warning(
-                    f"Preempting task {old_task_id} to start {task_id}."
-                )
-                old_task_info = self.get_task_info(old_task_id)
-                if old_task_info:
-                    old_task_info.update_state(ProgressState.PAUSED, timestamp)
-                    self.append_history_entry(
-                        old_task_id,
-                        f"Task paused because task {task_id} was preempted.",
-                        entry_type=TaskHistoryType.STATE_CHANGE,
-                        importance=TaskHistoryImportance.NORMAL,
-                        timestamp=timestamp,
-                        related_task_id=task_id,
-                        details={"to_state": ProgressState.PAUSED.value},
-                    )
-                    # Paused work stays tracked until an explicit resume makes
-                    # it runnable; it must not block the next queue selection.
-                    from custom_agents.task_queue_safety import remove_queue_entry
-
-                    remove_queue_entry(self, old_task_id)
-            self.task_state.current_in_progress_task_id = task_id
+            # A parallel request runs in its own lane beside the main slot
+            # (custom_agents.execution_lanes): it neither takes nor preempts it.
+            if lane_for_task(self, task_id) == MAIN_LANE:
+                self._take_main_slot(task_id, timestamp)
             if is_top_level:
                 self.task_state.waiting_top_level_task_ids.discard(task_id)
         elif is_locally_executable and self.is_blocked_state(new_state):

@@ -25,6 +25,7 @@ from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType
+from runtime_hosting.agent_execution import MAIN_LANE, AgentExecutionLanes
 from runtime_settings.worker_pools import WorkerPoolsConfig
 
 NOW = datetime(2026, 10, 4, 12, 0, tzinfo=timezone.utc)
@@ -35,35 +36,35 @@ def _iso() -> str:
 
 
 class _ExecutionGate:
-    """Owner-aware like runtime_hosting.agent_execution: a nested holder passes through."""
+    """The agent's real execution lanes (``runtime_hosting.agent_execution``).
+
+    It records when a holder starts waiting for a busy lane. A stand-in that
+    ignored the lane once hid a wake-up that asked for the main lane while
+    its turn needed the request's parallel lane.
+    """
 
     def __init__(self) -> None:
-        self.lock = asyncio.Lock()
-        self.owner: asyncio.Task | None = None
+        self.lanes = AgentExecutionLanes()
         self.waiting = asyncio.Event()
 
     @contextlib.asynccontextmanager
-    async def scope(self, _lane: str = "main"):
-        me = asyncio.current_task()
-        if self.owner is me:
+    async def scope(self, lane: str = MAIN_LANE):
+        if self.lanes.lane_busy(lane) and not self.lanes.owned_by_current_task(lane):
+            self.waiting.set()
+        async with self.lanes.hold(lane):
             yield
-            return
-        self.waiting.set()
-        async with self.lock:
-            self.owner = me
-            try:
-                yield
-            finally:
-                self.owner = None
 
 
-def _lead(tmp_path, monkeypatch, *, children: int, interactive: bool = True):
+def _lead(tmp_path, monkeypatch, *, children: int, interactive: bool = True, parallel: bool = False):
     manager = TaskManager(db_path=str(tmp_path / "lead.db"))
     manager.set_owner_identity("lead", "lead", "team", "TeamArchitect")
+    # Only the team lead opens parallel lanes (custom_agents.execution_lanes).
+    manager.parallel_lanes_enabled = parallel
     context = GatewayContext(
         canonical_user_id="jordan",
         session_key="s",
         delivery_mode="interactive" if interactive else "background",
+        parallel_thread=parallel,
     )
     manager.add_task(
         Task(task_id="root", task_type=MessageMetaType.REQUEST, problem_statement="Research"),
@@ -81,6 +82,7 @@ def _lead(tmp_path, monkeypatch, *, children: int, interactive: bool = True):
         _logger=logging.getLogger("delegation-wake-test"),
     )
     agent._execution_gate = _ExecutionGate()
+    agent._execution_lanes = agent._execution_gate.lanes
     agent._execution_scope = agent._execution_gate.scope
     for index in range(children):
         child_id = f"child_{index}"
@@ -191,7 +193,9 @@ async def test_an_untyped_failure_or_a_running_request_does_not_wake(tmp_path, m
 async def test_a_wake_skips_a_parent_another_path_resumed_while_it_waited(tmp_path, monkeypatch):
     """Regression (2026-10-17): the check-back wake read the parent before taking the
     execution slot; the last child's result, holding the slot, resumed and completed
-    the parent, and the wake then ran a second model turn for a finished task."""
+    the parent, and the wake then ran a second model turn for a finished task. The
+    check-back pass now skips a busy lane, so the claim handler's path (a worker lost
+    too often) shows the race."""
 
     agent, _ = _lead(tmp_path, monkeypatch, children=1)
     monkeypatch.setattr(
@@ -236,9 +240,70 @@ async def test_a_wake_skips_a_parent_another_path_resumed_while_it_waited(tmp_pa
     delivery = asyncio.create_task(result_delivery(), name="result_delivery")
     await asyncio.sleep(0)
     woken = await asyncio.create_task(
-        delegation_wake.wake_due_check_backs(agent, now=NOW + timedelta(minutes=1)), name="check_back"
+        delegation_wake.wake_parent_for_decision(
+            agent, parent_task_id="root", directive="decide", reason="delegated task failed (worker_lost)"
+        ),
+        name="claim_handler",
     )
     await delivery
-    assert woken == 0
+    assert woken is False
     assert turns == [("result_delivery", "in_progress")]
     assert manager.get_task_info("root") is None
+
+
+@pytest.mark.asyncio
+async def test_a_check_back_waits_for_a_later_pass_while_its_request_runs_a_turn(tmp_path, monkeypatch):
+    """The scheduler pass never waits for a turn: a busy request keeps its check-back time."""
+
+    agent, resume = _lead(tmp_path, monkeypatch, children=2)
+    repository = delegated_tasks(agent)
+    repository.set_check_back(team_id="team", parent_task_id="root", requester_agent_id="lead", at=NOW)
+    async with agent._execution_lanes.hold(MAIN_LANE):
+        woken = await asyncio.create_task(
+            delegation_wake.wake_due_check_backs(agent, now=NOW + timedelta(minutes=1))
+        )
+    assert woken == 0
+    resume.assert_not_awaited()
+    assert repository.get_wait("team", "root").check_back_at_utc is not None
+
+    assert await delegation_wake.wake_due_check_backs(agent, now=NOW + timedelta(minutes=2)) == 1
+    resume.assert_awaited_once()
+
+
+def _capture_lanes(agent, monkeypatch) -> list[list[str]]:
+    seen: list[list[str]] = []
+
+    async def turn(*_args, **_kwargs):
+        seen.append(agent._execution_lanes.held_lanes())
+
+    monkeypatch.setattr("custom_agents.task_resume_runtime.resume_task_with_directive", turn)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_parallel_requests_wake_from_the_scheduler_runs_in_its_own_lane(tmp_path, monkeypatch):
+    """Regression (PR #57 review): the wake held the main lane, and the turn then asked for the
+    request's parallel lane, which raised and failed the whole request."""
+
+    agent, _ = _lead(tmp_path, monkeypatch, children=2, parallel=True)
+    seen = _capture_lanes(agent, monkeypatch)
+    delegated_tasks(agent).set_check_back(team_id="team", parent_task_id="root", requester_agent_id="lead", at=NOW)
+
+    assert await delegation_wake.wake_due_check_backs(agent, now=NOW + timedelta(minutes=1)) == 1
+    assert seen == [["parallel:root"]]
+
+
+@pytest.mark.asyncio
+async def test_a_typed_failure_handled_in_a_parallel_lane_wakes_its_request(tmp_path, monkeypatch):
+    """Regression (PR #57 review): a worker's typed failure handled by the request's lane worker
+    asked for the main lane too; the error dropped the decision wake."""
+
+    agent, _ = _lead(tmp_path, monkeypatch, children=2, parallel=True)
+    seen = _capture_lanes(agent, monkeypatch)
+    failed = agent.task_manager.get_task_info("child_0")
+    failed.task.failure = TaskFailureV1(category=TaskFailureCategory.PROVIDER_LIMITED, attempts=3)
+
+    # The lane's worker holds the lane while it handles the result (execution_lanes_runtime).
+    async with agent._execution_lanes.hold("parallel:root"):
+        assert await delegation_wake.wake_for_failed_delegation(agent, parent_task_id="root", subtask_info=failed)
+    assert seen == [["parallel:root"]]

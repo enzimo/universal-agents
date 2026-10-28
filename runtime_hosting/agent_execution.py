@@ -33,6 +33,8 @@ from contextvars import ContextVar
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from runtime_hosting.turn_context import turn_scoped
+
 _LOGGER = logging.getLogger(__name__)
 
 # Every agent has it; it serves all work that is not a parallel request.
@@ -40,7 +42,7 @@ MAIN_LANE = "main"
 
 # The lane the current asyncio task (or the turn it started) holds, so code a
 # turn runs, such as choosing its Strands agent, knows its lane.
-_CURRENT_LANE: ContextVar[str | None] = ContextVar("execution_lane", default=None)
+_CURRENT_LANE: ContextVar[str | None] = turn_scoped(ContextVar("execution_lane", default=None), None)
 
 
 def current_lane() -> str | None:
@@ -74,11 +76,6 @@ class AgentExecutionLanes:
 
     def held_lanes(self) -> list[str]:
         return sorted(self._owners)
-
-    def parallel_lanes_held(self) -> int:
-        """How many lanes other than the main one are held now."""
-
-        return sum(1 for lane in self._owners if lane != MAIN_LANE)
 
     def lane_of_current_task(self) -> str | None:
         owner = asyncio.current_task()
@@ -136,7 +133,7 @@ class AgentExecutionLanes:
         except Exception:
             _LOGGER.exception(
                 "The execution lane's release callback failed. "
-                "event=execution_gate_release_callback_failed owner_task=%s lane=%s",
+                "event=execution_lane_release_callback_failed owner_task=%s lane=%s",
                 owner.get_name(),
                 lane,
             )

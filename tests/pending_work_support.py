@@ -19,7 +19,7 @@ from typing import Any
 
 from custom_agents import task_message_runtime
 from custom_agents.deferred_message_runtime import DeferredInboxOwner, DeferredMessageInbox
-from custom_agents.pending_work_runtime import wake_after_slot_release
+from custom_agents.execution_lanes_runtime import release_lane
 from custom_agents.strands_agent import UniversalAgent
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -43,6 +43,20 @@ def use_simple_queue_checks(monkeypatch) -> None:
     monkeypatch.setattr(task_message_runtime, "release_orphaned_execution_slot", _false)
     monkeypatch.setattr(task_message_runtime, "may_start_next_task", _true)
 
+
+
+def idle_runtime_coordinator() -> SimpleNamespace:
+    """A runtime coordinator with no runtime mailbox events waiting."""
+
+    async def none_drained(_root: str) -> bool:
+        return False
+
+    return SimpleNamespace(
+        enabled=lambda: True,
+        available=lambda: True,
+        runtime=SimpleNamespace(list_deferred_runtime_event_root_ids=lambda: [], get_active_runtime_lease=lambda _root: None),
+        drain_deferred_events=none_drained,
+    )
 
 class _Repository:
     """The deferred row's named writes succeed and keep nothing; the inbox keeps its own list."""
@@ -153,7 +167,7 @@ class DrainAgent:
         self._pending_work_timers: set[asyncio.TimerHandle] = set()
         self._owned_tasks: set[asyncio.Task] = set()
         self._pending_interrupt_responses: dict[str, Any] = {}
-        self._execution_lanes = AgentExecutionLanes(on_release=partial(wake_after_slot_release, self))
+        self._execution_lanes = AgentExecutionLanes(on_release=partial(release_lane, self))
         self._parallel_lanes = ParallelLanes()
         self._running_turns: dict[Any, Any] = {}
         self._lease_loss_wind_down = None
@@ -166,10 +180,7 @@ class DrainAgent:
             is_execution_cancelled=_false,
             logger=self._logger,
         )
-        self._runtime_coordinator = lambda: SimpleNamespace(
-            runtime=SimpleNamespace(list_deferred_runtime_event_root_ids=lambda: [], get_active_runtime_lease=lambda _root: None),
-            drain_deferred_events=_false,
-        )
+        self._runtime_coordinator = idle_runtime_coordinator
 
     @property
     def is_executing(self) -> bool:
@@ -188,7 +199,7 @@ class DrainAgent:
     async def _refresh_self_agent_state(self, **_kwargs: Any) -> None:
         return None
 
-    async def _drain_due_turn_action_outbox(self) -> bool:
+    async def _drain_due_turn_action_outbox(self, _lane: str = "main") -> bool:
         return False
 
     async def _dispatch_message(self, *, msg_content: Any, **_kwargs: Any) -> None:

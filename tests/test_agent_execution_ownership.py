@@ -446,5 +446,5 @@ async def test_a_failing_release_callback_is_logged_and_keeps_the_holders_outcom
         with pytest.raises(ValueError, match="the holder's own error"):
             await asyncio.create_task(holder_that_fails())
         assert await asyncio.create_task(holder_that_succeeds()) == "done"
-    assert caplog.text.count("event=execution_gate_release_callback_failed") == 2
+    assert caplog.text.count("event=execution_lane_release_callback_failed") == 2
     assert not gate.busy

@@ -235,10 +235,15 @@ from custom_agents.pending_work_runtime import (
     close_pending_work,
     schedule_pending_work,
     start_owned_task,
-    wake_after_slot_release,
 )
 from custom_agents.execution_lanes import lane_for_message
-from custom_agents.execution_lanes_runtime import ParallelLanes, continue_main_lane, lane_of, start_parallel_lanes
+from custom_agents.execution_lanes_runtime import (
+    ParallelLanes,
+    continue_main_lane,
+    lane_of,
+    release_lane,
+    start_parallel_lanes,
+)
 from custom_agents.objective_work_completion import prepare_objective_work_completion
 from custom_agents.sdk.strands import turn as llm_turn_runtime
 from custom_agents import model_failover_runtime
@@ -349,8 +354,9 @@ from custom_agents.access_request_runtime import handle_access_request_resolved
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from custom_tools.comms_tools import TeamComms
 from custom_tools.tool_stop import ToolStop
-from custom_tools.runtime_context import TaskWork, current_task_work
+from custom_tools.runtime_context import TaskWork, current_task_work, task_work
 from custom_agents.strands_parts import StrandsParts, task_strands_messages, turn_strands_agent
+from custom_agents.tool_loading import LoadedTools
 from custom_agents.strands_agent_builder import build_strands_parts
 from custom_agents.turn_registry import (
     end_turn,
@@ -1197,6 +1203,8 @@ class UniversalAgent(BaseModel):
     _execution_lanes: AgentExecutionLanes = PrivateAttr(default_factory=AgentExecutionLanes)
     # The parallel lanes' Strands agents, workers and retries (custom_agents.execution_lanes_runtime).
     _parallel_lanes: ParallelLanes = PrivateAttr(default_factory=ParallelLanes)
+    # MCP servers that failed to load, shared by all its Strands agents (mcp_server_tools.ServerFailures).
+    _mcp_server_failures: Any = PrivateAttr(default=None)
     # The model turns running now, by the asyncio task that runs each one; each
     # value is that task's work record (custom_tools.runtime_context.TaskWork).
     _running_turns: Dict[asyncio.Task, TaskWork] = PrivateAttr(default_factory=dict)
@@ -1342,7 +1350,7 @@ class UniversalAgent(BaseModel):
         self._local_team_runtime = local_team_runtime
         # Work saved or freed while another holder had the slot gets a drain
         # pass when that holder lets go (pending_work_runtime).
-        self._execution_lanes.on_release = partial(wake_after_slot_release, self)
+        self._execution_lanes.on_release = partial(release_lane, self)
         # The team lead receives people's requests: those sent in a parallel
         # thread get lanes of their own (custom_agents.execution_lanes).
         self.task_manager.parallel_lanes_enabled = bool(self.is_team_lead)
@@ -4401,7 +4409,14 @@ class UniversalAgent(BaseModel):
         )
         return True
 
-    async def _drain_due_turn_action_outbox(self) -> bool:
+    async def _drain_due_turn_action_outbox(self, lane: str = MAIN_LANE) -> bool:
+        """Retry the lane's saved turn actions that are due; whether a batch was retried.
+
+        A batch is retried in its request's lane, as that request's work
+        (``runtime_context.task_work``): a delegation it retries names the
+        request as its parent (``delegation_runtime``), never whichever task
+        the drain's context held (PR #57 review).
+        """
         await self.task_manager.operations_runtime.run(
             self.task_manager.mark_stale_dispatching_turn_actions,
             stale_after_seconds=self._turn_action_outbox_float(
@@ -4411,121 +4426,127 @@ class UniversalAgent(BaseModel):
         due_records = await self.task_manager.operations_runtime.run(
             self.task_manager.due_turn_action_retry_records,
         )
-        if not due_records:
-            return False
-
         for due_record in due_records:
-            batch = await self.task_manager.operations_runtime.run(
-                self.task_manager.get_turn_action_batch, due_record.batch_id
-            )
-            if batch is None:
+            if await lane_of(self, due_record.source_task_id) != lane:
                 continue
-            source_info = await self.task_manager.operations_runtime.run(
-                self.task_manager.get_task_info, due_record.source_task_id
+            with task_work(due_record.source_task_id):
+                if await self._retry_due_turn_action_batch(due_record):
+                    return True
+        return False
+
+    async def _retry_due_turn_action_batch(self, due_record: Any) -> bool:
+        """Retry one due batch from ``due_record`` on; False when there was nothing to retry."""
+        batch = await self.task_manager.operations_runtime.run(
+            self.task_manager.get_turn_action_batch, due_record.batch_id
+        )
+        if batch is None:
+            return False
+        source_info = await self.task_manager.operations_runtime.run(
+            self.task_manager.get_task_info, due_record.source_task_id
+        )
+        if source_info is None:
+            await self.task_manager.operations_runtime.run(
+                self.task_manager.mark_turn_action_record,
+                due_record.action_id,
+                status="failed_terminal",
+                recoverability="terminal",
+                last_error="Source task is no longer active.",
             )
-            if source_info is None:
-                await self.task_manager.operations_runtime.run(
-                    self.task_manager.mark_turn_action_record,
-                    due_record.action_id,
-                    status="failed_terminal",
-                    recoverability="terminal",
-                    last_error="Source task is no longer active.",
+            return False
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.mark_turn_action_batch_status,
+            batch.batch_id,
+            "retrying",
+            current_action_index=due_record.action_index,
+        )
+        records = await self.task_manager.operations_runtime.run(
+            self.task_manager.list_turn_action_records, batch.batch_id
+        )
+        root_task_id = (
+            await self.task_manager.operations_runtime.run(
+                self.task_manager.resolve_root_task_id, due_record.source_task_id
+            )
+            or due_record.source_task_id
+        )
+        coordinator = self._runtime_coordinator()
+        lease = None
+        try:
+            lease = await self.task_manager.operations_runtime.run(
+                coordinator.begin_batch,
+                root_task_id=root_task_id,
+                source_task_id=due_record.source_task_id,
+                batch_id=batch.batch_id,
+            )
+            for record in records:
+                if record.action_index < due_record.action_index:
+                    continue
+                if record.status in TURN_ACTION_DONE_STATUSES:
+                    continue
+                if record.status == "blocked":
+                    await self.task_manager.operations_runtime.run(
+                        self.task_manager.mark_turn_action_record,
+                        record.action_id,
+                        status="pending",
+                    )
+                action = self._turn_action_from_outbox_record(record)
+                await self._execute_turn_action_with_recovery(
+                    batch_id=batch.batch_id,
+                    record_id=record.action_id,
+                    action=action,
+                    incoming_content=source_info.task,
+                    incoming_header=source_info.header,
+                    incoming_meta=source_info.meta,
                 )
-                continue
+                await self.task_manager.operations_runtime.run(
+                    coordinator.interrupt_if_requested,
+                    lease.lease_id if lease is not None else None,
+                    batch.batch_id,
+                    record.action_index,
+                )
             await self.task_manager.operations_runtime.run(
                 self.task_manager.mark_turn_action_batch_status,
                 batch.batch_id,
-                "retrying",
-                current_action_index=due_record.action_index,
+                "completed",
             )
-            records = await self.task_manager.operations_runtime.run(
-                self.task_manager.list_turn_action_records, batch.batch_id
+            await self.task_manager.operations_runtime.run(
+                coordinator.complete_batch,
+                lease_id=lease.lease_id if lease is not None else None,
+                root_task_id=root_task_id,
+                batch_id=batch.batch_id,
+                status="completed",
             )
-            root_task_id = (
-                await self.task_manager.operations_runtime.run(
-                    self.task_manager.resolve_root_task_id, due_record.source_task_id
-                )
-                or due_record.source_task_id
-            )
-            coordinator = self._runtime_coordinator()
-            lease = None
-            try:
-                lease = await self.task_manager.operations_runtime.run(
-                    coordinator.begin_batch,
-                    root_task_id=root_task_id,
-                    source_task_id=due_record.source_task_id,
-                    batch_id=batch.batch_id,
-                )
-                for record in records:
-                    if record.action_index < due_record.action_index:
-                        continue
-                    if record.status in TURN_ACTION_DONE_STATUSES:
-                        continue
-                    if record.status == "blocked":
-                        await self.task_manager.operations_runtime.run(
-                            self.task_manager.mark_turn_action_record,
-                            record.action_id,
-                            status="pending",
-                        )
-                    action = self._turn_action_from_outbox_record(record)
-                    await self._execute_turn_action_with_recovery(
-                        batch_id=batch.batch_id,
-                        record_id=record.action_id,
-                        action=action,
-                        incoming_content=source_info.task,
-                        incoming_header=source_info.header,
-                        incoming_meta=source_info.meta,
-                    )
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.interrupt_if_requested,
-                        lease.lease_id if lease is not None else None,
-                        batch.batch_id,
-                        record.action_index,
-                    )
-                await self.task_manager.operations_runtime.run(
-                    self.task_manager.mark_turn_action_batch_status,
-                    batch.batch_id,
-                    "completed",
-                )
+            return True
+        except TurnActionRecoveryScheduled:
+            if lease is not None:
                 await self.task_manager.operations_runtime.run(
                     coordinator.complete_batch,
-                    lease_id=lease.lease_id if lease is not None else None,
+                    lease_id=lease.lease_id,
                     root_task_id=root_task_id,
                     batch_id=batch.batch_id,
-                    status="completed",
+                    # This attempt failed; the outbox owns the pending retry.
+                    status="failed",
                 )
-                return True
-            except TurnActionRecoveryScheduled:
-                if lease is not None:
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.complete_batch,
-                        lease_id=lease.lease_id,
-                        root_task_id=root_task_id,
-                        batch_id=batch.batch_id,
-                        # This attempt failed; the outbox owns the pending retry.
-                        status="failed",
-                    )
-                return True
-            except RuntimeBatchInterrupted:
-                if lease is not None:
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.complete_batch,
-                        lease_id=lease.lease_id,
-                        root_task_id=root_task_id,
-                        batch_id=batch.batch_id,
-                        status="interrupted",
-                    )
-                return True
-            except Exception:
-                if lease is not None:
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.complete_batch,
-                        lease_id=lease.lease_id,
-                        root_task_id=root_task_id,
-                        batch_id=batch.batch_id,
-                        status="failed",
-                    )
-                raise
+            return True
+        except RuntimeBatchInterrupted:
+            if lease is not None:
+                await self.task_manager.operations_runtime.run(
+                    coordinator.complete_batch,
+                    lease_id=lease.lease_id,
+                    root_task_id=root_task_id,
+                    batch_id=batch.batch_id,
+                    status="interrupted",
+                )
+            return True
+        except Exception:
+            if lease is not None:
+                await self.task_manager.operations_runtime.run(
+                    coordinator.complete_batch,
+                    lease_id=lease.lease_id,
+                    root_task_id=root_task_id,
+                    batch_id=batch.batch_id,
+                    status="failed",
+                )
+            raise
         return False
 
     @property
@@ -4577,9 +4598,13 @@ class UniversalAgent(BaseModel):
     async def _start_parallel_lanes(self) -> None:
         await start_parallel_lanes(self)
 
-    def _new_strands_parts(self) -> StrandsParts:
-        """A Strands agent of its own for a parallel lane (custom_agents.execution_lanes_runtime)."""
-        return build_strands_parts(self, agent_class=Agent)
+    def _new_strands_parts(self, loaded: Optional[LoadedTools] = None) -> StrandsParts:
+        """A Strands agent of its own for a parallel lane (custom_agents.execution_lanes_runtime).
+
+        ``loaded`` carries the groups the lane's request loaded over to a
+        rebuilt agent, as ``_create_strands_agent`` does for the main one.
+        """
+        return build_strands_parts(self, agent_class=Agent, loaded=loaded)
 
     async def _apply_runtime_content_defaults(
         self,
@@ -6094,7 +6119,7 @@ class UniversalAgent(BaseModel):
             # without a durable decision, including failover in this process.
             getattr(self, "_consumed_task_steering_ids", {}).pop(task_id, None)
             # Stop cancels this child turn, never the transport/runtime owner.
-            # Keep the execution gate held until the SDK finishes unwinding.
+            # Keep the execution lane held until the SDK finishes unwinding.
             return await asyncio.create_task(
                 self.turn_executor.process_llm_interaction(msg_content, msg_header, msg_meta)
             )

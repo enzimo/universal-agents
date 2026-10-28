@@ -22,6 +22,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+from tests.pending_work_support import idle_runtime_coordinator
 from strands import Agent
 from strands.models.model import Model
 
@@ -143,12 +145,7 @@ async def test_new_messages_reach_agent_while_model_stream_is_stuck(tmp_path, mo
     monkeypatch.setattr(task_message_runtime, "_apply_task_processing_result", complete)
     object.__setattr__(agent, "_drain_due_turn_action_outbox", AsyncMock(return_value=False))
     # No runtime mailbox events: every lane's drain finds none.
-    object.__setattr__(agent, "_runtime_coordinator", lambda: SimpleNamespace(
-        runtime=SimpleNamespace(
-            list_deferred_runtime_event_root_ids=lambda: [], get_active_runtime_lease=lambda _root: None
-        ),
-        drain_deferred_events=AsyncMock(return_value=False),
-    ))
+    object.__setattr__(agent, "_runtime_coordinator", idle_runtime_coordinator)
     agent._nats_transport_adapter = adapter
     reply = f"{team}_gateway_response"
     try:

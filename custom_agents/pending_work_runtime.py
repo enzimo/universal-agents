@@ -26,12 +26,17 @@ message, scheduler enqueues and outbox retries each started their own drain).
   such as a locked database, stayed unhandled on an idle worker, which then
   stopped asking for work and never retired).
 - ``wake_pending_work_after`` wakes the drain at a later time with a timer.
+- The drain, the lane pass (and so its lane workers) and the timers start
+  without the values of the turn that happened to start them
+  (``runtime_hosting.turn_context.detached_context``): each piece of work
+  binds its own task. Before, a drain started inside one request's turn kept
+  that request bound and replayed another request's saved actions as its own.
 - Parallel requests run in lanes of their own (``custom_agents.execution_lanes``).
   Every wake-up also runs the retained pass that starts a worker for each
   parallel lane with work waiting (``execution_lanes_runtime.start_parallel_lanes``),
   so a parallel request starts while the main lane runs a turn. A lane's
   release runs that pass again, for a lane that waited for the limit. A lane
-  whose waiting message failed is not started again before a backoff delay
+  whose waiting work failed is not started again before a backoff delay
   (``retry_lane_after_failure``), with the same delays as the drain.
 - ``start_owned_task`` runs short work that is safe to stop (its durable state
   is saved before it starts; see each caller). ``run_as_owned_task`` does the
@@ -48,6 +53,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from runtime_hosting.agent_execution import MAIN_LANE
+from runtime_hosting.turn_context import detached_context
 
 
 FAILURE_RETRY_FIRST_SECONDS = 5.0
@@ -70,7 +76,7 @@ def schedule_pending_work(agent: Any) -> None:
     pending = agent._pending_work_task
     if pending is None or pending.done():
         agent._pending_work_task = asyncio.create_task(
-            _drain_pending_work(agent), name=f"pending-work:{agent.id}"
+            _drain_pending_work(agent), name=f"pending-work:{agent.id}", context=detached_context()
         )
     schedule_parallel_lanes(agent)
 
@@ -85,7 +91,9 @@ def schedule_parallel_lanes(agent: Any) -> None:
     state.requested = True
     pending = state.task
     if pending is None or pending.done():
-        state.task = asyncio.create_task(_start_parallel_lanes(agent), name=f"parallel-lanes:{agent.id}")
+        state.task = asyncio.create_task(
+            _start_parallel_lanes(agent), name=f"parallel-lanes:{agent.id}", context=detached_context()
+        )
 
 
 async def _start_parallel_lanes(agent: Any) -> None:
@@ -107,14 +115,14 @@ async def _start_parallel_lanes(agent: Any) -> None:
 
 
 def retry_lane_after_failure(agent: Any, lane: str) -> float:
-    """Keep a parallel lane whose waiting message failed from starting again before a backoff delay."""
+    """Keep a parallel lane whose waiting work failed from starting again before a backoff delay."""
     state = agent._parallel_lanes
     failures: int = state.failures.get(lane, 0) + 1
     state.failures[lane] = failures
     delay = min(FAILURE_RETRY_MAX_SECONDS, FAILURE_RETRY_FIRST_SECONDS * 2.0 ** min(failures - 1, 16))
     state.retry_after[lane] = asyncio.get_running_loop().time() + delay
     agent._logger.warning(
-        "A parallel request's waiting message failed and was kept; its lane tries again in %.0f s. "
+        "Work waiting in a parallel request's lane failed and was kept; the lane tries again in %.0f s. "
         "event=parallel_lane_retry_scheduled agent_id=%s lane=%s failures=%s",
         delay,
         agent.id,
@@ -254,7 +262,7 @@ def wake_pending_work_after(agent: Any, delay_seconds: float) -> asyncio.TimerHa
         timers.discard(handle)
         schedule_pending_work(agent)
 
-    handle = asyncio.get_running_loop().call_later(max(0.0, delay_seconds), wake)
+    handle = asyncio.get_running_loop().call_later(max(0.0, delay_seconds), wake, context=detached_context())
     timers.add(handle)
     return handle
 

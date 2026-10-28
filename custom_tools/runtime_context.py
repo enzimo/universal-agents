@@ -26,6 +26,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from runtime_hosting.turn_context import turn_scoped
+
 if TYPE_CHECKING:
     from custom_agents.strands_agent import UniversalAgent
     from custom_agents.strands_parts import StrandsParts
@@ -66,7 +68,7 @@ class TaskWork:
     handling_finished: bool = False
 
 
-_task_work: ContextVar[TaskWork | None] = ContextVar("task_work", default=None)
+_task_work: ContextVar[TaskWork | None] = turn_scoped(ContextVar("task_work", default=None), None)
 
 
 def set_agent_ref(agent: UniversalAgent | None) -> None:
