@@ -311,6 +311,8 @@ class ConversationRepository(Protocol):
 
     def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]: ...
 
+    def count_artifacts_created_before(self, cutoff: str) -> int: ...
+
     def create_context_epoch(
         self,
         *,
@@ -1905,6 +1907,16 @@ class _RelationalConversationRepository:
             ).fetchall()
             conn.commit()
         return tuple(str(row[0] or "") for row in rows)
+
+    def count_artifacts_created_before(self, cutoff: str) -> int:
+        """How many artifact records ``delete_artifacts_created_before`` would delete (a dry run)."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM conversation_artifacts WHERE created_at < {self._dialect.bind}",
+                (cutoff,),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def create_context_epoch(
         self,

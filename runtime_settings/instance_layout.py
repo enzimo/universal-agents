@@ -94,8 +94,9 @@ GENERATED_AGENT_BUNDLES_DIRNAME = "team_lead_generated"
 SKILLS_DIRNAME = "skills"
 OBJECTIVE_PROFILES_DIRNAME = "objective_execution_profiles"
 TASK_DATABASE_FILENAME = "task_history.db"
-# Long texts offloaded from conversation turns; each file belongs to a row of the
-# task database (its full path is stored there), so it lives beside it in dbs/.
+# Long tool output offloaded from conversation turns (not chat messages); each
+# file belongs to a row of the task database (its full path is stored there),
+# so it lives beside it in dbs/.
 CONVERSATION_ARTIFACTS_DIRNAME = "conversation_artifacts"
 # Operator secrets file, used when launch.secrets_source is env_file.
 TEAM_ENV_FILENAME = "team.env"
@@ -483,7 +484,7 @@ class InstanceLayout:
 
     @property
     def conversation_artifacts_dir(self) -> Path:
-        """Long texts offloaded from conversation turns, whatever the storage backend."""
+        """Long tool output offloaded from conversation turns, whatever the storage backend."""
 
         return self.dbs_dir / CONVERSATION_ARTIFACTS_DIRNAME
 

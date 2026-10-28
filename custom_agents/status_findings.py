@@ -32,6 +32,7 @@ def agent_status_findings(agent: Any) -> list[StatusFindingV1]:
         _stale_schedules,
         _stopped_receivers,
         _output_retention_overdue,
+        _output_retention_grace,
     ):
         try:
             findings.extend(check(agent, agent_type))
@@ -178,6 +179,50 @@ def _output_retention_overdue(agent: Any, agent_type: str) -> list[StatusFinding
                 "Check that the internal-improvement maintenance schedule is on and not paused "
                 "(agent.schedule_maintenance.internal_improvement_review_interval_seconds above 0), and look for "
                 "event=output_retention_failed in the manager log."
+            ),
+            source=agent_type,
+        )
+    ]
+
+
+def _output_retention_grace(agent: Any, agent_type: str) -> list[StatusFindingV1]:
+    """During the grace period: when deletion starts and what the latest dry run found.
+
+    Shown while the latest run was a dry run; it clears with the first run
+    that deletes (``custom_agents.output_retention.remove_old_outputs_and_record``).
+    """
+
+    from custom_agents.output_retention import read_run_record, retention_days_of, size_text
+    from custom_tools.workspace_scope import current_instance_layout
+
+    if not bool(getattr(agent, "is_team_lead", False)) or retention_days_of(agent) <= 0:
+        return []
+    layout = current_instance_layout(agent)
+    record = read_run_record(layout.output_retention_record_path) if layout is not None else {}
+    if not record.get("dry_run") or not record.get("deletes_from"):
+        return []
+    deletes_from = datetime.fromisoformat(str(record["deletes_from"])).strftime("%Y-%m-%d %H:%M UTC")
+    kinds = record.get("kinds") or {}
+    items = sum(int(kind.get("items") or 0) for kind in kinds.values())
+    size = sum(int(kind.get("bytes") or 0) for kind in kinds.values())
+    found = "; ".join(
+        f"{name.replace('_', ' ')}: {kind.get('items', 0)} items, {kind.get('files', 0)} files, "
+        f"{size_text(int(kind.get('bytes') or 0))}"
+        for name, kind in sorted(kinds.items())
+    )
+    return [
+        StatusFindingV1(
+            finding_id="output_retention_grace_period",
+            severity=StatusSeverity.NOTE,
+            title=f"Old saved tool outputs will be deleted from {deletes_from}",
+            summary=(
+                f"Saved tool outputs older than {record.get('retention_days')} days: about {items} items "
+                f"({size_text(size)}) at the latest maintenance run ({found}). Nothing is deleted before that date; "
+                "chat transcripts, task links, summaries and completed tasks are always kept."
+            ),
+            action=(
+                "Keep the default, change the number of days in Settings → Team → File Retention, or set it to 0 "
+                "to keep everything. A change applies after the next restart."
             ),
             source=agent_type,
         )

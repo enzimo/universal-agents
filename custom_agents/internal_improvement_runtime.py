@@ -46,7 +46,12 @@ import logging
 from typing import Any, Mapping, Optional
 
 from custom_agents.conversation_runtime import start_new_conversation
-from custom_agents.output_retention import ensure_run_record, remove_old_outputs_and_record
+from custom_agents.output_retention import (
+    OutputRetentionResult,
+    ensure_run_record,
+    grace_notice,
+    remove_old_outputs_and_record,
+)
 from custom_agents.scratch_retention import prune_scratch_folders
 from python_env_lifecycle import prune_request_environments
 from custom_agents.schedule_permits import sign_system_run
@@ -478,7 +483,10 @@ def note_trusted_cleanups_at_start(agent: Any) -> None:
     layout = current_instance_layout(agent)
     if layout is not None:
         try:
-            ensure_run_record(layout.output_retention_record_path)
+            ensure_run_record(
+                layout.output_retention_record_path,
+                retention_days=int(getattr(agent, "output_retention_days", 0) or 0),
+            )
         except OSError:
             agent._logger.exception(
                 "[%s] The record of the saved tool output cleanup could not be started. "
@@ -597,7 +605,32 @@ async def remove_old_outputs_for_maintenance(agent: Any, schedule_id: str) -> st
             "Saved tool output cleanup failed before this review (manager log event=output_retention_failed); "
             "report it to TeamArchitect."
         )
+    if result.dry_run:
+        await asyncio.to_thread(tell_administrators_of_grace_period, agent, result)
     return result.instruction_sentence()
+
+
+def tell_administrators_of_grace_period(agent: Any, result: OutputRetentionResult) -> bool:
+    """One Inbox notice to administrators per grace period, with the first dry run's counts.
+
+    The Status page shows the latest counts for the whole grace period
+    (``custom_agents.status_findings``); this notice is the one message
+    administrators get, so they can change the period before anything goes.
+    """
+
+    from access_control.people import PERSON_ROLE_ADMIN
+    from custom_agents.access_runtime import send_runtime_notice_once
+    from custom_messages.contracts.access_v2 import AccessNoticeKind
+
+    title, summary = grace_notice(result)
+    return send_runtime_notice_once(
+        agent,
+        notice_id=f"output_retention_grace:{int(result.active_since or 0)}",
+        kind=AccessNoticeKind.SAVED_OUTPUT_RETENTION,
+        roles=(PERSON_ROLE_ADMIN,),
+        title=title,
+        summary=summary,
+    )
 
 
 async def check_schedules_for_maintenance(agent: Any, schedule_id: str) -> str:

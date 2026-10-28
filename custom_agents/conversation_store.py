@@ -456,6 +456,11 @@ class ConversationStore:
 
         return self._repository.delete_artifacts_created_before(cutoff, limit=limit)
 
+    def count_artifacts_created_before(self, cutoff: str) -> int:
+        """How many artifact records ``delete_artifacts_created_before`` would delete (a dry run)."""
+
+        return self._repository.count_artifacts_created_before(cutoff)
+
     def create_context_epoch(self, **kwargs: Any) -> dict[str, Any]:
         return self._repository.create_context_epoch(**kwargs)
 

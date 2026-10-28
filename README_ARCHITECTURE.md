@@ -1456,7 +1456,19 @@ the scheduler retries such an occurrence every 30 seconds. The manager keeps a
 record of each saved-output run (`state/output_retention.json`: time, last
 success, per kind items, files, bytes and failures), started at manager start;
 from it the manager's status heartbeat reports a Status page warning
-(`output_retention_overdue`) when no run succeeded for two days. The clean-ups
+(`output_retention_overdue`) when no run succeeded for two days. The record
+also keeps when retention became active (`active_since`): the first run with
+a period above 0 when it was not active (a new installation or upgrade, or a
+change from 0). For 7 days after that every run is a dry run: the same walks
+with `OldFilesRemoved.dry_run` set count the items, files and bytes they
+would delete and delete nothing (conversation artifact records are counted,
+not deleted). Administrators get one Inbox notice per grace period
+(`AccessNoticeKind.SAVED_OUTPUT_RETENTION`, the first dry run's counts, the
+date, the reason and their options), and the Status page shows a note
+(`output_retention_grace_period`) with the latest counts until the first
+deleting run. A restart keeps `active_since`; a period of 0, at a run or at
+manager start, clears it, so turning retention on again starts a new grace
+period. Shortening an active period applies at once. The clean-ups
 exist only with the maintenance schedule: with its interval at 0 it is never
 installed, which the manager logs at start (`event=retention_cleanup_off`). The manager
 does this because the outputs sit in `state/`, `dbs/` and people's folders,
@@ -1466,9 +1478,10 @@ completed tasks are never deleted by it. The content-addressed execution
 artifacts in `state/execution_artifacts/` are left alone: one stored object can
 serve many owners' execution records, which are kept, and deleting one a
 record still names breaks every later read of it. Deleting them needs a
-retention period for those records and a record of which objects they name. The maintenance run itself
-is system work for no person and cannot open people's folders, which is why
-trusted code does this part. The run may use the shared `team/` and `agents/`
+retention period for those records and a record of which objects they name.
+
+The maintenance run itself is system work for no person and cannot open
+people's folders, which is why trusted code does the clean-ups. The run may use the shared `team/` and `agents/`
 folders, sandboxed code there, the memory-review cleanup tools and model
 lookup, and it may read and record only its own schedule
 (`access_control/ownership.py`, `system_work_schedule_access`): people's
@@ -2165,7 +2178,7 @@ their GitHub, Google and X sign-ins and the broker's credentials folder for
 them, requests, notices and sandbox; their folder, personal memory, own knowledge pages and conversations
 are held out of every agent's reach for `gateway.users.removed_data_retention_days`
 (the folder under `state/held_people/`, the rows in `person_held_rows`, and
-the files of their conversations' offloaded long texts in place in
+the files of their conversations' offloaded long tool output in place in
 `dbs/conversation_artifacts/`) and then purged by a maintenance run, or by the
 gateway when it removes them again after an expired hold, unless
 `/user restore` (or adding them back the usual way while held) brings them

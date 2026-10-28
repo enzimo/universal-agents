@@ -20,8 +20,8 @@ The gateway holds and restores (it applies ``/user remove`` and
 ``/user restore``); the manager and the gateway purge. Both derive every path
 from the instance layout.
 
-A held conversation's long texts stay in their files in
-``dbs/conversation_artifacts`` while their records are held. Both purges
+A held conversation's offloaded long tool output stays in its files in
+``dbs/conversation_artifacts`` while its records are held. Both purges
 delete those files with the records (``purge_held_artifact_files``) before the
 records go, so a failed purge keeps the records that name the files and the
 next purge tries again, instead of leaving files no record names.

@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  FILE_RETENTION_ADMIN_ONLY, FILE_RETENTION_API, FILE_RETENTION_SAVED, createFileRetentionControls, parsedDays,
-  retentionText,
+  FILE_RETENTION_ADMIN_ONLY, FILE_RETENTION_API, FILE_RETENTION_SAVED, SAVED_OUTPUTS_HELP, createFileRetentionControls,
+  parsedDays, retentionText,
 } from "../assistant_gateway/onboarding_web/assets/file_retention_controls.mjs";
 import { createSettingsClient } from "../assistant_gateway/onboarding_web/assets/settings_support.mjs";
 import {
@@ -60,6 +60,9 @@ test("saving sends the three numbers with the write check and shows when each ap
   await answer(requests, FILE_RETENTION_API, jsonResponse({ ...PAGE, can_change: true }));
   const [uploads, scratch, outputs] = inputs(container);
   assert.deepEqual([uploads.value, scratch.value, outputs.value], ["90", "21", "90"]);
+  // Lowering the number deletes older outputs at the next run; the first time, after a week.
+  assert.ok(byTag(container, "small").some(node => node.textContent === SAVED_OUTPUTS_HELP));
+  assert.match(SAVED_OUTPUTS_HELP, /Lowering the number deletes the older outputs at the next maintenance run/);
 
   uploads.value = "30";
   scratch.value = "0";

@@ -864,7 +864,10 @@ that leads to it (owner's request 2026-10-12).
   forever") and "Only administrators change how long files are kept." After
   saving, say that chat uploads follow the new number at the next cleanup,
   within six hours, and scratch files and saved tool outputs after the next
-  restart. A failure keeps the typed numbers.
+  restart. The saved tool outputs field's help says that lowering the number
+  deletes the older outputs at the next maintenance run, and that nothing is
+  deleted for 7 days when it is first turned on. A failure keeps the typed
+  numbers.
 - Browser alerts are opt-in from Settings. Ask for browser permission only on a click;
   explain HTTPS/browser requirements or a denied permission in place. Store the
   preference by signed-in user and browser. Use generic alert text without message

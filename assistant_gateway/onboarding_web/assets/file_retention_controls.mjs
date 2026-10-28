@@ -24,7 +24,8 @@ export const FILE_RETENTION_ADMIN_ONLY = "Only administrators change how long fi
 export const FILE_RETENTION_SAVED = "Saved. Chat uploads follow the new number at the next cleanup, "
   + "within six hours. Scratch files and saved tool outputs follow it after the next restart.";
 export const SAVED_OUTPUTS_HELP = "Large tool results, long tool output from conversations, research results "
-  + "and run folders. Applies after the next restart.";
+  + "and run folders. Applies after the next restart. Lowering the number deletes the older outputs at the next "
+  + "maintenance run; when it is first turned on, nothing is deleted for 7 days.";
 const LOAD_FAILED = "File retention could not be loaded because the gateway returned no explanation. "
   + "Select Refresh to try again.";
 const SAVE_FAILED = "File retention was not saved. Check the numbers and try again.";

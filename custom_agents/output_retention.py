@@ -44,6 +44,17 @@ of what a tool returned, and a tool can be run again.
    again under the lock, and with the lock file deleted last; a build that
    waited on that lock starts over in a new folder.
 
+A week's grace (owner's decision 2026-10-28): when retention first becomes
+active on an installation (the first run with a period above 0 after an
+upgrade, or after the period was 0), nothing is deleted for ``GRACE_DAYS``.
+Each run in that week is a dry run that counts what it would delete, through
+the same walks (``OldFilesRemoved.dry_run``); administrators get one Inbox
+notice (``grace_notice``) and the Status page shows the latest counts. The
+start is kept in the run record (``state/output_retention.json``), so a
+restart does not start the week again; a period of 0 forgets it.
+Shortening an active period is the administrators' explicit choice and
+applies at once.
+
 Not deleted here: the content-addressed execution artifacts
 (``state/execution_artifacts``). One stored object can serve many owners'
 execution records (code, builds, revisions, run logs), which are kept, and
@@ -164,14 +175,27 @@ class OutputsRemoved(OldFilesRemoved):
 
 @dataclass
 class OutputRetentionResult:
-    """What one cleanup did, per kind."""
+    """What one cleanup did, per kind, or, in a dry run, what it would have deleted."""
 
     retention_days: int
     kinds: list[OutputsRemoved] = field(default_factory=list)
+    dry_run: bool = False
+    # When retention became active on this installation (``remove_old_outputs_and_record``).
+    active_since: float | None = None
+    # During the grace period: when deletion starts.
+    deletes_from: float | None = None
 
     @property
     def enabled(self) -> bool:
         return self.retention_days > 0
+
+    @property
+    def items(self) -> int:
+        return sum(kind.items_removed for kind in self.kinds)
+
+    @property
+    def bytes(self) -> int:
+        return sum(kind.bytes_removed for kind in self.kinds)
 
     def instruction_sentence(self) -> str:
         """One sentence for InternalImprovementAgent's run instructions."""
@@ -180,6 +204,15 @@ class OutputRetentionResult:
             return (
                 f"Saved tool output cleanup is turned off ({RETENTION_SETTING} is 0), so no saved tool "
                 "outputs were deleted before this review."
+            )
+        if self.dry_run:
+            return (
+                f"Saved tool output cleanup is in its {GRACE_DAYS}-day grace period, so nothing was deleted. "
+                f"From {_date_text(self.deletes_from)} it deletes saved tool outputs written more than "
+                f"{self.retention_days} days ago ({RETENTION_SETTING}); today it would delete: "
+                + "; ".join(kind.phrase() for kind in self.kinds)
+                + ". Administrators were told in the Inbox. Include these counts in your run record; these folders "
+                "are closed to you, so do not try to inspect them."
             )
         skipped = sum(kind.skipped for kind in self.kinds)
         failed = any(kind.failed for kind in self.kinds)
@@ -205,14 +238,16 @@ def remove_old_outputs(
     retention_days: int,
     conversation_records: ConversationStore | None,
     now: float | None = None,
+    dry_run: bool = False,
 ) -> OutputRetentionResult:
     """Delete saved tool outputs written more than ``retention_days`` ago; 0 deletes nothing.
 
     Each kind is cleaned on its own: a failure in one is logged and reported,
-    and the others still run.
+    and the others still run. With ``dry_run`` nothing is deleted and the
+    counts say what would have been (``OldFilesRemoved.dry_run``).
     """
 
-    result = OutputRetentionResult(retention_days=retention_days)
+    result = OutputRetentionResult(retention_days=retention_days, dry_run=dry_run)
     if not result.enabled:
         logger.info(
             "Saved tool output cleanup is turned off. event=output_retention_disabled retention_days=%s",
@@ -233,7 +268,7 @@ def remove_old_outputs(
         (OutputKind.EXECUTION_RUNS, lambda counts: _remove_old_execution_runs(layout.workspaces_dir, cutoff, moment, counts)),
     ]
     for kind, step in steps:
-        counts = OutputsRemoved(kind=kind)
+        counts = OutputsRemoved(kind=kind, dry_run=dry_run)
         try:
             step(counts)
         except Exception:
@@ -246,8 +281,10 @@ def remove_old_outputs(
             )
         result.kinds.append(counts)
         logger.info(
-            "Old saved tool outputs were deleted. event=output_retention_pruned kind=%s retention_days=%s "
+            "Old saved tool outputs were %s. event=%s kind=%s retention_days=%s "
             "items_removed=%s files_removed=%s bytes_removed=%s folders_removed=%s skipped=%s failed=%s",
+            "counted, not deleted (grace period)" if dry_run else "deleted",
+            "output_retention_counted" if dry_run else "output_retention_pruned",
             kind,
             retention_days,
             counts.items_removed,
@@ -265,12 +302,35 @@ def remove_old_outputs_and_record(
     *,
     retention_days: int,
     conversation_records: ConversationStore | None,
+    now: float | None = None,
 ) -> OutputRetentionResult:
-    """``remove_old_outputs``, then save what it did (``write_run_record``); a failed save is logged."""
+    """``remove_old_outputs`` with the grace period, then save what it did; a failed save is logged.
 
-    result = remove_old_outputs(layout, retention_days=retention_days, conversation_records=conversation_records)
+    Retention becomes active at the first run with a period above 0 after the
+    record says it was not (a new installation or upgrade, or the period
+    changed from 0); that time is kept in the record (``active_since``) and
+    survives restarts. For ``GRACE_DAYS`` after it every run is a dry run, so
+    administrators can see what will go and change the period first
+    (``grace_notice``). A period of 0 forgets it. Shortening an active period
+    is an administrator's explicit choice and takes effect at once.
+    """
+
+    moment = datetime.now(timezone.utc).timestamp() if now is None else now
+    path = layout.output_retention_record_path
+    active_since = _active_since(read_run_record(path), retention_days, moment)
+    deletes_from = None if active_since is None else active_since + GRACE_DAYS * SECONDS_PER_DAY
+    dry_run = deletes_from is not None and moment < deletes_from
+    result = remove_old_outputs(
+        layout,
+        retention_days=retention_days,
+        conversation_records=conversation_records,
+        now=moment,
+        dry_run=dry_run,
+    )
+    result.active_since = active_since
+    result.deletes_from = deletes_from if dry_run else None
     try:
-        write_run_record(layout.output_retention_record_path, result)
+        write_run_record(path, result, now=datetime.fromtimestamp(moment, timezone.utc))
     except OSError:
         logger.exception(
             "The record of the saved tool output cleanup could not be saved. event=output_retention_record_failed "
@@ -280,11 +340,23 @@ def remove_old_outputs_and_record(
     return result
 
 
+def _active_since(record: Mapping[str, Any], retention_days: int, now: float) -> float | None:
+    """When retention became active: as recorded, or now when it was not active; None with a period of 0."""
+
+    if retention_days <= 0:
+        return None
+    recorded = _time_of(record.get("active_since"))
+    return recorded if recorded is not None else now
+
+
 # -- the record of each run ----------------------------------------------------------------
 
 RUN_RECORD_VERSION = 1
 # The Status page warns when the cleanup has not succeeded for this long.
 RUN_OVERDUE_SECONDS = 2 * SECONDS_PER_DAY
+# Owner's decision 2026-10-28: when retention first becomes active, nothing is
+# deleted for a week; each run only counts, and administrators are told.
+GRACE_DAYS = 7
 
 
 def write_run_record(path: Path, result: OutputRetentionResult, *, now: datetime | None = None) -> dict[str, Any]:
@@ -304,6 +376,9 @@ def write_run_record(path: Path, result: OutputRetentionResult, *, now: datetime
         "last_run_at": moment,
         "last_success_at": moment if succeeded else previous.get("last_success_at"),
         "retention_days": result.retention_days,
+        "active_since": _iso(result.active_since),
+        "dry_run": result.dry_run,
+        "deletes_from": _iso(result.deletes_from),
         "kinds": {
             str(kind.kind): {
                 "items": kind.items_removed,
@@ -320,21 +395,30 @@ def write_run_record(path: Path, result: OutputRetentionResult, *, now: datetime
     return record
 
 
-def ensure_run_record(path: Path, *, now: datetime | None = None) -> None:
-    """Start the record when there is none, so a cleanup that never runs is noticed two days later."""
+def ensure_run_record(path: Path, *, retention_days: int, now: datetime | None = None) -> None:
+    """At manager start: start the record when there is none, and forget the active period when it is 0.
 
-    if read_run_record(path):
+    The record lets a cleanup that never runs be noticed two days later.
+    Forgetting the active period here too means a period set to 0 and back
+    between two maintenance runs still gets a new grace period.
+    """
+
+    record = read_run_record(path)
+    if record and (retention_days > 0 or not record.get("active_since")):
         return
     moment = (now or datetime.now(timezone.utc)).isoformat()
     _write_json_atomically(
         path,
         {
             "record_version": RUN_RECORD_VERSION,
-            "first_recorded_at": moment,
-            "last_run_at": None,
-            "last_success_at": None,
-            "retention_days": None,
-            "kinds": {},
+            "first_recorded_at": record.get("first_recorded_at") or moment,
+            "last_run_at": record.get("last_run_at"),
+            "last_success_at": record.get("last_success_at"),
+            "retention_days": retention_days if record else None,
+            "active_since": None,
+            "dry_run": False,
+            "deletes_from": None,
+            "kinds": record.get("kinds") or {},
         },
     )
 
@@ -365,6 +449,48 @@ def overdue_since(record: Mapping[str, Any], *, now: float | None = None) -> flo
     if since is None or moment - since <= RUN_OVERDUE_SECONDS:
         return None
     return since
+
+
+def grace_notice(result: OutputRetentionResult) -> tuple[str, str]:
+    """Title and text of the administrators' notice about a grace period's first dry run."""
+
+    when = _date_text(result.deletes_from)
+    days = result.retention_days
+    title = f"Saved tool outputs older than {days} days will be deleted from {when}"
+    summary = (
+        f"What will happen: on {when}, the team deletes about {result.items} items ({size_text(result.bytes)}) of "
+        f"saved tool output older than {days} days: oversized tool results, long tool output saved from "
+        "conversations (conversation artifacts), research results and execution run folders. After that, the "
+        f"same kinds are deleted automatically once they are {days} days old.\n\n"
+        "Why: these are copies of what tools returned, which a tool can produce again, and deleting them keeps "
+        "the disk from growing without limit. Chat transcripts, task links, conversation summaries and "
+        "completed tasks are kept.\n\n"
+        "Your options: keep this default; change the number of days in Settings > Team > File Retention; or "
+        "set it to 0 to keep everything. A change applies after the next restart.\n\n"
+        "Found today: " + "; ".join(kind.phrase() for kind in result.kinds) + "."
+    )
+    return title, summary
+
+
+def _date_text(moment: float | None) -> str:
+    if moment is None:
+        return "an unknown date"
+    return datetime.fromtimestamp(moment, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def size_text(size: int) -> str:
+    """Bytes as people read them: "512 bytes", "3.4 MB", "1.2 GB"."""
+
+    value = float(size)
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{int(value)} bytes" if unit == "bytes" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _iso(moment: float | None) -> str | None:
+    return None if moment is None else datetime.fromtimestamp(moment, timezone.utc).isoformat()
 
 
 def _write_json_atomically(path: Path, data: Mapping[str, Any]) -> None:
@@ -495,6 +621,8 @@ def _remove_old_results_in_task_folder(
 
 
 def _remove_empty_folder(parent: int, name: str, counts: OutputsRemoved) -> None:
+    if counts.dry_run:
+        return
     try:
         os.rmdir(name, dir_fd=parent)  # only an empty folder, never through a link
     except OSError:
@@ -568,6 +696,10 @@ def _remove_old_conversation_artifacts(
             "Old conversation artifact records were not deleted because this runtime has no conversation "
             "store. event=output_retention_records_skipped"
         )
+    elif counts.dry_run:
+        # Their files are as old as they are, so the age walk below counts them.
+        cutoff_text = datetime.fromtimestamp(cutoff, timezone.utc).isoformat()
+        counts.items_removed += records.count_artifacts_created_before(cutoff_text)
     else:
         _remove_old_artifact_records(records, root_dir, cutoff, counts)
     # Then every older file, which also removes files no record names any more.
@@ -831,6 +963,7 @@ __all__ = [
     "DELETED_OUTPUT_FLAG",
     "DELETED_OUTPUT_REASON",
     "EXECUTION_MINIMUM_AGE_DAYS",
+    "GRACE_DAYS",
     "RETENTION_SETTING",
     "SavedOutputRetention",
     "OutputKind",
@@ -839,11 +972,13 @@ __all__ = [
     "deleted_by_retention",
     "deleted_output_note",
     "ensure_run_record",
+    "grace_notice",
     "overdue_since",
     "read_run_record",
     "remove_old_outputs",
     "remove_old_outputs_and_record",
     "retention_days_of",
+    "size_text",
     "with_deleted_outputs_marked",
     "write_run_record",
     "written_at_from_name",

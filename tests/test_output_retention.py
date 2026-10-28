@@ -25,6 +25,7 @@ import pytest
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.internal_improvement_runtime import remove_old_outputs_for_maintenance
 from custom_agents.output_retention import (
+    GRACE_DAYS,
     OutputKind,
     remove_old_outputs,
     written_at_from_name,
@@ -584,6 +585,7 @@ async def test_maintenance_deletes_old_outputs_and_reports_counts_and_bytes_per_
     layout: InstanceLayout, store: ConversationStore
 ) -> None:
     _tool_result(layout, "task_old", datetime.now(timezone.utc).timestamp() - (DAYS + 1) * SECONDS_PER_DAY)
+    _grace_ended(layout)
     manager = SimpleNamespace(
         id="manager_1",
         _logger=logging.getLogger("test.output_retention.manager"),
@@ -695,6 +697,173 @@ def test_at_start_the_record_begins_and_a_schedule_that_is_off_is_logged(layout:
     note_trusted_cleanups_at_start(_lead(layout))
     assert read_run_record(layout.output_retention_record_path) == record, "a restart keeps the record"
     assert "retention_cleanup_off" not in caplog.text
+
+
+# -- the grace period before the first deletion ---------------------------------------------
+
+
+def _grace_ended(layout: InstanceLayout) -> None:
+    """A record saying retention became active more than the grace period ago."""
+
+    started = datetime.now(timezone.utc) - timedelta(days=GRACE_DAYS + 1)
+    path = layout.output_retention_record_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"active_since": started.isoformat(), "retention_days": DAYS}), encoding="utf-8")
+
+
+def _every_kind(layout: InstanceLayout, store: ConversationStore) -> dict[str, Path]:
+    """One expired output of each kind, plus a conversation artifact file no record names."""
+
+    artifact = store.offload_large_text(
+        conversation_id="conv_old", task_id="task_1", artifact_type="tool_output", raw_text="old output", summary_text="s"
+    )
+    _age_artifact(layout, artifact, EXPIRED)
+    run = layout.execution_runs_dir / "run_1.abcd"
+    _file(run / "entry.py", "print('run')", mtime=EXPIRED)
+    _touch(run, EXPIRED)
+    build = layout.execution_rust_builds_dir / ("a" * 64)
+    _file(build / BUILD_LOCK_FILENAME, "", mtime=EXPIRED)
+    _file(build / "main.rs", "fn main() {}", mtime=EXPIRED)
+    _touch(build, EXPIRED)
+    research = layout.person_research_dir("alice") / "task-1" / f"{_stamp(EXPIRED)}_web_q_0123456789ab"
+    _file(research / "manifest.json", '{"research": true}')
+    return {
+        "tool result": _tool_result(layout, "task_old", EXPIRED),
+        "artifact": Path(artifact["storage_path"]),
+        "orphan": _file(layout.conversation_artifacts_dir / "conv_gone" / "orphan.txt", "orphan", mtime=EXPIRED),
+        "research": research,
+        "run": run,
+        "build": build,
+    }
+
+
+def _graced(layout: InstanceLayout, store: ConversationStore, moment: float, *, days: int = DAYS):
+    from custom_agents.output_retention import remove_old_outputs_and_record
+
+    return remove_old_outputs_and_record(layout, retention_days=days, conversation_records=store, now=moment)
+
+
+def _counts(result) -> dict[str, tuple[int, int, int]]:
+    return {str(kind.kind): (kind.items_removed, kind.files_removed, kind.bytes_removed) for kind in result.kinds}
+
+
+def test_nothing_is_deleted_during_the_grace_period_and_deletion_starts_after_it(
+    layout: InstanceLayout, store: ConversationStore
+) -> None:
+    outputs = _every_kind(layout, store)
+
+    first = _graced(layout, store, NOW)
+    last_day = _graced(layout, store, NOW + GRACE_DAYS * SECONDS_PER_DAY - MINUTE)
+
+    assert first.dry_run and last_day.dry_run
+    assert first.deletes_from == pytest.approx(NOW + GRACE_DAYS * SECONDS_PER_DAY)
+    assert all(path.exists() for path in outputs.values()), "nothing is deleted before day 7"
+    assert len(_artifact_ids(layout)) == 1
+
+    after = _graced(layout, store, NOW + GRACE_DAYS * SECONDS_PER_DAY + MINUTE)
+
+    assert not after.dry_run and after.deletes_from is None
+    assert not any(path.exists() for path in outputs.values())
+    assert _artifact_ids(layout) == set()
+
+
+def test_the_dry_run_counts_match_what_is_then_deleted(layout: InstanceLayout, store: ConversationStore) -> None:
+    _every_kind(layout, store)
+    _graced(layout, store, NOW)  # retention becomes active
+
+    dry = _graced(layout, store, NOW + (GRACE_DAYS - 1) * SECONDS_PER_DAY)
+    real = _graced(layout, store, NOW + GRACE_DAYS * SECONDS_PER_DAY + MINUTE)
+
+    assert dry.dry_run and not real.dry_run
+    assert _counts(dry) == _counts(real)
+    assert all(items > 0 and files > 0 and size > 0 for items, files, size in _counts(real).values())
+    assert (dry.items, dry.bytes) == (real.items, real.bytes)
+
+
+def test_the_grace_period_starts_again_after_retention_was_turned_off(
+    layout: InstanceLayout, store: ConversationStore
+) -> None:
+    from custom_agents.output_retention import ensure_run_record
+
+    _graced(layout, store, NOW)
+    assert not _graced(layout, store, NOW + 8 * SECONDS_PER_DAY).dry_run
+    _graced(layout, store, NOW + 9 * SECONDS_PER_DAY, days=0)  # turned off at a run
+    outputs = _every_kind(layout, store)
+
+    again = _graced(layout, store, NOW + 10 * SECONDS_PER_DAY)
+
+    assert again.dry_run and again.deletes_from == pytest.approx(NOW + (10 + GRACE_DAYS) * SECONDS_PER_DAY)
+    assert all(path.exists() for path in outputs.values())
+
+    # Turned off and on again between two runs: the manager forgot the active period at its start.
+    assert not _graced(layout, store, NOW + 18 * SECONDS_PER_DAY).dry_run
+    ensure_run_record(layout.output_retention_record_path, retention_days=0)
+    assert _graced(layout, store, NOW + 19 * SECONDS_PER_DAY).dry_run
+
+
+def test_a_restart_or_a_shorter_period_does_not_start_the_grace_period_again(
+    layout: InstanceLayout, store: ConversationStore
+) -> None:
+    from custom_agents.output_retention import ensure_run_record
+
+    _graced(layout, store, NOW)
+    ensure_run_record(layout.output_retention_record_path, retention_days=DAYS)  # an ordinary restart
+    outputs = _every_kind(layout, store)
+
+    after = _graced(layout, store, NOW + GRACE_DAYS * SECONDS_PER_DAY + MINUTE)
+
+    assert not after.dry_run and not any(path.exists() for path in outputs.values())
+    # Shortening an active period is the administrator's explicit choice: it applies at once.
+    assert not _graced(layout, store, NOW + 9 * SECONDS_PER_DAY, days=30).dry_run
+
+
+def test_the_notice_says_when_how_much_why_and_what_administrators_can_do(
+    layout: InstanceLayout, store: ConversationStore
+) -> None:
+    from custom_agents.output_retention import grace_notice
+
+    _every_kind(layout, store)
+    result = _graced(layout, store, NOW)
+
+    title, text = grace_notice(result)
+
+    when = datetime.fromtimestamp(NOW + GRACE_DAYS * SECONDS_PER_DAY, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    assert when in title and when in text and "90 days" in title
+    assert f"about {result.items} items (" in text and result.items == 5
+    for kind in ("oversized tool results", "conversation artifacts", "research results", "execution run folders"):
+        assert kind in text
+    assert "deleted automatically once they are 90 days old" in text
+    assert "can produce again" in text and "growing without limit" in text
+    assert "Chat transcripts, task links, conversation summaries and completed tasks are kept" in text
+    assert "keep this default" in text and "Settings > Team > File Retention" in text and "set it to 0" in text
+    assert "applies after the next restart" in text
+
+
+@pytest.mark.asyncio
+async def test_administrators_are_told_once_per_grace_period_and_the_status_page_shows_it_until_deletion(
+    layout: InstanceLayout, store: ConversationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_agents import access_runtime
+    from custom_agents.status_findings import agent_status_findings
+
+    _every_kind(layout, store)
+    sent: list[dict] = []
+    monkeypatch.setattr(access_runtime, "send_runtime_notice_once", lambda agent, **notice: sent.append(notice) or True)
+    manager = _lead(layout, _conversation_store=store)
+    grace = lambda: [f for f in agent_status_findings(manager) if f.finding_id == "output_retention_grace_period"]  # noqa: E731
+
+    sentence = await remove_old_outputs_for_maintenance(manager, "internal_improvement_1")
+    await remove_old_outputs_for_maintenance(manager, "internal_improvement_1")
+
+    assert "grace period, so nothing was deleted" in sentence
+    assert len({notice["notice_id"] for notice in sent}) == 1, "one notice per grace period"
+    assert sent[0]["roles"] == ("admin",) and str(sent[0]["kind"]) == "saved_output_retention"
+    [finding] = grace()
+    assert "about 5 items" in finding.summary and "Settings → Team → File Retention" in finding.action
+
+    _grace_ended(layout)
+    await remove_old_outputs_for_maintenance(manager, "internal_improvement_1")
+    assert grace() == [], "it clears once deletion starts"
 
 
 # -- readers of a deleted conversation artifact ---------------------------------------------

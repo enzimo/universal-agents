@@ -266,37 +266,56 @@ Agents' tools save what they produce while they work, so a large result does
 not have to stay in the conversation. Each time the internal-improvement
 maintenance schedule runs (every six hours by default), the manager deletes
 those saved outputs written more than `tool_policy.output_retention_days` days
-ago (90 by default, about three months):
+ago (90 by default, about three months; at most 3650):
 
-- **Tool results** too large for one answer, in `state/tool_results/`.
-- **Long tool output saved from conversations**, in `dbs/conversation_artifacts/`,
-  with its record in the task database.
+- **Tool results** too large for one answer, in `state/tool_results/`, aged by
+  the date in their folder name.
+- **Long tool output saved from conversations** (conversation artifacts): the
+  full text of a tool's output that was too long to keep in the conversation,
+  in `dbs/conversation_artifacts/`, with its record in the task database, aged
+  by the record's date. These files hold tool output, not chat messages.
 - **Research results**, in `research/` of each person's folder and of `agents/`.
   Only the result folders the research tools wrote go: they are recognized by
   the date and time at the start of their names and aged by it. Folders and
   files people or agents made there themselves stay, however old.
 - **Execution run folders** in `agents/execution/`: folders that an
-  interrupted run left behind, and Rust build folders not used for the period.
-  A run or build folder is never deleted while it may still be in use, and
-  never when it is less than two days old.
+  interrupted run left behind, and Rust build folders not used for the period,
+  each aged by when the folder itself last changed (a build changes its
+  folder). A run or build folder is never deleted while it may still be in
+  use, and never when it is less than two days old.
 
 ```yaml
 tool_policy:
   output_retention_days: 90   # 0 keeps saved tool outputs
 ```
 
-Each output's age is counted from when it was written: the date in its folder
-name or record, or else when its files last changed. Conversations, their
-summaries, task links and completed tasks are kept whatever this number is.
-After a saved output is deleted, an old conversation still shows what the
-output was about, and an agent that tries to open it is told that it was
-deleted under the retention policy; the agent can run the tool again. Links
-are never followed. The maintenance run's record lists, for each kind, how
-many items, files and bytes were deleted, and the manager keeps the latest
-counts in `state/output_retention.json`. If no cleanup has succeeded for two
-days, the **Status** page warns administrators. Administrators can also
-change the number in **Settings → Team → File Retention**; like scratch
-retention it applies after the next restart.
+Conversations, their summaries, task links and completed tasks are kept
+whatever this number is. After a saved output is deleted, an old conversation
+still shows what the output was about, and an agent that tries to open it is
+told that it was deleted under the retention policy; the agent can run the
+tool again. Links are never followed. The maintenance run's record lists, for
+each kind, how many items, files and bytes were deleted, and the manager keeps
+the latest counts in `state/output_retention.json`. If no cleanup has
+succeeded for two days, the **Status** page warns administrators.
+Administrators can also change the number in **Settings → Team → File
+Retention**; like scratch retention it applies after the next restart.
+
+**A week's notice first.** When saved tool output retention first becomes
+active on an installation (the first maintenance run after an upgrade to
+this version, or after the number changes from 0 to a period), nothing is
+deleted for 7 days. During that week each maintenance run only counts what it
+would delete. Administrators get one Inbox notice saying on which date about
+how many items (and how much space) will be deleted, why, and what they can
+do: keep the default, change the number of days, or set it to 0 to keep
+everything. The **Status** page shows the date and the latest counts for the
+whole week and clears once deletion starts. A restart does not start the week
+again. Lowering an active period is your own choice, so it applies without a
+waiting week: the older outputs are deleted at the next maintenance run after
+the restart.
+
+**Upgrading:** the first maintenance run after the upgrade starts that week.
+Seven days later, the backlog of saved tool output older than 90 days is
+deleted, unless an administrator changed the number or set it to 0 first.
 
 Both clean-ups (scratch and saved tool outputs) run only with the
 internal-improvement maintenance schedule. They run even when the
