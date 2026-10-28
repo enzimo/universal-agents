@@ -260,6 +260,120 @@ def remove_old_outputs(
     return result
 
 
+def remove_old_outputs_and_record(
+    layout: InstanceLayout,
+    *,
+    retention_days: int,
+    conversation_records: ConversationStore | None,
+) -> OutputRetentionResult:
+    """``remove_old_outputs``, then save what it did (``write_run_record``); a failed save is logged."""
+
+    result = remove_old_outputs(layout, retention_days=retention_days, conversation_records=conversation_records)
+    try:
+        write_run_record(layout.output_retention_record_path, result)
+    except OSError:
+        logger.exception(
+            "The record of the saved tool output cleanup could not be saved. event=output_retention_record_failed "
+            "path=%s",
+            layout.output_retention_record_path,
+        )
+    return result
+
+
+# -- the record of each run ----------------------------------------------------------------
+
+RUN_RECORD_VERSION = 1
+# The Status page warns when the cleanup has not succeeded for this long.
+RUN_OVERDUE_SECONDS = 2 * SECONDS_PER_DAY
+
+
+def write_run_record(path: Path, result: OutputRetentionResult, *, now: datetime | None = None) -> dict[str, Any]:
+    """Save when this run happened and, per kind, what it deleted and whether it failed.
+
+    ``last_success_at`` moves only when no kind failed, so the Status page
+    can tell a cleanup that keeps failing (``overdue_since``). The file is
+    replaced in one step.
+    """
+
+    moment = (now or datetime.now(timezone.utc)).isoformat()
+    previous = read_run_record(path)
+    succeeded = not any(kind.failed for kind in result.kinds)
+    record: dict[str, Any] = {
+        "record_version": RUN_RECORD_VERSION,
+        "first_recorded_at": previous.get("first_recorded_at") or moment,
+        "last_run_at": moment,
+        "last_success_at": moment if succeeded else previous.get("last_success_at"),
+        "retention_days": result.retention_days,
+        "kinds": {
+            str(kind.kind): {
+                "items": kind.items_removed,
+                "files": kind.files_removed,
+                "bytes": kind.bytes_removed,
+                "folders": kind.folders_removed,
+                "skipped": kind.skipped,
+                "failed": kind.failed,
+            }
+            for kind in result.kinds
+        },
+    }
+    _write_json_atomically(path, record)
+    return record
+
+
+def ensure_run_record(path: Path, *, now: datetime | None = None) -> None:
+    """Start the record when there is none, so a cleanup that never runs is noticed two days later."""
+
+    if read_run_record(path):
+        return
+    moment = (now or datetime.now(timezone.utc)).isoformat()
+    _write_json_atomically(
+        path,
+        {
+            "record_version": RUN_RECORD_VERSION,
+            "first_recorded_at": moment,
+            "last_run_at": None,
+            "last_success_at": None,
+            "retention_days": None,
+            "kinds": {},
+        },
+    )
+
+
+def read_run_record(path: Path) -> dict[str, Any]:
+    """The saved record, or ``{}`` when there is none or it cannot be read (logged)."""
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        logger.warning(
+            "The record of the saved tool output cleanup could not be read. event=output_retention_record_unreadable "
+            "path=%s",
+            path,
+            exc_info=True,
+        )
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def overdue_since(record: Mapping[str, Any], *, now: float | None = None) -> float | None:
+    """When the cleanup last succeeded (or, never yet, was first recorded), if that is too long ago."""
+
+    since = _time_of(record.get("last_success_at")) or _time_of(record.get("first_recorded_at"))
+    moment = datetime.now(timezone.utc).timestamp() if now is None else now
+    if since is None or moment - since <= RUN_OVERDUE_SECONDS:
+        return None
+    return since
+
+
+def _write_json_atomically(path: Path, data: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
 # -- when an output was written ----------------------------------------------------------
 
 
@@ -724,8 +838,13 @@ __all__ = [
     "OutputsRemoved",
     "deleted_by_retention",
     "deleted_output_note",
+    "ensure_run_record",
+    "overdue_since",
+    "read_run_record",
     "remove_old_outputs",
+    "remove_old_outputs_and_record",
     "retention_days_of",
     "with_deleted_outputs_marked",
+    "write_run_record",
     "written_at_from_name",
 ]

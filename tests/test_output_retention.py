@@ -16,7 +16,7 @@ import logging
 import os
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -617,6 +617,84 @@ async def test_maintenance_outside_an_instance_layout_reports_that_it_did_not_ru
     sentence = await remove_old_outputs_for_maintenance(manager, "internal_improvement_1")
 
     assert "did not run" in sentence
+
+
+# -- the record of each run and the Status page -------------------------------------------
+
+
+def test_each_run_is_recorded_and_a_failing_kind_keeps_the_last_success(layout: InstanceLayout) -> None:
+    from custom_agents.output_retention import read_run_record, remove_old_outputs_and_record
+
+    _tool_result(layout, "task_old", time.time() - (DAYS + 1) * SECONDS_PER_DAY)
+
+    remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=None)
+    first = read_run_record(layout.output_retention_record_path)
+
+    class Broken:
+        def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+            raise RuntimeError("database unavailable")
+
+    remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=Broken())
+    second = read_run_record(layout.output_retention_record_path)
+
+    tool_results = first["kinds"]["tool_results"]
+    assert (tool_results["items"], tool_results["files"], tool_results["failed"]) == (1, 2, False)
+    assert tool_results["bytes"] > len(BLOCK_TEXT)
+    assert first["last_success_at"] == first["last_run_at"] and first["retention_days"] == DAYS
+    assert second["kinds"]["conversation_artifacts"]["failed"] is True
+    assert second["last_run_at"] != first["last_run_at"]
+    assert second["last_success_at"] == first["last_success_at"], "a failed run is no success"
+    assert second["first_recorded_at"] == first["first_recorded_at"]
+
+
+def _lead(layout: InstanceLayout, **values):
+    defaults = {
+        "id": "manager_1", "named_agent_type": "TeamArchitect", "is_team_lead": True,
+        "_logger": logging.getLogger("test.output_retention.manager"),
+        "instance_root": str(layout.root), "workspace_dir": str(layout.workspaces_dir),
+        "output_retention_days": DAYS, "scratch_retention_days": 21,
+        "schedule_maintenance": {"internal_improvement_review_interval_seconds": 21600},
+    }
+    return SimpleNamespace(**{**defaults, **values})
+
+
+def test_the_status_page_warns_when_no_cleanup_succeeded_for_two_days(layout: InstanceLayout) -> None:
+    from custom_agents.output_retention import write_run_record
+    from custom_agents.status_findings import agent_status_findings
+    from custom_agents.output_retention import OutputRetentionResult
+
+    path = layout.output_retention_record_path
+    findings = lambda agent: [f for f in agent_status_findings(agent) if f.finding_id == "output_retention_overdue"]  # noqa: E731
+
+    assert findings(_lead(layout)) == [], "nothing recorded yet"
+    write_run_record(path, OutputRetentionResult(retention_days=DAYS), now=datetime.now(timezone.utc) - timedelta(days=1))
+    assert findings(_lead(layout)) == []
+    write_run_record(path, OutputRetentionResult(retention_days=DAYS), now=datetime.now(timezone.utc) - timedelta(days=3))
+
+    [finding] = findings(_lead(layout))
+    assert "last succeeded at" in finding.summary and "90 days" in finding.summary
+    assert "maintenance schedule is on and not paused" in finding.action
+    assert findings(_lead(layout, output_retention_days=0)) == [], "nothing to delete with retention off"
+    worker = _lead(layout)
+    worker.is_team_lead = False
+    assert findings(worker) == [], "only the manager runs the cleanup"
+
+
+def test_at_start_the_record_begins_and_a_schedule_that_is_off_is_logged(layout: InstanceLayout, caplog) -> None:
+    from custom_agents.internal_improvement_runtime import note_trusted_cleanups_at_start
+    from custom_agents.output_retention import overdue_since, read_run_record
+
+    with caplog.at_level(logging.WARNING):
+        note_trusted_cleanups_at_start(_lead(layout, schedule_maintenance={"internal_improvement_review_interval_seconds": 0}))
+
+    record = read_run_record(layout.output_retention_record_path)
+    assert record["first_recorded_at"] and record["last_success_at"] is None
+    assert overdue_since(record, now=time.time() + 3 * SECONDS_PER_DAY) is not None, "a cleanup that never runs shows"
+    assert "event=retention_cleanup_off reason=maintenance_schedule_off" in caplog.text
+    caplog.clear()
+    note_trusted_cleanups_at_start(_lead(layout))
+    assert read_run_record(layout.output_retention_record_path) == record, "a restart keeps the record"
+    assert "retention_cleanup_off" not in caplog.text
 
 
 # -- readers of a deleted conversation artifact ---------------------------------------------

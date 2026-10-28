@@ -292,10 +292,19 @@ After a saved output is deleted, an old conversation still shows what the
 output was about, and an agent that tries to open it is told that it was
 deleted under the retention policy; the agent can run the tool again. Links
 are never followed. The maintenance run's record lists, for each kind, how
-many items, files and bytes were deleted, so administrators can see that the
-cleanup runs. Administrators can also change the number in **Settings → Team
-→ File Retention**; like scratch retention it applies after the next restart.
-Nothing is deleted while the maintenance schedule is turned off.
+many items, files and bytes were deleted, and the manager keeps the latest
+counts in `state/output_retention.json`. If no cleanup has succeeded for two
+days, the **Status** page warns administrators. Administrators can also
+change the number in **Settings → Team → File Retention**; like scratch
+retention it applies after the next restart.
+
+Both clean-ups (scratch and saved tool outputs) run only with the
+internal-improvement maintenance schedule. They run even when the
+maintenance agent itself cannot start, but if
+`agent.schedule_maintenance.internal_improvement_review_interval_seconds` is
+0 the schedule is never set up and nothing is ever deleted: the manager says
+so in its log when it starts (`event=retention_cleanup_off`), and the Status
+page warning appears. A paused or turned-off schedule also stops them.
 
 ### Upload retention
 

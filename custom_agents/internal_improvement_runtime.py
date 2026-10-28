@@ -5,7 +5,18 @@ their retention periods in trusted manager code
 (``prune_scratch_for_maintenance``, ``remove_old_outputs_for_maintenance``),
 then dispatches the agent's review with the counts in its instructions, which
 the run records, so administrators see in the maintenance schedule's runs
-that retention runs and what it deleted.
+that retention runs and what it deleted. The clean-ups run before the check
+that a maintenance worker is available, so a worker that cannot start never
+skips them, and once per occurrence: the scheduler retries an occurrence
+whose worker did not start every 30 seconds, and the clean-ups are not
+repeated for it. The saved output cleanup also writes a record of each run
+(``custom_agents.output_retention.write_run_record``), from which the Status
+page warns when no run succeeded for two days.
+
+The clean-ups run only with this schedule. With
+``agent.schedule_maintenance.internal_improvement_review_interval_seconds``
+at 0 or less it is never installed, so they never run; the manager says so
+in its log when it starts (``note_trusted_cleanups_at_start``).
 
 A maintenance run is system work (access plan 7c): the scheduler signs it for
 no person (``custom_agents.task_context_runtime.sign_system_context``; without
@@ -35,7 +46,7 @@ import logging
 from typing import Any, Mapping, Optional
 
 from custom_agents.conversation_runtime import start_new_conversation
-from custom_agents.output_retention import remove_old_outputs
+from custom_agents.output_retention import ensure_run_record, remove_old_outputs_and_record
 from custom_agents.scratch_retention import prune_scratch_folders
 from python_env_lifecycle import prune_request_environments
 from custom_agents.schedule_permits import sign_system_run
@@ -349,6 +360,8 @@ async def enqueue_internal_improvement_job(
     occurrence_key = hashlib.sha256(
         f"{schedule_id}:{scheduled_message.next_fire_at or 'unknown'}".encode("utf-8")
     ).hexdigest()[:20]
+    # Before the worker check, so a worker that cannot start never skips them.
+    scratch_sentence, outputs_sentence = await trusted_cleanups_for_occurrence(agent, schedule_id, occurrence_key)
     if not await ensure_maintenance_worker(agent, scheduled_message, occurrence_key):
         agent._logger.warning(
             "[%s] Could not verify or start an InternalImprovementAgent for schedule %s. "
@@ -360,9 +373,7 @@ async def enqueue_internal_improvement_job(
         )
         return False
 
-    scratch_sentence = await prune_scratch_for_maintenance(agent, schedule_id)
     python_sentence = await prune_python_envs_for_maintenance(agent, schedule_id)
-    outputs_sentence = await remove_old_outputs_for_maintenance(agent, schedule_id)
     schedules_sentence = await check_schedules_for_maintenance(agent, schedule_id)
     task = scheduled_message.payload.model_copy(deep=True)
     occurrence_id = operational_id(INTERNAL_IMPROVEMENT_ID_PREFIX, occurrence_key)
@@ -438,6 +449,53 @@ async def enqueue_internal_improvement_job(
         routing_key,
     )
     return True
+
+
+_CLEANUPS_DONE_ATTRIBUTE = "_maintenance_cleanups_done"
+
+
+async def trusted_cleanups_for_occurrence(agent: Any, schedule_id: str, occurrence_key: str) -> tuple[str, str]:
+    """Scratch and saved output clean-ups, once per occurrence; their sentences for the run's instructions.
+
+    A retried occurrence (its worker did not start) gets the sentences of
+    the clean-ups that already ran for it.
+    """
+
+    done = getattr(agent, _CLEANUPS_DONE_ATTRIBUTE, None)
+    if isinstance(done, tuple) and len(done) == 3 and done[0] == occurrence_key:
+        return done[1], done[2]
+    scratch_sentence = await prune_scratch_for_maintenance(agent, schedule_id)
+    outputs_sentence = await remove_old_outputs_for_maintenance(agent, schedule_id)
+    setattr(agent, _CLEANUPS_DONE_ATTRIBUTE, (occurrence_key, scratch_sentence, outputs_sentence))
+    return scratch_sentence, outputs_sentence
+
+
+def note_trusted_cleanups_at_start(agent: Any) -> None:
+    """At manager start: start the saved output cleanup's record, and log when the clean-ups can never run."""
+
+    from custom_tools.workspace_scope import current_instance_layout
+
+    layout = current_instance_layout(agent)
+    if layout is not None:
+        try:
+            ensure_run_record(layout.output_retention_record_path)
+        except OSError:
+            agent._logger.exception(
+                "[%s] The record of the saved tool output cleanup could not be started. "
+                "event=output_retention_record_failed",
+                agent.id,
+            )
+    scratch_days = int(getattr(agent, "scratch_retention_days", 0) or 0)
+    output_days = int(getattr(agent, "output_retention_days", 0) or 0)
+    if _review_interval_seconds(agent) <= 0 and (scratch_days > 0 or output_days > 0):
+        agent._logger.warning(
+            "[%s] The internal-improvement maintenance schedule is turned off, so old scratch files and saved "
+            "tool outputs are never deleted. event=retention_cleanup_off reason=maintenance_schedule_off "
+            "scratch_retention_days=%s output_retention_days=%s",
+            agent.id,
+            scratch_days,
+            output_days,
+        )
 
 
 async def prune_scratch_for_maintenance(agent: Any, schedule_id: str) -> str:
@@ -524,7 +582,7 @@ async def remove_old_outputs_for_maintenance(agent: Any, schedule_id: str) -> st
         return "Saved tool output cleanup did not run because this runtime has no instance folder layout; report it."
     try:
         result = await asyncio.to_thread(
-            remove_old_outputs,
+            remove_old_outputs_and_record,
             layout,
             retention_days=retention_days,
             conversation_records=getattr(agent, "_conversation_store", None),

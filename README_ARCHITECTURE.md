@@ -1449,7 +1449,16 @@ being emptied; a build that waited finds its lock file gone and starts over
 in a new folder (`runtime_hosting/builds.py`). Each kind runs on
 its own, so one failure is logged (`event=output_retention_failed`) and
 reported while the others still run, and the run's instructions carry the
-items, files and bytes deleted per kind, which the run records. The manager
+items, files and bytes deleted per kind, which the run records. Both trusted
+clean-ups run before the check that a maintenance worker is available, so a
+worker that cannot start never skips them, and once per occurrence, because
+the scheduler retries such an occurrence every 30 seconds. The manager keeps a
+record of each saved-output run (`state/output_retention.json`: time, last
+success, per kind items, files, bytes and failures), started at manager start;
+from it the manager's status heartbeat reports a Status page warning
+(`output_retention_overdue`) when no run succeeded for two days. The clean-ups
+exist only with the maintenance schedule: with its interval at 0 it is never
+installed, which the manager logs at start (`event=retention_cleanup_off`). The manager
 does this because the outputs sit in `state/`, `dbs/` and people's folders,
 which the maintenance run cannot open; it is the side that writes all four.
 Conversations (transcripts, task links, turn and context summaries) and

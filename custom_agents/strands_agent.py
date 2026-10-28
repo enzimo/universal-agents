@@ -125,6 +125,7 @@ from custom_agents.conversation_summary import (
 from custom_agents.memory_review_store import MemoryReviewStore
 from custom_agents.output_retention import SavedOutputRetention
 from custom_agents.internal_improvement_runtime import (
+    note_trusted_cleanups_at_start,
     publish_internal_improvement_schedule_ensure,
 )
 from custom_agents.manager_control_runtime import (
@@ -5028,6 +5029,8 @@ class UniversalAgent(BaseModel):
                 from custom_agents.person_departure_runtime import settle_departed_people_safely
 
                 await settle_departed_people_safely(self, when="manager_start")
+                # The retention clean-ups' record, and a log line when they can never run.
+                note_trusted_cleanups_at_start(self)
             from custom_agents.agent_instantiation_service import update_runtime_launch
             from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 

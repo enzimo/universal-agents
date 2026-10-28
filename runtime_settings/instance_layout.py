@@ -138,6 +138,8 @@ XAI_OAUTH_AUTH_FILENAME = "xai_oauth_auth.json"
 HELD_PEOPLE_DIRNAME = "held_people"
 # Keys typed during onboarding until the gateway hands them to the broker.
 ONBOARDING_ACCOUNT_KEYS_FILENAME = "onboarding_account_keys.json"
+# What the latest saved tool output cleanup did (custom_agents.output_retention).
+OUTPUT_RETENTION_RECORD_FILENAME = "output_retention.json"
 
 PERSON_UPLOADS_DIRNAME = "uploads"
 PERSON_RESEARCH_DIRNAME = "research"
@@ -503,6 +505,16 @@ class InstanceLayout:
     @property
     def diagnostics_dir(self) -> Path:
         return self.state_dir / "diagnostics"
+
+    @property
+    def output_retention_record_path(self) -> Path:
+        """When the saved tool output cleanup last ran and what it deleted per kind.
+
+        Written by the manager after each run (``custom_agents.output_retention``)
+        and read for the Status page, which warns when no run succeeded for two days.
+        """
+
+        return self.state_dir / OUTPUT_RETENTION_RECORD_FILENAME
 
     @property
     def execution_artifacts_dir(self) -> Path:
