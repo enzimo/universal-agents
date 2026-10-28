@@ -89,7 +89,9 @@ def main():
             )
             subprocess.run(
                 ["rtk", "proxy", *command], check=True, timeout=240,
-                cwd=workspace if workspace.exists() else root,
+                # Windows keeps the RTK parent's working directory open even
+                # after the PowerShell wrapper moves its own directory.
+                cwd=root,
             )
 
         try:
