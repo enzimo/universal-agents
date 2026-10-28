@@ -14,7 +14,8 @@ gateway-signed context. Covers:
 - restore within the window; purge after it; adding back afterwards starts fresh;
 - both purges (the maintenance run's and the gateway's, when it removes
   someone again after an expired hold) delete the held conversation artifact
-  files with their records;
+  files with their records, and so does the deletion of rows held after the
+  purge;
 - team schedules move to another administrator;
 - after-action report reviews stay with their person: the review schedule is
   deleted, never moved, and removal deletes the report records;
@@ -664,6 +665,30 @@ def test_the_maintenance_purge_deletes_held_conversation_artifact_files(world: W
     assert not artifact.exists() and not artifact.parent.exists()
     assert world.layout.conversation_artifacts_dir.is_dir()
     assert world.departures.held_row_count(TEAM, MIA) == 0
+
+
+def test_rows_held_after_the_purge_go_at_once_with_their_artifact_files(world: World) -> None:
+    """A conversation recorded for the person after their hold was purged (for example by work still finishing)."""
+
+    _give_work(world, MIA)
+    world.remove(ADAM, MIA)
+    assert purge_expired_holds(world.agent, now=START + timedelta(days=8)) == 1
+    world.conversations.ensure_thread(
+        conversation_id=f"conv_{MIA}_late", team_id=TEAM, owner_agent_id="manager_1", owner_agent_name="Manager",
+        requester_name=MIA, requester_id=MIA, root_task_id=f"task_{MIA}_late", owner_canonical_user_id=MIA,
+    )
+    late = Path(
+        world.conversations.offload_large_text(
+            conversation_id=f"conv_{MIA}_late", task_id=f"task_{MIA}_late", artifact_type="tool_output",
+            raw_text="late tool output " * 50, summary_text="late",
+        )["storage_path"]
+    )
+
+    world.run(settle_departed_people_safely(world.agent, when="maintenance"))
+
+    assert world.conversations.get_thread(f"conv_{MIA}_late") is None
+    assert world.departures.held_row_count(TEAM, MIA) == 0
+    assert not late.exists() and not late.parent.exists()
 
 
 def test_the_gateways_purge_of_an_expired_hold_deletes_held_conversation_artifact_files(world: World) -> None:

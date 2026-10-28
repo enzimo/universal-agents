@@ -534,9 +534,31 @@ def _hold_records(agent: Any, store: PersonDepartureRepository, person_id: str, 
         return
     held = store.hold_person_records(team_id, person_id, at=datetime.now(timezone.utc))
     if hold.purged_at is not None:
-        store.delete_held_rows(team_id, person_id)
+        _delete_late_rows(agent, store, team_id, person_id)
         return
     outcome.held_record_count += held
+
+
+def _delete_late_rows(agent: Any, store: PersonDepartureRepository, team_id: str, person_id: str) -> None:
+    """Delete rows held after the hold was purged, with the conversation artifact files they name.
+
+    The files go first, as in ``purge_expired_holds``: their rows name them,
+    so a failure keeps the rows for the next run instead of leaving files no
+    row names.
+    """
+
+    from custom_tools.workspace_scope import current_instance_layout
+
+    layout = current_instance_layout(agent)
+    if layout is None:
+        logger.warning(
+            "Rows of a removed person held after their purge were kept because this runtime has no instance "
+            "folder layout. event=person_hold_purge_skipped reason=no_instance_layout person_id=%s",
+            person_id,
+        )
+        return
+    purge_held_artifact_files(layout, person_id, store.held_artifact_paths(team_id, person_id))
+    store.delete_held_rows(team_id, person_id)
 
 
 def _delete_sandbox(person_id: str, outcome: PersonWorkOutcomeV1) -> None:
