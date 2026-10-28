@@ -162,17 +162,20 @@ def require_trusted_event(config: dict, environment: dict, event: dict) -> None:
         raise ValueError("Runner is not configured for this repository")
     if event.get("repository", {}).get("full_name") != repository:
         raise ValueError("The event does not identify the configured repository")
-    if not event.get("repository", {}).get("private") and repository not in config.get("public_repositories", []):
+    public = not event.get("repository", {}).get("private")
+    if public and repository not in config.get("public_repositories", []):
         raise ValueError("This public repository is not approved for the local runner")
     event_name = environment.get("GITHUB_EVENT_NAME")
-    if event_name not in {"push", "pull_request", "workflow_dispatch", "schedule"}:
+    # Other private repositories share these hosts. This rollout restricts new
+    # public work without changing their existing non-PR trigger policy.
+    if public and event_name not in {"push", "pull_request", "workflow_dispatch", "schedule"}:
         raise ValueError("This event type cannot execute on the local runner")
-    if event_name == "pull_request":
+    if event_name == "pull_request" or "pull_request" in event:
         request = event.get("pull_request", {})
         for side in ("head", "base"):
             if request.get(side, {}).get("repo", {}).get("full_name") != repository:
                 raise ValueError("Fork or unidentified PRs cannot execute on local runners")
-    elif "pull_request" in event:
+    if public and event_name != "pull_request" and "pull_request" in event:
         raise ValueError("The pull request payload does not match the event type")
 
 

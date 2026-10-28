@@ -297,6 +297,13 @@ class LifecycleTests(unittest.TestCase):
             self.begin()
         self.assertFalse((self.state / "job.json").exists())
 
+    def test_existing_private_repositories_keep_their_non_pr_event_policy(self):
+        ci_hook.require_trusted_event(
+            {"repositories": ["example/private"]},
+            {"GITHUB_REPOSITORY": "example/private", "GITHUB_EVENT_NAME": "workflow_run"},
+            {"repository": {"full_name": "example/private", "private": True}},
+        )
+
     def test_disk_reserve_blocks_new_work(self):
         self.config["min_free_gib"] = 10**9
         with self.assertRaises(RuntimeError):

@@ -88,12 +88,14 @@ hook also requires explicit public approval in its own `config.json` through
 `public_repositories`, outside the checkout. Add only Universal Agents and Desktop
 to that public list for this rollout.
 
-The hook accepts pushes, schedules, manual runs, and pull requests whose head
+For public work, the hook accepts pushes, schedules, manual runs, and PRs whose head
 and base both belong to the configured repository. Fork PRs, missing or mismatched
 repository identity, `pull_request_target`, `workflow_run`, and other trigger types
 are refused before job state or commands are created. Same-repository branches
 are trusted team code: only people and automation trusted with the machines may
 push them. Documentation validation stays on disposable GitHub-hosted runners.
+
+Private repositories sharing the hosts keep their existing non-PR trigger policy.
 
 Every local job requires `UA_CI_PUBLIC_JOB_POLICY_VERSION=1` from the installed
 hook beside the existing hook/cache markers. Jobs never replace installed hooks
