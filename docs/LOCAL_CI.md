@@ -119,6 +119,20 @@ the scanner without that variable before running the live installation canary.
 Rust setup uses `--no-self-update` and the job's `RUSTUP_TOOLCHAIN`, leaving
 the account's default toolchain unchanged. Each runner owns its work directory.
 
+On Apple Silicon Macs, Homebrew's Buildx plugin may be registered only in the
+account's Docker configuration. Jobs use a disposable `DOCKER_CONFIG`, so that
+registration does not apply. Provision the plugin in Docker's standard system
+plugin directory. If Homebrew provides the executable and the destination does
+not already exist, a Mac administrator can create the link:
+
+```sh
+rtk proxy sudo install -d -m 0755 /usr/local/lib/docker/cli-plugins
+rtk proxy sudo ln -s /opt/homebrew/opt/docker-buildx/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+```
+
+Verify `docker buildx version` with an empty `DOCKER_CONFIG` before accepting
+build jobs. This preserves the job's Docker credential isolation.
+
 Install reviewed `.github/runner` hooks outside both the checkout and runner
 application directory, using system Python. Restart the idle runner afterward.
 Do not manually set `UA_CI_HOOK_VERSION`; jobs require the started hook to

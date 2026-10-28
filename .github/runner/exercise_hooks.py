@@ -19,7 +19,10 @@ def main():
     source = Path(__file__).resolve().parent
     original_env = os.environ.copy()
     original_cwd = Path.cwd()
-    root = Path(tempfile.mkdtemp(prefix="ua-ci-hook-test-"))
+    # macOS's per-user temporary path can exceed its Unix socket path limit.
+    root = Path(tempfile.mkdtemp(
+        prefix="ua-ci-hook-test-", dir="/tmp" if sys.platform == "darwin" else None,
+    ))
     try:
         runner = root / "runner"
         work = runner / "_work"
