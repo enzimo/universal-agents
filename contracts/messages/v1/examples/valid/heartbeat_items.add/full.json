@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.heartbeat_items.add",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -57,5 +57,5 @@
     "source_id": "heartbeat_team"
   },
   "body_digest": "TPmBcNZTvkOTItYGQkP0acIfdLRI-1ddnoIk41Yx_nQ",
-  "signature": "1gzIFhc7Y29jc4Ebu9QuWkIUjLwH8kK0X-tIwBjuZYQ24nNTTbYqpzN8BkuOljECk7fRu4d4yUFN_yCk1_n2Bg"
+  "signature": "FA2Eh3J_o0F27O0zJt3xYZmG4GNfraygTbtQWh8ao7RrlVsKj5xZmPMF6KGnorrEYVUUZ137qT30rlcUqPOYBQ"
 }

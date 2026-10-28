@@ -10,7 +10,6 @@
   "role": "installation_authority",
   "subscribe": [
     "_INBOX.{self}.>",
-    "ua.v1._install.*.svc.host.join",
-    "ua.v1._install.*.svc.host.renew"
+    "ua.v1._install.*.svc"
   ]
 }

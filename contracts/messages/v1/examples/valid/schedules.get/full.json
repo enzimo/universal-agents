@@ -16,7 +16,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.schedules.get",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
   },
   "idempotency_key": "schedules.get:qdUmJ8erDce9becifyjz44v_S2FK9YAyLCGOCXzDPuU",
   "body_digest": "mb2fY_nxX7Ci8iiHmQbDgFZ7e7tA_JkDt1HnUhzdzfE",
-  "signature": "XSPojMTbskPb6C1yJ_DPrCngD_AN3odCtWvzYKCS_mxwaZ4vu05sglwulheY85rHNdsLQpkNuMy7xJ7uwja2Cg"
+  "signature": "SUAN36NhgmGnwVZIPQiQJsr7QbLGzSIQX1k3fHN7q2RAdWHk7M0bt-OZxQanwQSbT_G6lfE_PYw5YsRowEofBw"
 }

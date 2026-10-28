@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.worker-host-1.svc.team.run_context.sign",
+  "subject": "ua.v1.team_example.worker-host-1.svc.scheduler",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -31,5 +31,5 @@
     "conversation_id": "conversation_id_2"
   },
   "body_digest": "_xEBNw6aRABLCfVt2Ag8TcvSAzGODXqPGv4WsiWoEeA",
-  "signature": "7dCyTY-8cvRDZbpCsJTLGToxBNhmt_18Wk9DrN5UwVCW63PHs182Zhz0xE7fdeChDrHUT0Kw_FlLDaQpukQKDQ"
+  "signature": "6ZQrflasjQei2DaBBXv-FcEERs06IBGoyFwHmIRvchPBKXPDCa8foab6WTJcAwz2CmhO3bOF0HF3YxvExiJHBQ"
 }

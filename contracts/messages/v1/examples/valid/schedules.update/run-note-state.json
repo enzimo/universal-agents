@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.schedules.update",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -68,5 +68,5 @@
     "request_id": "req_schedules_update_run_note_state"
   },
   "body_digest": "WvzKnvN2KmtR3MOGsrGMVAk7LJB5OExnAp7RyIB8Jq8",
-  "signature": "Rr9a9Km4j-vzBcyIPttzGZvRGrVH91-ofhGoZVCSRuUFs2BNFtDvme1d06M18rPpTq1lNZ4rTcXWhv8T281rCQ"
+  "signature": "lclsLHoSkmfOMyfujWxKyXNWd26_wsnWcnXIb_7yaOpdvD5jb0Le3AbfBJ3u7dzJxFBfHpUrzTdEL4A0FDMNBw"
 }

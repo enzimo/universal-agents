@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.heartbeat_items.update",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -62,5 +62,5 @@
     "objective_id": "objective_dependency_watch"
   },
   "body_digest": "-vX0DMn8cCFIxVQgPkf1DcSmtFUqOUo9QMvJniLap6A",
-  "signature": "5C8AhamuiEnY6qkoGoRdz7ZvrWATypJWxyLxHpyQwNOpVBucTBe8tcj05mrx--PThAXP3QfPZCUdBqI6TXM0Dw"
+  "signature": "jlw6QUtz8YLUDFJm29r5iyqIlQDcpFsTiXByvxQoIt4mzpM4pF-Lh8DW1CSDwREJOxdsf7Zfov98JdyYrcuSAQ"
 }

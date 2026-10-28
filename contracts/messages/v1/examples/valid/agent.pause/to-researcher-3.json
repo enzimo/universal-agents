@@ -19,7 +19,7 @@
     "target": "agent",
     "id": "researcher-3"
   },
-  "subject": "ua.v1.team_example.lead-host-1.ctl.agent.researcher-3.pause",
+  "subject": "ua.v1.team_example.lead-host-1.ctl.agent.researcher-3",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -27,5 +27,5 @@
     "request_id": "pause_1"
   },
   "body_digest": "BlUzEHTAj5IJoKHaKhwxIwqU_bzN8ciQ1Rtebz-rmrA",
-  "signature": "de7AD9b9m4dnyg_IstSYodYglkXn5V55WDP3mkBoRAcwE8ku_O86R0MsQO1pbRufr8-zPVFXt8kVahOMSfgpBw"
+  "signature": "p58UD5LACKRZo1E3RzrtGgMxxyyjxa4MRzHmAjS4MhJH4nsROOL188s-xLBHfiNU7ySG2lzL7iRNobtFUu_qDw"
 }

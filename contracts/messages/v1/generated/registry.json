@@ -209,7 +209,7 @@
       "wakes_model": "never"
     },
     "access.withdraw": {
-      "address": "svc.team.access.withdraw",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -246,7 +246,7 @@
       "wakes_model": "never"
     },
     "agent.exit": {
-      "address": "ctl.agent.{agent}.exit",
+      "address": "ctl.agent.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -279,7 +279,7 @@
       "wakes_model": "never"
     },
     "agent.pause": {
-      "address": "ctl.agent.{agent}.pause",
+      "address": "ctl.agent.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -315,7 +315,7 @@
       "wakes_model": "never"
     },
     "agent.resume": {
-      "address": "ctl.agent.{agent}.resume",
+      "address": "ctl.agent.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -351,7 +351,7 @@
       "wakes_model": "never"
     },
     "agent.status": {
-      "address": "ctl.agent.{agent}.status",
+      "address": "ctl.agent.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -387,7 +387,7 @@
       "wakes_model": "never"
     },
     "conflicts.cancel": {
-      "address": "svc.team.conflicts.cancel",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -425,7 +425,7 @@
       "wakes_model": "never"
     },
     "conflicts.decide": {
-      "address": "svc.team.conflicts.decide",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -465,7 +465,7 @@
       "wakes_model": "never"
     },
     "conflicts.list": {
-      "address": "svc.team.conflicts.list",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -562,7 +562,7 @@
       "wakes_model": "next_turn"
     },
     "custody.decide": {
-      "address": "svc.team.custody.decide",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -636,8 +636,8 @@
     },
     "debug.dump": {
       "address": [
-        "svc.team.debug.dump",
-        "ctl.agent.{agent}.debug.dump"
+        "svc.team",
+        "ctl.agent.{agent}"
       ],
       "admission": {
         "accepted_while_paused": true,
@@ -675,10 +675,10 @@
         "team_services"
       ],
       "senders_by_address": {
-        "ctl.agent.{agent}.debug.dump": [
+        "ctl.agent.{agent}": [
           "team_services"
         ],
-        "svc.team.debug.dump": [
+        "svc.team": [
           "gateway"
         ]
       },
@@ -794,7 +794,7 @@
       "wakes_model": "never"
     },
     "heartbeat_items.add": {
-      "address": "svc.team.heartbeat_items.add",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -840,7 +840,7 @@
       "wakes_model": "never"
     },
     "heartbeat_items.disable": {
-      "address": "svc.team.heartbeat_items.disable",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -887,7 +887,7 @@
       "wakes_model": "never"
     },
     "heartbeat_items.enable": {
-      "address": "svc.team.heartbeat_items.enable",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -934,7 +934,7 @@
       "wakes_model": "never"
     },
     "heartbeat_items.list": {
-      "address": "svc.team.heartbeat_items.list",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -970,7 +970,7 @@
       "wakes_model": "never"
     },
     "heartbeat_items.remove": {
-      "address": "svc.team.heartbeat_items.remove",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1017,7 +1017,7 @@
       "wakes_model": "never"
     },
     "heartbeat_items.update": {
-      "address": "svc.team.heartbeat_items.update",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1064,7 +1064,7 @@
       "wakes_model": "never"
     },
     "host.join": {
-      "address": "_install.{sender}.svc.host.join",
+      "address": "_install.{sender}.svc",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1108,7 +1108,7 @@
       "wakes_model": "never"
     },
     "host.renew": {
-      "address": "_install.{sender}.svc.host.renew",
+      "address": "_install.{sender}.svc",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1150,7 +1150,7 @@
       "wakes_model": "never"
     },
     "intent.set": {
-      "address": "svc.team.intent.set",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1189,7 +1189,7 @@
       "wakes_model": "never"
     },
     "knowledge.add_note": {
-      "address": "svc.team.knowledge.add_note",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1257,7 +1257,7 @@
       "wakes_model": "never"
     },
     "knowledge.archive": {
-      "address": "svc.team.knowledge.archive",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1329,7 +1329,7 @@
       "wakes_model": "never"
     },
     "knowledge.count_contributions": {
-      "address": "svc.team.knowledge.count_contributions",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1382,7 +1382,7 @@
       "wakes_model": "never"
     },
     "knowledge.freeze": {
-      "address": "svc.team.knowledge.freeze",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1424,7 +1424,7 @@
       "wakes_model": "never"
     },
     "knowledge.history": {
-      "address": "svc.team.knowledge.history",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1479,7 +1479,7 @@
       "wakes_model": "never"
     },
     "knowledge.list": {
-      "address": "svc.team.knowledge.list",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1533,7 +1533,7 @@
       "wakes_model": "never"
     },
     "knowledge.list_contributions": {
-      "address": "svc.team.knowledge.list_contributions",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1586,7 +1586,7 @@
       "wakes_model": "never"
     },
     "knowledge.merge": {
-      "address": "svc.team.knowledge.merge",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1641,7 +1641,7 @@
       "wakes_model": "never"
     },
     "knowledge.publish_contribution": {
-      "address": "svc.team.knowledge.publish_contribution",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1710,7 +1710,7 @@
       "wakes_model": "never"
     },
     "knowledge.read": {
-      "address": "svc.team.knowledge.read",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1765,7 +1765,7 @@
       "wakes_model": "never"
     },
     "knowledge.read_contribution": {
-      "address": "svc.team.knowledge.read_contribution",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1819,7 +1819,7 @@
       "wakes_model": "never"
     },
     "knowledge.reject_contribution": {
-      "address": "svc.team.knowledge.reject_contribution",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1862,7 +1862,7 @@
       "wakes_model": "never"
     },
     "knowledge.resolve_note": {
-      "address": "svc.team.knowledge.resolve_note",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1902,7 +1902,7 @@
       "wakes_model": "never"
     },
     "knowledge.revert": {
-      "address": "svc.team.knowledge.revert",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -1970,7 +1970,7 @@
       "wakes_model": "never"
     },
     "knowledge.unfreeze": {
-      "address": "svc.team.knowledge.unfreeze",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2012,7 +2012,7 @@
       "wakes_model": "never"
     },
     "knowledge.withdraw_contribution": {
-      "address": "svc.team.knowledge.withdraw_contribution",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2067,7 +2067,7 @@
       "wakes_model": "never"
     },
     "knowledge.write": {
-      "address": "svc.team.knowledge.write",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2169,7 +2169,7 @@
       "wakes_model": "never"
     },
     "memory.create": {
-      "address": "svc.team.memory.create",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2232,7 +2232,7 @@
       "wakes_model": "never"
     },
     "memory.delete": {
-      "address": "svc.team.memory.delete",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2295,7 +2295,7 @@
       "wakes_model": "never"
     },
     "memory.list": {
-      "address": "svc.team.memory.list",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2347,7 +2347,7 @@
       "wakes_model": "never"
     },
     "memory.replace": {
-      "address": "svc.team.memory.replace",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2422,7 +2422,7 @@
       "wakes_model": "never"
     },
     "memory.show": {
-      "address": "svc.team.memory.show",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2475,7 +2475,7 @@
       "wakes_model": "never"
     },
     "memory.undo": {
-      "address": "svc.team.memory.undo",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2538,7 +2538,7 @@
       "wakes_model": "never"
     },
     "objectives.abandon": {
-      "address": "svc.team.objectives.abandon",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2583,7 +2583,7 @@
       "wakes_model": "never"
     },
     "objectives.activate_plan": {
-      "address": "svc.team.objectives.activate_plan",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2630,7 +2630,7 @@
       "wakes_model": "never"
     },
     "objectives.create": {
-      "address": "svc.team.objectives.create",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2679,7 +2679,7 @@
       "wakes_model": "never"
     },
     "objectives.delete": {
-      "address": "svc.team.objectives.delete",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2724,7 +2724,7 @@
       "wakes_model": "never"
     },
     "objectives.get": {
-      "address": "svc.team.objectives.get",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2761,7 +2761,7 @@
       "wakes_model": "never"
     },
     "objectives.list": {
-      "address": "svc.team.objectives.list",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2810,7 +2810,7 @@
       "wakes_model": "never"
     },
     "objectives.pause": {
-      "address": "svc.team.objectives.pause",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2855,7 +2855,7 @@
       "wakes_model": "never"
     },
     "objectives.record_checkpoint": {
-      "address": "svc.team.objectives.record_checkpoint",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2902,7 +2902,7 @@
       "wakes_model": "never"
     },
     "objectives.resume": {
-      "address": "svc.team.objectives.resume",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2947,7 +2947,7 @@
       "wakes_model": "never"
     },
     "objectives.start_task": {
-      "address": "svc.team.objectives.start_task",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -2994,7 +2994,7 @@
       "wakes_model": "never"
     },
     "objectives.stop": {
-      "address": "svc.team.objectives.stop",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3039,7 +3039,7 @@
       "wakes_model": "never"
     },
     "objectives.update_progress": {
-      "address": "svc.team.objectives.update_progress",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3098,7 +3098,7 @@
       "wakes_model": "never"
     },
     "objectives.update_status": {
-      "address": "svc.team.objectives.update_status",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3148,7 +3148,7 @@
       "wakes_model": "never"
     },
     "objectives.work_profiles.apply": {
-      "address": "svc.team.objectives.work_profiles.apply",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3198,7 +3198,7 @@
       "wakes_model": "never"
     },
     "objectives.work_profiles.list": {
-      "address": "svc.team.objectives.work_profiles.list",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3236,7 +3236,7 @@
       "wakes_model": "never"
     },
     "objectives.work_profiles.propose": {
-      "address": "svc.team.objectives.work_profiles.propose",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3276,7 +3276,7 @@
       "wakes_model": "never"
     },
     "objectives.work_profiles.remove": {
-      "address": "svc.team.objectives.work_profiles.remove",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3317,7 +3317,7 @@
       "wakes_model": "never"
     },
     "objectives.work_sessions.disable": {
-      "address": "svc.team.objectives.work_sessions.disable",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3366,7 +3366,7 @@
       "wakes_model": "never"
     },
     "objectives.work_sessions.enable": {
-      "address": "svc.team.objectives.work_sessions.enable",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3416,7 +3416,7 @@
       "wakes_model": "never"
     },
     "objectives.work_sessions.start": {
-      "address": "svc.team.objectives.work_sessions.start",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3464,7 +3464,7 @@
       "wakes_model": "never"
     },
     "objectives.work_sessions.status": {
-      "address": "svc.team.objectives.work_sessions.status",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3502,7 +3502,7 @@
       "wakes_model": "never"
     },
     "people.set_standing": {
-      "address": "svc.team.people.set_standing",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3617,7 +3617,7 @@
       "wakes_model": "always"
     },
     "requests.pause": {
-      "address": "svc.team.requests.pause",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3655,7 +3655,7 @@
       "wakes_model": "never"
     },
     "requests.resume": {
-      "address": "svc.team.requests.resume",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3693,7 +3693,7 @@
       "wakes_model": "never"
     },
     "run_context.sign": {
-      "address": "svc.team.run_context.sign",
+      "address": "svc.scheduler",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3733,7 +3733,7 @@
       "wakes_model": "never"
     },
     "schedules.authorize_access": {
-      "address": "svc.team.schedules.authorize_access",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3773,7 +3773,7 @@
       "wakes_model": "never"
     },
     "schedules.disable": {
-      "address": "svc.team.schedules.disable",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3836,7 +3836,7 @@
       "wakes_model": "never"
     },
     "schedules.get": {
-      "address": "svc.team.schedules.get",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3890,7 +3890,7 @@
       "wakes_model": "never"
     },
     "schedules.inspect_worker": {
-      "address": "svc.team.schedules.inspect_worker",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3930,7 +3930,7 @@
       "wakes_model": "never"
     },
     "schedules.install": {
-      "address": "svc.team.schedules.install",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -3995,7 +3995,7 @@
       "wakes_model": "never"
     },
     "schedules.list": {
-      "address": "svc.team.schedules.list",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4047,7 +4047,7 @@
       "wakes_model": "never"
     },
     "schedules.pause": {
-      "address": "svc.team.schedules.pause",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4110,7 +4110,7 @@
       "wakes_model": "never"
     },
     "schedules.prepare_access": {
-      "address": "svc.team.schedules.prepare_access",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4150,7 +4150,7 @@
       "wakes_model": "never"
     },
     "schedules.remove": {
-      "address": "svc.team.schedules.remove",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4213,7 +4213,7 @@
       "wakes_model": "never"
     },
     "schedules.resume": {
-      "address": "svc.team.schedules.resume",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4276,7 +4276,7 @@
       "wakes_model": "never"
     },
     "schedules.set_worker": {
-      "address": "svc.team.schedules.set_worker",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4327,7 +4327,7 @@
       "wakes_model": "never"
     },
     "schedules.update": {
-      "address": "svc.team.schedules.update",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4419,7 +4419,7 @@
       "wakes_model": "never"
     },
     "staged_changes.apply": {
-      "address": "svc.team.staged_changes.apply",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4473,7 +4473,7 @@
       "wakes_model": "never"
     },
     "steering.decide": {
-      "address": "svc.team.steering.decide",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4677,7 +4677,7 @@
       "wakes_model": "never"
     },
     "task.probe": {
-      "address": "ctl.agent.{agent}.task.probe",
+      "address": "ctl.agent.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5060,7 +5060,7 @@
       "wakes_model": "never"
     },
     "tasks.cancel": {
-      "address": "svc.team.tasks.cancel",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5098,7 +5098,7 @@
       "wakes_model": "never"
     },
     "tasks.inventory": {
-      "address": "svc.team.tasks.inventory",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5136,8 +5136,8 @@
     },
     "tasks.list": {
       "address": [
-        "svc.team.tasks.list",
-        "ctl.agent.{agent}.tasks.list"
+        "svc.team",
+        "ctl.agent.{agent}"
       ],
       "admission": {
         "accepted_while_paused": true,
@@ -5176,10 +5176,10 @@
         "team_services"
       ],
       "senders_by_address": {
-        "ctl.agent.{agent}.tasks.list": [
+        "ctl.agent.{agent}": [
           "team_services"
         ],
-        "svc.team.tasks.list": [
+        "svc.team": [
           "gateway"
         ]
       },
@@ -5188,8 +5188,8 @@
     },
     "tasks.list_finished": {
       "address": [
-        "svc.team.tasks.list_finished",
-        "ctl.agent.{agent}.tasks.list_finished"
+        "svc.team",
+        "ctl.agent.{agent}"
       ],
       "admission": {
         "accepted_while_paused": true,
@@ -5228,10 +5228,10 @@
         "team_services"
       ],
       "senders_by_address": {
-        "ctl.agent.{agent}.tasks.list_finished": [
+        "ctl.agent.{agent}": [
           "team_services"
         ],
-        "svc.team.tasks.list_finished": [
+        "svc.team": [
           "gateway"
         ]
       },
@@ -5239,7 +5239,7 @@
       "wakes_model": "never"
     },
     "tasks.probe": {
-      "address": "svc.team.tasks.probe",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5274,7 +5274,7 @@
       "wakes_model": "never"
     },
     "tasks.progress": {
-      "address": "svc.team.tasks.progress",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5312,8 +5312,8 @@
     },
     "tasks.purge": {
       "address": [
-        "svc.team.tasks.purge",
-        "ctl.agent.{agent}.tasks.purge"
+        "svc.team",
+        "ctl.agent.{agent}"
       ],
       "admission": {
         "accepted_while_paused": true,
@@ -5354,10 +5354,10 @@
         "team_services"
       ],
       "senders_by_address": {
-        "ctl.agent.{agent}.tasks.purge": [
+        "ctl.agent.{agent}": [
           "team_services"
         ],
-        "svc.team.tasks.purge": [
+        "svc.team": [
           "gateway"
         ]
       },
@@ -5366,8 +5366,8 @@
     },
     "tasks.remove": {
       "address": [
-        "svc.team.tasks.remove",
-        "ctl.agent.{agent}.tasks.remove"
+        "svc.team",
+        "ctl.agent.{agent}"
       ],
       "admission": {
         "accepted_while_paused": true,
@@ -5408,10 +5408,10 @@
         "team_services"
       ],
       "senders_by_address": {
-        "ctl.agent.{agent}.tasks.remove": [
+        "ctl.agent.{agent}": [
           "team_services"
         ],
-        "svc.team.tasks.remove": [
+        "svc.team": [
           "gateway"
         ]
       },
@@ -5419,7 +5419,7 @@
       "wakes_model": "never"
     },
     "tasks.steer": {
-      "address": "svc.team.tasks.steer",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5519,7 +5519,7 @@
       "wakes_model": "never"
     },
     "topics.find_threads": {
-      "address": "svc.team.topics.find_threads",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5557,7 +5557,7 @@
       "wakes_model": "never"
     },
     "topics.list_tags": {
-      "address": "svc.team.topics.list_tags",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5594,7 +5594,7 @@
       "wakes_model": "never"
     },
     "topics.tag_thread": {
-      "address": "svc.team.topics.tag_thread",
+      "address": "svc.team",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -5807,7 +5807,7 @@
     },
     {
       "code": "wrong_sender",
-      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow; or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
+      "meaning": "none of the certificate's roles may send the kind to its audience's address (for a reply, receive its request), or a join asks for a role that is not among the kind's senders; or a frame from the receiver's own installation is addressed to another team than its issuer's; or the frame comes from another installation with a kind, class or destination team its agreement does not allow, or from neither a lead agent nor the team services (only leads talk between teams); or it crosses the outside boundary other than through the lead (an outside agent's adapter reaches only the lead's inbox, and only a lead agent or the team services reach an outside agent)"
     },
     {
       "code": "wrong_team",

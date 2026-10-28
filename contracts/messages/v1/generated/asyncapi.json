@@ -1,180 +1,36 @@
 {
   "asyncapi": "3.1.0",
   "channels": {
-    "ctl_agent_debug_dump": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.debug.dump",
-      "messages": {
-        "debug_dump": {
-          "$ref": "#/components/messages/debug_dump"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
-        },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_exit": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.exit",
+    "ctl_agent": {
+      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}",
       "messages": {
         "agent_exit": {
           "$ref": "#/components/messages/agent_exit"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_pause": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.pause",
-      "messages": {
         "agent_pause": {
           "$ref": "#/components/messages/agent_pause"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_resume": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.resume",
-      "messages": {
         "agent_resume": {
           "$ref": "#/components/messages/agent_resume"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_status": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.status",
-      "messages": {
         "agent_status": {
           "$ref": "#/components/messages/agent_status"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
+        "debug_dump": {
+          "$ref": "#/components/messages/debug_dump"
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_task_probe": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.task.probe",
-      "messages": {
         "task_probe": {
           "$ref": "#/components/messages/task_probe"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_tasks_list": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.list",
-      "messages": {
         "tasks_list": {
           "$ref": "#/components/messages/tasks_list"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_tasks_list_finished": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.list_finished",
-      "messages": {
         "tasks_list_finished": {
           "$ref": "#/components/messages/tasks_list_finished"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_tasks_purge": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.purge",
-      "messages": {
         "tasks_purge": {
           "$ref": "#/components/messages/tasks_purge"
-        }
-      },
-      "parameters": {
-        "agent": {
-          "description": "The agent subject token."
         },
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "ctl_agent_tasks_remove": {
-      "address": "ua.v1.{team}.{sender}.ctl.agent.{agent}.tasks.remove",
-      "messages": {
         "tasks_remove": {
           "$ref": "#/components/messages/tasks_remove"
         }
@@ -226,22 +82,12 @@
         }
       }
     },
-    "install_svc_host_join": {
-      "address": "ua.v1._install.{sender}.svc.host.join",
+    "install_svc": {
+      "address": "ua.v1._install.{sender}.svc",
       "messages": {
         "host_join": {
           "$ref": "#/components/messages/host_join"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        }
-      }
-    },
-    "install_svc_host_renew": {
-      "address": "ua.v1._install.{sender}.svc.host.renew",
-      "messages": {
+        },
         "host_renew": {
           "$ref": "#/components/messages/host_renew"
         }
@@ -547,968 +393,8 @@
         }
       }
     },
-    "svc_team_access_withdraw": {
-      "address": "ua.v1.{team}.{sender}.svc.team.access.withdraw",
-      "messages": {
-        "access_withdraw": {
-          "$ref": "#/components/messages/access_withdraw"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_conflicts_cancel": {
-      "address": "ua.v1.{team}.{sender}.svc.team.conflicts.cancel",
-      "messages": {
-        "conflicts_cancel": {
-          "$ref": "#/components/messages/conflicts_cancel"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_conflicts_decide": {
-      "address": "ua.v1.{team}.{sender}.svc.team.conflicts.decide",
-      "messages": {
-        "conflicts_decide": {
-          "$ref": "#/components/messages/conflicts_decide"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_conflicts_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.conflicts.list",
-      "messages": {
-        "conflicts_list": {
-          "$ref": "#/components/messages/conflicts_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_custody_decide": {
-      "address": "ua.v1.{team}.{sender}.svc.team.custody.decide",
-      "messages": {
-        "custody_decide": {
-          "$ref": "#/components/messages/custody_decide"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_debug_dump": {
-      "address": "ua.v1.{team}.{sender}.svc.team.debug.dump",
-      "messages": {
-        "debug_dump": {
-          "$ref": "#/components/messages/debug_dump"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_heartbeat_items_add": {
-      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.add",
-      "messages": {
-        "heartbeat_items_add": {
-          "$ref": "#/components/messages/heartbeat_items_add"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_heartbeat_items_disable": {
-      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.disable",
-      "messages": {
-        "heartbeat_items_disable": {
-          "$ref": "#/components/messages/heartbeat_items_disable"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_heartbeat_items_enable": {
-      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.enable",
-      "messages": {
-        "heartbeat_items_enable": {
-          "$ref": "#/components/messages/heartbeat_items_enable"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_heartbeat_items_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.list",
-      "messages": {
-        "heartbeat_items_list": {
-          "$ref": "#/components/messages/heartbeat_items_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_heartbeat_items_remove": {
-      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.remove",
-      "messages": {
-        "heartbeat_items_remove": {
-          "$ref": "#/components/messages/heartbeat_items_remove"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_heartbeat_items_update": {
-      "address": "ua.v1.{team}.{sender}.svc.team.heartbeat_items.update",
-      "messages": {
-        "heartbeat_items_update": {
-          "$ref": "#/components/messages/heartbeat_items_update"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_intent_set": {
-      "address": "ua.v1.{team}.{sender}.svc.team.intent.set",
-      "messages": {
-        "intent_set": {
-          "$ref": "#/components/messages/intent_set"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_add_note": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.add_note",
-      "messages": {
-        "knowledge_add_note": {
-          "$ref": "#/components/messages/knowledge_add_note"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_archive": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.archive",
-      "messages": {
-        "knowledge_archive": {
-          "$ref": "#/components/messages/knowledge_archive"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_count_contributions": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.count_contributions",
-      "messages": {
-        "knowledge_count_contributions": {
-          "$ref": "#/components/messages/knowledge_count_contributions"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_freeze": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.freeze",
-      "messages": {
-        "knowledge_freeze": {
-          "$ref": "#/components/messages/knowledge_freeze"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_history": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.history",
-      "messages": {
-        "knowledge_history": {
-          "$ref": "#/components/messages/knowledge_history"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.list",
-      "messages": {
-        "knowledge_list": {
-          "$ref": "#/components/messages/knowledge_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_list_contributions": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.list_contributions",
-      "messages": {
-        "knowledge_list_contributions": {
-          "$ref": "#/components/messages/knowledge_list_contributions"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_merge": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.merge",
-      "messages": {
-        "knowledge_merge": {
-          "$ref": "#/components/messages/knowledge_merge"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_publish_contribution": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.publish_contribution",
-      "messages": {
-        "knowledge_publish_contribution": {
-          "$ref": "#/components/messages/knowledge_publish_contribution"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_read": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.read",
-      "messages": {
-        "knowledge_read": {
-          "$ref": "#/components/messages/knowledge_read"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_read_contribution": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.read_contribution",
-      "messages": {
-        "knowledge_read_contribution": {
-          "$ref": "#/components/messages/knowledge_read_contribution"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_reject_contribution": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.reject_contribution",
-      "messages": {
-        "knowledge_reject_contribution": {
-          "$ref": "#/components/messages/knowledge_reject_contribution"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_resolve_note": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.resolve_note",
-      "messages": {
-        "knowledge_resolve_note": {
-          "$ref": "#/components/messages/knowledge_resolve_note"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_revert": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.revert",
-      "messages": {
-        "knowledge_revert": {
-          "$ref": "#/components/messages/knowledge_revert"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_unfreeze": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.unfreeze",
-      "messages": {
-        "knowledge_unfreeze": {
-          "$ref": "#/components/messages/knowledge_unfreeze"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_withdraw_contribution": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.withdraw_contribution",
-      "messages": {
-        "knowledge_withdraw_contribution": {
-          "$ref": "#/components/messages/knowledge_withdraw_contribution"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_knowledge_write": {
-      "address": "ua.v1.{team}.{sender}.svc.team.knowledge.write",
-      "messages": {
-        "knowledge_write": {
-          "$ref": "#/components/messages/knowledge_write"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_memory_create": {
-      "address": "ua.v1.{team}.{sender}.svc.team.memory.create",
-      "messages": {
-        "memory_create": {
-          "$ref": "#/components/messages/memory_create"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_memory_delete": {
-      "address": "ua.v1.{team}.{sender}.svc.team.memory.delete",
-      "messages": {
-        "memory_delete": {
-          "$ref": "#/components/messages/memory_delete"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_memory_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.memory.list",
-      "messages": {
-        "memory_list": {
-          "$ref": "#/components/messages/memory_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_memory_replace": {
-      "address": "ua.v1.{team}.{sender}.svc.team.memory.replace",
-      "messages": {
-        "memory_replace": {
-          "$ref": "#/components/messages/memory_replace"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_memory_show": {
-      "address": "ua.v1.{team}.{sender}.svc.team.memory.show",
-      "messages": {
-        "memory_show": {
-          "$ref": "#/components/messages/memory_show"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_memory_undo": {
-      "address": "ua.v1.{team}.{sender}.svc.team.memory.undo",
-      "messages": {
-        "memory_undo": {
-          "$ref": "#/components/messages/memory_undo"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_abandon": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.abandon",
-      "messages": {
-        "objectives_abandon": {
-          "$ref": "#/components/messages/objectives_abandon"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_activate_plan": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.activate_plan",
-      "messages": {
-        "objectives_activate_plan": {
-          "$ref": "#/components/messages/objectives_activate_plan"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_create": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.create",
-      "messages": {
-        "objectives_create": {
-          "$ref": "#/components/messages/objectives_create"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_delete": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.delete",
-      "messages": {
-        "objectives_delete": {
-          "$ref": "#/components/messages/objectives_delete"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_get": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.get",
-      "messages": {
-        "objectives_get": {
-          "$ref": "#/components/messages/objectives_get"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.list",
-      "messages": {
-        "objectives_list": {
-          "$ref": "#/components/messages/objectives_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_pause": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.pause",
-      "messages": {
-        "objectives_pause": {
-          "$ref": "#/components/messages/objectives_pause"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_record_checkpoint": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.record_checkpoint",
-      "messages": {
-        "objectives_record_checkpoint": {
-          "$ref": "#/components/messages/objectives_record_checkpoint"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_resume": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.resume",
-      "messages": {
-        "objectives_resume": {
-          "$ref": "#/components/messages/objectives_resume"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_start_task": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.start_task",
-      "messages": {
-        "objectives_start_task": {
-          "$ref": "#/components/messages/objectives_start_task"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_stop": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.stop",
-      "messages": {
-        "objectives_stop": {
-          "$ref": "#/components/messages/objectives_stop"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_update_progress": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.update_progress",
-      "messages": {
-        "objectives_update_progress": {
-          "$ref": "#/components/messages/objectives_update_progress"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_update_status": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.update_status",
-      "messages": {
-        "objectives_update_status": {
-          "$ref": "#/components/messages/objectives_update_status"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_profiles_apply": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.apply",
-      "messages": {
-        "objectives_work_profiles_apply": {
-          "$ref": "#/components/messages/objectives_work_profiles_apply"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_profiles_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.list",
-      "messages": {
-        "objectives_work_profiles_list": {
-          "$ref": "#/components/messages/objectives_work_profiles_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_profiles_propose": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.propose",
-      "messages": {
-        "objectives_work_profiles_propose": {
-          "$ref": "#/components/messages/objectives_work_profiles_propose"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_profiles_remove": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_profiles.remove",
-      "messages": {
-        "objectives_work_profiles_remove": {
-          "$ref": "#/components/messages/objectives_work_profiles_remove"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_sessions_disable": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.disable",
-      "messages": {
-        "objectives_work_sessions_disable": {
-          "$ref": "#/components/messages/objectives_work_sessions_disable"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_sessions_enable": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.enable",
-      "messages": {
-        "objectives_work_sessions_enable": {
-          "$ref": "#/components/messages/objectives_work_sessions_enable"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_sessions_start": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.start",
-      "messages": {
-        "objectives_work_sessions_start": {
-          "$ref": "#/components/messages/objectives_work_sessions_start"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_objectives_work_sessions_status": {
-      "address": "ua.v1.{team}.{sender}.svc.team.objectives.work_sessions.status",
-      "messages": {
-        "objectives_work_sessions_status": {
-          "$ref": "#/components/messages/objectives_work_sessions_status"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_people_set_standing": {
-      "address": "ua.v1.{team}.{sender}.svc.team.people.set_standing",
-      "messages": {
-        "people_set_standing": {
-          "$ref": "#/components/messages/people_set_standing"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_requests_pause": {
-      "address": "ua.v1.{team}.{sender}.svc.team.requests.pause",
-      "messages": {
-        "requests_pause": {
-          "$ref": "#/components/messages/requests_pause"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_requests_resume": {
-      "address": "ua.v1.{team}.{sender}.svc.team.requests.resume",
-      "messages": {
-        "requests_resume": {
-          "$ref": "#/components/messages/requests_resume"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
-        },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_run_context_sign": {
-      "address": "ua.v1.{team}.{sender}.svc.team.run_context.sign",
+    "svc_scheduler": {
+      "address": "ua.v1.{team}.{sender}.svc.scheduler",
       "messages": {
         "run_context_sign": {
           "$ref": "#/components/messages/run_context_sign"
@@ -1523,409 +409,264 @@
         }
       }
     },
-    "svc_team_schedules_authorize_access": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.authorize_access",
+    "svc_team": {
+      "address": "ua.v1.{team}.{sender}.svc.team",
       "messages": {
+        "access_withdraw": {
+          "$ref": "#/components/messages/access_withdraw"
+        },
+        "conflicts_cancel": {
+          "$ref": "#/components/messages/conflicts_cancel"
+        },
+        "conflicts_decide": {
+          "$ref": "#/components/messages/conflicts_decide"
+        },
+        "conflicts_list": {
+          "$ref": "#/components/messages/conflicts_list"
+        },
+        "custody_decide": {
+          "$ref": "#/components/messages/custody_decide"
+        },
+        "debug_dump": {
+          "$ref": "#/components/messages/debug_dump"
+        },
+        "heartbeat_items_add": {
+          "$ref": "#/components/messages/heartbeat_items_add"
+        },
+        "heartbeat_items_disable": {
+          "$ref": "#/components/messages/heartbeat_items_disable"
+        },
+        "heartbeat_items_enable": {
+          "$ref": "#/components/messages/heartbeat_items_enable"
+        },
+        "heartbeat_items_list": {
+          "$ref": "#/components/messages/heartbeat_items_list"
+        },
+        "heartbeat_items_remove": {
+          "$ref": "#/components/messages/heartbeat_items_remove"
+        },
+        "heartbeat_items_update": {
+          "$ref": "#/components/messages/heartbeat_items_update"
+        },
+        "intent_set": {
+          "$ref": "#/components/messages/intent_set"
+        },
+        "knowledge_add_note": {
+          "$ref": "#/components/messages/knowledge_add_note"
+        },
+        "knowledge_archive": {
+          "$ref": "#/components/messages/knowledge_archive"
+        },
+        "knowledge_count_contributions": {
+          "$ref": "#/components/messages/knowledge_count_contributions"
+        },
+        "knowledge_freeze": {
+          "$ref": "#/components/messages/knowledge_freeze"
+        },
+        "knowledge_history": {
+          "$ref": "#/components/messages/knowledge_history"
+        },
+        "knowledge_list": {
+          "$ref": "#/components/messages/knowledge_list"
+        },
+        "knowledge_list_contributions": {
+          "$ref": "#/components/messages/knowledge_list_contributions"
+        },
+        "knowledge_merge": {
+          "$ref": "#/components/messages/knowledge_merge"
+        },
+        "knowledge_publish_contribution": {
+          "$ref": "#/components/messages/knowledge_publish_contribution"
+        },
+        "knowledge_read": {
+          "$ref": "#/components/messages/knowledge_read"
+        },
+        "knowledge_read_contribution": {
+          "$ref": "#/components/messages/knowledge_read_contribution"
+        },
+        "knowledge_reject_contribution": {
+          "$ref": "#/components/messages/knowledge_reject_contribution"
+        },
+        "knowledge_resolve_note": {
+          "$ref": "#/components/messages/knowledge_resolve_note"
+        },
+        "knowledge_revert": {
+          "$ref": "#/components/messages/knowledge_revert"
+        },
+        "knowledge_unfreeze": {
+          "$ref": "#/components/messages/knowledge_unfreeze"
+        },
+        "knowledge_withdraw_contribution": {
+          "$ref": "#/components/messages/knowledge_withdraw_contribution"
+        },
+        "knowledge_write": {
+          "$ref": "#/components/messages/knowledge_write"
+        },
+        "memory_create": {
+          "$ref": "#/components/messages/memory_create"
+        },
+        "memory_delete": {
+          "$ref": "#/components/messages/memory_delete"
+        },
+        "memory_list": {
+          "$ref": "#/components/messages/memory_list"
+        },
+        "memory_replace": {
+          "$ref": "#/components/messages/memory_replace"
+        },
+        "memory_show": {
+          "$ref": "#/components/messages/memory_show"
+        },
+        "memory_undo": {
+          "$ref": "#/components/messages/memory_undo"
+        },
+        "objectives_abandon": {
+          "$ref": "#/components/messages/objectives_abandon"
+        },
+        "objectives_activate_plan": {
+          "$ref": "#/components/messages/objectives_activate_plan"
+        },
+        "objectives_create": {
+          "$ref": "#/components/messages/objectives_create"
+        },
+        "objectives_delete": {
+          "$ref": "#/components/messages/objectives_delete"
+        },
+        "objectives_get": {
+          "$ref": "#/components/messages/objectives_get"
+        },
+        "objectives_list": {
+          "$ref": "#/components/messages/objectives_list"
+        },
+        "objectives_pause": {
+          "$ref": "#/components/messages/objectives_pause"
+        },
+        "objectives_record_checkpoint": {
+          "$ref": "#/components/messages/objectives_record_checkpoint"
+        },
+        "objectives_resume": {
+          "$ref": "#/components/messages/objectives_resume"
+        },
+        "objectives_start_task": {
+          "$ref": "#/components/messages/objectives_start_task"
+        },
+        "objectives_stop": {
+          "$ref": "#/components/messages/objectives_stop"
+        },
+        "objectives_update_progress": {
+          "$ref": "#/components/messages/objectives_update_progress"
+        },
+        "objectives_update_status": {
+          "$ref": "#/components/messages/objectives_update_status"
+        },
+        "objectives_work_profiles_apply": {
+          "$ref": "#/components/messages/objectives_work_profiles_apply"
+        },
+        "objectives_work_profiles_list": {
+          "$ref": "#/components/messages/objectives_work_profiles_list"
+        },
+        "objectives_work_profiles_propose": {
+          "$ref": "#/components/messages/objectives_work_profiles_propose"
+        },
+        "objectives_work_profiles_remove": {
+          "$ref": "#/components/messages/objectives_work_profiles_remove"
+        },
+        "objectives_work_sessions_disable": {
+          "$ref": "#/components/messages/objectives_work_sessions_disable"
+        },
+        "objectives_work_sessions_enable": {
+          "$ref": "#/components/messages/objectives_work_sessions_enable"
+        },
+        "objectives_work_sessions_start": {
+          "$ref": "#/components/messages/objectives_work_sessions_start"
+        },
+        "objectives_work_sessions_status": {
+          "$ref": "#/components/messages/objectives_work_sessions_status"
+        },
+        "people_set_standing": {
+          "$ref": "#/components/messages/people_set_standing"
+        },
+        "requests_pause": {
+          "$ref": "#/components/messages/requests_pause"
+        },
+        "requests_resume": {
+          "$ref": "#/components/messages/requests_resume"
+        },
         "schedules_authorize_access": {
           "$ref": "#/components/messages/schedules_authorize_access"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_disable": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.disable",
-      "messages": {
         "schedules_disable": {
           "$ref": "#/components/messages/schedules_disable"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_get": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.get",
-      "messages": {
         "schedules_get": {
           "$ref": "#/components/messages/schedules_get"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_inspect_worker": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.inspect_worker",
-      "messages": {
         "schedules_inspect_worker": {
           "$ref": "#/components/messages/schedules_inspect_worker"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_install": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.install",
-      "messages": {
         "schedules_install": {
           "$ref": "#/components/messages/schedules_install"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.list",
-      "messages": {
         "schedules_list": {
           "$ref": "#/components/messages/schedules_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_pause": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.pause",
-      "messages": {
         "schedules_pause": {
           "$ref": "#/components/messages/schedules_pause"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_prepare_access": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.prepare_access",
-      "messages": {
         "schedules_prepare_access": {
           "$ref": "#/components/messages/schedules_prepare_access"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_remove": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.remove",
-      "messages": {
         "schedules_remove": {
           "$ref": "#/components/messages/schedules_remove"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_resume": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.resume",
-      "messages": {
         "schedules_resume": {
           "$ref": "#/components/messages/schedules_resume"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_set_worker": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.set_worker",
-      "messages": {
         "schedules_set_worker": {
           "$ref": "#/components/messages/schedules_set_worker"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_schedules_update": {
-      "address": "ua.v1.{team}.{sender}.svc.team.schedules.update",
-      "messages": {
         "schedules_update": {
           "$ref": "#/components/messages/schedules_update"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_staged_changes_apply": {
-      "address": "ua.v1.{team}.{sender}.svc.team.staged_changes.apply",
-      "messages": {
         "staged_changes_apply": {
           "$ref": "#/components/messages/staged_changes_apply"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_steering_decide": {
-      "address": "ua.v1.{team}.{sender}.svc.team.steering.decide",
-      "messages": {
         "steering_decide": {
           "$ref": "#/components/messages/steering_decide"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_cancel": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.cancel",
-      "messages": {
         "tasks_cancel": {
           "$ref": "#/components/messages/tasks_cancel"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_inventory": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.inventory",
-      "messages": {
         "tasks_inventory": {
           "$ref": "#/components/messages/tasks_inventory"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_list": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.list",
-      "messages": {
         "tasks_list": {
           "$ref": "#/components/messages/tasks_list"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_list_finished": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.list_finished",
-      "messages": {
         "tasks_list_finished": {
           "$ref": "#/components/messages/tasks_list_finished"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_probe": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.probe",
-      "messages": {
         "tasks_probe": {
           "$ref": "#/components/messages/tasks_probe"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_progress": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.progress",
-      "messages": {
         "tasks_progress": {
           "$ref": "#/components/messages/tasks_progress"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_purge": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.purge",
-      "messages": {
         "tasks_purge": {
           "$ref": "#/components/messages/tasks_purge"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_remove": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.remove",
-      "messages": {
         "tasks_remove": {
           "$ref": "#/components/messages/tasks_remove"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_tasks_steer": {
-      "address": "ua.v1.{team}.{sender}.svc.team.tasks.steer",
-      "messages": {
         "tasks_steer": {
           "$ref": "#/components/messages/tasks_steer"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_topics_find_threads": {
-      "address": "ua.v1.{team}.{sender}.svc.team.topics.find_threads",
-      "messages": {
         "topics_find_threads": {
           "$ref": "#/components/messages/topics_find_threads"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_topics_list_tags": {
-      "address": "ua.v1.{team}.{sender}.svc.team.topics.list_tags",
-      "messages": {
         "topics_list_tags": {
           "$ref": "#/components/messages/topics_list_tags"
-        }
-      },
-      "parameters": {
-        "sender": {
-          "description": "The sender subject token."
         },
-        "team": {
-          "description": "The team subject token."
-        }
-      }
-    },
-    "svc_team_topics_tag_thread": {
-      "address": "ua.v1.{team}.{sender}.svc.team.topics.tag_thread",
-      "messages": {
         "topics_tag_thread": {
           "$ref": "#/components/messages/topics_tag_thread"
         }
@@ -6820,11 +5561,11 @@
     "receive_access_withdraw_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_access_withdraw"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_access_withdraw/messages/access_withdraw"
+          "$ref": "#/channels/svc_team/messages/access_withdraw"
         }
       ],
       "reply": {
@@ -6841,11 +5582,11 @@
     "receive_agent_exit_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_exit"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_exit/messages/agent_exit"
+          "$ref": "#/channels/ctl_agent/messages/agent_exit"
         }
       ],
       "reply": {
@@ -6862,11 +5603,11 @@
     "receive_agent_pause_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_pause"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_pause/messages/agent_pause"
+          "$ref": "#/channels/ctl_agent/messages/agent_pause"
         }
       ],
       "reply": {
@@ -6883,11 +5624,11 @@
     "receive_agent_resume_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_resume"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_resume/messages/agent_resume"
+          "$ref": "#/channels/ctl_agent/messages/agent_resume"
         }
       ],
       "reply": {
@@ -6904,11 +5645,11 @@
     "receive_agent_status_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_status"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_status/messages/agent_status"
+          "$ref": "#/channels/ctl_agent/messages/agent_status"
         }
       ],
       "reply": {
@@ -6925,11 +5666,11 @@
     "receive_conflicts_cancel_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_conflicts_cancel"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_conflicts_cancel/messages/conflicts_cancel"
+          "$ref": "#/channels/svc_team/messages/conflicts_cancel"
         }
       ],
       "reply": {
@@ -6946,11 +5687,11 @@
     "receive_conflicts_decide_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_conflicts_decide"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_conflicts_decide/messages/conflicts_decide"
+          "$ref": "#/channels/svc_team/messages/conflicts_decide"
         }
       ],
       "reply": {
@@ -6967,11 +5708,11 @@
     "receive_conflicts_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_conflicts_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_conflicts_list/messages/conflicts_list"
+          "$ref": "#/channels/svc_team/messages/conflicts_list"
         }
       ],
       "reply": {
@@ -7010,11 +5751,11 @@
     "receive_custody_decide_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_custody_decide"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_custody_decide/messages/custody_decide"
+          "$ref": "#/channels/svc_team/messages/custody_decide"
         }
       ],
       "reply": {
@@ -7053,11 +5794,11 @@
     "receive_debug_dump_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_debug_dump"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_debug_dump/messages/debug_dump"
+          "$ref": "#/channels/ctl_agent/messages/debug_dump"
         }
       ],
       "reply": {
@@ -7074,11 +5815,11 @@
     "receive_debug_dump_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_debug_dump"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_debug_dump/messages/debug_dump"
+          "$ref": "#/channels/svc_team/messages/debug_dump"
         }
       ],
       "reply": {
@@ -7150,11 +5891,11 @@
     "receive_heartbeat_items_add_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_add"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_add/messages/heartbeat_items_add"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_add"
         }
       ],
       "reply": {
@@ -7171,11 +5912,11 @@
     "receive_heartbeat_items_disable_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_disable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_disable/messages/heartbeat_items_disable"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_disable"
         }
       ],
       "reply": {
@@ -7192,11 +5933,11 @@
     "receive_heartbeat_items_enable_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_enable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_enable/messages/heartbeat_items_enable"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_enable"
         }
       ],
       "reply": {
@@ -7213,11 +5954,11 @@
     "receive_heartbeat_items_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_list/messages/heartbeat_items_list"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_list"
         }
       ],
       "reply": {
@@ -7234,11 +5975,11 @@
     "receive_heartbeat_items_remove_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_remove/messages/heartbeat_items_remove"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_remove"
         }
       ],
       "reply": {
@@ -7255,11 +5996,11 @@
     "receive_heartbeat_items_update_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_update"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_update/messages/heartbeat_items_update"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_update"
         }
       ],
       "reply": {
@@ -7276,11 +6017,11 @@
     "receive_host_join_installation_service": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/install_svc_host_join"
+        "$ref": "#/channels/install_svc"
       },
       "messages": [
         {
-          "$ref": "#/channels/install_svc_host_join/messages/host_join"
+          "$ref": "#/channels/install_svc/messages/host_join"
         }
       ],
       "reply": {
@@ -7297,11 +6038,11 @@
     "receive_host_renew_installation_service": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/install_svc_host_renew"
+        "$ref": "#/channels/install_svc"
       },
       "messages": [
         {
-          "$ref": "#/channels/install_svc_host_renew/messages/host_renew"
+          "$ref": "#/channels/install_svc/messages/host_renew"
         }
       ],
       "reply": {
@@ -7318,11 +6059,11 @@
     "receive_intent_set_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_intent_set"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_intent_set/messages/intent_set"
+          "$ref": "#/channels/svc_team/messages/intent_set"
         }
       ],
       "reply": {
@@ -7339,11 +6080,11 @@
     "receive_knowledge_add_note_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_add_note"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_add_note/messages/knowledge_add_note"
+          "$ref": "#/channels/svc_team/messages/knowledge_add_note"
         }
       ],
       "reply": {
@@ -7360,11 +6101,11 @@
     "receive_knowledge_archive_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_archive"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_archive/messages/knowledge_archive"
+          "$ref": "#/channels/svc_team/messages/knowledge_archive"
         }
       ],
       "reply": {
@@ -7381,11 +6122,11 @@
     "receive_knowledge_count_contributions_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_count_contributions"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_count_contributions/messages/knowledge_count_contributions"
+          "$ref": "#/channels/svc_team/messages/knowledge_count_contributions"
         }
       ],
       "reply": {
@@ -7402,11 +6143,11 @@
     "receive_knowledge_freeze_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_freeze"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_freeze/messages/knowledge_freeze"
+          "$ref": "#/channels/svc_team/messages/knowledge_freeze"
         }
       ],
       "reply": {
@@ -7423,11 +6164,11 @@
     "receive_knowledge_history_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_history"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_history/messages/knowledge_history"
+          "$ref": "#/channels/svc_team/messages/knowledge_history"
         }
       ],
       "reply": {
@@ -7444,11 +6185,11 @@
     "receive_knowledge_list_contributions_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_list_contributions"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_list_contributions/messages/knowledge_list_contributions"
+          "$ref": "#/channels/svc_team/messages/knowledge_list_contributions"
         }
       ],
       "reply": {
@@ -7465,11 +6206,11 @@
     "receive_knowledge_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_list/messages/knowledge_list"
+          "$ref": "#/channels/svc_team/messages/knowledge_list"
         }
       ],
       "reply": {
@@ -7486,11 +6227,11 @@
     "receive_knowledge_merge_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_merge"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_merge/messages/knowledge_merge"
+          "$ref": "#/channels/svc_team/messages/knowledge_merge"
         }
       ],
       "reply": {
@@ -7507,11 +6248,11 @@
     "receive_knowledge_publish_contribution_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_publish_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_publish_contribution/messages/knowledge_publish_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_publish_contribution"
         }
       ],
       "reply": {
@@ -7528,11 +6269,11 @@
     "receive_knowledge_read_contribution_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_read_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_read_contribution/messages/knowledge_read_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_read_contribution"
         }
       ],
       "reply": {
@@ -7549,11 +6290,11 @@
     "receive_knowledge_read_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_read"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_read/messages/knowledge_read"
+          "$ref": "#/channels/svc_team/messages/knowledge_read"
         }
       ],
       "reply": {
@@ -7570,11 +6311,11 @@
     "receive_knowledge_reject_contribution_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_reject_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_reject_contribution/messages/knowledge_reject_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_reject_contribution"
         }
       ],
       "reply": {
@@ -7591,11 +6332,11 @@
     "receive_knowledge_resolve_note_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_resolve_note"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_resolve_note/messages/knowledge_resolve_note"
+          "$ref": "#/channels/svc_team/messages/knowledge_resolve_note"
         }
       ],
       "reply": {
@@ -7612,11 +6353,11 @@
     "receive_knowledge_revert_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_revert"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_revert/messages/knowledge_revert"
+          "$ref": "#/channels/svc_team/messages/knowledge_revert"
         }
       ],
       "reply": {
@@ -7633,11 +6374,11 @@
     "receive_knowledge_unfreeze_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_unfreeze"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_unfreeze/messages/knowledge_unfreeze"
+          "$ref": "#/channels/svc_team/messages/knowledge_unfreeze"
         }
       ],
       "reply": {
@@ -7654,11 +6395,11 @@
     "receive_knowledge_withdraw_contribution_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_withdraw_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_withdraw_contribution/messages/knowledge_withdraw_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_withdraw_contribution"
         }
       ],
       "reply": {
@@ -7675,11 +6416,11 @@
     "receive_knowledge_write_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_write"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_write/messages/knowledge_write"
+          "$ref": "#/channels/svc_team/messages/knowledge_write"
         }
       ],
       "reply": {
@@ -7707,11 +6448,11 @@
     "receive_memory_create_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_create"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_create/messages/memory_create"
+          "$ref": "#/channels/svc_team/messages/memory_create"
         }
       ],
       "reply": {
@@ -7728,11 +6469,11 @@
     "receive_memory_delete_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_delete"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_delete/messages/memory_delete"
+          "$ref": "#/channels/svc_team/messages/memory_delete"
         }
       ],
       "reply": {
@@ -7749,11 +6490,11 @@
     "receive_memory_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_list/messages/memory_list"
+          "$ref": "#/channels/svc_team/messages/memory_list"
         }
       ],
       "reply": {
@@ -7770,11 +6511,11 @@
     "receive_memory_replace_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_replace"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_replace/messages/memory_replace"
+          "$ref": "#/channels/svc_team/messages/memory_replace"
         }
       ],
       "reply": {
@@ -7791,11 +6532,11 @@
     "receive_memory_show_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_show"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_show/messages/memory_show"
+          "$ref": "#/channels/svc_team/messages/memory_show"
         }
       ],
       "reply": {
@@ -7812,11 +6553,11 @@
     "receive_memory_undo_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_undo"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_undo/messages/memory_undo"
+          "$ref": "#/channels/svc_team/messages/memory_undo"
         }
       ],
       "reply": {
@@ -7833,11 +6574,11 @@
     "receive_objectives_abandon_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_abandon"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_abandon/messages/objectives_abandon"
+          "$ref": "#/channels/svc_team/messages/objectives_abandon"
         }
       ],
       "reply": {
@@ -7854,11 +6595,11 @@
     "receive_objectives_activate_plan_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_activate_plan"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_activate_plan/messages/objectives_activate_plan"
+          "$ref": "#/channels/svc_team/messages/objectives_activate_plan"
         }
       ],
       "reply": {
@@ -7875,11 +6616,11 @@
     "receive_objectives_create_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_create"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_create/messages/objectives_create"
+          "$ref": "#/channels/svc_team/messages/objectives_create"
         }
       ],
       "reply": {
@@ -7896,11 +6637,11 @@
     "receive_objectives_delete_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_delete"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_delete/messages/objectives_delete"
+          "$ref": "#/channels/svc_team/messages/objectives_delete"
         }
       ],
       "reply": {
@@ -7917,11 +6658,11 @@
     "receive_objectives_get_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_get"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_get/messages/objectives_get"
+          "$ref": "#/channels/svc_team/messages/objectives_get"
         }
       ],
       "reply": {
@@ -7938,11 +6679,11 @@
     "receive_objectives_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_list/messages/objectives_list"
+          "$ref": "#/channels/svc_team/messages/objectives_list"
         }
       ],
       "reply": {
@@ -7959,11 +6700,11 @@
     "receive_objectives_pause_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_pause"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_pause/messages/objectives_pause"
+          "$ref": "#/channels/svc_team/messages/objectives_pause"
         }
       ],
       "reply": {
@@ -7980,11 +6721,11 @@
     "receive_objectives_record_checkpoint_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_record_checkpoint"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_record_checkpoint/messages/objectives_record_checkpoint"
+          "$ref": "#/channels/svc_team/messages/objectives_record_checkpoint"
         }
       ],
       "reply": {
@@ -8001,11 +6742,11 @@
     "receive_objectives_resume_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_resume"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_resume/messages/objectives_resume"
+          "$ref": "#/channels/svc_team/messages/objectives_resume"
         }
       ],
       "reply": {
@@ -8022,11 +6763,11 @@
     "receive_objectives_start_task_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_start_task"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_start_task/messages/objectives_start_task"
+          "$ref": "#/channels/svc_team/messages/objectives_start_task"
         }
       ],
       "reply": {
@@ -8043,11 +6784,11 @@
     "receive_objectives_stop_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_stop"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_stop/messages/objectives_stop"
+          "$ref": "#/channels/svc_team/messages/objectives_stop"
         }
       ],
       "reply": {
@@ -8064,11 +6805,11 @@
     "receive_objectives_update_progress_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_update_progress"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_update_progress/messages/objectives_update_progress"
+          "$ref": "#/channels/svc_team/messages/objectives_update_progress"
         }
       ],
       "reply": {
@@ -8085,11 +6826,11 @@
     "receive_objectives_update_status_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_update_status"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_update_status/messages/objectives_update_status"
+          "$ref": "#/channels/svc_team/messages/objectives_update_status"
         }
       ],
       "reply": {
@@ -8106,11 +6847,11 @@
     "receive_objectives_work_profiles_apply_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_apply"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_apply/messages/objectives_work_profiles_apply"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_apply"
         }
       ],
       "reply": {
@@ -8127,11 +6868,11 @@
     "receive_objectives_work_profiles_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_list/messages/objectives_work_profiles_list"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_list"
         }
       ],
       "reply": {
@@ -8148,11 +6889,11 @@
     "receive_objectives_work_profiles_propose_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_propose"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_propose/messages/objectives_work_profiles_propose"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_propose"
         }
       ],
       "reply": {
@@ -8169,11 +6910,11 @@
     "receive_objectives_work_profiles_remove_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_remove/messages/objectives_work_profiles_remove"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_remove"
         }
       ],
       "reply": {
@@ -8190,11 +6931,11 @@
     "receive_objectives_work_sessions_disable_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_disable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_disable/messages/objectives_work_sessions_disable"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_disable"
         }
       ],
       "reply": {
@@ -8211,11 +6952,11 @@
     "receive_objectives_work_sessions_enable_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_enable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_enable/messages/objectives_work_sessions_enable"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_enable"
         }
       ],
       "reply": {
@@ -8232,11 +6973,11 @@
     "receive_objectives_work_sessions_start_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_start"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_start/messages/objectives_work_sessions_start"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_start"
         }
       ],
       "reply": {
@@ -8253,11 +6994,11 @@
     "receive_objectives_work_sessions_status_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_status"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_status/messages/objectives_work_sessions_status"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_status"
         }
       ],
       "reply": {
@@ -8274,11 +7015,11 @@
     "receive_people_set_standing_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_people_set_standing"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_people_set_standing/messages/people_set_standing"
+          "$ref": "#/channels/svc_team/messages/people_set_standing"
         }
       ],
       "reply": {
@@ -8328,11 +7069,11 @@
     "receive_requests_pause_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_requests_pause"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_requests_pause/messages/requests_pause"
+          "$ref": "#/channels/svc_team/messages/requests_pause"
         }
       ],
       "reply": {
@@ -8349,11 +7090,11 @@
     "receive_requests_resume_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_requests_resume"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_requests_resume/messages/requests_resume"
+          "$ref": "#/channels/svc_team/messages/requests_resume"
         }
       ],
       "reply": {
@@ -8370,11 +7111,11 @@
     "receive_run_context_sign_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_run_context_sign"
+        "$ref": "#/channels/svc_scheduler"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_run_context_sign/messages/run_context_sign"
+          "$ref": "#/channels/svc_scheduler/messages/run_context_sign"
         }
       ],
       "reply": {
@@ -8391,11 +7132,11 @@
     "receive_schedules_authorize_access_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_authorize_access"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_authorize_access/messages/schedules_authorize_access"
+          "$ref": "#/channels/svc_team/messages/schedules_authorize_access"
         }
       ],
       "reply": {
@@ -8412,11 +7153,11 @@
     "receive_schedules_disable_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_disable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_disable/messages/schedules_disable"
+          "$ref": "#/channels/svc_team/messages/schedules_disable"
         }
       ],
       "reply": {
@@ -8433,11 +7174,11 @@
     "receive_schedules_get_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_get"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_get/messages/schedules_get"
+          "$ref": "#/channels/svc_team/messages/schedules_get"
         }
       ],
       "reply": {
@@ -8454,11 +7195,11 @@
     "receive_schedules_inspect_worker_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_inspect_worker"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_inspect_worker/messages/schedules_inspect_worker"
+          "$ref": "#/channels/svc_team/messages/schedules_inspect_worker"
         }
       ],
       "reply": {
@@ -8475,11 +7216,11 @@
     "receive_schedules_install_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_install"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_install/messages/schedules_install"
+          "$ref": "#/channels/svc_team/messages/schedules_install"
         }
       ],
       "reply": {
@@ -8496,11 +7237,11 @@
     "receive_schedules_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_list/messages/schedules_list"
+          "$ref": "#/channels/svc_team/messages/schedules_list"
         }
       ],
       "reply": {
@@ -8517,11 +7258,11 @@
     "receive_schedules_pause_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_pause"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_pause/messages/schedules_pause"
+          "$ref": "#/channels/svc_team/messages/schedules_pause"
         }
       ],
       "reply": {
@@ -8538,11 +7279,11 @@
     "receive_schedules_prepare_access_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_prepare_access"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_prepare_access/messages/schedules_prepare_access"
+          "$ref": "#/channels/svc_team/messages/schedules_prepare_access"
         }
       ],
       "reply": {
@@ -8559,11 +7300,11 @@
     "receive_schedules_remove_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_remove/messages/schedules_remove"
+          "$ref": "#/channels/svc_team/messages/schedules_remove"
         }
       ],
       "reply": {
@@ -8580,11 +7321,11 @@
     "receive_schedules_resume_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_resume"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_resume/messages/schedules_resume"
+          "$ref": "#/channels/svc_team/messages/schedules_resume"
         }
       ],
       "reply": {
@@ -8601,11 +7342,11 @@
     "receive_schedules_set_worker_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_set_worker"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_set_worker/messages/schedules_set_worker"
+          "$ref": "#/channels/svc_team/messages/schedules_set_worker"
         }
       ],
       "reply": {
@@ -8622,11 +7363,11 @@
     "receive_schedules_update_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_update"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_update/messages/schedules_update"
+          "$ref": "#/channels/svc_team/messages/schedules_update"
         }
       ],
       "reply": {
@@ -8654,11 +7395,11 @@
     "receive_staged_changes_apply_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_staged_changes_apply"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_staged_changes_apply/messages/staged_changes_apply"
+          "$ref": "#/channels/svc_team/messages/staged_changes_apply"
         }
       ],
       "reply": {
@@ -8675,11 +7416,11 @@
     "receive_steering_decide_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_steering_decide"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_steering_decide/messages/steering_decide"
+          "$ref": "#/channels/svc_team/messages/steering_decide"
         }
       ],
       "reply": {
@@ -8790,11 +7531,11 @@
     "receive_task_probe_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_task_probe"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_task_probe/messages/task_probe"
+          "$ref": "#/channels/ctl_agent/messages/task_probe"
         }
       ],
       "reply": {
@@ -8993,11 +7734,11 @@
     "receive_tasks_cancel_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_cancel"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_cancel/messages/tasks_cancel"
+          "$ref": "#/channels/svc_team/messages/tasks_cancel"
         }
       ],
       "reply": {
@@ -9014,11 +7755,11 @@
     "receive_tasks_inventory_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_inventory"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_inventory/messages/tasks_inventory"
+          "$ref": "#/channels/svc_team/messages/tasks_inventory"
         }
       ],
       "reply": {
@@ -9035,11 +7776,11 @@
     "receive_tasks_list_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_list"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_list/messages/tasks_list"
+          "$ref": "#/channels/ctl_agent/messages/tasks_list"
         }
       ],
       "reply": {
@@ -9056,11 +7797,11 @@
     "receive_tasks_list_finished_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_list_finished"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_list_finished/messages/tasks_list_finished"
+          "$ref": "#/channels/ctl_agent/messages/tasks_list_finished"
         }
       ],
       "reply": {
@@ -9077,11 +7818,11 @@
     "receive_tasks_list_finished_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_list_finished"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_list_finished/messages/tasks_list_finished"
+          "$ref": "#/channels/svc_team/messages/tasks_list_finished"
         }
       ],
       "reply": {
@@ -9098,11 +7839,11 @@
     "receive_tasks_list_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_list/messages/tasks_list"
+          "$ref": "#/channels/svc_team/messages/tasks_list"
         }
       ],
       "reply": {
@@ -9119,11 +7860,11 @@
     "receive_tasks_probe_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_probe"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_probe/messages/tasks_probe"
+          "$ref": "#/channels/svc_team/messages/tasks_probe"
         }
       ],
       "reply": {
@@ -9140,11 +7881,11 @@
     "receive_tasks_progress_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_progress"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_progress/messages/tasks_progress"
+          "$ref": "#/channels/svc_team/messages/tasks_progress"
         }
       ],
       "reply": {
@@ -9161,11 +7902,11 @@
     "receive_tasks_purge_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_purge"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_purge/messages/tasks_purge"
+          "$ref": "#/channels/ctl_agent/messages/tasks_purge"
         }
       ],
       "reply": {
@@ -9182,11 +7923,11 @@
     "receive_tasks_purge_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_purge"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_purge/messages/tasks_purge"
+          "$ref": "#/channels/svc_team/messages/tasks_purge"
         }
       ],
       "reply": {
@@ -9203,11 +7944,11 @@
     "receive_tasks_remove_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_remove"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_remove/messages/tasks_remove"
+          "$ref": "#/channels/ctl_agent/messages/tasks_remove"
         }
       ],
       "reply": {
@@ -9224,11 +7965,11 @@
     "receive_tasks_remove_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_remove/messages/tasks_remove"
+          "$ref": "#/channels/svc_team/messages/tasks_remove"
         }
       ],
       "reply": {
@@ -9245,11 +7986,11 @@
     "receive_tasks_steer_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_steer"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_steer/messages/tasks_steer"
+          "$ref": "#/channels/svc_team/messages/tasks_steer"
         }
       ],
       "reply": {
@@ -9288,11 +8029,11 @@
     "receive_topics_find_threads_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_topics_find_threads"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_topics_find_threads/messages/topics_find_threads"
+          "$ref": "#/channels/svc_team/messages/topics_find_threads"
         }
       ],
       "reply": {
@@ -9309,11 +8050,11 @@
     "receive_topics_list_tags_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_topics_list_tags"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_topics_list_tags/messages/topics_list_tags"
+          "$ref": "#/channels/svc_team/messages/topics_list_tags"
         }
       ],
       "reply": {
@@ -9330,11 +8071,11 @@
     "receive_topics_tag_thread_team_services": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/svc_team_topics_tag_thread"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_topics_tag_thread/messages/topics_tag_thread"
+          "$ref": "#/channels/svc_team/messages/topics_tag_thread"
         }
       ],
       "reply": {
@@ -9395,11 +8136,11 @@
     "send_access_withdraw_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_access_withdraw"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_access_withdraw/messages/access_withdraw"
+          "$ref": "#/channels/svc_team/messages/access_withdraw"
         }
       ],
       "reply": {
@@ -9416,11 +8157,11 @@
     "send_agent_exit_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_exit"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_exit/messages/agent_exit"
+          "$ref": "#/channels/ctl_agent/messages/agent_exit"
         }
       ],
       "reply": {
@@ -9437,11 +8178,11 @@
     "send_agent_pause_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_pause"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_pause/messages/agent_pause"
+          "$ref": "#/channels/ctl_agent/messages/agent_pause"
         }
       ],
       "reply": {
@@ -9458,11 +8199,11 @@
     "send_agent_resume_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_resume"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_resume/messages/agent_resume"
+          "$ref": "#/channels/ctl_agent/messages/agent_resume"
         }
       ],
       "reply": {
@@ -9479,11 +8220,11 @@
     "send_agent_status_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_status"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_status/messages/agent_status"
+          "$ref": "#/channels/ctl_agent/messages/agent_status"
         }
       ],
       "reply": {
@@ -9500,11 +8241,11 @@
     "send_conflicts_cancel_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_conflicts_cancel"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_conflicts_cancel/messages/conflicts_cancel"
+          "$ref": "#/channels/svc_team/messages/conflicts_cancel"
         }
       ],
       "reply": {
@@ -9521,11 +8262,11 @@
     "send_conflicts_decide_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_conflicts_decide"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_conflicts_decide/messages/conflicts_decide"
+          "$ref": "#/channels/svc_team/messages/conflicts_decide"
         }
       ],
       "reply": {
@@ -9542,11 +8283,11 @@
     "send_conflicts_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_conflicts_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_conflicts_list/messages/conflicts_list"
+          "$ref": "#/channels/svc_team/messages/conflicts_list"
         }
       ],
       "reply": {
@@ -9585,11 +8326,11 @@
     "send_custody_decide_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_custody_decide"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_custody_decide/messages/custody_decide"
+          "$ref": "#/channels/svc_team/messages/custody_decide"
         }
       ],
       "reply": {
@@ -9628,11 +8369,11 @@
     "send_debug_dump_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_debug_dump"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_debug_dump/messages/debug_dump"
+          "$ref": "#/channels/ctl_agent/messages/debug_dump"
         }
       ],
       "reply": {
@@ -9649,11 +8390,11 @@
     "send_debug_dump_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_debug_dump"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_debug_dump/messages/debug_dump"
+          "$ref": "#/channels/svc_team/messages/debug_dump"
         }
       ],
       "reply": {
@@ -9725,11 +8466,11 @@
     "send_heartbeat_items_add_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_add"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_add/messages/heartbeat_items_add"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_add"
         }
       ],
       "reply": {
@@ -9746,11 +8487,11 @@
     "send_heartbeat_items_disable_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_disable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_disable/messages/heartbeat_items_disable"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_disable"
         }
       ],
       "reply": {
@@ -9767,11 +8508,11 @@
     "send_heartbeat_items_enable_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_enable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_enable/messages/heartbeat_items_enable"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_enable"
         }
       ],
       "reply": {
@@ -9788,11 +8529,11 @@
     "send_heartbeat_items_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_list/messages/heartbeat_items_list"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_list"
         }
       ],
       "reply": {
@@ -9809,11 +8550,11 @@
     "send_heartbeat_items_remove_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_remove/messages/heartbeat_items_remove"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_remove"
         }
       ],
       "reply": {
@@ -9830,11 +8571,11 @@
     "send_heartbeat_items_update_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_heartbeat_items_update"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_heartbeat_items_update/messages/heartbeat_items_update"
+          "$ref": "#/channels/svc_team/messages/heartbeat_items_update"
         }
       ],
       "reply": {
@@ -9851,11 +8592,11 @@
     "send_host_join_installation_service": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/install_svc_host_join"
+        "$ref": "#/channels/install_svc"
       },
       "messages": [
         {
-          "$ref": "#/channels/install_svc_host_join/messages/host_join"
+          "$ref": "#/channels/install_svc/messages/host_join"
         }
       ],
       "reply": {
@@ -9872,11 +8613,11 @@
     "send_host_renew_installation_service": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/install_svc_host_renew"
+        "$ref": "#/channels/install_svc"
       },
       "messages": [
         {
-          "$ref": "#/channels/install_svc_host_renew/messages/host_renew"
+          "$ref": "#/channels/install_svc/messages/host_renew"
         }
       ],
       "reply": {
@@ -9893,11 +8634,11 @@
     "send_intent_set_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_intent_set"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_intent_set/messages/intent_set"
+          "$ref": "#/channels/svc_team/messages/intent_set"
         }
       ],
       "reply": {
@@ -9914,11 +8655,11 @@
     "send_knowledge_add_note_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_add_note"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_add_note/messages/knowledge_add_note"
+          "$ref": "#/channels/svc_team/messages/knowledge_add_note"
         }
       ],
       "reply": {
@@ -9935,11 +8676,11 @@
     "send_knowledge_archive_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_archive"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_archive/messages/knowledge_archive"
+          "$ref": "#/channels/svc_team/messages/knowledge_archive"
         }
       ],
       "reply": {
@@ -9956,11 +8697,11 @@
     "send_knowledge_count_contributions_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_count_contributions"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_count_contributions/messages/knowledge_count_contributions"
+          "$ref": "#/channels/svc_team/messages/knowledge_count_contributions"
         }
       ],
       "reply": {
@@ -9977,11 +8718,11 @@
     "send_knowledge_freeze_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_freeze"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_freeze/messages/knowledge_freeze"
+          "$ref": "#/channels/svc_team/messages/knowledge_freeze"
         }
       ],
       "reply": {
@@ -9998,11 +8739,11 @@
     "send_knowledge_history_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_history"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_history/messages/knowledge_history"
+          "$ref": "#/channels/svc_team/messages/knowledge_history"
         }
       ],
       "reply": {
@@ -10019,11 +8760,11 @@
     "send_knowledge_list_contributions_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_list_contributions"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_list_contributions/messages/knowledge_list_contributions"
+          "$ref": "#/channels/svc_team/messages/knowledge_list_contributions"
         }
       ],
       "reply": {
@@ -10040,11 +8781,11 @@
     "send_knowledge_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_list/messages/knowledge_list"
+          "$ref": "#/channels/svc_team/messages/knowledge_list"
         }
       ],
       "reply": {
@@ -10061,11 +8802,11 @@
     "send_knowledge_merge_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_merge"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_merge/messages/knowledge_merge"
+          "$ref": "#/channels/svc_team/messages/knowledge_merge"
         }
       ],
       "reply": {
@@ -10082,11 +8823,11 @@
     "send_knowledge_publish_contribution_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_publish_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_publish_contribution/messages/knowledge_publish_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_publish_contribution"
         }
       ],
       "reply": {
@@ -10103,11 +8844,11 @@
     "send_knowledge_read_contribution_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_read_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_read_contribution/messages/knowledge_read_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_read_contribution"
         }
       ],
       "reply": {
@@ -10124,11 +8865,11 @@
     "send_knowledge_read_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_read"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_read/messages/knowledge_read"
+          "$ref": "#/channels/svc_team/messages/knowledge_read"
         }
       ],
       "reply": {
@@ -10145,11 +8886,11 @@
     "send_knowledge_reject_contribution_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_reject_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_reject_contribution/messages/knowledge_reject_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_reject_contribution"
         }
       ],
       "reply": {
@@ -10166,11 +8907,11 @@
     "send_knowledge_resolve_note_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_resolve_note"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_resolve_note/messages/knowledge_resolve_note"
+          "$ref": "#/channels/svc_team/messages/knowledge_resolve_note"
         }
       ],
       "reply": {
@@ -10187,11 +8928,11 @@
     "send_knowledge_revert_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_revert"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_revert/messages/knowledge_revert"
+          "$ref": "#/channels/svc_team/messages/knowledge_revert"
         }
       ],
       "reply": {
@@ -10208,11 +8949,11 @@
     "send_knowledge_unfreeze_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_unfreeze"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_unfreeze/messages/knowledge_unfreeze"
+          "$ref": "#/channels/svc_team/messages/knowledge_unfreeze"
         }
       ],
       "reply": {
@@ -10229,11 +8970,11 @@
     "send_knowledge_withdraw_contribution_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_withdraw_contribution"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_withdraw_contribution/messages/knowledge_withdraw_contribution"
+          "$ref": "#/channels/svc_team/messages/knowledge_withdraw_contribution"
         }
       ],
       "reply": {
@@ -10250,11 +8991,11 @@
     "send_knowledge_write_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_knowledge_write"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_knowledge_write/messages/knowledge_write"
+          "$ref": "#/channels/svc_team/messages/knowledge_write"
         }
       ],
       "reply": {
@@ -10282,11 +9023,11 @@
     "send_memory_create_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_create"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_create/messages/memory_create"
+          "$ref": "#/channels/svc_team/messages/memory_create"
         }
       ],
       "reply": {
@@ -10303,11 +9044,11 @@
     "send_memory_delete_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_delete"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_delete/messages/memory_delete"
+          "$ref": "#/channels/svc_team/messages/memory_delete"
         }
       ],
       "reply": {
@@ -10324,11 +9065,11 @@
     "send_memory_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_list/messages/memory_list"
+          "$ref": "#/channels/svc_team/messages/memory_list"
         }
       ],
       "reply": {
@@ -10345,11 +9086,11 @@
     "send_memory_replace_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_replace"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_replace/messages/memory_replace"
+          "$ref": "#/channels/svc_team/messages/memory_replace"
         }
       ],
       "reply": {
@@ -10366,11 +9107,11 @@
     "send_memory_show_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_show"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_show/messages/memory_show"
+          "$ref": "#/channels/svc_team/messages/memory_show"
         }
       ],
       "reply": {
@@ -10387,11 +9128,11 @@
     "send_memory_undo_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_memory_undo"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_memory_undo/messages/memory_undo"
+          "$ref": "#/channels/svc_team/messages/memory_undo"
         }
       ],
       "reply": {
@@ -10408,11 +9149,11 @@
     "send_objectives_abandon_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_abandon"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_abandon/messages/objectives_abandon"
+          "$ref": "#/channels/svc_team/messages/objectives_abandon"
         }
       ],
       "reply": {
@@ -10429,11 +9170,11 @@
     "send_objectives_activate_plan_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_activate_plan"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_activate_plan/messages/objectives_activate_plan"
+          "$ref": "#/channels/svc_team/messages/objectives_activate_plan"
         }
       ],
       "reply": {
@@ -10450,11 +9191,11 @@
     "send_objectives_create_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_create"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_create/messages/objectives_create"
+          "$ref": "#/channels/svc_team/messages/objectives_create"
         }
       ],
       "reply": {
@@ -10471,11 +9212,11 @@
     "send_objectives_delete_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_delete"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_delete/messages/objectives_delete"
+          "$ref": "#/channels/svc_team/messages/objectives_delete"
         }
       ],
       "reply": {
@@ -10492,11 +9233,11 @@
     "send_objectives_get_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_get"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_get/messages/objectives_get"
+          "$ref": "#/channels/svc_team/messages/objectives_get"
         }
       ],
       "reply": {
@@ -10513,11 +9254,11 @@
     "send_objectives_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_list/messages/objectives_list"
+          "$ref": "#/channels/svc_team/messages/objectives_list"
         }
       ],
       "reply": {
@@ -10534,11 +9275,11 @@
     "send_objectives_pause_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_pause"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_pause/messages/objectives_pause"
+          "$ref": "#/channels/svc_team/messages/objectives_pause"
         }
       ],
       "reply": {
@@ -10555,11 +9296,11 @@
     "send_objectives_record_checkpoint_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_record_checkpoint"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_record_checkpoint/messages/objectives_record_checkpoint"
+          "$ref": "#/channels/svc_team/messages/objectives_record_checkpoint"
         }
       ],
       "reply": {
@@ -10576,11 +9317,11 @@
     "send_objectives_resume_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_resume"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_resume/messages/objectives_resume"
+          "$ref": "#/channels/svc_team/messages/objectives_resume"
         }
       ],
       "reply": {
@@ -10597,11 +9338,11 @@
     "send_objectives_start_task_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_start_task"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_start_task/messages/objectives_start_task"
+          "$ref": "#/channels/svc_team/messages/objectives_start_task"
         }
       ],
       "reply": {
@@ -10618,11 +9359,11 @@
     "send_objectives_stop_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_stop"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_stop/messages/objectives_stop"
+          "$ref": "#/channels/svc_team/messages/objectives_stop"
         }
       ],
       "reply": {
@@ -10639,11 +9380,11 @@
     "send_objectives_update_progress_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_update_progress"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_update_progress/messages/objectives_update_progress"
+          "$ref": "#/channels/svc_team/messages/objectives_update_progress"
         }
       ],
       "reply": {
@@ -10660,11 +9401,11 @@
     "send_objectives_update_status_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_update_status"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_update_status/messages/objectives_update_status"
+          "$ref": "#/channels/svc_team/messages/objectives_update_status"
         }
       ],
       "reply": {
@@ -10681,11 +9422,11 @@
     "send_objectives_work_profiles_apply_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_apply"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_apply/messages/objectives_work_profiles_apply"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_apply"
         }
       ],
       "reply": {
@@ -10702,11 +9443,11 @@
     "send_objectives_work_profiles_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_list/messages/objectives_work_profiles_list"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_list"
         }
       ],
       "reply": {
@@ -10723,11 +9464,11 @@
     "send_objectives_work_profiles_propose_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_propose"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_propose/messages/objectives_work_profiles_propose"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_propose"
         }
       ],
       "reply": {
@@ -10744,11 +9485,11 @@
     "send_objectives_work_profiles_remove_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_profiles_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_profiles_remove/messages/objectives_work_profiles_remove"
+          "$ref": "#/channels/svc_team/messages/objectives_work_profiles_remove"
         }
       ],
       "reply": {
@@ -10765,11 +9506,11 @@
     "send_objectives_work_sessions_disable_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_disable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_disable/messages/objectives_work_sessions_disable"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_disable"
         }
       ],
       "reply": {
@@ -10786,11 +9527,11 @@
     "send_objectives_work_sessions_enable_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_enable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_enable/messages/objectives_work_sessions_enable"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_enable"
         }
       ],
       "reply": {
@@ -10807,11 +9548,11 @@
     "send_objectives_work_sessions_start_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_start"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_start/messages/objectives_work_sessions_start"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_start"
         }
       ],
       "reply": {
@@ -10828,11 +9569,11 @@
     "send_objectives_work_sessions_status_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_objectives_work_sessions_status"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_objectives_work_sessions_status/messages/objectives_work_sessions_status"
+          "$ref": "#/channels/svc_team/messages/objectives_work_sessions_status"
         }
       ],
       "reply": {
@@ -10849,11 +9590,11 @@
     "send_people_set_standing_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_people_set_standing"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_people_set_standing/messages/people_set_standing"
+          "$ref": "#/channels/svc_team/messages/people_set_standing"
         }
       ],
       "reply": {
@@ -10903,11 +9644,11 @@
     "send_requests_pause_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_requests_pause"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_requests_pause/messages/requests_pause"
+          "$ref": "#/channels/svc_team/messages/requests_pause"
         }
       ],
       "reply": {
@@ -10924,11 +9665,11 @@
     "send_requests_resume_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_requests_resume"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_requests_resume/messages/requests_resume"
+          "$ref": "#/channels/svc_team/messages/requests_resume"
         }
       ],
       "reply": {
@@ -10945,11 +9686,11 @@
     "send_run_context_sign_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_run_context_sign"
+        "$ref": "#/channels/svc_scheduler"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_run_context_sign/messages/run_context_sign"
+          "$ref": "#/channels/svc_scheduler/messages/run_context_sign"
         }
       ],
       "reply": {
@@ -10966,11 +9707,11 @@
     "send_schedules_authorize_access_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_authorize_access"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_authorize_access/messages/schedules_authorize_access"
+          "$ref": "#/channels/svc_team/messages/schedules_authorize_access"
         }
       ],
       "reply": {
@@ -10987,11 +9728,11 @@
     "send_schedules_disable_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_disable"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_disable/messages/schedules_disable"
+          "$ref": "#/channels/svc_team/messages/schedules_disable"
         }
       ],
       "reply": {
@@ -11008,11 +9749,11 @@
     "send_schedules_get_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_get"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_get/messages/schedules_get"
+          "$ref": "#/channels/svc_team/messages/schedules_get"
         }
       ],
       "reply": {
@@ -11029,11 +9770,11 @@
     "send_schedules_inspect_worker_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_inspect_worker"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_inspect_worker/messages/schedules_inspect_worker"
+          "$ref": "#/channels/svc_team/messages/schedules_inspect_worker"
         }
       ],
       "reply": {
@@ -11050,11 +9791,11 @@
     "send_schedules_install_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_install"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_install/messages/schedules_install"
+          "$ref": "#/channels/svc_team/messages/schedules_install"
         }
       ],
       "reply": {
@@ -11071,11 +9812,11 @@
     "send_schedules_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_list/messages/schedules_list"
+          "$ref": "#/channels/svc_team/messages/schedules_list"
         }
       ],
       "reply": {
@@ -11092,11 +9833,11 @@
     "send_schedules_pause_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_pause"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_pause/messages/schedules_pause"
+          "$ref": "#/channels/svc_team/messages/schedules_pause"
         }
       ],
       "reply": {
@@ -11113,11 +9854,11 @@
     "send_schedules_prepare_access_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_prepare_access"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_prepare_access/messages/schedules_prepare_access"
+          "$ref": "#/channels/svc_team/messages/schedules_prepare_access"
         }
       ],
       "reply": {
@@ -11134,11 +9875,11 @@
     "send_schedules_remove_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_remove/messages/schedules_remove"
+          "$ref": "#/channels/svc_team/messages/schedules_remove"
         }
       ],
       "reply": {
@@ -11155,11 +9896,11 @@
     "send_schedules_resume_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_resume"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_resume/messages/schedules_resume"
+          "$ref": "#/channels/svc_team/messages/schedules_resume"
         }
       ],
       "reply": {
@@ -11176,11 +9917,11 @@
     "send_schedules_set_worker_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_set_worker"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_set_worker/messages/schedules_set_worker"
+          "$ref": "#/channels/svc_team/messages/schedules_set_worker"
         }
       ],
       "reply": {
@@ -11197,11 +9938,11 @@
     "send_schedules_update_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_schedules_update"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_schedules_update/messages/schedules_update"
+          "$ref": "#/channels/svc_team/messages/schedules_update"
         }
       ],
       "reply": {
@@ -11229,11 +9970,11 @@
     "send_staged_changes_apply_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_staged_changes_apply"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_staged_changes_apply/messages/staged_changes_apply"
+          "$ref": "#/channels/svc_team/messages/staged_changes_apply"
         }
       ],
       "reply": {
@@ -11250,11 +9991,11 @@
     "send_steering_decide_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_steering_decide"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_steering_decide/messages/steering_decide"
+          "$ref": "#/channels/svc_team/messages/steering_decide"
         }
       ],
       "reply": {
@@ -11365,11 +10106,11 @@
     "send_task_probe_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_task_probe"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_task_probe/messages/task_probe"
+          "$ref": "#/channels/ctl_agent/messages/task_probe"
         }
       ],
       "reply": {
@@ -11568,11 +10309,11 @@
     "send_tasks_cancel_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_cancel"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_cancel/messages/tasks_cancel"
+          "$ref": "#/channels/svc_team/messages/tasks_cancel"
         }
       ],
       "reply": {
@@ -11589,11 +10330,11 @@
     "send_tasks_inventory_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_inventory"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_inventory/messages/tasks_inventory"
+          "$ref": "#/channels/svc_team/messages/tasks_inventory"
         }
       ],
       "reply": {
@@ -11610,11 +10351,11 @@
     "send_tasks_list_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_list"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_list/messages/tasks_list"
+          "$ref": "#/channels/ctl_agent/messages/tasks_list"
         }
       ],
       "reply": {
@@ -11631,11 +10372,11 @@
     "send_tasks_list_finished_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_list_finished"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_list_finished/messages/tasks_list_finished"
+          "$ref": "#/channels/ctl_agent/messages/tasks_list_finished"
         }
       ],
       "reply": {
@@ -11652,11 +10393,11 @@
     "send_tasks_list_finished_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_list_finished"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_list_finished/messages/tasks_list_finished"
+          "$ref": "#/channels/svc_team/messages/tasks_list_finished"
         }
       ],
       "reply": {
@@ -11673,11 +10414,11 @@
     "send_tasks_list_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_list"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_list/messages/tasks_list"
+          "$ref": "#/channels/svc_team/messages/tasks_list"
         }
       ],
       "reply": {
@@ -11694,11 +10435,11 @@
     "send_tasks_probe_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_probe"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_probe/messages/tasks_probe"
+          "$ref": "#/channels/svc_team/messages/tasks_probe"
         }
       ],
       "reply": {
@@ -11715,11 +10456,11 @@
     "send_tasks_progress_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_progress"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_progress/messages/tasks_progress"
+          "$ref": "#/channels/svc_team/messages/tasks_progress"
         }
       ],
       "reply": {
@@ -11736,11 +10477,11 @@
     "send_tasks_purge_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_purge"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_purge/messages/tasks_purge"
+          "$ref": "#/channels/ctl_agent/messages/tasks_purge"
         }
       ],
       "reply": {
@@ -11757,11 +10498,11 @@
     "send_tasks_purge_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_purge"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_purge/messages/tasks_purge"
+          "$ref": "#/channels/svc_team/messages/tasks_purge"
         }
       ],
       "reply": {
@@ -11778,11 +10519,11 @@
     "send_tasks_remove_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/ctl_agent_tasks_remove"
+        "$ref": "#/channels/ctl_agent"
       },
       "messages": [
         {
-          "$ref": "#/channels/ctl_agent_tasks_remove/messages/tasks_remove"
+          "$ref": "#/channels/ctl_agent/messages/tasks_remove"
         }
       ],
       "reply": {
@@ -11799,11 +10540,11 @@
     "send_tasks_remove_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_remove"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_remove/messages/tasks_remove"
+          "$ref": "#/channels/svc_team/messages/tasks_remove"
         }
       ],
       "reply": {
@@ -11820,11 +10561,11 @@
     "send_tasks_steer_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_tasks_steer"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_tasks_steer/messages/tasks_steer"
+          "$ref": "#/channels/svc_team/messages/tasks_steer"
         }
       ],
       "reply": {
@@ -11863,11 +10604,11 @@
     "send_topics_find_threads_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_topics_find_threads"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_topics_find_threads/messages/topics_find_threads"
+          "$ref": "#/channels/svc_team/messages/topics_find_threads"
         }
       ],
       "reply": {
@@ -11884,11 +10625,11 @@
     "send_topics_list_tags_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_topics_list_tags"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_topics_list_tags/messages/topics_list_tags"
+          "$ref": "#/channels/svc_team/messages/topics_list_tags"
         }
       ],
       "reply": {
@@ -11905,11 +10646,11 @@
     "send_topics_tag_thread_team_services": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/svc_team_topics_tag_thread"
+        "$ref": "#/channels/svc_team"
       },
       "messages": [
         {
-          "$ref": "#/channels/svc_team_topics_tag_thread/messages/topics_tag_thread"
+          "$ref": "#/channels/svc_team/messages/topics_tag_thread"
         }
       ],
       "reply": {

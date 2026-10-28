@@ -305,7 +305,10 @@ frame it checks, in the registry's order:
    audience's address (for a reply, receive its request; a kind's `senders_by_address`
    narrows some addresses). A frame from the receiver's own installation is addressed to
    its issuer's team: reaching another team needs a later agreement between teams. Another
-   installation's frame stays within its agreement.
+   installation's frame stays within its agreement, and comes from that team's lead agent
+   (its session's `agent_role` is `lead`) or from its team services speaking for no
+   agent: between teams only the leads talk. A host that runs the lead may run workers
+   too, so the session decides, not the host's roles.
    Contact with outside agents goes through the lead, in both directions. A frame whose
    sole sending role is `edge_adapter`, which speaks for outside agents, reaches only the
    lead's inbox or the team services: the receiving host states its agent's role
@@ -353,8 +356,8 @@ frame's issuer, lasts longer than its limit, or was not valid when the frame was
 
 **A run's token.** A worker that claimed a due schedule itself asks for its run's token
 with `run_context.sign`. Only a scheduler signs a run's token (plan, section 13A.10), so a
-scheduler answers it: the scheduler serves the team services' audience for this one
-address (`transport.yaml`), and like every role it receives only the kinds that list it.
+scheduler answers it: the scheduler serves the team services' audience at its own address,
+`svc.scheduler` (`transport.yaml`), so it never hears the team services' requests.
 The scheduler checks the claim against the frame's `issuer.agent`, which the agent's
 session confirms; a frame that names no agent is refused as `claim_not_held`. An `ok`
 answer carries the token, and its `system_work` is true exactly when the token names no
@@ -391,9 +394,20 @@ token is the destination team. The sender slot is the issuer's runtime, or
 `x-<issuer installation>` for a frame from another installation; runtime ids starting with
 `x-` or `_` are reserved. The address decides the audience target: `{agent}`, `{pool}` and
 `{edge}` addresses deliver to that target with the audience id in the address,
-`work.team` and `svc.team.*` to `team_services`, and `evt.*` events to the whole `team`.
-For the last two the audience id is the team id. Any receiver in the team accepts a frame
-for the whole `team`.
+`work.team`, `svc.team` and `svc.scheduler` to `team_services`, and `evt.*` events to the
+whole `team`. For the last two the audience id is the team id. Any receiver in the team
+accepts a frame for the whole `team`.
+
+**One address per receiving service.** Requests do not get a subject per operation. The
+team services answer every operation at `svc.team`, the scheduler its one operation at
+`svc.scheduler`, an agent's host every control operation at `ctl.agent.<agent>`, and the
+installation authority both installation operations at `_install.<sender>.svc`. The signed
+`kind` names the operation, and the receiver checks the issuer's roles against the kind's
+senders (`wrong_sender`), so NATS no longer refuses a kind a role may not send: the
+receiver does, after checking the signature. Every role that receives at a team-wide
+address receives every kind sent there, so no service hears requests it does not answer;
+the generator refuses a registry that breaks this. Counts per operation come from the
+receiving services, not from NATS subjects.
 
 Each reply is also a signed frame, with kind `<operation>.reply`. Its `subject` is the
 actual NATS reply inbox, `_INBOX.<requester runtime>.<one or more inbox tokens>`. Its
@@ -409,9 +423,9 @@ change the first consumer's filter. Generated permission templates
 (`generated/permissions/<role>.json`) give each host role:
 - **publish:** its kinds under its own id, `ua.v1.{team}.{self}.<address>`, to any
   receiver of its team; and for durable work it receives, only the consumer-info,
-  next-message and acknowledgement subjects of its own consumers;
-- **subscribe:** its own inbox, `_INBOX.{self}.>`, and the request and event subjects of
-  the agents it runs;
+  next-message and acknowledgement subjects of the consumers it may read;
+- **subscribe:** its own inbox, `_INBOX.{self}.>`, and the request and event subjects it
+  receives;
 - **allow_responses:** for roles that answer requests, one answer per request within the
   request class's expiry, instead of any grant on other runtimes' inboxes.
 
@@ -421,18 +435,38 @@ only when it is among the kind's receivers and serves that target (`audience_tar
 `transport.yaml`): team services receive a task's copy on `work.team`, not the agent and
 pool inboxes the same kind also uses.
 
+**Whole-team grants.** A lead or worker host may receive requests and queued work for any
+agent or pool of the teams it serves (`team_grants` in `transport.yaml`):
+- it subscribes only to the agents it runs, `ua.v1.<team>.*.ctl.agent.<agent>`, but its
+  permission is `ua.v1.{team}.*.ctl.agent.*`;
+- agent inboxes and worker pools live in a stream per team, `UA1_AGENT_WORK_<team>`, and
+  the host may read and acknowledge any consumer there. It pulls only from its own agents'
+  and pools' consumers.
+
+Placing or moving an agent therefore needs no new credential, work queued for an agent
+follows it to its new host, and a credential stays the same size however many agents its
+team has. The cost is isolation inside a team: a broken-into host could read or
+acknowledge work queued for its team's other agents. It still cannot sign as them, since
+every frame names its agent's session ("Who sent it"). Edge deliveries and the team
+services' inbox stay in `UA1_WORK`, read through grants on their exact consumers, so
+agent hosts reach neither.
+
 Before installing permissions, trusted membership code fills `{team}` with each team the
-host serves, `{self}` with its runtime id, and repeats each subject for every `{agent}`,
-`{pool}` or `{edge}` the host serves. These identity placeholders must never become
-wildcards. Clients use `_INBOX.<runtime>` as their inbox prefix. Workers cannot create or delete consumers, read streams, fetch from other
-consumers or acknowledge other consumers' work. The live conformance tests prove both
-allowed and refused operations.
+host serves, `{self}` with its runtime id, and repeats each subject for every `{edge}` the
+host serves; these placeholders never become wildcards. Clients use `_INBOX.<runtime>` as
+their inbox prefix. Hosts cannot create or delete consumers or streams, read streams
+directly, or reach another team's or another role's consumers. The topology owner creates
+a team's stream with the team. The live conformance tests prove both allowed and refused
+operations.
 
 `transport.yaml` states the broker settings too: the minimum NATS version and the
 server-wide JetStream settings under `server`, then each stream and consumer. A delivery
-class's `max_expiry_seconds` caps its kinds' `expiry_seconds`; its stream keeps messages
-at least that long, and replay records outlive the longest class expiry. The generator
-refuses settings that break these rules.
+class's `max_expiry_seconds` caps its kinds' `expiry_seconds`; its streams keep messages
+at least that long, and replay records outlive the longest class expiry. Each durable and
+dead-letter address is stored in exactly one of its class's streams, no stream stores
+requests or events, and stream subjects never overlap, which NATS would refuse. A stream
+named with `{team}` exists once per team and stores only that team's subjects. The
+generator refuses settings that break these rules.
 
 A receiver accepts a frame from `issued_at` (or a later `not_before`) through the earlier
 of `expires_at` and `issued_at + expiry_seconds` for its kind, with the end exclusive.
@@ -479,15 +513,16 @@ key, and for how long, is in "Stored outcomes".
 
 **Durable copies.** Some facts must reach two inboxes. The team services keep each
 task's custody record from claims, results, handbacks, progress and hold accounts,
-which go first to the task's requester (plan, section 13A.5). `UA1_WORK` is a work-queue
-stream: each message goes to one consumer and is deleted once acknowledged, and NATS
-refuses a second consumer whose filter overlaps the first. So the team services cannot
-read the requester's inbox; a kind's `copy_to` addresses get a second frame:
+which go first to the task's requester (plan, section 13A.5). The work streams are
+work-queue streams: each message goes to one consumer and is deleted once acknowledged,
+and NATS refuses a second consumer whose filter overlaps the first. So the team services
+cannot read the requester's inbox; a kind's `copy_to` addresses get a second frame:
 - the same kind and body, signed by the same sender, for the copy's audience target
   (`team_services` on `work.team`, audience id the team);
-- its own `message_id`, and its own key: the kind's parts plus the audience target. The
+- its own `message_id`, and its own key: the kind's parts plus the audience target. A
   stream drops a repeated `Nats-Msg-Id` on any of its subjects within its duplicate
-  window, so a copy with its original's key would be lost;
+  window, and an edge delivery and its copy share `UA1_WORK`, so a copy with its
+  original's key would be lost;
 - saved before publishing and retried unchanged, like any durable frame.
 
 The team services read it there, and no other role does: the scheduler serves the same
@@ -558,17 +593,22 @@ file. It uses public fixture signing keys and no operator credentials.
   the test checks that the server reports the same values back.
 - **What it proves:**
   - real publish, pull, acknowledgement and signed inbox replies;
+  - a host pulling and acknowledging any agent of its team with one credential, including
+    work queued before the agent moved to it;
+  - a relayed queue request sent straight to an agent by the gateway: NATS delivers it,
+    and the agent's host refuses it as `wrong_sender`;
   - a result and its team-services copy both stored and pulled by their own readers;
   - a scheduled run delivered to a worker pool, and its result to the person's gateway route;
   - a new host that holds only the pre-join permissions joins, and checks the authority's
     reply from its bootstrap records;
   - dead-letter raw copies and notices stored under the receiver's own id;
   - separate consumers for ids that an `_` separator would have merged;
-  - refusals of: an outside agent's adapter publishing into a worker pool; other
-    consumers' fetches and acknowledgements; consumer creation and deletion; stream
-    reads; publishing under another runtime's id, dead-letter copies included;
-    subscribing to another runtime's inbox, to stream subjects or to another agent's
-    requests; writing into another runtime's inbox except to answer a request once.
+  - refusals of: an outside agent's adapter publishing into a worker pool; fetches and
+    acknowledgements on another team's stream or the team services' consumer; consumer
+    creation and deletion; stream reads; publishing under another runtime's id,
+    dead-letter copies included; subscribing to another runtime's inbox, to stream
+    subjects, to the team services' requests or to another team's agents; writing into
+    another runtime's inbox except to answer a request once.
 
 A team `config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
 
@@ -587,12 +627,12 @@ A queued message can wait days, for example while a host is cut off.
 
 ## Installation traffic
 
-Joining an installation and renewing a certificate use addresses under `ua.v1._install.<sender>`. Their frames name the scope `_install` (`transport.yaml` `installation_scope`) as both the issuer's and the audience's team, and never an agent.
+Joining an installation and renewing a certificate use the address `ua.v1._install.<sender>.svc`. Their frames name the scope `_install` (`transport.yaml` `installation_scope`) as both the issuer's and the audience's team, and never an agent.
 
 **Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it (authorization plan 12.2). The bundle holds:
 - the installation's authority keys;
 - the certificates of the installation authority's hosts, and the installation's revocations record, so the host can check the authority's replies before it has a certificate of its own;
-- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`. With it the host can publish its own join request and read its own reply inbox, and nothing else.
+- the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`. With it the host can publish its own installation requests and read its own reply inbox, and nothing else. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
 
 **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. A receiver checks:
 - the join comes from the receiver's own installation and names, as its issuer's key, the key its body presents, which is not an authority key (`unknown_key`);
@@ -725,10 +765,10 @@ token. An operation both may send lists both bindings, each with the roles that 
 
 **Relays to an agent's host.** The holder answers for its own queue through the team
 services (plan, section 13A.4). The gateway sends `tasks.list`, `tasks.list_finished`,
-`tasks.remove` and `tasks.purge` to the team services (`svc.team.tasks.<operation>`), and
-only the team services pass them on to the agent's host
-(`ctl.agent.<agent>.tasks.<operation>`, `senders_by_address`). `debug.dump` takes the same
-way to `ctl.agent.<agent>.debug.dump`: today the lead applies it in its own process, and
+`tasks.remove` and `tasks.purge` to the team services (`svc.team`), and only the team
+services pass them on to the agent's host (`ctl.agent.<agent>`, `senders_by_address`); the
+agent's host refuses them straight from the gateway as `wrong_sender`. `debug.dump` takes
+the same way to `ctl.agent.<agent>`: today the lead applies it in its own process, and
 the relay lets the team services move to another host without a new message (plan,
 section 11A.10). A relayed frame carries the gateway's command token unchanged, with the
 same `request_id`. The agent's host verifies the person from the gateway's signature: no

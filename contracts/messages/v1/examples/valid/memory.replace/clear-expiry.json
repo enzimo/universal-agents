@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.memory.replace",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
     "request_id": "cmd_memory_replace_clear_expiry"
   },
   "body_digest": "Ezp6SYS3RLBGD-VZKdjlCXAlfrcht9Pu3nSoXajCbc4",
-  "signature": "vWnfaSJ_DSJCmK5tqqZcFNVubPZMKAZFFvlhrgdJyQcbHxFp4dM1x9WtfwuJYcsbLiJYdgoZTrqwWsCl0raKBQ"
+  "signature": "cvFjToWgMX5WW0c-AZ_f71i_sLjoEygNzwyGuqbMjuqn60ZokobJJFgbGns8vNLLcRIDTmV6fMrFjVsJ2cY8AQ"
 }

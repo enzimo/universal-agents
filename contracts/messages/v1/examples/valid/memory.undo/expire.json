@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.memory.undo",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -49,5 +49,5 @@
     "event_id": "mem_event_expire_3"
   },
   "body_digest": "7wH6HlqmxAG5Tn0K_6g_OMlxxjGL0fA69PfAwwoZQ4s",
-  "signature": "8LDgWiyhMNySv6L4MhAyQlYCRhG595DA4c4E0yV7Da6HOvVbnoTgRViAL2UzdyzjFgSsclJlKTQx4ZvqkPieBw"
+  "signature": "FcWGFQJ9d2JgIaBFT_iL2YZuZN_gczR0hrBbR3rFpA6YS8Wl4HQNELh3gCXmTYF4sqS1dzGU5eaX17hSocP8Aw"
 }

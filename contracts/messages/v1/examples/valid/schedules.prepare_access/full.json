@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.schedules.prepare_access",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -63,5 +63,5 @@
     "request_id": "req_schedules_prepare_access_full"
   },
   "body_digest": "0Uy8c9FrN-n0UMEkrjPIosqjpfsDEaVKFIGeuL_b3_E",
-  "signature": "_EWmRnEqYQvbvlI2lWDzWW_X7Q6XtJQGgI1ttnzYif4ZxY4WBOAQPwV1bauTWhpSqReJB-Mh_Lq_Y0PtITDVDA"
+  "signature": "Uz-fhW2Zky2Ib2D7JXrETO9ChqeZlOjMDCYoSRSd9JiwIdYKwWYUsKCErOE0XAERbOHLdZpDo99g9LZj9H7_CA"
 }

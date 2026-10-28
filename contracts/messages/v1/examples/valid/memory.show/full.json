@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.memory.show",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -49,5 +49,5 @@
     "memory_id": 3
   },
   "body_digest": "6I7cfTyXzAsXwBY2jI_yaWUtXk5dSUDI9PmYJqXnpbw",
-  "signature": "xNVBbeOmKDFhsJtFAkoLAv1QgGV6qwTIRCfw2z8hSWeXlZyEMYOzecG5Ix47bXvVn0-plLSa56WbEbArCUUXAA"
+  "signature": "PCasnXtgY0-TQ8eKUlyOrnNWjbNr-BYBjOojMQDtDwv4XSJ94dS_uhwhLQsDmeVwZnSlCMwcaMA1N0XOnVoEAw"
 }

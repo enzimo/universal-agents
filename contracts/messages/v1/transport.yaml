@@ -4,7 +4,7 @@
 # the sender slot is the issuer's runtime id, or x-<installation> for a frame from
 # another installation. Replies use the requester's _INBOX.<runtime>.<token(s)>
 # subject, signed in the reply frame. Pull and acknowledgement API permissions name
-# exact consumers.
+# exact consumers, or every consumer of the team's agent work stream (team_grants).
 # Edit by hand, then run scripts/export_message_contract.py.
 
 subject_prefix: ua.v1.{team}.{sender}
@@ -12,8 +12,21 @@ reply_inbox_prefix: _INBOX.{runtime}
 peer_sender_slot: x-{installation}
 # Installation-wide traffic (joining, renewing a certificate) names this scope where other
 # frames name a team: as the issuer's and the audience's team, and as the subject's team
-# token (ua.v1._install.<sender>.svc.<operation>). Team ids cannot start with _.
+# token (ua.v1._install.<sender>.svc). Team ids cannot start with _.
 installation_scope: _install
+
+# One request address serves each receiving service's operations (svc.team, svc.scheduler,
+# ctl.agent.{agent}, _install.{sender}.svc): the frame's signed kind names the operation,
+# and the receiver checks that one of the issuer's roles may send it (registry senders,
+# wrong_sender). Every role that receives at an address receives every kind sent there,
+# so no role hears requests it does not answer.
+
+# Audience targets whose grants cover the whole team. A host may receive requests and
+# queued work for any agent or pool of the teams it serves, so placing or moving an agent
+# needs no new credential, and credentials stay the same size however many agents a
+# team has. The signed audience decides which agent a frame is for. Edges keep grants
+# for the ids each host serves.
+team_grants: [agent, pool]
 
 # Which host roles serve each audience target. A role receives a kind's address, and
 # gets its subscription or consumer grants, only when it is one of the kind's receivers
@@ -22,7 +35,7 @@ audience_targets:
   agent: [lead_host, worker_host]
   pool: [lead_host, worker_host]
   edge: [gateway, edge_adapter]   # an edge is a gateway route or an outside-agent adapter
-  team_services: [team_services, scheduler]   # the scheduler answers only run_context.sign, which signs a run's token
+  team_services: [team_services, scheduler]   # the scheduler answers only run_context.sign, which signs a run's token, at svc.scheduler
   team: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
   installation_service: [installation_authority]
 
@@ -46,7 +59,7 @@ classes:
   durable:
     description: at least once; the sender records before publishing, the receiver admits durably before acknowledging
     between_installations: true   # the only class another installation may send: NATS forgets reply routes between accounts
-    stream: UA1_WORK
+    streams: ["UA1_AGENT_WORK_{team}", UA1_WORK]
     addresses:
       - work.agent.{agent}
       - work.pool.{pool}
@@ -57,10 +70,11 @@ classes:
     description: answered at once or "no responders"; changes carry an idempotency key, and the receiver stores the final outcome with the change before replying, except outcomes that ask for a retry (README, "Stored outcomes")
     between_installations: false
     addresses:
-      - svc.team.{operation}
-      - ctl.agent.{agent}.{operation}
+      - svc.team
+      - svc.scheduler
+      - ctl.agent.{agent}
     installation_addresses:
-      - _install.{sender}.svc.{operation}
+      - _install.{sender}.svc
     max_expiry_seconds: 30
   event:
     description: at most once; never the only way something important happens
@@ -71,18 +85,32 @@ classes:
   dead_letter:
     description: set-aside copies and notices, under the receiving runtime's id
     between_installations: false
-    stream: UA1_DLQ
+    streams: [UA1_DLQ]
     addresses:
       - dlq.raw.{copy}
       - dlq.notice.{copy}
     max_expiry_seconds: 2592000
 
+# A stream whose name holds {team} exists once per team; the topology owner creates it with
+# the team. Each durable or dead-letter address is stored in exactly one of its class's
+# streams.
 streams:
-  UA1_WORK:
-    subjects: [ua.v1.*.*.work.>]
+  UA1_AGENT_WORK_{team}:
+    # Agent inboxes and worker pools only, so a grant on every consumer of this stream
+    # (team_grants) reaches no edge's or team services' work.
+    subjects: ["ua.v1.{team}.*.work.agent.*", "ua.v1.{team}.*.work.pool.*"]
     retention: workqueue
     storage: file
     max_age_seconds: 604860     # the durable class's longest expiry plus a minute (more than the clock tolerance): no receiver could still accept older work
+    duplicate_window_seconds: 120
+    max_consumers: 4096         # agents and pools of one team; NATS 2.15 defaults to 1,000 per stream
+    max_message_bytes: 262144
+  UA1_WORK:
+    # Edge deliveries and the team services' inbox, read through exact consumer grants.
+    subjects: [ua.v1.*.*.work.edge.*, ua.v1.*.*.work.team]
+    retention: workqueue
+    storage: file
+    max_age_seconds: 604860     # as UA1_AGENT_WORK_{team}
     duplicate_window_seconds: 120
     max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 262144
@@ -99,7 +127,7 @@ streams:
 # first consumer's filter when the second is created.
 consumers:
   agent_inbox:
-    stream: UA1_WORK
+    stream: UA1_AGENT_WORK_{team}
     name: agent~{team}~{agent}
     filter: ua.v1.{team}.*.work.agent.{agent}
     mode: pull
@@ -107,7 +135,7 @@ consumers:
     ack_wait_seconds: 60
     max_deliveries: 20
   pool:
-    stream: UA1_WORK
+    stream: UA1_AGENT_WORK_{team}
     name: pool~{team}~{pool}
     filter: ua.v1.{team}.*.work.pool.{pool}
     mode: pull

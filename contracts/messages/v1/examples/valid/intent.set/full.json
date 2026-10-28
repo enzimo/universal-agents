@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.intent.set",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -52,5 +52,5 @@
     "text": "Example text"
   },
   "body_digest": "XP7DopC897zLTUCpER1nC9zN1GWBbY2IODtT5iY89gA",
-  "signature": "tT4KAO4GrkFWWqf6U7j8Gpg104UHDr6C3J1NE4lKQ6hGvhHFBCgvGDJwkuyCssW54DIF7MDnwz0jAyTrMWqwDA"
+  "signature": "eWX0PDmPUjrlrFE-gC7AmGnk0l_M8Re91U7XljuhVmzJYx4ZTk6ez05XLQX7PWzBOQY4uTKVAgNcgKjm2omYCA"
 }

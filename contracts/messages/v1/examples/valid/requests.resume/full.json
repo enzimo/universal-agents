@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.requests.resume",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
     "reason": "Example reason"
   },
   "body_digest": "uUXOLfnWCLa0-4c2nObDmw3JN1pwLfmmrcsnGQMIDKY",
-  "signature": "3t1VBvtujm8SCz70AzuXlIMSf0YcgSITlHOaZS6QqfnMqNMs0HafhVd9BJdbaG7Miq0YMAlbeOVUaBV8xSEQAA"
+  "signature": "6ZnMX3y6HnO4mkyyjvJZwMKsuJ87YWlhat65E9cOi0ZubtggB5FFxIp50M12ixVhaDpJqL01FRvAfKaH5L6BDQ"
 }

@@ -1,0 +1,24 @@
+{
+  "description": "A worker agent on the other installation's lead host stops a task here. Between teams only the lead or the team services talk.",
+  "refusal": "wrong_sender",
+  "at": "/issuer",
+  "base": "task.stop/from-peer.json",
+  "changes": [
+    {
+      "set": "/issuer/agent",
+      "to": "analyst"
+    },
+    {
+      "set": "/issuer/session",
+      "to": "s-peer-analyst-1"
+    }
+  ],
+  "context": {
+    "trust": {
+      "add": [
+        "extra/peer-worker-session.json"
+      ]
+    }
+  },
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.stop\", \"message_id\": \"01928f3a-7b2c-7006-8000-000000000006\", \"idempotency_key\": \"task.stop:ufLtU0itspt0fZanqXG9j3Np-UeuY5ckwcv6OodPzA0\", \"issuer\": {\"installation\": \"install_peer\", \"team\": \"team_peer\", \"runtime\": \"peer-lead-host-1\", \"agent\": \"analyst\", \"session\": \"s-peer-analyst-1\", \"membership_epoch\": 1, \"revocation_epoch\": 0, \"key_id\": \"test-peer-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.x-install_peer.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_7f3a\", \"stop_id\": \"stop_4\", \"reason\": \"The other installation's request was cancelled.\", \"cascade_to_subtasks\": true}, \"body_digest\": \"AvEjtfMtAitYnd4v3gsaOVjKxpOlyjZg2LgXG1L0ZgE\", \"signature\": \"QT5Di4hZ9QIq_f4KaPhMzox0VcqhRnoUnZWmBXRuF8BkjslU3r_fGgrghECI630DwXspYBq5FDaYfEiuLtQCBA\"}"
+}

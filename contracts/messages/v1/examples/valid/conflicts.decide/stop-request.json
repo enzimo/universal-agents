@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.conflicts.decide",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -53,5 +53,5 @@
     "request_id": "conflict_decision_4"
   },
   "body_digest": "z1N9oc4_lao42YDBM2j5Xk9ZlV7a4n-HVIy7blP8Ybc",
-  "signature": "biclFBW3JF5bYOXuNSHzDLvveNO-yJw6ZmtEcUVwWSXEEQ82H4Sc16WvKwrT8loFDOf2usyh0v2uZWsEQG4oAg"
+  "signature": "ipIGGsCfk117jVhZ7C0GLvlx173UPcXeEJmDkZ_frKykx48yNp16TDVeaeNmbvBpFrmNTZ7weG-piaEeCl5LBg"
 }

@@ -18,7 +18,7 @@
     "id": "researcher-2",
     "runtime": "worker-host-1"
   },
-  "subject": "ua.v1.team_example.team-services-1.ctl.agent.researcher-2.debug.dump",
+  "subject": "ua.v1.team_example.team-services-1.ctl.agent.researcher-2",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
     "agent": "researcher-2"
   },
   "body_digest": "zBn7tUMXA_Bs6vshC6OXMBBp0exrjgnNSg4daX8zYkM",
-  "signature": "g3nu-0p33HOVOQC4jtrImdnyLUEQ5y2Bt98RWgihHHe4zO3wNpJ8Akd2OTL4EYaP2JNu7wvKAWZkj_sJUdwjDg"
+  "signature": "73ZWAFk_AN9CKMJGwVi0Slbcf4NqRend1fc8Om8FGb5Sl2u0Fs3n7tfz3wYl0DkpSz52cwKcfYibaUQCc0n4Ag"
 }

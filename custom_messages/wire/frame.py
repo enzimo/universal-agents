@@ -83,8 +83,9 @@ DECISION_ISSUER_ROLE = "team_services"
 DECISION_TOKEN_AT = "/body/decision_token"
 # The host role that speaks for outside agents (A2A); its frames reach only the lead.
 OUTSIDE_ROLE = "edge_adapter"
-# Who may reach an outside agent: the lead agent, or the team services without an agent.
-OUTSIDE_CONTACT_ROLE, OUTSIDE_CONTACT_HOST = "lead", "team_services"
+# Who speaks for a team beyond it, to an outside agent or another installation: the lead
+# agent, or the team services without an agent.
+LEAD_ROLE, SERVICES_ROLE = "lead", "team_services"
 # Audience targets an address delivers to as a whole team (audience id is the team id).
 TEAM_WIDE_TARGETS = frozenset({"team", "team_services"})
 # NATS headers that copy frame fields (README, "NATS headers").
@@ -95,7 +96,7 @@ DURABLE = "durable"
 QUEUED_CLASSES = frozenset({"durable", "dead_letter"})
 # Subjects start with this root, then the team token (transport.yaml subject_prefix).
 # Installation-wide traffic (joining, renewing) names INSTALLATION_SCOPE as its team, and
-# its addresses (_install.{sender}.svc.<operation>) follow the root directly.
+# its address (_install.{sender}.svc) follows the root directly.
 SUBJECT_ROOT = SUBJECT_PREFIX.split("{team}", 1)[0]
 # A join is signed by the key it presents, since its host has no certificate yet.
 PROOF_OF_POSSESSION = "proof_of_possession"
@@ -520,6 +521,16 @@ def _verify_sender(frame: Frame, certificate: HostCertificate, session: Optional
         raise FrameRefused("wrong_sender", f"the agreement with {agreement.peer} does not allow this team", at="/audience/team")
     if not agreement.covers(issued_at):
         raise FrameRefused("wrong_sender", "the agreement did not cover the frame's issue time", at="/issued_at")
+    if not _speaks_for_team(roles, session):
+        raise FrameRefused("wrong_sender", "between teams only the lead or the team services talk", at="/issuer")
+
+
+def _speaks_for_team(roles: frozenset[str] | set[str], session: Optional[AgentSession]) -> bool:
+    """Whether the frame comes from the lead agent, or from the team services speaking for no agent."""
+
+    lead = session is not None and session.agent_role == LEAD_ROLE
+    services = session is None and SERVICES_ROLE in roles
+    return lead or services
 
 
 def _verify_outside_boundary(frame: Frame, roles: frozenset[str] | set[str], session: Optional[AgentSession], receiver: Receiver) -> None:
@@ -531,13 +542,10 @@ def _verify_outside_boundary(frame: Frame, roles: frozenset[str] | set[str], ses
     """
 
     if roles == {OUTSIDE_ROLE} and not (frame.audience.target == "team_services"
-                                       or (frame.audience.target == "agent" and receiver.agent_role == OUTSIDE_CONTACT_ROLE)):
+                                       or (frame.audience.target == "agent" and receiver.agent_role == LEAD_ROLE)):
         raise FrameRefused("wrong_sender", "an outside agent reaches only the team's lead", at="/audience/id")
-    if receiver.outside:
-        lead = session is not None and session.agent_role == OUTSIDE_CONTACT_ROLE
-        services = session is None and OUTSIDE_CONTACT_HOST in roles
-        if not (lead or services):
-            raise FrameRefused("wrong_sender", "only the lead or the team services contact an outside agent", at="/issuer")
+    if receiver.outside and not _speaks_for_team(roles, session):
+        raise FrameRefused("wrong_sender", "only the lead or the team services contact an outside agent", at="/issuer")
 
 
 def _verify_audience(frame: Frame, receiver: Receiver) -> None:

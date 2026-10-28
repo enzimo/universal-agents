@@ -17,7 +17,7 @@
     "target": "installation_service",
     "id": "authority"
   },
-  "subject": "ua.v1._install.lead-host-1.svc.host.renew",
+  "subject": "ua.v1._install.lead-host-1.svc",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -32,5 +32,5 @@
     }
   },
   "body_digest": "PAECrdGqQ1Ms_rIO2ok3D_OxMx1wNAnbhDtq-Hr-rXQ",
-  "signature": "AHjC3V16H9bA7xpDxyj1bU0nhILpsaceKcJgbrvtJ3xu3fwaC-bBQJJSKo0dyYkfEiydXb7JxZnWxaOt9pimAA"
+  "signature": "WRhc1H-7_NFgemlt6uRSVa-TDW1cfu9YeQdFIWcbgU6mZuhBnAAuNY4jy2JrWC7aWeZby9U9pSiM_QF0FM9ZAw"
 }

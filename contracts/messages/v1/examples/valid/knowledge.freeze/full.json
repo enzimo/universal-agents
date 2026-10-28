@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.freeze",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -52,5 +52,5 @@
     "minutes": 90
   },
   "body_digest": "H7Y61Rfz_aift8pBa0Ses9QoQx7ZLUxPKKmyLfSJJRs",
-  "signature": "ISefyeWcXzanoHXysH1yTp_9R5GFv2NmGU4tA8Hh2htZTr-EKjbB-vlKLj_fIFi-tlrNTiOV6qjGT0TVFIPHBQ"
+  "signature": "k2fQtJyc7jalJz8PptLKxS721uEqV7cPBGGu3coUGwgElBajzro_UPfnQkFB3lnVFnOAVJKDBx2lBdqFgiBqCw"
 }

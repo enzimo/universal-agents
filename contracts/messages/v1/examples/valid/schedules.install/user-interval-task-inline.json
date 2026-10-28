@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.schedules.install",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -95,5 +95,5 @@
     }
   },
   "body_digest": "4vCBz0HS5nT9cr4GcJz9StTHHiB1O9I0BQIKdKznUcM",
-  "signature": "MMCNjcp9k9UdY-JD_z4GYydQH5S7e6I2CaECcVCS2L-RJvChsyPNvkx8HZYvC9NcN6HjOVb8RWDV0u83OOOnAw"
+  "signature": "4qKZgopurP8LSWatoqh818tpAN-h3M8rS47R6sK7lQt8E45CEqSstSxMJA9HIMAoDQ1QWdLIHN-wa0WSNHCXAA"
 }

@@ -88,17 +88,18 @@ PORTABLE_ESCAPES = set(".-\\[](){}*+?|^$/")
 # with a character outside this set.
 ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # Address placeholders that name the receiver. A sender may address any receiver in
-# its team; a receiver reads only its own, so subscriptions and consumer grants keep
-# them as placeholders for membership code to fill per assigned id.
+# its team. A host receives for any receiver of its team whose target transport.yaml
+# lists under team_grants; for the others, subscriptions and consumer grants keep the
+# placeholder for membership code to fill per assigned id.
 RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
 # Other address placeholders: a dead-letter copy id (the body's copy_id), and the
-# sender of an installation address (<installation scope>.{sender}.svc.<op>).
+# sender of an installation address (<installation scope>.{sender}.svc).
 COPY_PLACEHOLDER, SENDER_PLACEHOLDER = "copy", "sender"
 # Hosts that send frames for agents; a kind no agent sends is not a topology check.
 AGENT_HOSTS = {"lead_host", "worker_host"}
 # Audience targets that get durable copies, and the roles that read them there: the
 # team services record custody facts. Another role serving the same target (the
-# scheduler answers run_context.sign at svc.team) never reads copies.
+# scheduler answers run_context.sign at svc.scheduler) never reads copies.
 COPY_READERS = {"team_services": ["team_services"]}
 # The token type bound to one command; its binding always names the command id (`at`).
 COMMAND_BINDING = "command"
@@ -346,6 +347,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         check_wake_alternatives(where, entry, schemas)
         check_reply_errors(where, entry, schemas)
         check_covered_change(where, entry, registry, schemas)
+    check_shared_addresses(registry, transport)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
         # Generated model and adapter names come from the kind name; two kinds
@@ -545,6 +547,27 @@ def check_entry_receivers(where: str, entry: dict[str, Any], transport: dict[str
             raise ContractError(f"{where}: senders_by_address narrows the senders of one of its own addresses")
 
 
+def check_shared_addresses(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """Every role that receives at a team-wide address receives every kind sent there.
+
+    Operations share their receiving service's address and the kind names the
+    operation, so a role listening at an address hears every kind on it; one that
+    did not answer some of them could still reply first, or read requests meant for
+    another service. An agent, pool or edge address names its receiver, and only the
+    host that runs it listens there.
+    """
+
+    receivers: dict[str, set[str]] = {}
+    for name, entry in sorted(registry["kinds"].items()):
+        for address in entry_addresses(entry):
+            if audience_target(address) in RECEIVER_PLACEHOLDERS:
+                continue
+            roles = set(receiving_roles(entry, address, transport))
+            if receivers.setdefault(address, roles) != roles:
+                raise ContractError(f"registry.yaml kinds.{name}: {address} is received by {sorted(receivers[address])}, "
+                                    f"so every kind sent there has those receivers, not {sorted(roles)}")
+
+
 def own_addresses(entry: dict[str, Any]) -> list[str]:
     """The addresses a kind is delivered to as itself, without its copies."""
 
@@ -554,7 +577,7 @@ def own_addresses(entry: dict[str, Any]) -> list[str]:
 def full_subject(address: str, owner: str) -> str:
     """The NATS subject of an address: team addresses sit under ua.v1.<team>.<sender>, installation ones under ua.v1.
 
-    An installation address already names its scope and sender (_install.{sender}.svc.<op>).
+    An installation address already names its scope and sender (_install.{sender}.svc).
     """
 
     if address.startswith(INSTALLATION_ADDRESS):
@@ -925,7 +948,7 @@ def audience_target(address: str) -> str:
             return placeholder
     if address.startswith("evt."):
         return "team"
-    if address == "work.team" or address.startswith("svc.team."):
+    if address in {"work.team", "svc.team", "svc.scheduler"}:
         return "team_services"
     if address.startswith("dlq."):
         return "team_services"
@@ -983,14 +1006,147 @@ def check_transport(transport: dict[str, Any]) -> None:
     for name, spec in transport["classes"].items():
         if not isinstance(spec.get("between_installations"), bool):
             raise ContractError(f"transport.yaml: class {name} states between_installations")
-        if "stream" not in spec:
-            continue
-        stream = transport["streams"].get(spec["stream"])
+        check_class_streams(name, spec, transport, skew)
+    check_stream_subjects(transport)
+    check_team_grants(transport)
+
+
+def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
+    """A queued class's streams exist and keep its messages for its longest expiry plus the clock tolerance."""
+
+    for stream_name in spec.get("streams", []):
+        stream = transport["streams"].get(stream_name)
         if stream is None:
-            raise ContractError(f"transport.yaml: class {name} names an unknown stream {spec['stream']}")
+            raise ContractError(f"transport.yaml: class {name} names an unknown stream {stream_name}")
         if stream.get("max_age_seconds", 0) < spec["max_expiry_seconds"] + skew:
-            raise ContractError(f"transport.yaml: stream {spec['stream']} must keep messages for class {name}'s "
+            raise ContractError(f"transport.yaml: stream {stream_name} must keep messages for class {name}'s "
                                 "max_expiry_seconds plus the clock tolerance")
+
+
+def subject_tokens(subject: str) -> list[str]:
+    """A subject template's tokens; a {placeholder} stands for one token, like *."""
+
+    return [token if not re.fullmatch(r"\{[a-z_]+\}", token) else "*" for token in subject.split(".")]
+
+
+def subject_covers(pattern: str, subject: str) -> bool:
+    """Whether every subject the template ``subject`` stands for matches ``pattern``.
+
+    A placeholder in the pattern matches only the same placeholder, so a stream for
+    one team covers that team's addresses, not every team's.
+    """
+
+    want, have = pattern.split("."), subject.split(".")
+    for index, token in enumerate(want):
+        if token == ">":
+            return len(have) > index
+        if index >= len(have) or have[index] == ">" or not (token == "*" or token == have[index]):
+            return False
+    return len(want) == len(have)
+
+
+def subjects_overlap(first: str, second: str) -> bool:
+    """Whether some subject matches both templates (NATS refuses streams whose subjects overlap)."""
+
+    left, right = subject_tokens(first), subject_tokens(second)
+    for index in range(max(len(left), len(right))):
+        if index >= len(left) or index >= len(right):
+            return False
+        if ">" in (left[index], right[index]):
+            return True
+        if "*" not in (left[index], right[index]) and left[index] != right[index]:
+            return False
+    return True
+
+
+def check_stream_subjects(transport: dict[str, Any]) -> None:
+    """Every queued address is stored in exactly one stream of its class, and no stream stores other traffic."""
+
+    for name, spec in transport["streams"].items():
+        check_stream_name(name, spec)
+    patterns = [(name, subject) for name, spec in transport["streams"].items() for subject in spec["subjects"]]
+    check_streams_disjoint(patterns)
+    for class_name, spec in transport["classes"].items():
+        for address in class_addresses(transport, class_name):
+            check_address_storage(class_name, spec.get("streams"), address, patterns)
+    for key, consumer in transport["consumers"].items():
+        stream = transport["streams"].get(consumer["stream"])
+        if stream is None or not any(subject_covers(pattern, consumer["filter"]) for pattern in stream["subjects"]):
+            raise ContractError(f"transport.yaml consumers.{key}: its stream stores its filter's subjects")
+
+
+def check_streams_disjoint(patterns: list[tuple[str, str]]) -> None:
+    """No two streams store one subject, which NATS refuses.
+
+    One team's instance of a {team} stream is compared with the other streams; two
+    teams' instances cannot overlap, since each subject names its team.
+    """
+
+    for index, (name, subject) in enumerate(patterns):
+        overlapping = [other for other, pattern in patterns[index + 1:] if other != name and subjects_overlap(subject, pattern)]
+        if overlapping:
+            raise ContractError(f"transport.yaml: streams {name} and {overlapping[0]} overlap, which NATS refuses")
+
+
+def check_stream_name(name: str, spec: dict[str, Any]) -> None:
+    """A stream name may hold {team}; that stream exists once per team and stores only that team's subjects."""
+
+    placeholders = set(re.findall(r"\{([a-z_]+)\}", name))
+    if placeholders - {"team"}:
+        raise ContractError(f"transport.yaml: stream {name} may name only {{team}}")
+    team_token = f"{SUBJECT_ROOT}{{team}}."
+    if placeholders and not all(subject.startswith(team_token) for subject in spec["subjects"]):
+        raise ContractError(f"transport.yaml: each subject of stream {name} starts {team_token}")
+    if re.search(r"[\s.*>/\\]", name.replace("{team}", "")):
+        raise ContractError(f"transport.yaml: stream {name}: NATS stream names cannot hold whitespace, ., *, >, / or \\")
+
+
+def check_address_storage(class_name: str, streams: list[str] | None, address: str, patterns: list[tuple[str, str]]) -> None:
+    """A queued class's address is stored in exactly one of its streams; any other class's in none."""
+
+    subject = full_subject(address, "*")
+    storing = [stream for stream, pattern in patterns if subjects_overlap(pattern, subject)]
+    if streams is None:
+        if storing:
+            raise ContractError(f"transport.yaml: stream {storing[0]} stores {class_name} traffic ({address})")
+        return
+    covering = [stream for stream, pattern in patterns if subject_covers(pattern, subject)]
+    if len(covering) != 1 or storing != covering or covering[0] not in streams:
+        raise ContractError(f"transport.yaml: {address} is stored in exactly one of the {class_name} class's streams")
+
+
+def granted_target(consumer: dict[str, Any], transport: dict[str, Any]) -> str | None:
+    """The team-granted audience target whose work a consumer delivers, if any."""
+
+    placeholders = set(re.findall(r"\{([a-z_]+)\}", consumer["filter"])) & set(RECEIVER_PLACEHOLDERS)
+    granted = placeholders & set(transport["team_grants"])
+    return next(iter(granted), None)
+
+
+def check_team_grants(transport: dict[str, Any]) -> None:
+    """A grant on every consumer of a stream reaches only team-granted work of one team.
+
+    Team-granted consumers live in streams named with {team}, beside no other consumers,
+    and the targets sharing one stream are served by the same roles; otherwise a host
+    could read another team's work, an edge's or the team services', or work its role
+    does not serve.
+    """
+
+    grants = transport.get("team_grants")
+    if not isinstance(grants, list) or not set(grants) <= set(RECEIVER_PLACEHOLDERS) or len(set(grants)) != len(grants):
+        raise ContractError(f"transport.yaml: team_grants lists distinct targets among {list(RECEIVER_PLACEHOLDERS)}")
+    by_stream: dict[str, set[str | None]] = {}
+    for consumer in transport["consumers"].values():
+        by_stream.setdefault(consumer["stream"], set()).add(granted_target(consumer, transport))
+    for stream, targets in by_stream.items():
+        if targets == {None}:
+            continue
+        if None in targets:
+            raise ContractError(f"transport.yaml: stream {stream} holds team-granted consumers beside others")
+        if "{team}" not in stream:
+            raise ContractError(f"transport.yaml: stream {stream} holds team-granted consumers and is named with {{team}}")
+        if len({tuple(transport["audience_targets"][target]) for target in targets}) != 1:
+            raise ContractError(f"transport.yaml: the targets read from stream {stream} are served by the same roles")
 
 
 def class_addresses(transport: dict[str, Any], delivery_class: str) -> list[str]:
@@ -999,9 +1155,9 @@ def class_addresses(transport: dict[str, Any], delivery_class: str) -> list[str]
 
 
 def address_matches(address: str, template: str, kind: str) -> bool:
-    operation = kind.split(".", 1)[1] if kind.startswith("agent.") else kind
-    expected = template.replace("{operation}", operation).replace("{event}", kind.replace(".", "_"))
-    return address == expected
+    """Whether a kind's address is the class template; an event's names the event, an operation's only its family."""
+
+    return address == template.replace("{event}", kind.replace(".", "_"))
 
 
 # -- generated JSON ------------------------------------------------------------------------------
@@ -1024,12 +1180,20 @@ def publication_addresses(entry: dict[str, Any], transport: dict[str, Any]) -> l
     return addresses
 
 
-def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
-    """Pull, inspect and acknowledge only the consumers for this delivery address.
+def receive_pattern(address: str, transport: dict[str, Any]) -> str:
+    """The address a receiving host is granted: any receiver of its team for team-granted targets."""
 
-    Consumer names keep their {team} and receiver placeholders; membership code
-    fills them with the host's own team and each id it serves, never with
-    wildcards. Creating consumers stays with the topology owner.
+    return re.sub(r"\{(" + "|".join(transport["team_grants"]) + r")\}", "*", address)
+
+
+def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
+    """Pull, inspect and acknowledge the consumers for this delivery address.
+
+    A team-granted target's consumers fill a stream of their own per team, so the
+    grant covers every consumer of the host's team's stream. Other consumer names keep
+    their {team} and receiver placeholders; membership code fills them with the host's
+    own team and each id it serves, never with wildcards. Creating consumers stays
+    with the topology owner.
     """
 
     expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address
@@ -1038,11 +1202,12 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
         raise ContractError(f"no pull consumer for {address}")
     subjects = set()
     for consumer in matches:
-        stream, name = consumer["stream"], consumer["name"]
+        stream = consumer["stream"]
+        name = "*" if granted_target(consumer, transport) else consumer["name"]
         subjects.update({
             f"$JS.API.CONSUMER.INFO.{stream}.{name}",
             f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
-            f"$JS.ACK.{stream}.{name}.>",
+            f"$JS.ACK.{stream}.>" if name == "*" else f"$JS.ACK.{stream}.{name}.>",
         })
     return subjects
 
@@ -1050,13 +1215,13 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: the NATS permissions it gets, as templates.
 
-    {team} is each team the host serves and {self} its runtime id. {agent},
-    {pool} and {edge} are each id the host serves: membership code repeats a
-    subject once per id and never turns one into a wildcard, so a host receives
-    only its own agents' requests and work. A host publishes only under its own
-    id. A receiver of requests answers each one once, within the class's
-    expiry, through NATS allow_responses; it holds no grant on other runtimes'
-    inboxes.
+    {team} is each team the host serves and {self} its runtime id. A host receives
+    requests and work for any agent or pool of its teams (transport.yaml team_grants),
+    so its permissions do not grow with its agents; the signed audience names the
+    agent. {edge} is each edge the host serves: membership code repeats a subject once
+    per id and never turns one into a wildcard. A host publishes only under its own id.
+    A receiver of requests answers each one once, within the class's expiry, through
+    NATS allow_responses; it holds no grant on other runtimes' inboxes.
     """
 
     reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
@@ -1076,7 +1241,7 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                 elif entry["class"] != "dead_letter":
                     # Dead letters wait in UA1_DLQ; its read grants come with the services
                     # that read it (message contract plan 13A.9), not as a subscription.
-                    subscribe.add(full_subject(address, "*"))
+                    subscribe.add(full_subject(receive_pattern(address, transport), "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
         if answers_requests:

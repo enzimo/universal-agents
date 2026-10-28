@@ -18,7 +18,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.work_profiles.propose",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -71,5 +71,5 @@
   },
   "idempotency_key": "objectives.work_profiles.propose:nP17vLZSj13Z4NKnDM2XAiwk8Se7g1VWo9-E7zUv3KE",
   "body_digest": "yQg5oNM8WpH2fgmrzUc7JzO9G4yqn344R5naHz3UDzQ",
-  "signature": "jjf4npMlUgUkGagft_j1skU6iFzGdYofG9ExF4UT1jVWsmmlXoMLRzEBLBLB11AgKoIqNN1TJGmc9-G4fGGYCA"
+  "signature": "IlU8jg9vVmfjkG83nrd9-5eehQ8wxyPI4jAiT8GcSvf-32ECWTqlYb1eJuIXFu24J5JJ4Jz-TP4fbDTSzmsIDg"
 }
