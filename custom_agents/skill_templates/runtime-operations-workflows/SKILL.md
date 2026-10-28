@@ -1204,7 +1204,9 @@ user, an administrator), with that person's access, and tells them with
 Before each run, trusted code cleans scratch folders, deletes saved tool
 outputs written longer ago than `tool_policy.output_retention_days` (tool
 results, long tool output saved from conversations, research results and
-execution run folders; the run records the counts and bytes per kind), and
+execution run folders; the run records the counts and bytes per kind; for the
+first 7 days after retention becomes active it only counts them, and
+administrators get an Inbox notice and a Status page note with the date), and
 checks every schedule (`agent.schedule_maintenance.stale_schedules`): it deletes the own schedules of
 people removed from the team, and sends Inbox notices to owners about schedules
 that look unused (turned off for 30 days, paused more than 90 days ahead, for
