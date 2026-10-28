@@ -272,7 +272,9 @@ ago (90 by default, about three months):
 - **Long tool output saved from conversations**, in `dbs/conversation_artifacts/`,
   with its record in the task database.
 - **Research results**, in `research/` of each person's folder and of `agents/`.
-  Only the result folders the research tools wrote go; other files there stay.
+  Only the result folders the research tools wrote go: they are recognized by
+  the date and time at the start of their names and aged by it. Folders and
+  files people or agents made there themselves stay, however old.
 - **Execution run folders** in `agents/execution/`: folders that an
   interrupted run left behind, and Rust build folders not used for the period.
   A run or build folder is never deleted while it may still be in use, and

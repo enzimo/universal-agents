@@ -1432,10 +1432,14 @@ deleted first), long tool output offloaded from conversations (each
 `conversation_artifacts` record with its file in `dbs/conversation_artifacts/`,
 the record first, then any older file no record names), research result
 folders in `research/` of every person's folder and `agents/`, and execution
-run and Rust build folders in `agents/execution/`. An item's age is the UTC
-time its folder name starts with, or its record's `created_at`, or else (no
-date, or an agent-written name dated in the future) its last change; for a
-tool result without a dated name, its manifest's `created_at` comes first.
+run and Rust build folders in `agents/execution/`. A tool result's age is the
+UTC time its folder name starts with, else its manifest's `created_at`, else
+its last change; a conversation artifact's is its record's `created_at`. In
+`research/`, which people also use for their own folders, only folders named
+with the research tools' stamp (`<stamp>_<labels>_<hex>` and the older
+`<stamp>_<kind>_<label>`) are deleted, aged by that stamp; undated or
+future-dated folders and loose files stay, and a task folder goes only when
+the run emptied it.
 Run and build folders are never deleted younger than two days (no run or
 build lasts more than one), and a build folder only while the cleanup holds
 its build lock; a build that waited on that lock finds its lock file gone and

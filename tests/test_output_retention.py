@@ -139,13 +139,20 @@ def test_a_tool_result_without_a_dated_name_uses_its_manifest_then_its_last_chan
 
 
 def test_a_folder_name_dated_in_the_future_counts_as_undated(layout: InstanceLayout) -> None:
-    future = layout.workspaces_dir / "agents" / "research" / "task-1" / f"{_stamp(NOW + 400 * SECONDS_PER_DAY)}_web_x_abc"
-    _file(future / "manifest.json", "{}", mtime=EXPIRED)
-    _touch(future, EXPIRED)
+    """A saved tool result (trusted folder) falls back to its manifest and last change; research keeps it."""
+
+    future = _stamp(NOW + 400 * SECONDS_PER_DAY)
+    tool_result = layout.tool_results_dir / "task-1" / f"{future}_tooluse_1_shell_0123456789abcdef"
+    _file(tool_result / "block_0.txt", "x", mtime=EXPIRED)
+    _touch(tool_result, EXPIRED)
+    research = layout.workspaces_dir / "agents" / "research" / "task-1" / f"{future}_web_x_abc"
+    _file(research / "manifest.json", "{}", mtime=EXPIRED)
+    _touch(research, EXPIRED)
 
     _run(layout)
 
-    assert not future.exists(), "a future date in an agent-written name cannot keep a folder forever"
+    assert not tool_result.exists()
+    assert research.exists(), "research keeps every folder without a usable stamp"
 
 
 def test_names_carry_their_write_time_with_or_without_microseconds() -> None:
@@ -312,26 +319,58 @@ def test_a_failing_kind_is_reported_and_the_others_still_run(layout: InstanceLay
 
 def test_research_results_go_by_their_dated_names_in_every_person_folder(layout: InstanceLayout) -> None:
     alice = layout.person_research_dir("alice")
-    old_alice = alice / "task-1" / f"{_stamp(EXPIRED, micro=True)}_exa_search_q_abc"
+    old_alice = alice / "task-1" / f"{_stamp(EXPIRED, micro=True)}_exa_search_q_0123456789ab"
     _file(old_alice / "manifest.json", "{}")
     _file(old_alice / "nested" / "page.md", "page")
-    kept_alice = alice / "task-1" / f"{_stamp(KEPT)}_web_page_q_def"
+    kept_alice = alice / "task-1" / f"{_stamp(KEPT)}_web_page_q_def0123456789"
     _file(kept_alice / "manifest.json", "{}")
-    old_agents = layout.person_research_dir(None) / "task-2" / f"{_stamp(EXPIRED)}_web_q_ghi"
+    old_agents = layout.person_research_dir(None) / "task-2" / f"{_stamp(EXPIRED)}_web_q_ghi012345678"
     _file(old_agents / "manifest.json", "{}")
-    undated_old = alice / "task-3" / "older-layout-folder"
-    _file(undated_old / "result.json", "{}", mtime=EXPIRED)
-    _touch(undated_old, EXPIRED)
+    # The scheme before result folders got a random ending: <stamp>_<kind>_<label>.
+    older_scheme = alice / "task-3" / f"{_stamp(EXPIRED)}_search_weather-in-paris"
+    _file(older_scheme / "manifest.json", "{}")
     # Not tool results: files directly in research/ and in a task folder stay.
     notes = _file(alice / "notes.md", "my notes", mtime=EXPIRED)
     task_note = _file(alice / "task-1" / "summary.md", "summary", mtime=EXPIRED)
 
     result = _run(layout)
 
-    assert not old_alice.exists() and not old_agents.exists() and not undated_old.exists()
-    assert not old_agents.parent.exists() and not undated_old.parent.exists()
+    assert not old_alice.exists() and not old_agents.exists() and not older_scheme.exists()
+    assert not old_agents.parent.exists() and not older_scheme.parent.exists(), "task folders this run emptied go"
     assert kept_alice.exists() and notes.exists() and task_note.exists()
     assert _kind(result, OutputKind.RESEARCH_RESULTS).items_removed == 3
+
+
+def test_research_folders_without_the_tools_stamp_are_never_deleted(layout: InstanceLayout) -> None:
+    """People keep their own folders under research/; their last change says nothing about a tool."""
+
+    alice = layout.person_research_dir("alice")
+    # An undated folder, untouched for months, with a file edited today.
+    undated = alice / "my-project" / "notes"
+    edited_today = _file(undated / "draft.md", "edited today", mtime=NOW)
+    _touch(undated, EXPIRED)
+    _touch(undated.parent, EXPIRED)
+    # A nested folder a person made, old throughout.
+    papers = alice / "reading-list" / "papers"
+    paper = _file(papers / "paper.pdf", "pdf", mtime=EXPIRED)
+    _touch(papers, EXPIRED)
+    _touch(papers.parent, EXPIRED)
+    # An empty folder a person made, and an old empty task folder.
+    empty_own = alice / "ideas" / "later"
+    empty_own.mkdir(parents=True)
+    _touch(empty_own, EXPIRED)
+    _touch(empty_own.parent, EXPIRED)
+    empty_task = alice / "empty-task"
+    empty_task.mkdir()
+    _touch(empty_task, EXPIRED)
+
+    result = _run(layout)
+
+    assert edited_today.read_text(encoding="utf-8") == "edited today"
+    assert paper.exists() and papers.is_dir()
+    assert empty_own.is_dir() and empty_task.is_dir()
+    counts = _kind(result, OutputKind.RESEARCH_RESULTS)
+    assert (counts.items_removed, counts.files_removed, counts.folders_removed) == (0, 0, 0)
 
 
 def test_links_in_research_folders_are_never_followed(layout: InstanceLayout, tmp_path: Path) -> None:

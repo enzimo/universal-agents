@@ -27,10 +27,12 @@ of what a tool returned, and a tool can be run again.
    they would have if the person had stayed.
 3. **Research results** (``research/<task folder>/<result folder>/`` in each
    person's folder and in ``agents/``, ``custom_tools.research_identity``):
-   written at the UTC time the result folder's name starts with
-   (``result_folder_name``), else the folder's last change. Agents can write
-   these folders, so a name dated in the future counts as no date. Files
-   directly in ``research/`` or a task folder are not tool results and stay.
+   only result folders whose names start with the research tools' UTC stamp,
+   aged by that stamp: ``<stamp>_<labels>_<12 hex>`` (``result_folder_name``)
+   and the older ``<stamp>_<kind>_<label>``. People and agents also keep
+   their own folders and files under ``research/``, so a folder without that
+   stamp, or with one dated in the future, is never deleted, nor is any loose
+   file, and a task folder goes only when this run emptied it.
 4. **Execution run folders** (``agents/execution``): a run's folder that an
    interrupted run left behind (a finished run deletes its own) and the
    content-addressed Rust build folders (``rust-builds/<source digest>/``),
@@ -121,8 +123,8 @@ MANIFEST_MAX_BYTES = 1024 * 1024
 
 SKIPPED_BUILD_IN_USE = "build_in_use"
 
-# "<YYYYmmddTHHMMSS>[microseconds]Z_" at the start of a saved output folder's name.
-_NAME_STAMP = re.compile(r"^(\d{8}T\d{6})(\d{6})?Z_")
+# "<YYYYmmddTHHMMSS>[microseconds]Z_<label>" at the start of a saved output folder's name.
+_NAME_STAMP = re.compile(r"^(\d{8}T\d{6})(\d{6})?Z_.")
 
 
 class OutputKind(StrEnum):
@@ -273,11 +275,15 @@ def written_at_from_name(name: str) -> float | None:
     return moment.timestamp() + (int(match.group(2)) / 1_000_000 if match.group(2) else 0.0)
 
 
-def _named_or_changed(name: str, info: os.stat_result, now: float) -> float:
-    """The time in the name, unless it has none or is in the future; then the last change."""
+def _research_written_at(folder: int, name: str, info: os.stat_result, now: float) -> float | None:
+    """The stamp a research tool put in the result folder's name; None (keep) without one or in the future.
+
+    The folder's last change says nothing here: a person may keep their own
+    folders under ``research/`` and edit files in them.
+    """
 
     named = written_at_from_name(name)
-    return named if named is not None and named <= now else info.st_mtime
+    return named if named is not None and named <= now else None
 
 
 def _manifest_created_at(folder: int, name: str) -> float | None:
@@ -326,7 +332,8 @@ def _entries(folder: int) -> Iterator[tuple[str, os.stat_result]]:
 
 # -- result folders in task folders (tool results, research results) --------------------
 
-WrittenAt = Callable[[int, str, os.stat_result, float], float]
+# When a result folder was written; None means it is not a tool's result and stays.
+WrittenAt = Callable[[int, str, os.stat_result, float], float | None]
 
 
 def _remove_old_results_in_task_folder(
@@ -339,11 +346,13 @@ def _remove_old_results_in_task_folder(
     written_at: WrittenAt,
     counts: OutputsRemoved,
     first: str | None = None,
+    remove_old_empty: bool = False,
 ) -> None:
     """Delete each result folder in the task folder ``task_name`` written before ``cutoff``.
 
-    The task folder goes too when it is empty afterwards and either this run
-    emptied it or it is itself that old. Other entries stay.
+    The task folder goes too when it is empty afterwards and this run emptied
+    it, or, with ``remove_old_empty`` (a folder only trusted code writes), when
+    it is itself that old. Other entries stay.
     """
 
     try:
@@ -357,14 +366,16 @@ def _remove_old_results_in_task_folder(
     removed_before = counts.items_removed
     try:
         for name, info in _entries(task):
-            if not stat.S_ISDIR(info.st_mode) or written_at(task, name, info, now) >= cutoff:
+            written = written_at(task, name, info, now) if stat.S_ISDIR(info.st_mode) else None
+            if written is None or written >= cutoff:
                 continue
             if remove_folder_tree(task, name, shown / name, counts, first=first):
                 counts.items_removed += 1
         empty = not os.listdir(task)
     finally:
         os.close(task)
-    if empty and (counts.items_removed > removed_before or task_info.st_mtime < cutoff):
+    emptied_now = counts.items_removed > removed_before
+    if empty and (emptied_now or (remove_old_empty and task_info.st_mtime < cutoff)):
         _remove_empty_folder(parent, task_name, counts)
 
 
@@ -395,6 +406,7 @@ def _remove_old_tool_results(root_dir: Path, cutoff: float, now: float, counts: 
                 written_at=_tool_result_written_at,
                 counts=counts,
                 first=TOOL_RESULT_MANIFEST_FILENAME,
+                remove_old_empty=True,
             )
     finally:
         os.close(root)
@@ -418,7 +430,7 @@ def _remove_old_research_results(workspaces_dir: Path, cutoff: float, now: float
                         shown / task_name,
                         cutoff=cutoff,
                         now=now,
-                        written_at=lambda folder, name, entry, moment: _named_or_changed(name, entry, moment),
+                        written_at=_research_written_at,
                         counts=counts,
                     )
         finally:
