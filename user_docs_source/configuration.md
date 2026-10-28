@@ -399,6 +399,9 @@ gateway:
 
 The bundled NATS server sets no limit for stored messages, so the page notes
 how much they take instead of a percentage; they are on the instance's disk.
+When a server does set a limit for the account, the percentage counts the
+bytes stored, not the space its streams reserve, so leave room for those
+reservations (64 MB for set-aside messages).
 
 ### Upgrading from the single workspace folder
 

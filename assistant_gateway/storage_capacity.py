@@ -10,7 +10,10 @@ is reached (owner's decision of 2026-10-27). The Status page
   another filesystem, as ``df`` counts it: space reserved for the system
   administrator is neither used nor free.
 - **Message storage.** The NATS account's JetStream use against the account's
-  limit (``js.account_info()``), when the account has one. The bundled server
+  limit (``js.account_info()``), when the account has one. The percentage
+  counts bytes stored, not the space streams reserve (the account
+  information does not report reservations; the set-aside stream reserves
+  64 MB, ``custom_transport.nats_topology``), and the finding says so. The bundled server
   runs without one (``docker/nats_service.py`` sets no ``max_file_store``), so
   then a note says so plainly instead of inventing a limit. A server that does
   not answer is listed as unavailable on the page.
@@ -353,8 +356,15 @@ def space_finding(
 
     message_server = space.key.startswith("message_storage:")
     if message_server:
-        effect = "When it is full, the message server refuses new messages, so requests, replies and agents' work stop."
-        fix = "Raise this account's JetStream limit in the NATS server's configuration, then restart the server."
+        effect = (
+            "When it is full, the message server refuses new messages, so requests, replies and agents' work stop. "
+            "The percentage counts the bytes stored, not the space streams reserve for themselves, so the server "
+            "can refuse a new stream somewhat earlier."
+        )
+        fix = (
+            "Raise this account's JetStream limit in the NATS server's configuration, then restart the server. "
+            "Leave room for the streams' reservations (64 MB for set-aside messages)."
+        )
     else:
         effect = (
             "When it is full, agents cannot save files, and chats, tasks and settings can no longer be saved."

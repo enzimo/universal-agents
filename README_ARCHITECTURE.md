@@ -3553,9 +3553,13 @@ the findings' details. The bundled NATS server sets no JetStream limit
 (`docker/nats_service.py` passes no `max_file_store`), so the account reports
 none; the page then shows a note with the stored size instead of inventing a
 limit. Without `max_file_store` the server itself stops storing at three
-quarters of the disk space that was free when it started. An account limit
-must leave room for the streams' own reservations: the server refuses to
-create the dead-letter stream (64 MB) in an account allowed less.
+quarters of the disk space that was free when it started. The percentage
+counts bytes stored, not the space streams reserve, which the account
+information does not report, and the finding says so. An account limit must
+leave room for the streams' own reservations: the server refuses to create
+the dead-letter stream (64 MB) in an account allowed less. People's
+stored-data totals that the manager stopped measuring are a warning on the
+page too (`StorageUsageNotices.stale_finding`).
 
 ### Knowledge page
 

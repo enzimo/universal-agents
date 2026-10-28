@@ -1163,9 +1163,10 @@ disappears once it is fixed:
   variable in `team.env` or the container environment that overrides a saved
   setting or a key saved with `/auth model`, memory search that stopped
   working, schedules an administrator needs to check, people who may not
-  use the team's model keys and have no model of their own yet, or a disk
-  the instance uses, or the message server's storage, nearing its limit (80%
-  by default).
+  use the team's model keys and have no model of their own yet, a disk the
+  instance uses, or the message server's storage, nearing its limit (80% by
+  default), or people's stored-data totals that are out of date, so they get
+  no storage notices.
 - **Note**: a deliberate choice worth knowing, such as access checks turned
   off, people whose work goes to their own model provider, or a message
   server that sets no limit for stored messages.

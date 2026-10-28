@@ -1,6 +1,7 @@
 """Storage filling up, on administrators' Status page (assistant_gateway.storage_capacity).
 
-Covered: disks measured once per filesystem as df counts them; database sizes
+Covered: disks measured once per filesystem as df counts them; people's
+stored-data totals that are out of date shown as a warning; database sizes
 from SQLite files (with their write-ahead log) and from PostgreSQL when
 ``LIVE_TEST_POSTGRES_DSN`` is set; the two levels and when each was entered,
 kept across restarts, with use moving around a threshold not counting as a
@@ -229,6 +230,7 @@ def test_stored_messages_are_measured_against_the_accounts_limit_or_noted_withou
     assert limited.finding_id.startswith("storage_nearing_limit:message_storage:file:")
     assert limited.title == "The message server's storage is 90% full"
     assert "refuses new messages" in limited.summary and "Stored messages (JetStream): 9 GB" in limited.details
+    assert "counts the bytes stored, not the space streams reserve" in limited.summary
     assert unlimited.finding_id == NO_MESSAGE_LIMIT_FINDING_ID
     assert unlimited.severity is StatusSeverity.NOTE
     assert "no limit for stored messages (JetStream), which take 12 MB now" in unlimited.summary
@@ -283,7 +285,9 @@ def _lead() -> AgentStatus:
     )
 
 
-def _page(config, capacity: StorageCapacity, notices: _Notices, clock: _Clock, *, messages=None) -> StatusPage:
+def _page(
+    config, capacity: StorageCapacity, notices: _Notices, clock: _Clock, *, messages=None, person_totals=lambda: None
+) -> StatusPage:
     async def keys() -> dict:
         return {"endpoints": [{"address": "https://api.openai.com", "state": "stored"}]}
 
@@ -294,7 +298,7 @@ def _page(config, capacity: StorageCapacity, notices: _Notices, clock: _Clock, *
 
     return StatusPage(
         config=config, model_key_status=keys, agent_statuses=lambda: [_lead()], send_notice_once=notices,
-        now=clock, storage=capacity, jetstream_usage=jetstream,
+        now=clock, storage=capacity, jetstream_usage=jetstream, person_storage_totals=person_totals,
     )
 
 
@@ -372,6 +376,27 @@ async def test_a_failing_storage_check_is_listed_and_the_rest_of_the_page_still_
 
     assert report.unavailable_sources == ("storage checks",)
     assert "event=status_storage_check_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_out_of_date_stored_data_totals_are_a_warning_and_an_unreadable_record_is_listed(tmp_path: Path) -> None:
+    from custom_messages.contracts.status_v1 import StatusFindingV1
+
+    clock = _Clock()
+    stale = StatusFindingV1(
+        finding_id="person_storage_totals_stale", severity=StatusSeverity.WARNING, title="Stored-data totals are out of date"
+    )
+
+    def unreadable():
+        raise OSError("database is locked")
+
+    shown = await _page(_config(tmp_path), _capacity(tmp_path, _Disk(10.0), clock), _Notices(), clock,
+                        person_totals=lambda: stale).report()
+    failed = await _page(_config(tmp_path), _capacity(tmp_path, _Disk(10.0), clock), _Notices(), clock,
+                         person_totals=unreadable).report()
+
+    assert [finding.finding_id for finding in shown.findings] == ["person_storage_totals_stale"]
+    assert failed.findings == () and failed.unavailable_sources == ("stored-data totals",)
 
 
 def test_the_gateway_measures_its_instance_folder_and_databases(tmp_path: Path) -> None:

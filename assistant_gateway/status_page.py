@@ -28,7 +28,10 @@ Sources, each producing ``StatusFindingV1`` items:
   instance and its databases are on, and the message server's stored
   messages against the account's limit. Nearing the limit is a warning that
   administrators are told about anyway, nearly full a problem; a message
-  server that sets no limit is a note.
+  server that sets no limit is a note;
+- people's stored-data totals that the manager stopped measuring
+  (``assistant_gateway.storage_usage``), a warning: those people get no
+  storage notices meanwhile.
 
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.
@@ -105,6 +108,7 @@ LAUNCHER_SOURCE = "launcher"
 GATEWAY_SOURCE = "gateway"
 MESSAGE_SERVER_SOURCE = "message server"
 STORAGE_SOURCE = "storage checks"
+PERSON_STORAGE_SOURCE = "stored-data totals"
 # The longest the page waits for the message server's account information.
 MESSAGE_SERVER_TIMEOUT_SECONDS = 10.0
 
@@ -128,6 +132,7 @@ class StatusPage:
         stopped_receivers: Callable[[], Sequence[Any]] = lambda: (),
         storage: StorageCapacity | None = None,
         jetstream_usage: Callable[[], Awaitable[Any]] = _no_message_storage,
+        person_storage_totals: Callable[[], StatusFindingV1 | None] = lambda: None,
     ) -> None:
         self._config = config
         # People and their model settings; the gateway's own manager storage unless a test gives one.
@@ -142,6 +147,8 @@ class StatusPage:
         # the gateway always gives it, a test may leave it out.
         self.storage = storage
         self._jetstream_usage = jetstream_usage
+        # Out-of-date totals behind people's storage notices (storage_usage.StorageUsageNotices.stale_finding).
+        self._person_storage_totals = person_storage_totals
 
     async def report(self) -> StatusReportV1:
         # File and database reads run in worker threads: the gateway's loop
@@ -156,6 +163,7 @@ class StatusPage:
         findings.extend(await asyncio.to_thread(self._person_findings, unavailable))
         findings.extend(self._configuration_findings())
         findings.extend(await self._storage_findings(unavailable))
+        findings.extend(await asyncio.to_thread(self._person_storage_findings, unavailable))
         return StatusReportV1(
             checked_at=self._now(), findings=tuple(_ordered(_unique(findings))), unavailable_sources=tuple(unavailable)
         )
@@ -335,6 +343,19 @@ class StatusPage:
             LOGGER.exception("The storage checks failed. event=status_storage_check_failed")
             unavailable.append(STORAGE_SOURCE)
             return []
+
+    def _person_storage_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
+        try:
+            finding = self._person_storage_totals()
+        except Exception as exc:  # noqa: BLE001 - listed as unavailable, never shown as current
+            LOGGER.warning(
+                "The Status page could not read people's stored-data totals. event=status_person_storage_unreadable "
+                "error=%s",
+                exc,
+            )
+            unavailable.append(PERSON_STORAGE_SOURCE)
+            return []
+        return [finding] if finding is not None else []
 
     def _configuration_findings(self) -> list[StatusFindingV1]:
         findings = [] if self._config.authorization.enabled else [_AUTHORIZATION_OFF]

@@ -1308,6 +1308,7 @@ class UserGateway:
                 send_notice_once=self.access_inbox.send_notice_once,
                 stopped_receivers=resolved_manager_runtime.stopped_receivers,
                 storage=self.stored_data.capacity,
+                person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
             ),
             # People's Knowledge page; the knowledge base is in the manager's database.
