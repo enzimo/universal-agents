@@ -1442,8 +1442,11 @@ future-dated folders and loose files stay, and a task folder goes only when
 the run emptied it.
 Run and build folders are never deleted younger than two days (no run or
 build lasts more than one), and a build folder only while the cleanup holds
-its build lock; a build that waited on that lock finds its lock file gone and
-starts over in a new folder (`runtime_hosting/builds.py`). Each kind runs on
+its build lock, after checking the folder's age again under the lock (a build
+may have finished meanwhile). The lock file is deleted after everything else,
+so a build arriving meanwhile waits on it rather than writing into a folder
+being emptied; a build that waited finds its lock file gone and starts over
+in a new folder (`runtime_hosting/builds.py`). Each kind runs on
 its own, so one failure is logged (`event=output_retention_failed`) and
 reported while the others still run, and the run's instructions carry the
 items, files and bytes deleted per kind, which the run records. The manager

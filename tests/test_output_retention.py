@@ -452,6 +452,100 @@ def test_a_build_folder_in_use_is_left_alone(layout: InstanceLayout) -> None:
     assert _kind(result, OutputKind.EXECUTION_RUNS).skipped == 1
 
 
+def _old_build(layout: InstanceLayout, digest: str) -> Path:
+    build = layout.execution_rust_builds_dir / digest
+    _file(build / BUILD_LOCK_FILENAME, "", mtime=EXPIRED)
+    _file(build / "main.rs", "fn main() {}", mtime=EXPIRED)
+    _file(build / "program", "old output", mtime=EXPIRED)
+    _touch(build, EXPIRED)
+    return build
+
+
+def test_a_build_folders_lock_file_goes_last_whatever_the_listing_order(
+    layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build arriving while the folder is emptied waits on the old lock instead of losing its files.
+
+    If the lock went first, a build arriving then would create a new lock,
+    get it at once, write its source and output, and lose them to the
+    cleanup's earlier listing (the critic's build-lock probe).
+    """
+
+    import old_file_cleanup
+    from runtime_hosting.builds import _still_linked
+
+    build = _old_build(layout, "d" * 64)
+    real_listdir = os.listdir
+    real_remove_entry = old_file_cleanup._remove_entry
+    removed: list[str] = []
+    builder: dict[str, bool] = {}
+
+    def lock_first(folder):
+        names = real_listdir(folder)
+        if BUILD_LOCK_FILENAME in names:
+            names.remove(BUILD_LOCK_FILENAME)
+            names.insert(0, BUILD_LOCK_FILENAME)
+        return names
+
+    def remove_then_a_build_arrives(folder, name, shown, counts, *, depth):
+        real_remove_entry(folder, name, shown, counts, depth=depth)
+        removed.append(name)
+        if name == BUILD_LOCK_FILENAME and not builder:
+            # runtime_hosting.builds: make the folder, lock, write source and output.
+            build.mkdir(parents=True, exist_ok=True)
+            lock = os.open(build / BUILD_LOCK_FILENAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            builder["still_linked"] = _still_linked(lock, build / BUILD_LOCK_FILENAME)
+            (build / "main.rs").write_text("fn main() { new(); }", encoding="utf-8")
+            (build / "program").write_text("new output", encoding="utf-8")
+            os.close(lock)
+
+    monkeypatch.setattr(os, "listdir", lock_first)
+    monkeypatch.setattr(old_file_cleanup, "_remove_entry", remove_then_a_build_arrives)
+
+    result = _run(layout)
+
+    assert removed[-1] == BUILD_LOCK_FILENAME and set(removed) == {BUILD_LOCK_FILENAME, "main.rs", "program"}
+    assert builder["still_linked"] is True
+    assert (build / "main.rs").read_text(encoding="utf-8") == "fn main() { new(); }"
+    assert (build / "program").read_text(encoding="utf-8") == "new output"
+    assert _kind(result, OutputKind.EXECUTION_RUNS).items_removed == 0, "the new build's folder stays"
+
+
+def test_a_build_folder_built_again_before_the_lock_was_taken_stays(
+    layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The age is checked again under the lock: a build may finish between the listing and the lock."""
+
+    from custom_agents import output_retention
+
+    build = _old_build(layout, "e" * 64)
+    real_locked_now = output_retention._locked_now
+
+    def a_build_finishes_first(lock):
+        (build / "program").unlink()
+        (build / "program").write_text("rebuilt", encoding="utf-8")
+        return real_locked_now(lock)
+
+    monkeypatch.setattr(output_retention, "_locked_now", a_build_finishes_first)
+
+    result = _run(layout)
+
+    assert (build / "program").read_text(encoding="utf-8") == "rebuilt"
+    assert _kind(result, OutputKind.EXECUTION_RUNS).items_removed == 0
+
+
+def test_an_old_build_folder_without_a_lock_file_goes_without_making_one(layout: InstanceLayout) -> None:
+    build = layout.execution_rust_builds_dir / ("f" * 64)
+    _file(build / "main.rs", "fn main() {}", mtime=EXPIRED)
+    _touch(build, EXPIRED)
+
+    result = _run(layout)
+
+    assert not build.exists()
+    assert _kind(result, OutputKind.EXECUTION_RUNS).items_removed == 1
+
+
 def test_run_folders_are_never_deleted_younger_than_two_days(layout: InstanceLayout) -> None:
     """No run lasts longer than a day, so a short period never deletes a running one's folder."""
 

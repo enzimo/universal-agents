@@ -40,8 +40,9 @@ of what a tool returned, and a tool can be run again.
    never deleted younger than ``EXECUTION_MINIMUM_AGE_DAYS``, because no run
    or build lasts longer than a day (``ExecutionLimitsV1.wall_time_seconds``),
    and a build folder only while holding its build lock
-   (``runtime_hosting.builds.BUILD_LOCK_FILENAME``); a build that waited on
-   that lock starts over in a new folder.
+   (``runtime_hosting.builds.BUILD_LOCK_FILENAME``), after checking its age
+   again under the lock, and with the lock file deleted last; a build that
+   waited on that lock starts over in a new folder.
 
 Not deleted here: the content-addressed execution artifacts
 (``state/execution_artifacts``). One stored object can serve many owners'
@@ -89,10 +90,10 @@ from old_file_cleanup import (
     FOLDER_FLAGS,
     SECONDS_PER_DAY,
     SKIPPED_CANNOT_OPEN,
-    SKIPPED_CANNOT_REMOVE,
     SKIPPED_NOT_FILE_OR_FOLDER,
     OldFilesRemoved,
     note_skipped,
+    remove_file_if_old,
     remove_folder_tree,
     remove_listed_file,
     remove_old_files,
@@ -496,27 +497,25 @@ def _remove_old_execution_runs(workspaces_dir: Path, cutoff: float, now: float, 
         return
     try:
         for name, info in _entries(runs):
-            _remove_old_run_entry(runs, name, info, shown / name, cutoff, counts)
+            _remove_old_run_entry(runs, name, info, shown, cutoff, counts)
     finally:
         os.close(runs)
 
 
 def _remove_old_run_entry(
-    runs: int, name: str, info: os.stat_result, shown: Path, cutoff: float, counts: OutputsRemoved
+    runs: int, name: str, info: os.stat_result, runs_shown: Path, cutoff: float, counts: OutputsRemoved
 ) -> None:
     """One entry of ``agents/execution``: the build folders, a run's folder, or a stray file."""
 
+    shown = runs_shown / name
     if stat.S_ISDIR(info.st_mode) and name == EXECUTION_RUST_BUILDS_DIRNAME:
         _remove_old_builds(runs, name, shown, cutoff, counts)
-    elif not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+    elif stat.S_ISREG(info.st_mode):
+        remove_file_if_old(runs, name, info, runs_shown, cutoff, counts)
+    elif not stat.S_ISDIR(info.st_mode):
         note_skipped(counts, shown, SKIPPED_NOT_FILE_OR_FOLDER)  # a link is never followed
-    elif info.st_mtime >= cutoff:
-        return
-    elif stat.S_ISDIR(info.st_mode):
-        if remove_folder_tree(runs, name, shown, counts):
-            counts.items_removed += 1
-    else:
-        _remove_file(runs, name, info, shown, counts)
+    elif info.st_mtime < cutoff and remove_folder_tree(runs, name, shown, counts):
+        counts.items_removed += 1
 
 
 def _remove_old_builds(parent: int, name: str, shown: Path, cutoff: float, counts: OutputsRemoved) -> None:
@@ -531,17 +530,23 @@ def _remove_old_builds(parent: int, name: str, shown: Path, cutoff: float, count
         for build, info in _entries(builds):
             if not stat.S_ISDIR(info.st_mode) or info.st_mtime >= cutoff:
                 continue
-            if _remove_build_folder(builds, build, shown / build, counts):
+            if _remove_build_folder(builds, build, shown / build, cutoff, counts):
                 counts.items_removed += 1
     finally:
         os.close(builds)
 
 
-def _remove_build_folder(parent: int, name: str, shown: Path, counts: OutputsRemoved) -> bool:
+def _remove_build_folder(parent: int, name: str, shown: Path, cutoff: float, counts: OutputsRemoved) -> bool:
     """Delete a build folder while holding its build lock, so no build uses it meanwhile.
 
-    A build waiting on the lock finds its lock file gone afterwards and starts
-    over in a new folder (``runtime_hosting.builds``).
+    The lock file goes last: until then a build arriving waits on the same
+    lock instead of creating a new one and writing into a folder being
+    emptied. A build waiting on the lock finds its lock file gone afterwards
+    and starts over in a new folder (``runtime_hosting.builds``). After the
+    lock is taken the folder's age is checked again, because a build may
+    have finished between the listing and the lock. A folder without a lock
+    file was never locked by a build; the lock is not created, since that
+    would change the folder's age.
     """
 
     try:
@@ -550,37 +555,42 @@ def _remove_build_folder(parent: int, name: str, shown: Path, counts: OutputsRem
         note_skipped(counts, shown, SKIPPED_CANNOT_OPEN)
         return False
     try:
-        lock = os.open(
-            BUILD_LOCK_FILENAME, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600, dir_fd=folder
-        )
-    except OSError:
-        note_skipped(counts, shown / BUILD_LOCK_FILENAME, SKIPPED_CANNOT_OPEN)
-        return False
+        try:
+            lock = _open_build_lock(folder)
+        except OSError:
+            note_skipped(counts, shown / BUILD_LOCK_FILENAME, SKIPPED_CANNOT_OPEN)
+            return False
+        try:
+            if lock is not None and not _locked_now(lock):
+                note_skipped(counts, shown, SKIPPED_BUILD_IN_USE)
+                return False
+            if os.fstat(folder).st_mtime >= cutoff:
+                return False  # built again since the listing
+            return remove_folder_tree(parent, name, shown, counts, last=BUILD_LOCK_FILENAME)
+        finally:
+            if lock is not None:
+                os.close(lock)
     finally:
         os.close(folder)
-    try:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            if exc.errno not in {errno.EWOULDBLOCK, errno.EAGAIN}:
-                raise
-            note_skipped(counts, shown, SKIPPED_BUILD_IN_USE)
-            return False
-        return remove_folder_tree(parent, name, shown, counts)
-    finally:
-        os.close(lock)
 
 
-def _remove_file(folder: int, name: str, info: os.stat_result, shown: Path, counts: OutputsRemoved) -> None:
+def _open_build_lock(folder: int) -> int | None:
+    """The build folder's lock file, never through a link; None when it has none."""
+
     try:
-        os.unlink(name, dir_fd=folder)
+        return os.open(BUILD_LOCK_FILENAME, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=folder)
     except FileNotFoundError:
-        return
-    except OSError:
-        note_skipped(counts, shown, SKIPPED_CANNOT_REMOVE)
-        return
-    counts.files_removed += 1
-    counts.bytes_removed += info.st_size
+        return None
+
+
+def _locked_now(lock: int) -> bool:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno not in {errno.EWOULDBLOCK, errno.EAGAIN}:
+            raise
+        return False
+    return True
 
 
 # -- what readers say about a deleted output ---------------------------------------------

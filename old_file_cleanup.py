@@ -84,7 +84,7 @@ def remove_old_files(
         except FileNotFoundError:
             continue  # removed while we looked
         if stat.S_ISREG(info.st_mode):
-            _remove_file(folder, name, info, shown, cutoff, counts)
+            remove_file_if_old(folder, name, info, shown, cutoff, counts)
         elif stat.S_ISDIR(info.st_mode):
             _remove_subfolder(folder, name, info, shown, cutoff, counts, depth=depth)
         else:
@@ -98,6 +98,7 @@ def remove_folder_tree(
     counts: OldFilesRemoved,
     *,
     first: str | None = None,
+    last: str | None = None,
     depth: int = 0,
 ) -> bool:
     """Delete the folder ``name`` in the open ``parent`` and everything in it; True when it is gone.
@@ -105,7 +106,9 @@ def remove_folder_tree(
     ``shown`` is the folder's path, for logs only. ``first`` names an entry
     to delete before any other, so a reader that finds the folder half
     deleted finds that entry missing first (a saved tool result's
-    ``manifest.json``). A link inside is removed as a link and never
+    ``manifest.json``). ``last`` names one to delete after all the others,
+    whatever the listing order (a build folder's lock file, which keeps a new
+    build out until the rest is gone). A link inside is removed as a link and never
     followed; a link in place of the folder itself is left alone. Regular
     files count as files removed (with their bytes), folders as folders
     removed. When something cannot be removed the folder stays, and the
@@ -127,6 +130,9 @@ def remove_folder_tree(
         if first in names:
             names.remove(first)
             names.insert(0, first)
+        if last in names:
+            names.remove(last)
+            names.append(last)
         for entry in names:
             _remove_entry(folder, entry, shown / entry, counts, depth=depth)
     finally:
@@ -219,9 +225,11 @@ def note_skipped(counts: OldFilesRemoved, path: Path, reason: str) -> None:
     )
 
 
-def _remove_file(
+def remove_file_if_old(
     folder: int, name: str, info: os.stat_result, shown: Path, cutoff: float, counts: OldFilesRemoved
 ) -> None:
+    """Delete the regular file ``name`` in the open ``folder`` (path ``shown``) when ``info`` says it is old."""
+
     if info.st_mtime >= cutoff:
         return
     try:
@@ -281,6 +289,7 @@ __all__ = [
     "SKIPPED_OUTSIDE_FOLDER",
     "OldFilesRemoved",
     "note_skipped",
+    "remove_file_if_old",
     "remove_folder_tree",
     "remove_listed_file",
     "remove_old_files",
