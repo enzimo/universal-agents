@@ -37,7 +37,12 @@ def build_strands_parts(agent: Any, *, agent_class: Any, loaded: Optional[Loaded
 
     model = agent._strands_model or agent._configure_model()
     agent._strands_model = model
-    agent._refresh_skills_plugins(force=True)
+    # Re-read the skill folders only when they changed. Re-reading clears the
+    # shared plugin's skills of every Strands agent until its next model call,
+    # including turns running now in other lanes, whose Objective work checks
+    # then found its required skills missing (PR #57 review). A new Strands
+    # agent loads the folders itself when the plugin starts with it.
+    agent._refresh_skills_plugins()
 
     # Prepare the full system prompt with agent status placeholder
     full_system_prompt = agent.system_prompt

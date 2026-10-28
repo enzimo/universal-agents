@@ -24,6 +24,7 @@ from custom_agents.model_keys import last_call_used_personal_key
 from custom_agents.person_model_runtime import person_model_active
 from custom_agents.provider_error_runtime import is_model_key_error, is_provider_failover_eligible_error
 from custom_agents.runtime_paths import agent_layout
+from custom_tools.runtime_context import current_task_work
 from runtime_settings.model_request_options import (
     LITELLM_API_MODE_CHAT_COMPLETIONS,
     normalize_litellm_api_mode,
@@ -50,6 +51,8 @@ except Exception:  # pragma: no cover
 
 _SELECTION_REASON_PROVIDER_FAILOVER = "provider_failover"
 _SELECTION_REASON_CONFIGURED_PRIMARY_CHANGED = "configured_primary_changed"
+# Another turn already switched away from the model this call used.
+_SELECTION_REASON_ALREADY_SWITCHED = "already_switched"
 
 
 @dataclass(frozen=True)
@@ -844,6 +847,53 @@ async def _emit_switch_notice(
             pass
 
 
+def _turn_model_outdated(agent: Any) -> bool:
+    """Whether the bound turn's Strands agent was built before the agent's model last changed.
+
+    Its call then used a model the agent has since left, usually because
+    another turn already switched after the same outage. Turns run at once in
+    parallel lanes (``custom_agents.execution_lanes``): two failing on one
+    outage must switch once, not twice, possibly back to the failing model
+    (PR #57 review), and a success on the old model says nothing about the
+    current one. A turn takes the current model at its next model call
+    (``turn_registry.pin_turn_strands``).
+    """
+
+    work = current_task_work()
+    parts = getattr(work, "strands", None)
+    generation = getattr(agent, "_strands_generation", None)
+    return parts is not None and generation is not None and parts.generation != generation
+
+
+def _already_switched_outcome(
+    agent: Any, config: Dict[str, Any], *, task_id: Optional[str], tool_calls_started: bool
+) -> ModelFailoverOutcome:
+    """Retry on the model another turn switched to, without recording a failure or switching again."""
+
+    current = _current_candidate(agent)
+    with _state_file_lock(agent, config):
+        lease = _load_state(agent, config).get("active_lease")
+    source = current
+    if isinstance(lease, dict) and (lease.get("provider"), lease.get("model_id")) == (current.provider, current.model_id):
+        source = ModelCandidate(str(lease.get("source_provider") or ""), str(lease.get("source_model_id") or ""))
+    logging.getLogger(__name__).warning(
+        "A model call failed on a model the agent already left; retrying on the current one without "
+        "another switch. event=model_failover_already_switched agent_id=%s task_id=%s from_model=%s to_model=%s",
+        getattr(agent, "id", None),
+        task_id,
+        source.key,
+        current.key,
+    )
+    return ModelFailoverOutcome(
+        from_candidate=source,
+        to_candidate=current,
+        notice=f"The model provider {source.key} could not complete the request. Continuing with {current.key}.",
+        retry_inline=not tool_calls_started,
+        requeue_required=tool_calls_started,
+        selection_reason=_SELECTION_REASON_ALREADY_SWITCHED,
+    )
+
+
 async def handle_provider_failure(
     agent: Any,
     *,
@@ -866,6 +916,8 @@ async def handle_provider_failure(
         return None
 
     cfg = _config(agent)
+    if _turn_model_outdated(agent):
+        return _already_switched_outcome(agent, cfg, task_id=task_id, tool_calls_started=tool_calls_started)
     now = _now()
     current = _current_candidate(agent)
     with _state_file_lock(agent, cfg):
@@ -968,8 +1020,9 @@ async def handle_provider_failure(
 
 
 def record_model_success(agent: Any, *, task_id: Optional[str]) -> None:
-    if not is_enabled(agent) or person_model_active(agent):
-        # A person's own model says nothing about the team's model or its lease.
+    if not is_enabled(agent) or person_model_active(agent) or _turn_model_outdated(agent):
+        # A person's own model, or one the agent has since left, says nothing
+        # about the team's current model or its lease.
         return
     cfg = _config(agent)
     now = _now()
