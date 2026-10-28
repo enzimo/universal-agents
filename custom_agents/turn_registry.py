@@ -6,7 +6,11 @@ parallel thread). Each turn records itself in its task's work record
 task's handling, and in the agent's ``_running_turns``, keyed by the asyncio
 task that runs the turn. A stop, a custody release or a lease-loss handback
 finds the turns of its task graph there; status reports read the running set.
-Nothing reads an agent-wide "current task" any more.
+A turn's own code (tools, hooks, post-turn steps) never reads an agent-wide
+"current task"; it reads its bound work record. The task manager's main slot
+(``TaskManager.current_task_id``) remains, but it names only the main lane's
+task: ``executing_task_ids`` reads it beside the parallel lanes and running
+turns to report everything executing now.
 
 Kept outside ``UniversalAgent``, whose size is capped
 (``tests/test_runtime_architecture_boundaries.py``); the agent keeps thin

@@ -19,9 +19,9 @@ until the person stopped the task by hand.
   queue loop, the resumed-turn path and the resume-with-directive paths all
   use it.
 - ``release_orphaned_execution_slot`` is the safety net for any path that
-  still misses it. It runs where the next task is chosen, with the execution
-  gate freshly held, so no turn can be running in this process: an
-  IN_PROGRESS task there has lost its turn. It is logged
+  still misses it. It runs where the next task is chosen, with the main lane
+  freshly held, so no main-lane turn can be running in this process: an
+  IN_PROGRESS task in the main slot has lost its turn. It is logged
   (``event=execution_slot_orphaned``) and failed with a plain explanation,
   like a task restart recovery cannot retry
   (``runtime_recovery.fail_recovered_executing_task``). Other executing states
@@ -211,7 +211,8 @@ def _slot_holder(manager: Any) -> Any:
 async def release_orphaned_execution_slot(agent: Any) -> bool:
     """Fail an IN_PROGRESS task that holds the slot with no turn running (module docstring).
 
-    Call only with the execution gate freshly held, never nested inside a turn.
+    Call only with the main lane freshly held (``runtime_hosting.agent_execution``),
+    never nested inside a turn.
     """
 
     # Bind the manager: the operations lane deep-copies call arguments.
@@ -237,12 +238,14 @@ async def release_orphaned_execution_slot(agent: Any) -> bool:
 
 
 async def release_orphaned_slot_when_idle(agent: Any) -> bool:
-    """Run the orphaned-slot check from the scheduler pass when no turn holds the gate.
+    """Run the orphaned-slot checks from the scheduler pass when no turn holds the main lane.
 
     Before 2026-10-04 the check ran only when the next task was picked, so an
-    orphaned slot blocked the queue until new work arrived. The gate is taken
-    only when it is free: in asyncio, acquiring a free lock does not suspend, so
-    no turn can start in between, and a busy gate means a turn is running.
+    orphaned slot blocked the queue until new work arrived. The main lane is
+    taken only when it is free: in asyncio, acquiring a free lock does not
+    suspend, so no turn can start in between, and a busy main lane means a
+    turn is running. Parallel lanes are then checked one by one
+    (``release_orphaned_parallel_tasks``).
     """
 
     lanes = getattr(agent, "_execution_lanes", None)

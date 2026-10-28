@@ -5,15 +5,24 @@ parallel thread (``GatewayContext.parallel_thread``) runs in a lane of its own,
 named after its root task, so the team lead works on it at the same time as
 its other work. By starting such a thread the person says the request does
 not overlap their other work, so both may run at once (owner, 2026-10-27).
-Everything else — other chats, New Chat, ``/new``, schedules, heartbeat runs,
-other chat apps — shares the main lane, one turn at a time, as before.
+Work set up from a parallel thread runs in parallel too (owner, 2026-10-28):
+a schedule or Objective work created there copies the request's context,
+mark and delivery mode included (``custom_tools.providers.schedules``
+``_build_schedule_payload_meta``, the turn action outbox's
+``ScheduledMessage`` branch), so each of its runs, a new root task, gets a
+parallel lane of its own and counts toward the limit below. Repeated runs of
+one schedule still never overlap: the scheduler skips a fire while the
+previous run is active (``custom_agents.scheduled_runtime``). Everything else
+— other chats, New Chat, ``/new``, schedules created anywhere else, heartbeat
+runs, other chat apps — shares the main lane, one turn at a time, as before.
 
 - **Only the team lead opens parallel lanes.** People's requests reach it. A
   worker runs one task at a time (it asks for work only while it can start
   it, ADR-019), so the mark on a delegated task's copied context changes
   nothing there.
-- **Only interactive requests count** (``delivery_mode`` ``interactive``),
-  never a scheduled or heartbeat run whose context was copied from a chat.
+- **Only interactive requests count** (``delivery_mode`` ``interactive``).
+  Heartbeat runs take the heartbeat launcher's context, which the gateway
+  never marks, so they stay in the main lane.
 - **One lane per request.** All turns of a request share its lane: its first
   turn and every resume after workers report, approvals and answered
   questions. Its turns therefore never overlap each other.
@@ -22,11 +31,18 @@ other chat apps — shares the main lane, one turn at a time, as before.
   number is fixed (owner, 2026-10-27): more turns at once reach model
   provider rate limits sooner.
 
-Overlapping changes stay protected where the stores protect them: the change
-ledger and record versions refuse the later of two conflicting changes to
-memory facts, schedules, Objectives, heartbeat items, file-tool writes and
-credentials (``storage.change_ledger``). Shell and Python writes are not
-checked; the person who launched the parallel thread accepted that.
+Overlapping changes are checked only where the stores check them:
+
+- The change ledger (``storage.change_ledger``) refuses the later of two of
+  a person's requests' changes to the same personal knowledge page, its only
+  user today. ``agent.request_conflict_checks: false`` turns this off.
+- Memory facts, schedules, heartbeat items and Objectives (their definition
+  and success criteria) refuse only a change made from an out-of-date read
+  (``changed_since_read``); a request that read the newest version can still
+  change what another request changed.
+- Shell, Python and file-tool writes (``file_write`` overwrites) and
+  everything else are not checked; the person who launched the parallel
+  thread accepted that.
 
 The functions here read task state, so they run on the task manager's
 operations lane (``TaskManager.operations_runtime``).
@@ -38,11 +54,11 @@ from typing import Any
 
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
+from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE
 from runtime_hosting.agent_execution import MAIN_LANE
 
 MAX_PARALLEL_LANES = 4
 PARALLEL_LANE_PREFIX = "parallel:"
-INTERACTIVE_DELIVERY = "interactive"
 
 
 def is_parallel_request(meta: Any) -> bool:
@@ -51,7 +67,7 @@ def is_parallel_request(meta: Any) -> bool:
     gateway_context = getattr(meta, "gateway_context", None)
     return bool(
         getattr(gateway_context, "parallel_thread", False)
-        and getattr(gateway_context, "delivery_mode", None) == INTERACTIVE_DELIVERY
+        and getattr(gateway_context, "delivery_mode", None) == DELIVERY_MODE_INTERACTIVE
     )
 
 
@@ -120,7 +136,6 @@ def lanes_for_messages(manager: Any, contents: list[tuple[str, Any]]) -> dict[st
 
 
 __all__ = [
-    "INTERACTIVE_DELIVERY",
     "MAX_PARALLEL_LANES",
     "executing_parallel_task_ids",
     "PARALLEL_LANE_PREFIX",

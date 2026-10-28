@@ -137,7 +137,10 @@ person's own knowledge pages), the later change is refused instead of being
 saved over the earlier one, and the agent tells the person, who can repeat it in
 a new message. A request that was stopped or has finished changes nothing,
 including a helper agent still working on it. Changes made from a page that is
-out of date ("changed since you read it") are always refused.
+out of date ("changed since you read it") are always refused. Memory facts,
+schedules, heartbeat items and Objectives have only that "changed since you
+read it" check. Files the agent writes with its file tools, and its shell or
+Python commands, are not checked.
 
 `agent.request_conflict_checks` (default `true`) turns the checks between
 requests on or off. With `false`, the later change is saved over the earlier

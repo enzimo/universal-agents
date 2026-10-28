@@ -35,7 +35,7 @@ from assistant_gateway.application.session_service import (
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.control_v1 import PAUSE_OBJECTIVE, ControlInstruction, Instruction, ManagerRuntimeWorkCommand, RuntimeWorkSummary, SystemStatusMessage
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
 from custom_messages.enums import ControlType, ObjectiveStatus, RequesterType, RoutingType
 
 
@@ -567,7 +567,7 @@ class GatewayOperationalControlApplication:
                 is_response_requested=True,
                 gateway_context=self._request_context.build_gateway_context(
                     session_key=resolved.session_key,
-                    delivery_mode="interactive",
+                    delivery_mode=DELIVERY_MODE_INTERACTIVE,
                     route=resolved.route,
                     manager_agent_id=self._manager.manager_id,
                 ),

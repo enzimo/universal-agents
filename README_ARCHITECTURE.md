@@ -299,8 +299,9 @@ each. They run in parallel on as many workers as the team allows:
 - **When the requester wakes.** Its model runs again when every delegated task
   ended, at once when one failed with a typed reason, or when a
   `check_back_after_minutes` set on the delegation passed
-  (`custom_agents/delegation_wake.py`). An early wake-up holds the agent's
-  execution slot and moves the waiting task to running with a compare-and-set,
+  (`custom_agents/delegation_wake.py`). An early wake-up holds the parent's
+  execution lane (the main lane, or its request's own lane for a request from a
+  parallel thread) and moves the waiting task to running with a compare-and-set,
   so it never runs a second turn for a task that a delegated result handled
   meanwhile already resumed or finished. Meanwhile trusted code sends the person
   counts ("9 of 24 done, 4 running, 11 waiting for a free worker") at most every
@@ -350,14 +351,24 @@ team lead runs each such request in an execution lane of its own
 `custom_agents.execution_lanes_runtime` runs the lanes,
 `runtime_hosting.agent_execution` allows one turn per lane): its
 turns run at the same time as the main lane's and other parallel lanes', up to
-four lanes at once, while one request's turns still run one at a time. All
-other work (ordinary chats, New Chat, `/new`, schedules, heartbeat, other chat
-apps, and every worker) shares the main lane, one turn at a time, as before.
+four lanes at once, while one request's turns still run one at a time. A
+schedule or Objective work created in a parallel thread copies that request's
+context, mark included (`custom_tools.providers.schedules`, the turn action
+outbox), so each of its runs gets a parallel lane of its own and counts toward
+the limit (owner, 2026-10-28: work set up from a parallel thread runs in
+parallel). Its runs may therefore overlap a new request in the same thread;
+repeated runs of one schedule do not, because the scheduler skips a fire while
+the previous run is active. All other work (ordinary chats, New Chat, `/new`,
+schedules created elsewhere, heartbeat runs, other chat apps, and every
+worker) shares the main lane, one turn at a time, as before.
 Why: by launching a parallel thread the person says the request does not
-overlap their other work (owner, 2026-10-27); the stores still refuse the later
-of two conflicting changes to covered records, and shell or Python writes are
-not checked. Each turn is self-contained: its task, person's model, stop
-handle and Strands agent live in the task's work record
+overlap their other work (owner, 2026-10-27). Overlapping changes are checked
+only where stores check them: the change ledger refuses the later of two
+requests' changes to a personal knowledge page (`agent.request_conflict_checks`
+turns this off); memory facts, schedules, heartbeat items and Objectives refuse
+only a change decided from an older version (`changed_since_read`); shell,
+Python and file-tool writes are not checked. Each turn is self-contained: its
+task, person's model, stop handle and Strands agent live in the task's work record
 (`custom_tools.runtime_context.TaskWork`), bound by the runner around the
 task's handling, and every tool, hook and post-turn step reads them from
 there, never from an agent-wide current task (`custom_agents.turn_registry`
@@ -374,6 +385,40 @@ turns. A fresh SDK agent removes only implicit history from earlier summary
 calls. `NullConversationManager` disables SDK history trimming, not retention,
 so reusing a summary agent would include another thread's prompts and answers.
 Settings marks such requests **Parallel**.
+
+How the lanes run, and what they share (`custom_agents.execution_lanes_runtime`):
+
+- All of a parallel request's work runs in its lane: answers that resume its
+  paused turns, waiting messages, due retries of its saved turn actions (the
+  turn action outbox, each retried as its source task's work), runtime mailbox
+  events and queued tasks. Decision wake-ups for its delegated work
+  (`custom_agents.delegation_wake`) hold its lane too; the scheduler pass
+  skips a request whose lane runs a turn and looks again on the next pass.
+- The limit of four counts every lane in use, whether a lane worker or the
+  scheduler's or a delivery's resume holds it. Requests already under way go
+  before new ones, and a worker's end starts a lane that waited for the limit
+  (a worker ends a little after it releases its lane, so the release alone
+  did not).
+- A lane whose waiting work fails, or whose step raises, is not started again
+  before a backoff delay (5 s doubling to 300 s), since its work stays waiting.
+- Background work (the queue drain, the lane pass and its workers, delayed
+  wake-ups) starts without the values of the turn that started it
+  (`runtime_hosting.turn_context`): its task binding, lane, person's summary
+  model and model keys.
+- What is about the agent, not one Strands agent, is shared by all of them:
+  MCP servers that failed to load (`custom_agents.mcp_server_tools.ServerFailures`,
+  so `mcp.load_retry_window_minutes` holds across lanes), and the skills a
+  change reloads into every live Strands agent
+  (`custom_agents.skill_catalog_runtime`). Building a lane's Strands agent
+  re-reads skill folders only when they changed, and a rebuilt lane agent
+  keeps the request's loaded tool groups.
+- Model failover: a turn whose Strands agent is older than the agent's model
+  (another turn switched after the same outage) retries on the current model
+  without recording a failure or switching again
+  (`custom_agents.model_failover_runtime`).
+- The scheduler still claims a due schedule only while the main lane is free,
+  so a run of a schedule made in a parallel thread can start late while the
+  main lane is busy, then runs in its own lane.
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
@@ -1140,23 +1185,31 @@ preparation failure.
 In-app restarts keep the streams they started with, because transport settings
 are operator-owned and change only with a new launch.
 
-Each agent owns one model execution slot across turn preparation, invocation,
-and completion. Parent recovery waits for that owner; queued tasks cannot claim
-the slot during an active turn. Control and status messages remain responsive.
-Because a model call holds the slot, every model call is time-bounded:
+Each agent runs one model turn at a time per execution lane
+(`runtime_hosting.agent_execution.AgentExecutionLanes`): the main lane, plus,
+on the team lead, one lane per parallel-thread request (see "Parallel threads"
+above). A turn holds its lane across turn preparation, invocation, and
+completion. Parent recovery waits for its lane's owner; queued tasks cannot
+claim a lane during an active turn. Control and status messages remain
+responsive. Because a model call holds its lane, every model call is
+time-bounded:
 `build_strands_model` wraps each provider stream with
 `custom_agents.model_stream_watchdog`, which ends a call that sends no output
 for `llm.stream_idle_timeout_seconds` or runs past
 `llm.model_call_timeout_seconds`. The HTTP client timeout alone is not enough,
 since proxy keep-alive pings keep an idle stream's bytes flowing. A stopped call
 is a provider timeout: failover, or a failed task with a plain timeout message.
-A task claims the task manager's single execution slot by moving to
-IN_PROGRESS before its turn, so every path that runs a turn (the queue, a turn
-resumed after a sign-in or access decision, a resume with a directive) ends a
-failed turn through `custom_agents.turn_failure_runtime`. As a safety net, the
-queue logs `event=execution_slot_orphaned` and ends any IN_PROGRESS task that
-still holds the slot when no turn is running. RETRYING keeps the slot on purpose
-while the turn-action outbox waits to retry.
+A main-lane task claims the task manager's main slot
+(`current_in_progress_task_id`) by moving to IN_PROGRESS before its turn; a
+parallel request moves to IN_PROGRESS in its own lane without taking that
+slot. Every path that runs a turn (the queue, a turn resumed after a sign-in or
+access decision, a resume with a directive) therefore ends a failed turn
+through `custom_agents.turn_failure_runtime`. As a safety net,
+`event=execution_slot_orphaned` is logged and an IN_PROGRESS task with no turn
+running is ended: the main slot's holder when the next task is chosen and in
+the scheduler pass, and a parallel request's task whose lane nobody holds in
+the scheduler pass. RETRYING keeps the slot on purpose while the turn-action
+outbox waits to retry.
 Busy or paused runtimes admit messages up to `agent.max_deferred_messages` (100 by
 default); excess messages remain with the broker for redelivery. The active task
 snapshot layout has changed without a migration. Finish or explicitly abandon
@@ -1503,8 +1556,10 @@ cleanup. A group is signalled only while its number still belongs to that comman
 number cannot be reused while any member lives, and a process holding it with
 a different start time is a reuse and left alone. A turn that ends normally
 leaves its background processes running, as before. A tool call keeps the task
-it started for until it returns (`runtime_context.bind_tool_call_task`), so a
-call that outlives its turn never picks up the next task's person and folders.
+it started for until it returns: the runner binds the task's work record around
+the task's handling (`custom_tools.runtime_context.task_work`), and Strands
+starts each tool call with a copy of that context, so a call that outlives its
+turn never picks up the next task's person and folders.
 
 The cancelled turn waits up to 10 seconds for its running tool calls to end,
 then gives leftover processes one second after SIGTERM and up to one more

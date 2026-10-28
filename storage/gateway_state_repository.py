@@ -262,6 +262,7 @@ class GatewayStateRepository(
         thread_id: Optional[str] = None,
         status: str = "active",
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: bool = False,
     ) -> SessionRecord: ...
 
     def upsert_session(

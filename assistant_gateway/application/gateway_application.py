@@ -204,8 +204,9 @@ class GatewayApplication(Protocol):
         chat_id: str | None = None,
         thread_id: str | None = None,
         canonical_user_id: str | None = None,
+        parallel_thread: bool = False,
     ) -> GatewaySession:
-        """Create and activate a fresh gateway session."""
+        """Create and activate a fresh gateway session; ``parallel_thread`` marks one launched as parallel."""
 
     async def reply_to_pending_query(
         self,

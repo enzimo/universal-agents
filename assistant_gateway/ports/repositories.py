@@ -138,6 +138,7 @@ class SessionRepository(Protocol):
         thread_id: str | None = None,
         status: str = "active",
         owner_canonical_user_id: str | None = None,
+        parallel_thread: bool = False,
     ) -> SessionRecord: ...
 
     def upsert_session(

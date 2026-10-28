@@ -37,7 +37,12 @@ What travels, and why:
   sessions carried schedules and delivery targets use, and each imported
   person's current session per chat, with their names and chat routes but no
   conversation: the session's conversation and last task are history and stay
-  behind. Whether a session is its chat's current one travels too
+  behind, and so does a Web Chat thread's parallel mark
+  (``SessionRecord.parallel_thread``), which belongs to the conversation the
+  person launched it for: the next message in a carried session starts an
+  ordinary thread. A schedule made in a parallel thread keeps its own mark in
+  its payload and still runs in parallel. Whether a session is its chat's
+  current one travels too
   (``channel_current``), because that is where the person's next message
   goes. Sessions are written in key order and an older session a schedule
   uses can sort after the current one, so the writer saves every session
@@ -866,7 +871,9 @@ class SchedulesSection:
     #    replied to (Task.replied_message).
     # 5: ScheduledMessage carries its store-owned timing_revision.
     # 6: the payload's GatewayContext can mark a request from a parallel thread
-    #    (GatewayContext.parallel_thread; scheduled runs never use it).
+    #    (GatewayContext.parallel_thread). A schedule created in a parallel
+    #    thread keeps the mark, so its runs get parallel lanes of their own
+    #    (custom_agents.execution_lanes).
     schema_version: ClassVar[int] = 6
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False

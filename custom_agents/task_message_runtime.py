@@ -755,7 +755,7 @@ async def _handle_task_query_message(
     """Handle a TaskQuery as the handling of its parent task (``runtime_context.task_work``)."""
 
     with task_work(task_query_msg.parent_task_id):
-        return await _handle_task_query_for_parent(
+        await _handle_task_query_for_parent(
             self,
             task_query_msg,
             incoming_msg_header,

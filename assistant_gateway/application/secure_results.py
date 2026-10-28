@@ -18,7 +18,7 @@ from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, GatewayContext, MessageHeader, MessageMeta
 from custom_messages.enums import RequesterType
 
 # The chat request waits for a page the person is filling in.
@@ -102,7 +102,7 @@ class SecureResultPublisher:
                     canonical_user_id=session.owner_canonical_user_id,
                     chat_id=session.chat_id,
                     thread_id=session.thread_id,
-                    delivery_mode="interactive",
+                    delivery_mode=DELIVERY_MODE_INTERACTIVE,
                     schedule_owner_agent_id=manager_id,
                 ),
             ),

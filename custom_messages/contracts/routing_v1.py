@@ -220,6 +220,11 @@ class MessageMeta(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+# ``GatewayContext.delivery_mode`` of a message a person sent in a chat and
+# waits on; other modes (scheduled, heartbeat, autonomous) run unattended.
+DELIVERY_MODE_INTERACTIVE = "interactive"
+
+
 # Identity and personal delivery fields travel together. Runtime signing,
 # schedule refresh and persistence loading use the same list when replacing
 # or removing a person's context; the contract owns it to avoid runtime cycles.
