@@ -174,6 +174,10 @@ class GatewayStateRepository(
 
     def transcript_unit_of_work(self) -> TranscriptUnitOfWork: ...
 
+    def chat_text_bytes_by_owner(self) -> dict[str, int]: ...
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]: ...
+
     def get_session(self, session_key: str) -> Optional[SessionRecord]: ...
 
     def get_session_by_conversation_id(
@@ -2917,6 +2921,58 @@ class _RelationalGatewayStateRepository:
             ).fetchall()
             conn.commit()
         return tuple(str(row[0] or "") for row in rows)
+
+    def chat_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of each person's chat text kept here, by owner: transcripts, requests and deliveries.
+
+        For people's storage notices (``assistant_gateway.storage_usage``).
+        One aggregate per table, so no row is loaded; the byte size comes from
+        the database (``SqlDialect.text_bytes``), which on SQLite reads each
+        value once. Requests and deliveries without an owner are left out.
+        """
+
+        def text_bytes(*columns: str) -> str:
+            return " + ".join(self._dialect.text_bytes(column) for column in columns)
+
+        owned = "owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> ''"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner, SUM(stored) FROM (
+                    SELECT owner_canonical_user_id AS owner, SUM({text_bytes("content")}) AS stored
+                    FROM gateway_transcript_messages GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes("request_text")})
+                    FROM gateway_requests WHERE {owned} GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes("rendered_text", "payload_json")})
+                    FROM gateway_deliveries WHERE {owned} GROUP BY owner_canonical_user_id
+                ) AS chat_text GROUP BY owner
+                """
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]:
+        """Bytes of the chat uploads each person sent that are still kept in ``uploads_dir``.
+
+        Read from the recorded sizes. The same table records copies of files
+        sent to people in their own scratch folders; those are in the person's
+        folder, which is counted on its own, so only paths under the uploads
+        folder count (matched as in ``delete_uploads_created_before``).
+        """
+
+        bind = self._dialect.bind
+        prefix = uploads_dir.rstrip("/") + "/"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner_canonical_user_id, SUM(size_bytes) FROM gateway_attachments
+                WHERE owner_canonical_user_id IS NOT NULL AND substr(local_path, 1, {bind}) = {bind}
+                GROUP BY owner_canonical_user_id
+                """,
+                (len(prefix), prefix),
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
 
     def update_attachment_nats_ref(
         self,

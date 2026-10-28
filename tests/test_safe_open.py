@@ -196,3 +196,16 @@ def test_status_and_listing_report_links_without_following_them(root: Path, secr
     assert linked is not None and stat.S_ISLNK(linked.st_mode)
     assert stat.S_ISLNK(listed["linked.txt"].st_mode)
     assert safe_open.entry_status(root, ("docs", "missing.txt")) is None
+
+
+def test_folder_sizes_count_regular_files_below_and_never_follow_a_link(root: Path, secret: Path, tmp_path: Path) -> None:
+    (root / "docs" / "deep").mkdir()
+    (root / "docs" / "deep" / "data.bin").write_bytes(b"x" * 20)
+    os.symlink(secret.parent, root / "docs" / "deep" / "out")
+    os.symlink(secret, root / "docs" / "secret-link.txt")
+    os.symlink(secret.parent, root / "linked")
+
+    assert safe_open.folder_bytes(root, ("docs",)) == len("hello") + 20
+    assert safe_open.folder_bytes(root, ("missing",)) == 0
+    assert safe_open.folder_bytes(tmp_path / "no-root", ()) == 0
+    assert _reason(lambda: safe_open.folder_bytes(root, ("linked",))) == safe_open.REASON_LINK

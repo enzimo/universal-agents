@@ -181,6 +181,16 @@ class GatewayStateStore:
     def transcript_unit_of_work(self) -> TranscriptUnitOfWork:
         return self._repository.transcript_unit_of_work()
 
+    def chat_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of each person's chat text in this database (``assistant_gateway.storage_usage``)."""
+
+        return self._repository.chat_text_bytes_by_owner()
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]:
+        """Bytes of each person's chat uploads still kept in ``uploads_dir``."""
+
+        return self._repository.upload_bytes_by_owner(uploads_dir=uploads_dir)
+
     def get_session(self, session_key: str) -> Optional[SessionRecord]:
         return self._repository.get_session(session_key)
 

@@ -437,6 +437,36 @@ class ConversationRepository(Protocol):
         review_job_id: str,
     ) -> int: ...
 
+    def stored_text_bytes_by_owner(self) -> dict[str, int]: ...
+
+    def conversation_owners(self) -> dict[str, str]: ...
+
+
+# Text a person's conversations keep, counted for their storage notices
+# (stored_text_bytes_by_owner). Ids, states and timestamps are left out.
+_TASK_LINK_TEXT_COLUMNS = (
+    "problem_text",
+    "final_answer_text",
+    "clarification_summary_text",
+    "execution_history_text",
+    "turn_summary_text",
+    "user_request_summary",
+    "assistant_response_summary",
+    "context_summary_text",
+    "artifact_summary_json",
+    "tool_artifact_manifest_json",
+    "gateway_context_json",
+)
+_THREAD_TEXT_COLUMNS = ("subject_preview", "synopsis_json", "synopsis_markdown", "compaction_state_json")
+_CONTEXT_EPOCH_TEXT_COLUMNS = (
+    "summary_json",
+    "summary_markdown",
+    "rehydration_manifest_json",
+    "source_lengths_before_json",
+    "source_lengths_after_json",
+    "error_text",
+)
+
 
 class _RelationalConversationRepository:
     """Shared record operations for durable conversation-thread persistence."""
@@ -1934,6 +1964,47 @@ class _RelationalConversationRepository:
                 (cutoff, after_path, int(limit)),
             ).fetchall()
         return tuple(str(row[0]) for row in rows)
+
+    def stored_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of the text each person's conversations keep here, by owner.
+
+        For people's storage notices, measured by the manager (``custom_agents.storage_usage_runtime``):
+        the turns' texts (``conversation_task_links``), the threads' summaries
+        and the compaction summaries, one aggregate per table so no row is
+        loaded. Long texts moved to files (``offload_large_text``) are counted
+        from the files, by ``conversation_owners``.
+        """
+
+        def text_bytes(columns: tuple[str, ...]) -> str:
+            return " + ".join(self._dialect.text_bytes(column) for column in columns)
+
+        owned = "owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> ''"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner, SUM(stored) FROM (
+                    SELECT owner_canonical_user_id AS owner, SUM({text_bytes(_TASK_LINK_TEXT_COLUMNS)}) AS stored
+                    FROM conversation_task_links WHERE {owned} GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes(_THREAD_TEXT_COLUMNS)})
+                    FROM conversation_threads WHERE {owned} GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes(_CONTEXT_EPOCH_TEXT_COLUMNS)})
+                    FROM conversation_context_epochs WHERE {owned} GROUP BY owner_canonical_user_id
+                ) AS conversation_text GROUP BY owner
+                """
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
+
+    def conversation_owners(self) -> dict[str, str]:
+        """Each conversation's owner, for conversations that have one (ids only)."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT conversation_id, owner_canonical_user_id FROM conversation_threads "
+                "WHERE owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> ''"
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
 
     def create_context_epoch(
         self,
