@@ -47,9 +47,9 @@ runner administration role while their base organization membership remains
 ## Public documentation publishing
 
 `publish-docs.yml` uses GitHub-hosted `ubuntu-24.04` runners for both build and
-deployment. The repository is public, while the managed local runners deliberately
-accept only private repositories. Keep those local guards intact; public pull
-requests must never execute on personal build hosts.
+deployment. Documentation PRs use disposable hosted machines, including fork
+PRs. The managed local runners accept explicitly approved repositories and
+same-repository work under the installed public-job policy described below.
 
 The documentation job installs RTK 0.51.0 from its upstream Linux release with a
 pinned SHA-256 through a JavaScript action before running any shell steps. Those
@@ -184,6 +184,19 @@ covers native Windows/macOS prerequisites and the shared host setup in detail.
 On WSL the hook installer requires `--reserve-path /mnt/c`, or the mount for
 the Windows drive actually holding the distro VHD. This checks physical Windows
 free space as well as Linux filesystem space before admitting a job.
+
+### Runner recovery
+
+If the dedicated CI distribution reports I/O errors before it can start a
+command, first check that its runners are offline and no job is active. Restarting
+the distribution stops every process inside it. With the operator's approval,
+terminate only that distribution, then start it again and verify command execution
+and both runner services. Keep Docker Desktop and other distributions untouched.
+If the error remains, investigate it before accepting more jobs.
+
+Keep the Mac awake while it serves CI. For a temporary verification session,
+run `rtk proxy caffeinate -dimsu` in a terminal and leave it running until the
+jobs finish. A launch agent cannot accept work while its host is asleep.
 
 ### WSL disk maintenance
 
