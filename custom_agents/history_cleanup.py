@@ -41,6 +41,7 @@ request is decided it keeps only ids, dates and counts
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -803,6 +804,12 @@ def finish_unfinished_history_cleanups(agent: Any) -> int:
     return finished
 
 
+async def resume_history_cleanups(agent: Any) -> int:
+    """``finish_unfinished_history_cleanups`` in a worker thread (manager start and maintenance)."""
+
+    return await asyncio.to_thread(finish_unfinished_history_cleanups, agent)
+
+
 def followup_conversation_deleted(agent: Any, person_id: Optional[str], conversation_id: str) -> bool:
     """Whether an approved clean-up deleted this whole conversation of this person.
 
@@ -834,5 +841,6 @@ __all__ = [
     "finish_unfinished_history_cleanups",
     "followup_conversation_deleted",
     "history_overview",
+    "resume_history_cleanups",
     "stage_history_cleanup",
 ]

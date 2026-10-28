@@ -469,6 +469,25 @@ def _access_maintenance_tasks(
     return tasks
 
 
+def _history_cleanup(
+    config: GatewayInstanceConfig, state_store: GatewayStateStore, access_inbox: GatewayAccessInbox
+) -> GatewayHistoryCleanup:
+    """The gateway's part of people's history clean-ups, in both authorization modes.
+
+    Composed here so the host stays a composition root
+    (``assistant_gateway.history_cleanup`` owns the behavior).
+    """
+
+    return GatewayHistoryCleanup(
+        team_id=config.manager.team_id,
+        storage=config.manager_storage_settings,
+        state_store=state_store,
+        uploads_dir=config.layout.uploads_dir,
+        proactive_session_key=config.heartbeat.session_key,
+        send_notice_once=access_inbox.send_notice_once,
+    )
+
+
 def _file_retention(
     config: GatewayInstanceConfig, *, records: DeliveryRepository, person_changes: PersonChangeCheck
 ) -> tuple[UploadRetention, GatewayFileRetention]:
@@ -937,16 +956,6 @@ class UserGateway:
             event_output=self._event_output,
             logger=logger,
         )
-        # The gateway's part of people's history clean-ups, in both
-        # authorization modes (assistant_gateway.history_cleanup).
-        self.history_cleanup = GatewayHistoryCleanup(
-            team_id=config.manager.team_id,
-            storage=config.manager_storage_settings,
-            state_store=self.state_store,
-            uploads_dir=config.layout.uploads_dir,
-            proactive_session_key=config.heartbeat.session_key,
-            send_notice_once=self.access_inbox.send_notice_once,
-        )
         self._task_progress_service = GatewayTaskProgressService(
             settings=GatewayTaskProgressSettings(
                 instance_name=config.instance_name,
@@ -1352,7 +1361,7 @@ class UserGateway:
                     name="gateway_upload_retention_loop",
                 ),
                 asyncio.create_task(
-                    self.history_cleanup.run(self._stop_event),
+                    _history_cleanup(self.config, self.state_store, self.access_inbox).run(self._stop_event),
                     name="gateway_history_cleanup_loop",
                 ),
             ]

@@ -354,6 +354,7 @@ from custom_agents.access_request_runtime import handle_access_request_resolved
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from custom_tools.comms_tools import TeamComms
 from custom_tools.tool_stop import ToolStop
+from custom_agents.history_cleanup import resume_history_cleanups
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from storage.knowledge_repository import create_knowledge_repository
@@ -5084,9 +5085,7 @@ class UniversalAgent(BaseModel):
                 await settle_departed_people_safely(self, when="manager_start")
                 # And finish history clean-ups a stopped run left part way
                 # (custom_agents.history_cleanup).
-                from custom_agents.history_cleanup import finish_unfinished_history_cleanups
-
-                await asyncio.to_thread(finish_unfinished_history_cleanups, self)
+                await resume_history_cleanups(self)
             from custom_agents.agent_instantiation_service import update_runtime_launch
             from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 
