@@ -60,6 +60,7 @@ def task_agent(layout: InstanceLayout, person: str | None, *, signed: bool = Tru
         workspace_dir=str(layout.workspaces_dir),
         authorization_config={"enabled": False},
         task_manager=task_manager,
+        test_task_id="task-1",  # the tool calls are this task's turn
     )
 
 

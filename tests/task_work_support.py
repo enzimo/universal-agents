@@ -7,9 +7,10 @@ bind it here instead:
 
 - ``bind_task(task_id)`` binds a task explicitly;
 - ``set_agent_ref(agent)`` makes ``agent`` the agent of the following calls
-  and binds the task the test gave it: its ``test_task_id``, else the task in
-  its task manager's main slot (``current_task_id``). A test agent with
-  neither leaves the binding as it is.
+  and binds the task the test gave it (its ``test_task_id``). A test agent
+  without one leaves the binding as it is. It never falls back to the task
+  manager's main slot (``current_task_id``): production does not read it, and
+  the fallback hid code paths that run with no task bound (PR #57 review).
 
 ``conftest.isolate_task_work_between_tests`` clears the binding after every
 test, so it never leaks into the next one.
@@ -35,14 +36,10 @@ def bind_task(task_id: str | None) -> TaskWork:
 
 
 def declared_task_id(agent: Any) -> str | None:
-    """The task a test agent works on: its ``test_task_id``, else its task manager's main slot."""
+    """The task a test agent works on: its ``test_task_id`` (module docstring)."""
 
     task_id = getattr(agent, "test_task_id", None)
-    if task_id:
-        return str(task_id)
-    manager = getattr(agent, "task_manager", None)
-    current = getattr(manager, "current_task_id", None) if manager is not None else None
-    return str(current) if isinstance(current, str) and current else None
+    return str(task_id) if task_id else None
 
 
 def set_agent_ref(agent: Any) -> None:

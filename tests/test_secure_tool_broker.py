@@ -4739,6 +4739,7 @@ def test_secure_cli_sends_the_signed_task_context_from_the_active_task() -> None
         team_id="team_bound",
         named_agent_type="PersonalAdminAgent",
         task_manager=task_manager,
+        test_task_id="task_bound",  # the call is this task's turn
     )
     set_agent_ref(agent)
     try:

@@ -76,6 +76,7 @@ from custom_tools.providers.objectives import (
     start_isolated_recovery,
     update_execution_plan_step,
 )
+from custom_tools.runtime_context import task_work
 from tests.task_work_support import set_agent_ref
 from storage import resolve_storage_settings
 from custom_transport.base import TransportPublishOptions
@@ -2322,16 +2323,18 @@ async def test_live_manager_isolated_recovery_uses_fresh_context_and_plan_link()
                 plan_id = manager.task_manager.get_task_plan_id(original_task_id)
                 assert plan_id is not None
                 set_agent_ref(manager)
-                tool_result = json.loads(
-                    await asyncio.to_thread(
-                        start_isolated_recovery,
-                        failure_type="critical_context_pressure",
-                        failure_summary="The original task context is too large for reliable troubleshooting.",
-                        recovery_brief="PHASE3_RECOVERY_BRIEF: inspect the failure and return a compact recovery path.",
-                        affected_step_id="plan_step_recover",
-                        notify_user=True,
+                # The original task's turn calls the tool; only that call has its task bound.
+                with task_work(original_task_id):
+                    tool_result = json.loads(
+                        await asyncio.to_thread(
+                            start_isolated_recovery,
+                            failure_type="critical_context_pressure",
+                            failure_summary="The original task context is too large for reliable troubleshooting.",
+                            recovery_brief="PHASE3_RECOVERY_BRIEF: inspect the failure and return a compact recovery path.",
+                            affected_step_id="plan_step_recover",
+                            notify_user=True,
+                        )
                     )
-                )
                 assert tool_result["recovery_started"] is True
                 assert tool_result["metadata_hidden"] is True
                 assert tool_result["recovery_task_payload_has_plan_id"] is False

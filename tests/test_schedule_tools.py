@@ -207,6 +207,8 @@ class _FakeAgent:
                 ),
             ),
         )
+        # The tool calls below are the person's request's own turn.
+        self.test_task_id = "task_current"
         self._schedule_store = ScheduleStore(db_path=db_path)
         self._conversation_store = ConversationStore(db_path=db_path, artifacts_dir=Path(db_path).parent / "conversation_artifacts")
         self._scheduler_wake = _FakeWake()

@@ -51,6 +51,7 @@ class _FakeAgent:
         self.task_manager = _FakeTaskManager(
             db_path, meta, storage_settings=storage_settings
         )
+        self.test_task_id = "task_current"  # the tool calls are this task's turn
         self.instance_config_path = instance_config_path
         self.workspace_dir = workspace_dir
 

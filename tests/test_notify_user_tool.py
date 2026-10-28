@@ -100,6 +100,7 @@ def _fake_agent(
         workspace_dir=str(config_path.parent / "workspaces"),
         task_manager=task_manager,
         team_comms=team_comms or SimpleNamespace(send_message=AsyncMock()),
+        test_task_id="task_1",  # notify_user runs in this task's turn
     )
 
 

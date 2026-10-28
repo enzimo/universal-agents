@@ -37,6 +37,7 @@ class _FakeAgent:
     id = "agent_site_test"
     named_agent_type = "TeamArchitect"
     task_manager = _FakeTaskManager()
+    test_task_id = _FakeTaskManager.current_task_id  # the tool calls are this task's turn
 
     def __init__(self, workspace_dir: Path) -> None:
         self.workspace_dir = str(workspace_dir)

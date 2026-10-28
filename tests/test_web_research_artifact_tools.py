@@ -32,6 +32,7 @@ class _FakeAgent:
     id = "agent_web_test"
     named_agent_type = "WebResearchAgent"
     task_manager = _FakeTaskManager()
+    test_task_id = _FakeTaskManager.current_task_id  # the tool calls are this task's turn
 
     def __init__(self, layout: InstanceLayout) -> None:
         self.instance_root = str(layout.root)

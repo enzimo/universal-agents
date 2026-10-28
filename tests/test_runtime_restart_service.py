@@ -182,6 +182,8 @@ def _make_agent(
     _delegate(lead, "task_restart", "task_child")
     _report(lead, _specialist_status(current_task_id="task_child"))
     assert manager.current_task_id == "task_restart"
+    # The tool calls below are the restart request's own turn.
+    lead.test_task_id = "task_restart"
     set_agent_ref(lead)
     yield lead
     set_agent_ref(None)

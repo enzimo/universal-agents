@@ -11,7 +11,7 @@ import pytest
 
 from custom_messages.enums import ProgressState
 from custom_tools.providers.task_queue import control_task_queue, list_task_queue
-from tests.task_work_support import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from test_runtime_task_controls import agent as runtime_agent_fixture, add, command
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -39,6 +39,7 @@ def current_request(agent, monkeypatch):
     use_signed_contexts(monkeypatch)
     add(agent, "inspection", state=ProgressState.IN_PROGRESS)
     request = sign(agent, "inspection")
+    agent.test_task_id = "inspection"  # the tool calls below are this task's turn
     set_agent_ref(agent)
     yield request
     set_agent_ref(None)
@@ -114,6 +115,7 @@ async def test_explicit_queue_pause_survives_recovery_and_does_not_mask_a_later_
     # must be active before an agent tool has a canonical user context again.
     add(agent, "after-restart", state=ProgressState.IN_PROGRESS)
     sign(agent, "after-restart", current_request)
+    bind_task("after-restart")
     resumed = json.loads(await control_task_queue("queued", "resume", "Continue"))
     assert resumed["state"] == "accepted"
     agent.task_manager.update_main_task_state(

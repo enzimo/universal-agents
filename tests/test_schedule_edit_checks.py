@@ -351,6 +351,8 @@ class _ToolAgent:
             task=Task(task_id="task_current", task_type=MessageMetaType.REQUEST, problem_statement="Schedules"),
         )
         self.task_manager = _ToolTaskManager(store._storage_settings, task_info)
+        # The tool calls below are this request's own turn.
+        self.test_task_id = "task_current"
         self._schedule_store = store
         self._conversation_store = ConversationStore(
             db_path=str(tmp_path / "conversations.db"), artifacts_dir=tmp_path / "conversation_artifacts"

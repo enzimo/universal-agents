@@ -156,6 +156,7 @@ def test_execution_digest_tools_update_delegated_specialist_task():
         ProgressState.IN_PROGRESS,
         "2026-04-25T04:14:41+00:00",
     )
+    bind_task(task.task_id)
     set_agent_ref(_FakeAgent(task_manager))
 
     plan_result = tool_json(

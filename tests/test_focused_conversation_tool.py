@@ -65,6 +65,8 @@ class _FakeAgent:
     named_agent_type = "TeamArchitect"
     # The per-call access hook is not part of these tests.
     authorization_config = {"enabled": False}
+    # The tool calls are the person's request's own turn.
+    test_task_id = _FakeTaskManager.current_task_id
 
     def __init__(
         self, conversation_store: ConversationStore, canonical_user_id: str = OWNER_A

@@ -77,6 +77,7 @@ def _set_person_agent(attachment: UserTaskAttachment, layout, person: str) -> No
             task_manager=task_manager,
             instance_root=str(layout.root),
             workspace_dir=str(layout.workspaces_dir),
+            test_task_id="task_1",  # the tool calls are this task's turn
         )
     )
 

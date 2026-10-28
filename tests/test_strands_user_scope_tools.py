@@ -67,6 +67,8 @@ class _FakeAgent:
     memory_config = {"usermem": {"max_facts_per_user": 10}}
     # The per-call access hook is not part of these tests.
     authorization_config = {"enabled": False}
+    # The tool calls are the person's request's own turn.
+    test_task_id = _FakeTaskManager.current_task_id
 
     def __init__(self, db_path: Path, canonical_user_id: str) -> None:
         self._pinned_memory_repository = SqlitePinnedMemoryRepository(str(db_path))
