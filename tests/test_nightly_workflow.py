@@ -25,7 +25,7 @@ def test_nightly_runs_daily_or_by_hand_from_main_only() -> None:
         "cancel-in-progress": "false",
     }
     job = workflow["jobs"]["nightly"]
-    assert job["if"] == "github.event.repository.private && github.ref == 'refs/heads/main'"
+    assert job["if"] == "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
     assert job["runs-on"] == ["self-hosted", "Linux", "X64", "ua-build", "ua-linux"]
     # Releases and tags need contents: write; starting publish-container needs actions: write.
     assert job["permissions"] == {"contents": "write", "actions": "write"}

@@ -35,7 +35,7 @@ but requires its own Linux Actions runner. A Windows runner cannot execute
 GitHub Linux container actions directly.
 
 The shared host setup uses the `Universal Agents` organization runner group
-for private repositories, with repository allowlists enforced by installed hooks.
+for explicitly approved repositories, with allowlists enforced by installed hooks.
 One Windows host runs a Windows runner and two Linux runners; the Linux runners
 use a dedicated `Ubuntu-24.04` WSL 2 distribution and its own Docker daemon. A
 Mac runs the ARM64 runner.
@@ -80,6 +80,33 @@ run and an HTTP check of the published quickstart complete deployment verificati
 
 ## Toolchains and isolation
 
+### Public repository access
+
+The runner group must allow public repositories and select only approved
+repositories, preserving already approved private repositories. Each installed
+hook also requires explicit public approval in its own `config.json` through
+`public_repositories`, outside the checkout. Add only Universal Agents and Desktop
+to that public list for this rollout.
+
+The hook accepts pushes, schedules, manual runs, and pull requests whose head
+and base both belong to the configured repository. Fork PRs, missing or mismatched
+repository identity, `pull_request_target`, `workflow_run`, and other trigger types
+are refused before job state or commands are created. Same-repository branches
+are trusted team code: only people and automation trusted with the machines may
+push them. Documentation validation stays on disposable GitHub-hosted runners.
+
+Every local job requires `UA_CI_PUBLIC_JOB_POLICY_VERSION=1` from the installed
+hook beside the existing hook/cache markers. Jobs never replace installed hooks
+from their checkout. Install the reviewed code and public allowlist before
+enabling group access; preserve every existing host path, cache setting, disk
+reserve and private-repository entry.
+
+Verify the policy with `.github/runner/test_ci_hook.py` and the CI workflow tests.
+The hook suite exercises accepted public work and proves fork requests leave no
+job state. After rollout, dispatch **Local runner preflight** for each repository,
+inspect cleanup, and confirm both Linux runners, Windows and macOS are online.
+Do not create release tags or run publishing workflows to validate runners.
+
 Provision RTK 0.48.0, system Python 3.12+, Node.js 22+, Git, Rust 1.95.0,
 Docker, Buildx, QEMU/binfmt, and GitHub CLI 2.100.0. Sidecar jobs select Node.js 24.20.0. Runtime
 installation checks use Python 3.12 and 3.13; other Python CI selects 3.13.
@@ -103,7 +130,9 @@ rtk proxy python3 .github/runner/install_hooks.py \
   --runner /opt/actions-runner \
   --destination /opt/ua-ci-hooks \
   --repository enzimo/universal-agents \
-  --repository enzimo/universal-agents-desktop
+  --repository enzimo/universal-agents-desktop \
+  --public-repository enzimo/universal-agents \
+  --public-repository enzimo/universal-agents-desktop
 rtk proxy python3 -m unittest discover -s .github/runner -v
 ```
 

@@ -16,7 +16,8 @@ def run(*args):
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    if os.environ.get("UA_CI_HOOK_VERSION") != "1":
+    if (os.environ.get("UA_CI_HOOK_VERSION") != "1"
+            or os.environ.get("UA_CI_PUBLIC_JOB_POLICY_VERSION") != "1"):
         raise RuntimeError(
             "Install the reviewed runner hooks before assigning this label"
         )

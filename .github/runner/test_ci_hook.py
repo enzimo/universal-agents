@@ -24,13 +24,15 @@ class LifecycleTests(unittest.TestCase):
             "runner": str(self.work.parent),
             "min_free_gib": 0,
             "repositories": ["enzimo/universal-agents"],
+            "public_repositories": ["enzimo/universal-agents"],
         }
         self.event = self.root / "event.json"
-        self.event.write_text(json.dumps({"repository": {"private": True}}))
+        self.event.write_text(json.dumps({"repository": {"private": False, "full_name": "enzimo/universal-agents"}}))
         self.env = patch.dict(
             os.environ,
             {
                 "GITHUB_REPOSITORY": "enzimo/universal-agents",
+                "GITHUB_EVENT_NAME": "push",
                 "GITHUB_WORKSPACE": str(self.workspace),
                 "GITHUB_EVENT_PATH": str(self.event),
                 "GITHUB_RUN_ID": "123",
@@ -83,6 +85,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue((prepared_action / "index.js").exists())
         env = (self.root / "env").read_text()
         self.assertIn("UA_CI_HOOK_VERSION=1", env)
+        self.assertIn("UA_CI_PUBLIC_JOB_POLICY_VERSION=1", env)
         self.assertIn("DOCKER_CONFIG=" + str(self.state / "cache" / "docker"), env)
 
     def test_interrupted_compiler_cache_is_stopped_before_reuse(self):
@@ -233,19 +236,65 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.begin()
 
-    def test_public_and_fork_code_cannot_start(self):
-        for event in (
-            {"repository": {"private": False}},
-            {
-                "repository": {"private": True},
-                "pull_request": {
-                    "head": {"repo": {"full_name": "fork/universal-agents"}}
-                },
+    def test_fork_pr_is_refused_before_any_job_state_is_created(self):
+        os.environ["GITHUB_EVENT_NAME"] = "pull_request"
+        self.event.write_text(json.dumps({
+            "repository": {"full_name": "enzimo/universal-agents"},
+            "pull_request": {
+                "head": {"repo": {"full_name": "fork/universal-agents"}},
+                "base": {"repo": {"full_name": "enzimo/universal-agents"}},
             },
+        }))
+        with self.assertRaisesRegex(ValueError, "Fork"):
+            self.begin()
+        self.assertFalse((self.state / "job.json").exists())
+
+    def test_same_repository_pr_can_use_the_public_repository_runner(self):
+        os.environ["GITHUB_EVENT_NAME"] = "pull_request"
+        self.event.write_text(json.dumps({
+            "repository": {"full_name": "enzimo/universal-agents", "private": False},
+            "pull_request": {
+                side: {"repo": {"full_name": "enzimo/universal-agents"}}
+                for side in ("head", "base")
+            },
+        }))
+        self.begin()
+        self.assertTrue((self.state / "job.json").exists())
+
+    def test_missing_or_unsupported_provenance_is_refused(self):
+        repository = {"full_name": "enzimo/universal-agents"}
+        for name, event in (
+            ("", {"repository": repository}),
+            ("pull_request_target", {"repository": repository}),
+            ("workflow_run", {"repository": repository}),
+            ("repository_dispatch", {"repository": repository}),
+            ("push", {"repository": {"full_name": "other/repository"}}),
+            ("push", {"repository": repository, "pull_request": {}}),
+            ("pull_request", {"repository": repository}),
+            ("push", {}),
         ):
-            self.event.write_text(json.dumps(event))
-            with self.assertRaises(ValueError):
-                self.begin()
+            with self.subTest(event_name=name, event=event):
+                os.environ["GITHUB_EVENT_NAME"] = name
+                self.event.write_text(json.dumps(event))
+                with self.assertRaises(ValueError):
+                    self.begin()
+                self.assertFalse((self.state / "job.json").exists())
+
+    def test_configured_repositories_accept_supported_non_pr_events(self):
+        for repository in ("enzimo/universal-agents", "enzimo/universal-agents-desktop"):
+            for private in (False, True):
+                for name in ("push", "workflow_dispatch", "schedule"):
+                    with self.subTest(repository=repository, private=private, event_name=name):
+                        ci_hook.require_trusted_event(
+                            {"repositories": [repository], "public_repositories": [repository]},
+                            {"GITHUB_REPOSITORY": repository, "GITHUB_EVENT_NAME": name},
+                            {"repository": {"full_name": repository, "private": private}},
+                        )
+
+    def test_public_repository_needs_explicit_host_approval(self):
+        del self.config["public_repositories"]
+        with self.assertRaisesRegex(ValueError, "not approved"):
+            self.begin()
         self.assertFalse((self.state / "job.json").exists())
 
     def test_disk_reserve_blocks_new_work(self):

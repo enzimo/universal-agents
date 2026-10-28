@@ -196,8 +196,10 @@ def test_jobs_require_their_documented_runners_and_bounded_execution() -> None:
             for runner in runners:
                 assert "self-hosted" in runner, (path, name)
                 assert "ua-linux" in runner or "ua-macos" in runner, (path, name)
-            assert "github.event.repository.private" in job["if"]
+            assert "github.event.repository.private" not in job["if"]
+            assert "pull_request" in job["if"]
             assert "UA_CI_HOOK_VERSION" in job["steps"][0]["run"]
+            assert "UA_CI_PUBLIC_JOB_POLICY_VERSION" in job["steps"][0]["run"]
 
 
 def test_live_nats_uses_job_identity_and_dynamic_loopback_port() -> None:
