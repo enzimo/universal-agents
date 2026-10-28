@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
+import json
 from pathlib import Path
+import subprocess
 
 import pytest
 import yaml
@@ -14,7 +16,7 @@ def _workflow() -> dict:
     return yaml.load(WORKFLOW_PATH.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
-def test_docs_workflow_builds_automatically_but_deploys_manually() -> None:
+def test_docs_workflow_builds_public_contributions_and_publishes_trusted_refs() -> None:
     workflow = _workflow()
 
     assert "pull_request" in workflow["on"]
@@ -23,13 +25,12 @@ def test_docs_workflow_builds_automatically_but_deploys_manually() -> None:
     assert "workflow_dispatch" in workflow["on"]
     assert workflow["permissions"] == {"contents": "read"}
 
+    build = workflow["jobs"]["build"]
+    assert "if" not in build
+    assert build["runs-on"] == "ubuntu-24.04"
+    assert build["permissions"] == {"contents": "read", "pages": "read"}
     deploy = workflow["jobs"]["deploy"]
-    assert deploy["if"] == (
-        "github.event.repository.private && "
-        "(github.event_name != 'pull_request' || "
-        "github.event.pull_request.head.repo.full_name == github.repository) && "
-        "(github.event_name == 'workflow_dispatch')"
-    )
+    assert deploy["runs-on"] == "ubuntu-24.04"
     assert deploy["needs"] == "build"
     assert deploy["permissions"] == {"pages": "write", "id-token": "write"}
     assert deploy["environment"]["name"] == "github-pages"
@@ -37,6 +38,51 @@ def test_docs_workflow_builds_automatically_but_deploys_manually() -> None:
         "group": "github-pages",
         "cancel-in-progress": "false",
     }
+
+
+def test_docs_publish_conditions_allow_only_main_and_stable_releases() -> None:
+    """Execute the workflow's boolean expressions against event/ref combinations.
+
+    The expressions use the JavaScript-compatible subset of GitHub's language;
+    pass its two string functions explicitly so these are the actual conditions.
+    """
+    workflow = _workflow()
+    steps = workflow["jobs"]["build"]["steps"]
+    conditions = [workflow["jobs"]["deploy"]["if"]] + [
+        step["if"] for step in steps
+        if step.get("name") in {"Configure GitHub Pages", "Upload GitHub Pages artifact"}
+    ]
+    assert len(conditions) == 3
+    cases = [
+        ("push", "refs/heads/main", True),
+        ("push", "refs/tags/v0.9.1", True),
+        ("workflow_dispatch", "refs/heads/main", True),
+        ("workflow_dispatch", "refs/tags/v0.9.1", True),
+        ("pull_request", "refs/pull/123/merge", False),
+        ("pull_request", "refs/heads/main", False),
+        ("workflow_dispatch", "refs/heads/feature/docs", False),
+        ("workflow_dispatch", "refs/tags/v0.9.2-beta.1", False),
+        ("workflow_dispatch", "refs/tags/v0.9.2-rc.1", False),
+        ("workflow_dispatch", "refs/tags/v0.9.2-nightly.202610280317", False),
+    ]
+    contexts = [
+        {"event_name": event, "ref": ref, "event": {"repository": {"private": private}}}
+        for private in (False, True) for event, ref, _ in cases
+    ]
+    completed = subprocess.run(
+        [
+            "node", "--eval",
+            "const {conditions, contexts} = JSON.parse(process.argv[1]);"
+            "const result = conditions.map(condition => {"
+            "  const decide = new Function('github', 'startsWith', 'contains', 'return (' + condition + ')');"
+            "  return contexts.map(github => decide(github, (s, p) => s.startsWith(p), (s, p) => s.includes(p)));"
+            "}); process.stdout.write(JSON.stringify(result));",
+            json.dumps({"conditions": conditions, "contexts": contexts}),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    expected = [allowed for _, _, allowed in cases] * 2
+    assert json.loads(completed.stdout) == [expected] * len(conditions)
 
 
 def test_docs_workflow_builds_and_uploads_a_pages_safe_artifact() -> None:
@@ -58,7 +104,6 @@ def test_docs_workflow_builds_and_uploads_a_pages_safe_artifact() -> None:
         step for step in steps if step.get("name") == "Upload GitHub Pages artifact"
     )
     deploy_steps = workflow["jobs"]["deploy"]["steps"]
-    assert "UA_CI_HOOK_VERSION" in deploy_steps[0]["run"]
     deployment = next(step for step in deploy_steps if step.get("id") == "deployment")
 
     assert (
@@ -80,7 +125,6 @@ def test_docs_workflow_builds_and_uploads_a_pages_safe_artifact() -> None:
         pages["uses"]
         == "actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b"
     )
-    assert pages["if"] == "github.event_name == 'workflow_dispatch'"
     assert install["run"] == (
         "python -m pip install --require-hashes -r requirements-dev.lock.txt"
     )
@@ -100,15 +144,30 @@ def test_docs_workflow_builds_and_uploads_a_pages_safe_artifact() -> None:
         == "actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b"
     )
     assert upload["with"]["path"] == "user_docs/pages"
-    # Only an actual Pages deployment needs stored output; automatic CI still builds it.
+    # Validation always builds, but only trusted refs can upload or publish.
     assert "if" not in build
-    assert upload["if"] == pages["if"] == "github.event_name == 'workflow_dispatch'"
+    assert upload["if"] == pages["if"] == workflow["jobs"]["deploy"]["if"]
     assert upload["with"]["retention-days"] == "7"
     assert "continue-on-error" not in upload
     assert (
         deployment["uses"]
         == "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e"
     )
+
+
+def test_docs_bootstraps_rtk_before_any_shell_step() -> None:
+    workflow = _workflow()
+    assert workflow["defaults"]["run"]["shell"].startswith("rtk proxy bash ")
+    steps = workflow["jobs"]["build"]["steps"]
+    bootstrap = next(step for step in steps if step.get("name") == "Install pinned RTK")
+    assert bootstrap["uses"] == "actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd"
+    script = bootstrap["with"]["script"]
+    assert "createHash('sha256')" in script
+    assert script.index("RTK archive checksum mismatch") < script.index("await exec.exec('tar'")
+    assert "core.addPath(directory)" in script
+    first_shell = next(step for step in steps if "run" in step)
+    assert steps.index(bootstrap) < steps.index(first_shell)
+    assert first_shell["run"] == "rtk --version"
 
 
 def _tag_starts_docs(tag: str, patterns: list[str]) -> bool:

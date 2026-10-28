@@ -1,6 +1,6 @@
 # Local CI
 
-Tests, dependency audits, documentation, source releases, and AMD64 container
+Tests, dependency audits, source releases, and AMD64 container
 builds use `[self-hosted, Linux, X64, ua-build, ua-linux]`. ARM64 container
 builds use `[self-hosted, macOS, ARM64, ua-build, ua-macos]` with a native
 ARM64 Docker daemon. A final Linux job combines both immutable platform digests
@@ -15,9 +15,10 @@ must use the explicit build-only mode when dispatching the container workflow.
 
 GitHub Actions artifacts and logs use seven-day retention across the organization.
 The skill-installation canary and fast tests must pass, but archiving their evidence
-runs afterward and reports upload failures as warnings. Automatic documentation
-checks test and build the site without uploading it. Only a manual Pages deployment
-uploads the site, and that upload must succeed before deployment. Container builds
+runs afterward and reports upload failures as warnings. Documentation pull requests
+test and build the site without uploading it. Main pushes, stable release tags and
+manual runs on main or stable tags upload the Pages site, and that upload must
+succeed before deployment. Container builds
 and image publication do not require these stored artifacts.
 
 The fast job allows 75 minutes for setup, the complete hermetic suite, and
@@ -42,6 +43,40 @@ Mac and Linux runner registration and group access require organization runner
 administration permission. A maintainer can receive it through a delegated
 runner administration role while their base organization membership remains
 `member`.
+
+## Public documentation publishing
+
+`publish-docs.yml` uses GitHub-hosted `ubuntu-24.04` runners for both build and
+deployment. The repository is public, while the managed local runners deliberately
+accept only private repositories. Keep those local guards intact; public pull
+requests must never execute on personal build hosts.
+
+The documentation job installs RTK 0.51.0 from its upstream Linux release with a
+pinned SHA-256 through a JavaScript action before running any shell steps. Those
+steps retain the RTK shell wrapper. Python 3.13 and Node.js 24.20.0 are set up by
+pinned actions. Hosted runners do not use the local cleanup hooks, build caches,
+`UA_CI_PYTHON`, or the local Python relocation helper. Their machines are disposable.
+
+In the repository's **Settings > Pages > Build and deployment**, set **Source** to
+**GitHub Actions**. The existing workflow builds the MkDocs sources under
+`user_docs_source/`; no suggested Jekyll or static HTML template is needed.
+
+Pushes to `main` and stable `vX.Y.Z` tags publish after all documentation checks and
+the strict build pass. To publish the current main manually, open **Actions >
+Publish Documentation > Run workflow**, select `main`, and run it. Pull requests
+validate with read-only repository access and never upload or deploy. The build
+job has `pages: read` to read the site's base URL; only deployment has
+`pages: write` and `id-token: write`. Manual runs on feature branches or
+pre-release tags cannot deploy. The `github-pages`
+environment must allow `main` and stable release tags if deployment protection
+rules are configured. The deployed quickstart is under `/universal-agents/quickstart/`.
+
+Verify workflow changes with `tests/test_publish_docs_workflow.py` and
+`tests/test_ci_workflows.py`, the served-documentation tests listed in the workflow,
+`node --test tests/setup_guide.test.cjs`, and a strict Pages build using
+`scripts/build_user_docs.py --github-pages`. The event/ref matrix checks that both
+public and private repositories publish only the intended refs. The real Actions
+run and an HTTP check of the published quickstart complete deployment verification.
 
 ## Toolchains and isolation
 
@@ -346,7 +381,7 @@ workflow. Its `--kind` option prints `stable`, `beta`, `rc` or `nightly`.
 
 | Tag | Made by | GitHub release | Image tags | Docs site |
 |-----|---------|----------------|------------|-----------|
-| `vX.Y.Z` | a person, per the release process | release, may become Latest | `X.Y.Z`, `X.Y`, `X`, `latest` | built |
+| `vX.Y.Z` | a person, per the release process | release, may become Latest | `X.Y.Z`, `X.Y`, `X`, `latest` | published |
 | `vX.Y.Z-beta.N`, `vX.Y.Z-rc.N` | a person (signed tag on `main`) | pre-release, never Latest | `X.Y.Z-beta.N` only | not built |
 | `vX.Y.Z-nightly.YYYYMMDDHHMM` | `nightly.yml` | pre-release, never Latest | `X.Y.Z-nightly.…` only | not built |
 

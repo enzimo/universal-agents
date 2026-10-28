@@ -21,23 +21,53 @@ defaults:
 
 jobs:
   build:
-    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    # Public contributions run on disposable hosted machines, never personal hosts.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read
     timeout-minutes: 15
     steps:
-      - name: Require managed local runner
-        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
+      # Bootstrap through a JavaScript action so every shell step can use RTK.
+      - name: Install pinned RTK
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const { createHash } = require('node:crypto');
+            const response = await fetch('https://github.com/rtk-ai/rtk/releases/download/v0.51.0/rtk-x86_64-unknown-linux-musl.tar.gz');
+            if (!response.ok) throw new Error(`RTK download failed: HTTP ${response.status}`);
+            const archive = Buffer.from(await response.arrayBuffer());
+            const digest = createHash('sha256').update(archive).digest('hex');
+            if (digest !== '5028d3b19a8f0990d30fec9fbb07e32782bc5698e618fb1861aad8a9ccba4eb5') {
+              throw new Error('RTK archive checksum mismatch');
+            }
+            const directory = path.join(process.env.RUNNER_TEMP, 'rtk');
+            await fs.mkdir(directory, { recursive: true });
+            const filename = path.join(directory, 'rtk.tar.gz');
+            await fs.writeFile(filename, archive);
+            await exec.exec('tar', ['-xzf', filename, '-C', directory]);
+            core.addPath(directory);
+
+      - name: Verify RTK
+        run: rtk --version
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
-      - name: Make disposable Python work with isolated child processes
-        run: '"$UA_CI_PYTHON" .github/runner/relocate_python.py'
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: "24.20.0"
+          package-manager-cache: false
+
       - name: Create disposable Python environment
         run: |
           python -m venv .venv
@@ -55,7 +85,10 @@ jobs:
           fi
 
       - name: Configure GitHub Pages
-        if: github.event_name == 'workflow_dispatch'
+        if: >-
+          github.event_name != 'pull_request' &&
+          (github.ref == 'refs/heads/main' ||
+          (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')))
         id: pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
@@ -68,6 +101,7 @@ jobs:
       - name: Test served documentation and guide routes
         run: >-
           python -m pytest -q
+          tests/test_publish_docs_workflow.py tests/test_ci_workflows.py
           tests/test_user_docs_service.py tests/test_docs_navigation.py
           tests/test_gateway_website_app.py tests/test_gateway_interactive_app_registry.py
           tests/test_docker_compose_setup_html.py tests/test_build_user_docs.py
@@ -82,16 +116,22 @@ jobs:
           --github-pages
 
       - name: Upload GitHub Pages artifact
-        if: github.event_name == 'workflow_dispatch'
+        if: >-
+          github.event_name != 'pull_request' &&
+          (github.ref == 'refs/heads/main' ||
+          (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')))
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: user_docs/pages
           retention-days: 7
 
   deploy:
-    if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name == 'workflow_dispatch')
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' ||
+      (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')))
     needs: build
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
@@ -103,8 +143,6 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     timeout-minutes: 15
     steps:
-      - name: Require managed local runner
-        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
       - name: Deploy GitHub Pages
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
