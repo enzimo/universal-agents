@@ -3,9 +3,10 @@
 Saved tool results are deleted after the team's retention period
 (``tool_policy.output_retention_days``, ``custom_agents.output_retention``).
 A result folder's name starts with the UTC time it was written, so a request
-for a missing result written before the period gets a plain answer that it was
-deleted under the retention policy, with ``retryable: false``, rather than
-"not found".
+for a result whose folder is gone and was written before the period gets a
+plain answer that it was deleted under the retention policy, with
+``retryable: false``, rather than "not found". A file missing from a folder
+that still exists is an ordinary "not found".
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from access_control.ownership import (
 )
 
 import json
+import os
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -80,10 +82,15 @@ def _json_result(status: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _deleted_under_retention(result_folder: Path) -> Optional[Dict[str, Any]]:
-    """The answer for a missing saved result written before the retention period, else None."""
+    """The answer for a result the cleanup deleted, else None.
+
+    Only when the result folder's dated name is past the retention period and
+    the folder itself is gone: the cleanup deletes a result as a whole. A file
+    missing from a folder that still exists is an ordinary "not found".
+    """
 
     days = retention_days_of(get_agent_ref())
-    if not deleted_by_retention(written_at_from_name(result_folder.name), days):
+    if os.path.lexists(result_folder) or not deleted_by_retention(written_at_from_name(result_folder.name), days):
         return None
     return _json_result(
         "error",
@@ -105,8 +112,8 @@ def _missing_manifest(manifest: Path) -> Dict[str, Any]:
 
 
 def _block_path_failure(manifest: Path, error: str) -> Dict[str, Any]:
-    # The cleanup deletes the manifest first: a block lost with it was being deleted just now.
-    deleted = None if manifest.exists() else _deleted_under_retention(manifest.parent)
+    # A block lost with its whole folder since the manifest was read: the cleanup deleted the result meanwhile.
+    deleted = _deleted_under_retention(manifest.parent)
     if deleted is not None:
         return deleted
     return _json_result("error", {"status": "failed", "failure_stage": "input_validation", "failure_reason": "block_path_invalid", "message": error, "retryable": True})

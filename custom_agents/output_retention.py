@@ -626,15 +626,77 @@ def deleted_output_note(retention_days: int | None = None) -> str:
     )
 
 
-def with_deleted_outputs_marked(artifacts: Any) -> list[dict[str, Any]]:
-    """Copies of a turn's artifact entries; one whose saved file is gone says so instead of naming it.
+@dataclass(frozen=True)
+class SavedOutputRetention:
+    """What a reader needs to tell that the cleanup deleted a saved output: the period and its folders.
+
+    ``folders`` are the instance's ``tool_results_dir`` and
+    ``conversation_artifacts_dir``, the only folders whose files the cleanup
+    deletes while their conversation exists. With no folders (no instance
+    layout) or a period of 0 nothing is ever said to be deleted.
+    """
+
+    retention_days: int = 0
+    folders: tuple[Path, ...] = ()
+
+    @classmethod
+    def for_layout(cls, layout: InstanceLayout, retention_days: int) -> SavedOutputRetention:
+        return cls(
+            retention_days=max(0, int(retention_days)),
+            folders=(layout.tool_results_dir, layout.conversation_artifacts_dir),
+        )
+
+    @classmethod
+    def for_agent(cls, agent: Any) -> SavedOutputRetention:
+        from custom_agents.runtime_paths import agent_layout
+
+        return cls.for_layout(agent_layout(agent), retention_days_of(agent))
+
+    def deleted(self, path: Any, *, created_at: Any = None, now: float | None = None) -> bool:
+        """Whether the cleanup deleted the saved output at ``path``.
+
+        All must hold: the period is above 0; ``path`` is absolute and, once
+        normalized, inside one of the cleaned folders; when ``created_at`` is
+        known, it is before the cutoff; and nothing is there any more. A
+        relative path, a URL, a placeholder such as "(inline)", a path a
+        summarizer reworded, one in an older layout, or a recent output is
+        never called deleted.
+        """
+
+        raw = str(path or "")
+        if self.retention_days <= 0 or not raw or not os.path.isabs(raw):
+            return False
+        normalized = Path(os.path.normpath(raw))
+        if not any(folder in normalized.parents for folder in self.folders):
+            return False
+        written = _time_of(created_at)
+        if written is not None and written >= retention_cutoff(self.retention_days, now):
+            return False
+        return not os.path.lexists(normalized)
+
+
+def _time_of(value: Any) -> float | None:
+    """An ISO 8601 time as a timestamp (UTC when it names no zone); None when unknown."""
+
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def with_deleted_outputs_marked(
+    artifacts: Any, retention: SavedOutputRetention | None, *, now: float | None = None
+) -> list[dict[str, Any]]:
+    """Copies of a turn's artifact entries; one the cleanup deleted says so instead of naming its file.
 
     Its ``storage_path`` becomes ``deleted_output_note()`` and
     ``deleted_under_retention`` is set, so prompts and tool results never
-    point at a file that no longer exists; its summary stays. While a
-    conversation exists only this cleanup deletes these files (a removed
-    person's purge deletes the conversation too), so a missing file is one
-    the retention deleted.
+    point at a file the retention deleted; its summary stays. Only entries
+    ``retention.deleted`` confirms are changed; every other entry is copied
+    as it is, and without a ``retention`` nothing is marked.
     """
 
     marked: list[dict[str, Any]] = []
@@ -643,8 +705,8 @@ def with_deleted_outputs_marked(artifacts: Any) -> list[dict[str, Any]]:
             continue
         entry = dict(artifact)
         path = entry.get("storage_path") or entry.get("path")
-        if path and not os.path.lexists(str(path)):
-            entry["storage_path"] = deleted_output_note()
+        if retention is not None and retention.deleted(path, created_at=entry.get("created_at"), now=now):
+            entry["storage_path"] = deleted_output_note(retention.retention_days)
             entry.pop("path", None)
             entry[DELETED_OUTPUT_FLAG] = True
         marked.append(entry)
@@ -656,6 +718,7 @@ __all__ = [
     "DELETED_OUTPUT_REASON",
     "EXECUTION_MINIMUM_AGE_DAYS",
     "RETENTION_SETTING",
+    "SavedOutputRetention",
     "OutputKind",
     "OutputRetentionResult",
     "OutputsRemoved",

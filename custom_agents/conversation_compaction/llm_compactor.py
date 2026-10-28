@@ -105,7 +105,9 @@ class LLMSummarizingConversationCompactor(HeuristicSlidingWindowCompactor):
                     "storage_path": artifact.get("storage_path"),
                 }
                 # A saved output deleted under the retention policy says so instead of naming its file.
-                for artifact in with_deleted_outputs_marked(turn.get("tool_artifact_manifest"))
+                for artifact in with_deleted_outputs_marked(
+                    turn.get("tool_artifact_manifest"), self.config.saved_outputs
+                )
             ],
         }
 

@@ -122,6 +122,7 @@ from custom_agents.conversation_summary import (
     build_conversation_summary_generator,
 )
 from custom_agents.memory_review_store import MemoryReviewStore
+from custom_agents.output_retention import SavedOutputRetention
 from custom_agents.internal_improvement_runtime import (
     publish_internal_improvement_schedule_ensure,
 )
@@ -1481,6 +1482,7 @@ class UniversalAgent(BaseModel):
                 openai_codex=self.openai_codex,
                 xai_oauth=self.xai_oauth,
                 instance_root=infer_instance_root(self),
+                saved_outputs=SavedOutputRetention.for_agent(self),
             ),
             logger=self._logger,
         )
@@ -1617,6 +1619,7 @@ class UniversalAgent(BaseModel):
             is_team_lead=self.is_team_lead,
             instance_config_path=self.instance_config_path,
             memory_plugin_manager=memory_plugin_manager,
+            saved_outputs=SavedOutputRetention.for_agent(self),
             adapters=ContextEngineAdapters(
                 build_request_time_context=lambda meta: build_request_time_context(
                     meta,
@@ -3424,6 +3427,7 @@ class UniversalAgent(BaseModel):
                 openai_codex=self.openai_codex,
                 xai_oauth=self.xai_oauth,
                 instance_root=infer_instance_root(self),
+                saved_outputs=SavedOutputRetention.for_agent(self),
             ),
             logger=self._logger,
         )

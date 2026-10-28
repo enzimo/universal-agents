@@ -16,8 +16,7 @@ class NoOpConversationCompactor(ConversationCompactor):
     def __init__(self, config: ConversationCompactionConfig, logger=None) -> None:
         super().__init__(config=config, logger=logger)
 
-    @staticmethod
-    def _render_raw_turn(turn: Dict[str, str]) -> str:
+    def _render_raw_turn(self, turn: Dict[str, str]) -> str:
         lines = [
             f"### Turn {turn['turn_index']}",
             f"- Task ID: {turn['task_id']}",
@@ -36,7 +35,7 @@ class NoOpConversationCompactor(ConversationCompactor):
         if turn.get("turn_summary_text") and not turn.get("final_answer_text"):
             lines.append(f"\nTurn Summary:\n{turn['turn_summary_text']}")
         # A saved output deleted under the retention policy says so instead of naming its file.
-        artifact_manifest = with_deleted_outputs_marked(turn.get("tool_artifact_manifest"))
+        artifact_manifest = with_deleted_outputs_marked(turn.get("tool_artifact_manifest"), self.config.saved_outputs)
         if artifact_manifest:
             artifact_lines = []
             for artifact in artifact_manifest:

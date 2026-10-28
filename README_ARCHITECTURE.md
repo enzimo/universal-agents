@@ -3224,13 +3224,17 @@ folder with `manifest.json` naming its agent, team and task, because
 Saved results, research results and offloaded conversation outputs are
 deleted after `tool_policy.output_retention_days`
 (`custom_agents/output_retention.py`). Their readers never retry or make up a
-deleted one: the two inspection tools answer `deleted_by_retention` with
-`retryable: false` and a plain note when the result folder's name dates it
-before the period, and the thread renderer, the compactors and the
-conversation tools show that note in place of a deleted file's path while
-keeping its summary (`with_deleted_outputs_marked`). Only the cleanup
-deletes these files while their conversation exists, so a missing one is one
-it deleted.
+deleted one, and call an output deleted only when the retention deleted it:
+the two inspection tools answer `deleted_by_retention` with `retryable: false`
+and a plain note when the result folder's name dates it before the period and
+the folder is gone (a file missing from a folder that still exists is an
+ordinary "not found"); the thread renderer, the compactors and the
+conversation tools show that note in place of a stored path only when the
+period is above 0, the path is absolute and inside `state/tool_results/` or
+`dbs/conversation_artifacts/`, its `created_at`, when known, is before the
+cutoff, and nothing is there any more (`SavedOutputRetention`,
+`with_deleted_outputs_marked`). Relative paths, placeholders, URLs, paths an
+LLM summary reworded and older layouts are shown as stored.
 Projected context pressure shrinks only results the model has already read; a
 result it has not read yet (a staged change id, for example) is shrunk only
 after the provider actually rejects the request, and then after older ones.

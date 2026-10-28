@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -621,12 +622,26 @@ async def test_maintenance_outside_an_instance_layout_reports_that_it_did_not_ru
 # -- readers of a deleted conversation artifact ---------------------------------------------
 
 
-def _turn_with_artifacts(kept_path: Path, deleted_path: Path) -> dict:
-    """A turn whose offloaded outputs were saved; one was deleted under the retention policy since."""
+def _retention(layout: InstanceLayout, days: int = DAYS):
+    from custom_agents.output_retention import SavedOutputRetention
 
+    return SavedOutputRetention.for_layout(layout, days)
+
+
+def _turn_with_artifacts(kept_path: Path, deleted_path: Path, *, unchanged: str = "conv_1/reworded.txt") -> dict:
+    """A turn whose offloaded outputs were saved; the retention deleted one since.
+
+    The third entry names its output the way an LLM summary may reword it,
+    which no reader may call deleted.
+    """
+
+    old = datetime.fromtimestamp(time.time() - (DAYS + 30) * SECONDS_PER_DAY, timezone.utc).isoformat()
     manifest = [
-        {"artifact_type": "tool_output", "storage_path": str(kept_path), "summary_text": "kept output summary"},
-        {"artifact_type": "tool_output", "storage_path": str(deleted_path), "summary_text": "deleted output summary"},
+        {"artifact_type": "tool_output", "storage_path": str(kept_path), "summary_text": "kept output summary",
+         "created_at": old},
+        {"artifact_type": "tool_output", "storage_path": str(deleted_path), "summary_text": "deleted output summary",
+         "created_at": old},
+        {"artifact_type": "tool_output", "storage_path": unchanged, "summary_text": "reworded output summary"},
     ]
     return {
         "turn_index": 1,
@@ -645,25 +660,60 @@ def artifact_paths(layout: InstanceLayout) -> tuple[Path, Path]:
     return kept, deleted
 
 
-def test_a_deleted_output_is_marked_and_its_summary_kept(artifact_paths) -> None:
+def test_a_deleted_output_is_marked_and_its_summary_kept(layout: InstanceLayout, artifact_paths) -> None:
     from custom_agents.output_retention import DELETED_OUTPUT_FLAG, with_deleted_outputs_marked
 
     kept, deleted = artifact_paths
     turn = _turn_with_artifacts(kept, deleted)
 
-    marked = with_deleted_outputs_marked([*turn["tool_artifact_manifest"], "not an entry"])
+    marked = with_deleted_outputs_marked([*turn["tool_artifact_manifest"], "not an entry"], _retention(layout))
 
     assert marked[0] == turn["tool_artifact_manifest"][0]
     assert marked[1]["summary_text"] == "deleted output summary"
     assert marked[1][DELETED_OUTPUT_FLAG] is True
     assert "deleted under the team's retention policy" in marked[1]["storage_path"]
-    assert len(marked) == 2
+    assert "kept 90 days" in marked[1]["storage_path"]
+    assert marked[2] == turn["tool_artifact_manifest"][2]
+    assert len(marked) == 3
     assert turn["tool_artifact_manifest"][1]["storage_path"] == str(deleted), "the stored turn is not changed"
-    assert with_deleted_outputs_marked(None) == []
+    assert with_deleted_outputs_marked(None, _retention(layout)) == []
+    assert with_deleted_outputs_marked(turn["tool_artifact_manifest"], None) == turn["tool_artifact_manifest"]
 
 
-def test_prompts_and_summaries_say_a_deleted_output_was_deleted(artifact_paths) -> None:
-    from custom_agents.context_engine.thread_renderer import BudgetedThreadContextRenderer
+def test_only_outputs_the_retention_deleted_are_called_deleted(layout: InstanceLayout, tmp_path: Path) -> None:
+    """Missing alone is not enough: the period, the folder and the age must all say the cleanup deleted it."""
+
+    retention = _retention(layout)
+    gone_artifact = layout.conversation_artifacts_dir / "conv_1" / "task_1_artifact_gone.txt"
+    gone_result = layout.tool_results_dir / "task-1" / f"{_stamp(EXPIRED)}_tooluse_1_shell_abc" / "manifest.json"
+    present = _file(layout.conversation_artifacts_dir / "conv_1" / "task_1_artifact_here.txt", "here")
+    old, recent = _iso(EXPIRED), _iso(KEPT)
+
+    # Deleted: inside a cleaned folder, gone, and old (or of unknown age).
+    assert retention.deleted(str(gone_artifact), created_at=old, now=NOW)
+    assert retention.deleted(str(gone_result), now=NOW)
+    # Not deleted by the retention:
+    not_deleted = {
+        "period 0": (_retention(layout, 0), str(gone_artifact), old),
+        "relative path": (retention, "dbs/conversation_artifacts/conv_1/task_1_artifact_gone.txt", old),
+        "placeholder": (retention, "(inline)", old),
+        "url": (retention, "https://example.org/page", old),
+        "reworded by a summary": (retention, "conversation artifact of task_1", old),
+        "outside the cleaned folders": (retention, str(tmp_path / "elsewhere" / "output.txt"), old),
+        "older layout": (retention, str(layout.root / "workspace" / "runtime" / "conversation_artifacts" / "x.txt"), old),
+        "escapes the folder": (retention, f"{layout.conversation_artifacts_dir}/../../outside.txt", old),
+        "recent": (retention, str(gone_artifact), recent),
+        "still there": (retention, str(present), old),
+    }
+    for case, (policy, path, created_at) in not_deleted.items():
+        assert not policy.deleted(path, created_at=created_at, now=NOW), case
+
+
+def test_prompts_and_summaries_say_a_deleted_output_was_deleted(layout: InstanceLayout, artifact_paths) -> None:
+    from custom_agents.context_engine.thread_renderer import (
+        BudgetedThreadContextRenderer,
+        BudgetedThreadContextRendererConfig,
+    )
     from custom_agents.conversation_compaction.base import ConversationCompactionConfig
     from custom_agents.conversation_compaction.heuristic_compactor import HeuristicSlidingWindowCompactor
     from custom_agents.conversation_compaction.llm_compactor import LLMSummarizingConversationCompactor
@@ -672,18 +722,31 @@ def test_prompts_and_summaries_say_a_deleted_output_was_deleted(artifact_paths) 
 
     kept, deleted = artifact_paths
     turn = _turn_with_artifacts(kept, deleted)
-    heuristic = HeuristicSlidingWindowCompactor(ConversationCompactionConfig())
+    retention = _retention(layout)
+    config = ConversationCompactionConfig(saved_outputs=retention)
+    heuristic = HeuristicSlidingWindowCompactor(config)
+    renderer = BudgetedThreadContextRenderer(config=BudgetedThreadContextRendererConfig(saved_outputs=retention))
     rendered = {
-        "thread renderer": BudgetedThreadContextRenderer()._render_artifacts(turn["artifact_summary"]),
+        "thread renderer": renderer._render_artifacts(turn["artifact_summary"]),
         "heuristic turn": heuristic._render_raw_turn(turn),
         "heuristic synopsis": json.dumps(heuristic._merge_synopsis({}, [turn])),
-        "noop turn": NoOpConversationCompactor._render_raw_turn(turn),
+        "noop turn": NoOpConversationCompactor(config)._render_raw_turn(turn),
         "llm input": json.dumps(LLMSummarizingConversationCompactor._turn_payload(heuristic, turn)),
-        "conversation tool": json.dumps(_conversation_turn_summary_payload(turn)),
+        "conversation tool": json.dumps(_conversation_turn_summary_payload(turn, retention)),
     }
 
     for reader, text in rendered.items():
         assert "deleted under the team's retention policy" in text, reader
         assert str(deleted) not in text, reader
         assert str(kept) in text, reader
+        assert "conv_1/reworded.txt" in text, reader  # not a path the cleanup deletes: shown as stored
         assert "deleted output summary" in text, reader  # what the output was about stays
+
+
+def test_without_the_retention_policy_readers_show_references_as_stored(artifact_paths) -> None:
+    from custom_agents.context_engine.thread_renderer import BudgetedThreadContextRenderer
+
+    kept, deleted = artifact_paths
+    text = BudgetedThreadContextRenderer()._render_artifacts(_turn_with_artifacts(kept, deleted)["artifact_summary"])
+
+    assert str(deleted) in text and "deleted under the team's retention policy" not in text

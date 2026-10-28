@@ -13,7 +13,7 @@ from custom_agents.after_action_report_knowledge import (
     lesson_problem,
     save_review_lesson,
 )
-from custom_agents.output_retention import with_deleted_outputs_marked
+from custom_agents.output_retention import SavedOutputRetention, with_deleted_outputs_marked
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import AfterActionReportReviewStatus
 from custom_tools.provider_contract import ToolProvider
@@ -175,7 +175,9 @@ def get_conversation_turns(
         return json.dumps({"error": str(exc)})
 
 
-def _conversation_turn_summary_payload(turn: dict[str, Any]) -> dict[str, Any]:
+def _conversation_turn_summary_payload(
+    turn: dict[str, Any], saved_outputs: Optional[SavedOutputRetention] = None
+) -> dict[str, Any]:
     user_text = str(turn.get("problem_text") or "")
     user_summary = str(turn.get("user_request_summary") or user_text[:600])
     assistant_summary = str(
@@ -200,7 +202,7 @@ def _conversation_turn_summary_payload(turn: dict[str, Any]) -> dict[str, Any]:
         "summary_generator": turn.get("summary_generator") or "",
         "summary_generated_at": turn.get("summary_generated_at"),
         # A saved output deleted under the retention policy says so instead of naming its file.
-        "artifact_summary": with_deleted_outputs_marked(artifact_summary[:10])
+        "artifact_summary": with_deleted_outputs_marked(artifact_summary[:10], saved_outputs)
         if isinstance(artifact_summary, list)
         else [],
         "has_full_user_text": bool(user_text),
@@ -472,7 +474,10 @@ def get_conversation_context_slice(
         if has_more and visible_rows:
             next_start_turn = int(visible_rows[-1].get("turn_index") or safe_start) + 1
         payload_turns = (
-            [_conversation_turn_summary_payload(turn) for turn in visible_rows]
+            [
+                _conversation_turn_summary_payload(turn, SavedOutputRetention.for_agent(agent))
+                for turn in visible_rows
+            ]
             if normalized_mode == "summary"
             else visible_rows
         )

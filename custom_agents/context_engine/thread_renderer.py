@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 from default_values import AGENT_DEFAULTS
 
 from custom_agents.conversation_delivery_states import MODEL_VISIBLE_TIMER_DELIVERY_STATES
-from custom_agents.output_retention import with_deleted_outputs_marked
+from custom_agents.output_retention import SavedOutputRetention, with_deleted_outputs_marked
 from custom_agents.prompt_context_sanitization import extract_display_request_text
 from custom_agents.token_estimation import estimate_tokens
 
@@ -23,6 +23,8 @@ class BudgetedThreadContextRendererConfig:
     omitted_notice_enabled: bool = _THREAD_DEFAULTS["omitted_notice_enabled"]
     include_turn_ids: bool = _THREAD_DEFAULTS["include_turn_ids"]
     retrieval_tool_hint: bool = _THREAD_DEFAULTS["retrieval_tool_hint"]
+    # Tells which offloaded outputs the retention deleted (custom_agents.output_retention).
+    saved_outputs: SavedOutputRetention | None = None
 
 
 @dataclass
@@ -253,7 +255,7 @@ class BudgetedThreadContextRenderer:
     def _render_artifacts(self, artifacts: list[dict[str, Any]]) -> str:
         lines = []
         # A saved output deleted under the retention policy says so instead of naming its file.
-        for artifact in with_deleted_outputs_marked(list(artifacts)[:5]):
+        for artifact in with_deleted_outputs_marked(list(artifacts)[:5], self.config.saved_outputs):
             artifact_type = artifact.get("artifact_type") or artifact.get("type") or "artifact"
             storage_path = artifact.get("storage_path") or artifact.get("path") or "(path unavailable)"
             summary = artifact.get("summary_text") or artifact.get("summary") or ""

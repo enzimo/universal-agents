@@ -430,3 +430,22 @@ def test_a_research_result_deleted_under_the_retention_policy_says_so(layout, da
         assert "deleted under the team's retention policy" in payload["message"]
     else:
         assert payload["failure_reason"] == "file_not_found"
+
+
+def test_a_file_missing_from_an_old_research_result_that_still_exists_is_only_not_found(layout):
+    """The cleanup deletes a result folder as a whole; a folder still there was not deleted by it."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from custom_tools.web_research_artifact_tools import web_artifact_inspect
+
+    agent = _FakeAgent(layout)
+    agent.output_retention_days = 90
+    set_agent_ref(agent)
+    written = datetime.now(timezone.utc) - timedelta(days=400)
+    folder = _task_research_dir(layout) / f"{written:%Y%m%dT%H%M%S%fZ}_exa_search_query_0123456789ab"
+    folder.mkdir(parents=True)
+
+    payload = _payload(web_artifact_inspect(str(folder / "page.md"), action="head"))
+
+    assert payload["failure_reason"] == "file_not_found"

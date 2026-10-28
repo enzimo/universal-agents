@@ -295,7 +295,7 @@ def test_a_missing_result_inside_the_period_or_kept_forever_is_only_not_found(
 
 
 def test_a_result_deleted_while_it_was_read_says_it_was_deleted(tmp_path, own_agent, monkeypatch):
-    """The cleanup deletes the manifest first; a read that already loaded it finds its block gone too."""
+    """A read that loaded the manifest just before the cleanup deleted the whole result folder."""
 
     from custom_tools import tool_result_artifact_tools as tools
 
@@ -313,9 +313,10 @@ def test_a_result_deleted_while_it_was_read_says_it_was_deleted(tmp_path, own_ag
     real_load = tools._load_manifest
 
     def load_then_cleanup_runs(path):
+        import shutil
+
         data = real_load(path)
-        manifest.unlink()
-        block.unlink()
+        shutil.rmtree(folder)
         return data
 
     monkeypatch.setattr(tools, "_load_manifest", load_then_cleanup_runs)
@@ -324,3 +325,29 @@ def test_a_result_deleted_while_it_was_read_says_it_was_deleted(tmp_path, own_ag
 
     assert payload["failure_reason"] == "deleted_by_retention"
     assert payload["retryable"] is False
+
+
+@pytest.mark.parametrize("missing", ["manifest", "block"])
+def test_a_file_missing_from_an_old_result_folder_that_still_exists_is_only_not_found(
+    tmp_path, own_agent, monkeypatch, missing
+):
+    """The cleanup deletes a result as a whole; a folder still there was not deleted by it."""
+
+    from custom_tools import tool_result_artifact_tools as tools
+
+    own_agent.output_retention_days = 90
+    folder = _saved_result_folder(tmp_path, 400)
+    folder.mkdir(parents=True)
+    block = folder / "block_0.txt"
+    manifest = folder / "manifest.json"
+    if missing == "block":
+        manifest.write_text(
+            json.dumps({"task_id": "task-1", "agent_id": "agent-1", "team_id": "team-1",
+                        "blocks": [{"index": 0, "content_type": "text/plain", "path": str(block)}]}),
+            encoding="utf-8",
+        )
+
+    payload = _payload(tools.inspect_tool_result_artifact._tool_func(str(manifest), action="head"))
+
+    assert payload["failure_reason"] == ("file_not_found" if missing == "manifest" else "block_path_invalid")
+    assert "retention" not in payload["message"]

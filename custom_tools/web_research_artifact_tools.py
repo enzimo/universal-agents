@@ -9,9 +9,9 @@ follows a link.
 
 Result folders are deleted after the team's retention period
 (``tool_policy.output_retention_days``, ``custom_agents.output_retention``).
-Their names start with the UTC time they were written, so inspecting a missing
-file of a result written before the period answers that it was deleted under
-the retention policy, with ``retryable: false``.
+Their names start with the UTC time they were written, so inspecting a file of
+a result whose folder is gone and was written before the period answers that
+it was deleted under the retention policy, with ``retryable: false``.
 """
 
 import json
@@ -809,10 +809,13 @@ def _inspection_target(path: str) -> tuple[Path, Dict[str, Any], str] | Dict[str
 
 
 def _deleted_under_retention(path: Path) -> bool:
-    """Whether a missing path is inside a result folder written before the retention period.
+    """Whether a missing path was in a result folder the cleanup deleted.
 
     ``research/<task folder>/<result folder>/...``: the result folder's name
-    starts with the time it was written (``result_folder_name``).
+    starts with the time it was written (``result_folder_name``), and the
+    cleanup deletes a result folder as a whole, so the folder must be past
+    the period and gone. A file missing from a folder that still exists is an
+    ordinary "not found".
     """
 
     identity = research_identity()
@@ -821,7 +824,7 @@ def _deleted_under_retention(path: Path) -> bool:
         parts = path.relative_to(research_root).parts
     except ValueError:
         return False
-    if len(parts) < 2:
+    if len(parts) < 2 or os.path.lexists(research_root / parts[0] / parts[1]):
         return False
     return deleted_by_retention(written_at_from_name(parts[1]), retention_days_of(get_agent_ref()))
 

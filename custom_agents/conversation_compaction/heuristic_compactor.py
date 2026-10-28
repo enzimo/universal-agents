@@ -140,7 +140,7 @@ class HeuristicSlidingWindowCompactor(ConversationCompactor):
                 next_step_intent = self._truncate_text(" ".join(next_step_lines), 280)
 
             # A saved output deleted under the retention policy says so instead of naming its file.
-            for artifact in with_deleted_outputs_marked(turn.get("tool_artifact_manifest")):
+            for artifact in with_deleted_outputs_marked(turn.get("tool_artifact_manifest"), self.config.saved_outputs):
                 artifact_summary = (artifact or {}).get("summary_text")
                 storage_path = (artifact or {}).get("storage_path")
                 artifact_type = (artifact or {}).get("artifact_type")
@@ -241,7 +241,7 @@ class HeuristicSlidingWindowCompactor(ConversationCompactor):
             lines.append(f"\nExecution History:\n{turn['execution_history_text']}")
         if turn.get("turn_summary_text") and not turn.get("final_answer_text"):
             lines.append(f"\nTurn Summary:\n{turn['turn_summary_text']}")
-        artifact_manifest = with_deleted_outputs_marked(turn.get("tool_artifact_manifest"))
+        artifact_manifest = with_deleted_outputs_marked(turn.get("tool_artifact_manifest"), self.config.saved_outputs)
         if artifact_manifest:
             artifact_lines = []
             for artifact in artifact_manifest:
