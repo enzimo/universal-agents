@@ -23,6 +23,9 @@ jobs:
   build:
     # Public contributions run on disposable hosted machines, never personal hosts.
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read
     timeout-minutes: 15
     steps:
       - name: Check out source

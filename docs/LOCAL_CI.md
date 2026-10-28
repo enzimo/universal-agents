@@ -64,8 +64,10 @@ In the repository's **Settings > Pages > Build and deployment**, set **Source** 
 Pushes to `main` and stable `vX.Y.Z` tags publish after all documentation checks and
 the strict build pass. To publish the current main manually, open **Actions >
 Publish Documentation > Run workflow**, select `main`, and run it. Pull requests
-validate with read-only repository access and never upload or deploy. Manual runs
-on feature branches or pre-release tags cannot deploy. The `github-pages`
+validate with read-only repository access and never upload or deploy. The build
+job has `pages: read` to read the site's base URL; only deployment has
+`pages: write` and `id-token: write`. Manual runs on feature branches or
+pre-release tags cannot deploy. The `github-pages`
 environment must allow `main` and stable release tags if deployment protection
 rules are configured. The deployed quickstart is under `/universal-agents/quickstart/`.
 

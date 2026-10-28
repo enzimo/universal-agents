@@ -28,6 +28,7 @@ def test_docs_workflow_builds_public_contributions_and_publishes_trusted_refs() 
     build = workflow["jobs"]["build"]
     assert "if" not in build
     assert build["runs-on"] == "ubuntu-24.04"
+    assert build["permissions"] == {"contents": "read", "pages": "read"}
     deploy = workflow["jobs"]["deploy"]
     assert deploy["runs-on"] == "ubuntu-24.04"
     assert deploy["needs"] == "build"
