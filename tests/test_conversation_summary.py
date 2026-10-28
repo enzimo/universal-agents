@@ -60,7 +60,7 @@ class _RecordingSummaryModel(Model):
             spec["name"] for spec in tool_specs
             if spec["name"] in {"StructuredTurnSummary", "StructuredConversationSynopsis"}
         )
-        markers = " ".join(sorted(set(re.findall(r"THREAD_[AB]_PRIVATE_SENTINEL", json.dumps(messages)))))
+        markers = " ".join(sorted(set(re.findall(r"THREAD_[AB]_(?:PRIVATE|NEXT)_SENTINEL", json.dumps(messages)))))
         if self.output is not None:
             output = self.output
         elif tool_name == "StructuredTurnSummary":
@@ -146,7 +146,7 @@ def test_llm_turn_summary_generator_falls_back_to_heuristic_on_failure() -> None
     assert result.summary_generator == "heuristic"
 
 
-def _seed_thread(store: ConversationStore, name: str) -> None:
+def _seed_thread(store: ConversationStore, name: str, *, next_marker: str | None = None) -> None:
     conversation_id = f"conversation_{name}"
     store.ensure_thread(
         conversation_id=conversation_id,
@@ -159,27 +159,31 @@ def _seed_thread(store: ConversationStore, name: str) -> None:
         root_task_id=f"task_{name}_1",
     )
     for index in (1, 2):
-        task_id = f"task_{name}_{index}"
-        marker = f"THREAD_{name}_PRIVATE_SENTINEL"
-        store.append_turn(
-            conversation_id=conversation_id,
-            task_id=task_id,
-            followup_to_task_id=None,
-            owner_agent_id="lead",
-            requester_name="exampleuser",
-            requester_id="person_example",
-            correlation_id=f"correlation_{task_id}",
-            problem_text=marker,
-            task_status="completed",
-            requester_type="user_req",
-            delivery_state="not_applicable",
-        )
-        store.update_turn_completion(
-            task_id=task_id,
-            task_status="completed",
-            final_answer_text=marker,
-            turn_summary_text=marker,
-        )
+        marker = next_marker if index == 2 and next_marker else f"THREAD_{name}_PRIVATE_SENTINEL"
+        _append_thread_turn(store, name, index, marker)
+
+
+def _append_thread_turn(store: ConversationStore, name: str, index: int, marker: str) -> None:
+    task_id = f"task_{name}_{index}"
+    store.append_turn(
+        conversation_id=f"conversation_{name}",
+        task_id=task_id,
+        followup_to_task_id=None,
+        owner_agent_id="lead",
+        requester_name="exampleuser",
+        requester_id="person_example",
+        correlation_id=f"correlation_{task_id}",
+        problem_text=marker,
+        task_status="completed",
+        requester_type="user_req",
+        delivery_state="not_applicable",
+    )
+    store.update_turn_completion(
+        task_id=task_id,
+        task_status="completed",
+        final_answer_text=marker,
+        turn_summary_text=marker,
+    )
 
 
 @pytest.mark.parametrize("operation", ["summary", "compaction"])
@@ -246,6 +250,42 @@ def test_independent_summary_operations_keep_only_their_thread(
     unused_model = team_model if own_model else person_model
     assert not unused_model.calls
     assert "falling back" not in caplog.text
+
+
+def test_compaction_preserves_saved_synopsis_after_summarizing_another_thread(tmp_path: Path) -> None:
+    model = _RecordingSummaryModel()
+    store = ConversationStore(str(tmp_path / "conversations.db"), artifacts_dir=tmp_path / "artifacts")
+    compactor = LLMSummarizingConversationCompactor(
+        ConversationCompactionConfig(
+            context_window_tokens=100_000, trigger_turn_count=1,
+            min_recent_turns=1, max_recent_turns=1,
+        ),
+        summarization_model=model,
+    )
+    for name in ("A", "B"):
+        _seed_thread(store, name, next_marker="THREAD_A_NEXT_SENTINEL" if name == "A" else None)
+        result = compactor.compact_if_needed(store=store, conversation_id=f"conversation_{name}")
+        assert result.compacted and result.context_epoch_id
+
+    saved_synopsis = store.get_thread("conversation_A")["synopsis_json"]
+    # The next rollup must preserve A's saved synopsis even when its next turn
+    # carries different facts and the service has processed B in between.
+    _append_thread_turn(store, "A", 3, "Recent turn stays uncompressed.")
+    result = compactor.compact_if_needed(store=store, conversation_id="conversation_A")
+
+    assert result.compacted and result.context_epoch_id
+    assert len(model.calls) == 3
+    assert len(model.calls[-1]) == 1
+    prompt = model.calls[-1][0]["content"][0]["text"]
+    existing, turns = prompt.split("Existing synopsis JSON:\n", 1)[1].split("\n\nNew turn block JSON:\n")
+    assert json.loads(existing) == saved_synopsis
+    assert [turn["task_id"] for turn in json.loads(turns)] == ["task_A_2"]
+    assert "THREAD_A_PRIVATE_SENTINEL" not in turns
+    assert "THREAD_B_PRIVATE_SENTINEL" not in prompt
+    epoch = store.get_context_epoch(result.context_epoch_id)
+    assert epoch["summary_markdown"] == "THREAD_A_NEXT_SENTINEL THREAD_A_PRIVATE_SENTINEL"
+    assert result.through_turn_index == 2
+    assert "Recent turn stays uncompressed." in result.prompt_context
 
 
 def test_legacy_answer_block_can_be_removed_without_losing_reasoning_notes() -> None:

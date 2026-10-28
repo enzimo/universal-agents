@@ -16,10 +16,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_tools.runtime_context import TaskWork
-from custom_agents.control_runtime import consume_handback_interrupt, handle_interrupted_turn
+from custom_agents.control_runtime import _interrupt_active_execution, consume_handback_interrupt, handle_interrupted_turn
 from custom_agents.custody_loss import custody_moved, install_custody_listeners
 from custom_agents.sdk.strands.turn_tool_stop import CUSTODY_LOST_REASON
 from custom_agents.turn_failure_runtime import fail_task_after_turn_error
+from custom_tools.tool_stop import ToolStop
 
 
 def _agent(running_task_id: str | None, held: set[str]) -> SimpleNamespace:
@@ -58,7 +59,7 @@ async def test_a_released_running_turn_is_stopped_as_a_transfer_without_a_reply(
         await asyncio.sleep(0)
         if stops:
             break
-    await agent._custody_release.interrupt
+    await asyncio.gather(*agent._custody_release.interrupts.values())
 
     assert stops == [("taken", {"taken"}, CUSTODY_LOST_REASON)]
     # The stopped turn is a transfer: no cancellation record, consumed once.
@@ -94,6 +95,57 @@ async def test_a_task_this_agent_holds_again_is_its_own():
     assert not custody_moved(agent, "t1", RuntimeError())
     agent.task_manager.get_task_info = lambda task_id: None
     assert not custody_moved(agent, "t1", RuntimeError())  # it left the released set
+
+
+@pytest.mark.asyncio
+async def test_separate_custody_losses_stop_each_turn_while_another_is_cleaning_up():
+    cleanup_started = {name: asyncio.Event() for name in ("first", "second")}
+    finish_cleanup = asyncio.Event()
+
+    async def run_turn(name):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if name in cleanup_started:
+                cleanup_started[name].set()
+            if name == "first":
+                await finish_cleanup.wait()
+            raise
+
+    turns = {name: asyncio.create_task(run_turn(name)) for name in ("first", "second", "kept")}
+    stops = {name: ToolStop(agent_id="worker_a", task_id=name) for name in turns}
+    agent = _agent(None, held={"kept"})
+    agent._running_turns = {
+        turn: TaskWork(task_id=name, turn_owner=turn, tool_stop=stops[name])
+        for name, turn in turns.items()
+    }
+    install_custody_listeners(agent, interrupt_turn=_interrupt_active_execution)
+    try:
+        await asyncio.sleep(0)
+        agent.listener["callback"](("first",))
+        await asyncio.wait_for(cleanup_started["first"].wait(), 2)
+        agent.listener["callback"](("second",))
+        await asyncio.wait_for(cleanup_started["second"].wait(), 2)
+        # A duplicate notification must not cancel the first turn's cleanup again.
+        agent.listener["callback"](("first",))
+        await asyncio.sleep(0)
+        assert not turns["first"].done()
+        assert stops["first"].reason == stops["second"].reason == CUSTODY_LOST_REASON
+        assert not turns["kept"].done() and not stops["kept"].is_requested()
+
+        finish_cleanup.set()
+        await asyncio.wait_for(asyncio.gather(*agent._custody_release.interrupts.values()), 2)
+        assert turns["first"].cancelled() and turns["second"].cancelled()
+        assert not agent._custody_release.interrupts
+        for name in ("first", "second"):
+            assert consume_handback_interrupt(agent, name)
+            assert not consume_handback_interrupt(agent, name)
+    finally:
+        finish_cleanup.set()
+        for turn in turns.values():
+            if not turn.done():
+                turn.cancel()
+        await asyncio.gather(*turns.values(), return_exceptions=True)
 
 
 def test_a_released_task_withdraws_its_access_requests_but_keeps_the_request_access(monkeypatch):

@@ -166,7 +166,7 @@ async def test_custody_loss_stops_the_running_turn_without_a_handback_or_a_failu
     with pytest.raises(RuntimeCustodyLost):
         await old.operations_runtime.run(old.update_main_task_state, "work", ProgressState.IN_PROGRESS, now())
     await asyncio.sleep(0)
-    await agent._custody_release.interrupt
+    await asyncio.gather(*agent._custody_release.interrupts.values())
     assert turn.cancelled()
     # The turn's running commands were asked to stop, with the custody reason.
     assert turn_stop.is_requested()

@@ -65,7 +65,10 @@ class CustodyRelease:
     released_task_ids: set[str] = field(default_factory=set)
     # Turns this module stopped; handle_interrupted_turn treats them as transfers.
     interrupting_task_ids: set[str] = field(default_factory=set)
-    interrupt: Optional[asyncio.Task[Any]] = None
+    # A second release must stop its turn while an earlier stop awaits cleanup.
+    # Keep each stop until it finishes, so duplicate notifications cannot cancel
+    # the same turn's cleanup again.
+    interrupts: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
 
 
 def install_custody_listeners(agent: Any, *, interrupt_turn: InterruptTurn) -> None:
@@ -87,38 +90,40 @@ def _release_tasks(agent: Any, task_ids: tuple[str, ...]) -> None:
     state: CustodyRelease = agent._custody_release
     state.released_task_ids.update(task_ids)
     # The running turns of released tasks; several turns may run at once.
-    running = sorted(set(running_turn_task_ids(agent)) & set(task_ids))
-    stopping = bool(running) and (state.interrupt is None or state.interrupt.done())
+    running = sorted((set(running_turn_task_ids(agent)) & set(task_ids)) - state.interrupts.keys())
     agent._logger.warning(
         "Released saved work that another agent took over; this agent keeps running. "
         "event=runtime_custody_released agent_id=%s store=%s task_ids=%s stopping_turn_task_ids=%s",
         agent.id,
         CustodyStore.TASK_RUNTIME.value,
         list(task_ids),
-        running if stopping else [],
+        running,
     )
-    if stopping:
-        state.interrupting_task_ids.update(running)
-        state.interrupt = asyncio.create_task(
-            _stop_released_turns(agent, state, running, set(task_ids)),
-            name=f"{agent.id}:custody_release",
+    for task_id in running:
+        state.interrupting_task_ids.add(task_id)
+        state.interrupts[task_id] = asyncio.create_task(
+            _stop_released_turn(agent, state, task_id),
+            name=f"{agent.id}:custody_release:{task_id}",
         )
 
 
-async def _stop_released_turns(agent: Any, state: CustodyRelease, task_ids: list[str], released: set[str]) -> None:
-    stopped = await state.interrupt_turn(
-        agent, root_task_id=task_ids[0], graph_task_ids=released, reason=CUSTODY_LOST_REASON,
-    )
-    if stopped is None:
-        # The turns ended before the stop arrived; nothing will consume the markers.
-        state.interrupting_task_ids.difference_update(task_ids)
-    agent._logger.info(
-        "Stopped the running turns of released work. event=custody_released_turn_stopped "
-        "agent_id=%s task_ids=%s stopped=%s",
-        agent.id,
-        task_ids,
-        stopped is not None,
-    )
+async def _stop_released_turn(agent: Any, state: CustodyRelease, task_id: str) -> None:
+    try:
+        stopped = await state.interrupt_turn(
+            agent, root_task_id=task_id, graph_task_ids={task_id}, reason=CUSTODY_LOST_REASON,
+        )
+        if stopped is None:
+            # The turn ended before the stop arrived; nothing consumes its marker.
+            state.interrupting_task_ids.discard(task_id)
+        agent._logger.info(
+            "Stopped the running turn of released work. event=custody_released_turn_stopped "
+            "agent_id=%s task_id=%s stopped=%s",
+            agent.id,
+            task_id,
+            stopped is not None,
+        )
+    finally:
+        state.interrupts.pop(task_id, None)
 
 
 def _report_released_messages(agent: Any, count: int) -> None:

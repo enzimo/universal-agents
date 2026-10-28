@@ -1494,4 +1494,3 @@ class NatsTransportAdapter:
             _term=_term,
             _in_progress=_in_progress,
         )
-

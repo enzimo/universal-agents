@@ -368,12 +368,22 @@ team facts and the person's saved preferences remain shared across their
 threads. Background completion archives model messages only from that task's
 own work record. Optional model-generated summaries and compaction use fresh
 SDK history for every operation, while reusing the selected provider model.
+The saved conversation synopsis still carries earlier context forward: each
+compaction prompt includes that thread's prior synopsis and the next block of
+turns. A fresh SDK agent removes only implicit history from earlier summary
+calls. `NullConversationManager` disables SDK history trimming, not retention,
+so reusing a summary agent would include another thread's prompts and answers.
 Settings marks such requests **Parallel**.
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
 stopped workers, ten records at a time. Runtime Controls sorts schedules by next
 fire time, with undated schedules last.
+
+When another agent takes over work, custody release tracks a separate stop
+operation for each affected turn. A later takeover stops its turn immediately
+even while an earlier turn is cleaning up. Repeated notifications reuse an
+in-progress stop, so they cannot cancel that cleanup a second time.
 
 Self-status, own tool-result inspection and current-task history notes are
 part of every agent's standard access. Artifact inspection checks agent,
