@@ -262,6 +262,9 @@ def run_manager_bootstrap(agent: Any) -> ManagerBootstrapResult:
 
     if not getattr(agent, "is_team_lead", False):
         return ManagerBootstrapResult(None, ())
+    from custom_agents.internal_improvement_runtime import note_trusted_cleanups_at_start
+
+    note_trusted_cleanups_at_start(agent)
     config = dict(getattr(agent, "bootstrap_config", {}) or {})
     if not config:
         return ManagerBootstrapResult(None, ())
