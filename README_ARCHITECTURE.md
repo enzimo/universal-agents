@@ -3118,7 +3118,10 @@ manager's row for a person is missing or more than three days old, the gateway
 sends that person no notice, because a partial total could hide a step, logs
 `event=storage_usage_totals_stale` with their folder name, and the Status page
 warns that the totals are out of date; a person whose standing changed less
-than three days ago only waits for the next daily measurement. The notices
+than three days ago only waits for the next daily measurement. Status checks
+both processes' snapshots and identifies which one stopped measuring. A
+missing gateway snapshot waits for the initial 15-minute check before it can
+be reported; an already stale snapshot remains visible after a restart. The notices
 stay in the Inbox like all notices (decision D3); only stuck work is also sent
 to a chat, by a separate owner's decision. The team transfer's settings
 section is version 8 for `gateway.storage_warnings`.

@@ -378,8 +378,11 @@ first measured at 16 GB gets one notice, for 15 GB. When stored data falls
 below a step, for example after files were deleted from the person's folder,
 and later grows past it again, that is a new crossing and is announced again.
 If the manager has not measured a person's data for three days, the gateway
-sends them no notice, because the total would be incomplete, and the Status
-page warns administrators that the totals are out of date. A folder that
+sends them no notice, because the total would be incomplete. Status checks
+both processes' measurements and warns administrators when either is out of
+date, identifying the gateway or manager and which log to check. New people
+have time for the next daily check, and the first gateway check waits 15
+minutes after startup. A folder that
 cannot be fully read keeps the previous total and measurement time, so a
 permission or filesystem failure cannot make a smaller total look current.
 The sizes are

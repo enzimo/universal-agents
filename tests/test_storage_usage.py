@@ -365,11 +365,53 @@ def test_missing_or_old_manager_totals_send_no_notice_and_show_on_the_status_pag
     assert "event=storage_usage_not_measured_yet person_folder=usr_carol" in caplog.text
     assert finding is not None and finding.finding_id == STALE_FINDING_ID
     assert finding.severity is StatusSeverity.WARNING and finding.title.startswith("Stored-data totals are out of date for 2")
-    assert finding.details == "Their folders: usr_alice, usr_bob"
+    assert finding.details == "Manager folders: usr_alice, usr_bob"
 
     team.manager_measures(usr_alice=0, usr_bob=0, usr_carol=0)  # the manager measures again
     assert loop.stale_finding() is None
     assert loop.check() == 2
+
+
+def test_failed_gateway_measurement_keeps_old_totals_and_identifies_the_gateway_on_status(team: _Team, caplog) -> None:
+    team.people = [_person(ALICE)]
+    team.manager_measures(usr_alice=0)
+    previous = NOW - timedelta(days=4)
+    team.store.record_side(TEAM, StorageSide.GATEWAY, {ALICE: {"chats": 6 * GB}}, measured_at=previous)
+    notices = _Notices()
+    loop = team.loop(notices)
+
+    def broken(people):
+        raise OSError("database is locked")
+
+    loop._measure = broken
+    assert asyncio.run(loop.run_once()) is None
+    finding = loop.stale_finding()
+    assert finding is not None
+    assert "gateway" in finding.summary.lower() and "gateway" in finding.action.lower()
+    assert finding.details == "Gateway folders: usr_alice"
+    assert team.store.side_usage(TEAM, StorageSide.GATEWAY)[ALICE].measured_at == previous
+    assert notices.stored == {} and "event=storage_usage_failed" in caplog.text
+
+    loop._measure = team.measure
+    team.chats[ALICE] = 6 * GB
+    assert loop.check() == 1
+    assert loop.stale_finding() is None
+
+
+@pytest.mark.parametrize("joined_ago", [timedelta(days=30), timedelta(hours=2)])
+def test_missing_gateway_measurements_allow_startup_and_new_person_grace(team: _Team, joined_ago: timedelta) -> None:
+    team.people = [_person(ALICE, changed=NOW - joined_ago)]
+    team.manager_measures(usr_alice=0)
+    loop = team.loop(_Notices())
+    assert loop.stale_finding() is None, "the first gateway measurement waits 15 minutes"
+
+    team.clock.now += timedelta(minutes=16)
+    assert (loop.stale_finding() is not None) == (joined_ago > timedelta(days=3))
+
+    team.clock.now += timedelta(days=4)
+    team.manager_measures(usr_alice=0)
+    finding = loop.stale_finding()
+    assert finding is not None and finding.details == "Gateway folders: usr_alice"
 
 
 def test_the_notice_says_what_is_stored_by_kind_and_when_the_next_one_comes() -> None:

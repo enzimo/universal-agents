@@ -40,7 +40,9 @@ the two finds the same id and the step is still announced exactly once.
 Out-of-date totals. When the manager's row for a person is missing or older
 than ``STALE_AFTER``, the gateway sends that person no notice, because a
 partial total could hide a step. It logs a warning naming the person's folder,
-and the Status page shows that the totals are out of date
+and the Status page shows that the totals are out of date. Status also checks
+the gateway's rows, so repeated gateway measurement failures cannot remain
+silent while the manager still measures normally
 (``stale_finding``), so silence does not look like "under the limit". A
 person whose standing changed less than ``STALE_AFTER`` ago (just added or
 enabled again) and has no manager row yet is only waiting for the manager's
@@ -245,6 +247,7 @@ class StorageUsageNotices:
         self._now = now
         self._interval = interval
         self._first_check_delay = first_check_delay
+        self._first_check_at = self._now() + first_check_delay
 
     async def run(self, stop_event: asyncio.Event) -> None:
         if await _stopped_within(stop_event, self._first_check_delay):
@@ -296,38 +299,52 @@ class StorageUsageNotices:
         return stored
 
     def stale_people(self) -> list[str]:
-        """Folder names of active people whose manager totals are out of date (not those just added)."""
+        """Folder names of active people with an out-of-date measurement on either side."""
 
+        return sorted({folder for folders in self._stale_sides().values() for folder in folders})
+
+    def _stale_sides(self) -> dict[StorageSide, list[str]]:
         now = self._now()
-        manager = self._store().side_usage(self._team_id, StorageSide.MANAGER)
-        return sorted(
-            person_folder_name(person.person_id)
-            for person in self._active_people()
-            if _stale(person, manager.get(person.person_id), now)
-        )
+        store, people = self._store(), self._active_people()
+        stale = {}
+        for side in StorageSide:
+            rows = store.side_usage(self._team_id, side)
+            folders = sorted(
+                person_folder_name(person.person_id)
+                for person in people
+                if _stale(person, rows.get(person.person_id), now)
+                and not (side is StorageSide.GATEWAY and person.person_id not in rows and now < self._first_check_at)
+            )
+            if folders:
+                stale[side] = folders
+        return stale
 
     def stale_finding(self) -> StatusFindingV1 | None:
         """The Status page's warning when people's totals are out of date; None while they are current or notices are off."""
 
         if self.step_gb <= 0:
             return None
-        stale = self.stale_people()
+        stale = self._stale_sides()
         if not stale:
             return None
+        people = {folder for folders in stale.values() for folder in folders}
+        sources = " and ".join(side.value for side in stale)
+        actions = []
+        if StorageSide.GATEWAY in stale:
+            actions.append("Check that the gateway is running and its log for event=storage_usage_failed. It measures 15 minutes after startup and once a day.")
+        if StorageSide.MANAGER in stale:
+            actions.append("Check that the manager is running and its log for event=storage_usage_failed or event=storage_usage_skipped. It measures when it starts and once a day.")
         return StatusFindingV1(
             finding_id=STALE_FINDING_ID,
             severity=StatusSeverity.WARNING,
-            title=f"Stored-data totals are out of date for {len(stale)} person(s)",
+            title=f"Stored-data totals are out of date for {len(people)} person(s)",
             summary=(
-                f"The manager has not measured their stored data in the last {STALE_AFTER.days} days, so they get "
-                "no storage notices until it does, even if their data grows past the next step."
+                f"Measurements from the {sources} are missing or more than {STALE_AFTER.days} days old. "
+                "These people may miss storage notices even if their data grows past the next step."
             ),
-            action=(
-                "Check that the manager is running, and its log for event=storage_usage_failed or "
-                "event=storage_usage_skipped. It measures when it starts and once a day."
-            ),
+            action=" ".join(actions),
             source="gateway",
-            details=("Their folders: " + ", ".join(stale))[:2000],
+            details="\n".join(f"{side.value.capitalize()} folders: {', '.join(folders)}" for side, folders in stale.items())[:2000],
         )
 
     def _active_people(self) -> list[TeamPersonV1]:
