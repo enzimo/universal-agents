@@ -1161,6 +1161,13 @@ never changes anything.
 
 ## Deterministic code and managed services
 
+For generated Python code, each request and each scheduled run gets its own
+default environment. Helpers share the current request's environment. Defaults
+are removed as whole environments after 7 days without use, once active tool
+calls have finished. Ask for a named environment when code and packages should
+be reused across requests or scheduled runs. Named environments stay until
+deleted. Keep lasting results outside default environments.
+
 Agents can promote fixed Python or single-file Rust code into an immutable
 revision. A trusted profile records the exact language, toolchain, isolation
 backend, resource limits, network posture, and runtime placement. Once enabled,

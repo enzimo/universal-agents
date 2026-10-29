@@ -548,6 +548,12 @@ class InstanceLayout:
 
         return self.state_dir / HELD_PEOPLE_DIRNAME
 
+    @property
+    def python_env_locks_dir(self) -> Path:
+        """Per-environment use/cleanup locks, outside agent-writable folders."""
+
+        return self.runtime_dir / "python-env-locks"
+
     # People
     def person_scratch_dir(self, canonical_user_id: str | None) -> Path:
         """``scratch/`` of a person's folder, or of ``agents/`` for work for no person."""

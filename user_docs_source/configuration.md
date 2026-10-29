@@ -1272,6 +1272,15 @@ an absent record, but cannot repair a Sealbox failure.
 
 ## Code Execution Sandbox
 
+The `python_env` tool gives each request its own default environment when the
+agent omits `env_name`. Helpers working on that request share it. Every
+scheduled run gets a separate default too. Trusted maintenance removes the
+whole default environment after 7 days without use, keeping it intact while
+a tool call is running. Save lasting results outside default environments.
+For a reusable script or a schedule that needs earlier code, give the
+environment a name explicitly. Named environments stay until deleted;
+the earlier shared environment remains available by the name `default`.
+
 Agents with `shell` or `python_env` run every command in a Linux Landlock
 sandbox unless `security_layer.mode` is `openshell` (see
 [OpenShell mode](#openshell-mode)). What one command can reach follows the

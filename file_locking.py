@@ -32,7 +32,8 @@ import errno
 import fcntl
 import logging
 import os
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -57,6 +58,10 @@ class FileLockUnavailable(RuntimeError):
         self.error_number = error_number
 
 
+class FileLockCancelled(RuntimeError):
+    """The caller stopped while waiting, so the protected work did not run."""
+
+
 def lock_file_path(path: Path) -> Path:
     """The lock file that guards ``path``: the same name with ``.lock`` added."""
 
@@ -64,7 +69,9 @@ def lock_file_path(path: Path) -> Path:
 
 
 @contextmanager
-def exclusive_file_lock(path: Path, *, purpose: str) -> Iterator[None]:
+def exclusive_file_lock(
+    path: Path, *, purpose: str, cancelled: Callable[[], bool] | None = None,
+) -> Iterator[None]:
     """Hold an exclusive lock on ``<path>.lock`` while the body runs.
 
     Waits as long as another holder keeps the lock. ``purpose`` names the
@@ -72,24 +79,29 @@ def exclusive_file_lock(path: Path, *, purpose: str) -> Iterator[None]:
     and the error message. The lock file is created owner-only when missing;
     the folder must already exist. Raises :class:`FileLockUnavailable` without
     running the body when the lock file cannot be opened or locked.
+    When ``cancelled`` is provided, check it while waiting and raise
+    :class:`FileLockCancelled` before entering the body if it reports a stop.
     """
 
     lock_path = lock_file_path(path)
-    descriptor = _open_locked(lock_path, purpose=purpose)
+    descriptor = _open_locked(lock_path, purpose=purpose, cancelled=cancelled)
     try:
         yield
     finally:
         _release(descriptor, lock_path, purpose=purpose)
 
 
-def _open_locked(lock_path: Path, *, purpose: str) -> int:
+def _open_locked(lock_path: Path, *, purpose: str, cancelled: Callable[[], bool] | None = None) -> int:
     try:
         descriptor = os.open(lock_path, _LOCK_FILE_FLAGS, _LOCK_FILE_MODE)
     except OSError as exc:
         raise _lock_unavailable(lock_path, purpose=purpose, error=exc) from exc
     locked = False
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if cancelled is None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        else:
+            _lock_until_stopped(descriptor, lock_path, purpose, cancelled)
         locked = True
     except OSError as exc:
         raise _lock_unavailable(lock_path, purpose=purpose, error=exc) from exc
@@ -97,6 +109,17 @@ def _open_locked(lock_path: Path, *, purpose: str) -> int:
         if not locked:
             os.close(descriptor)
     return descriptor
+
+
+def _lock_until_stopped(descriptor: int, lock_path: Path, purpose: str, cancelled: Callable[[], bool]) -> None:
+    while not cancelled():
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(0.05)
+    logger.info("File lock wait stopped. event=file_lock_cancelled purpose=%r path=%s", purpose, lock_path)
+    raise FileLockCancelled(f"The {purpose} was left unchanged because the operation was stopped.")
 
 
 def _release(descriptor: int, lock_path: Path, *, purpose: str) -> None:

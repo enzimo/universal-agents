@@ -1532,6 +1532,22 @@ work for no person uses a shared one. The operator's OpenShell policy decides
 the network and anything else there; folder grants and the network rule above
 do not apply.
 
+Managed Python environments live under `python_envs/` in the task's default
+folder. Omitting `env_name` selects a name derived from the verified request
+context ID, shared by that request's lead and helpers. Other requests and each
+scheduled run get separate defaults, even in the same conversation. Explicit
+names allow deliberate reuse across requests and schedules. Supplying a name,
+including a default's returned name, keeps that environment until deleted.
+Trusted maintenance removes whole request-default environments after seven
+days without a `python_env` call. It takes the same per-environment lock as
+tool calls, then rechecks the last-use time, so an active install or script
+cannot be removed. The locks live outside workspaces, derived from
+`InstanceLayout.python_env_locks_dir`. File access still goes through
+`file_access`, and cleanup uses the descriptor-based `safe_open` operations.
+Tool calls waiting for a lock still respect their task's stop signal.
+Keep lasting results outside default environments. The previous shared
+`python_envs/default` is retained as an explicitly named environment.
+
 Commands stop with their task. Strands runs the `shell` and `python_env` tools
 in a worker thread, and cancelling a turn does not stop that thread, so a
 command used to keep running after a person stopped its task, after a
