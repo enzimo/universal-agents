@@ -352,6 +352,68 @@ A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name
 plus a short hash.
 
+### Storage notices
+
+Chat transcripts and completed tasks are kept; nothing deletes them. So that
+nobody's stored data grows unnoticed, the gateway and the manager each
+measure once a day how much they store for each active person, and the
+gateway sends the person an Inbox notice each time the total passes another
+step: at 5 GB, 10 GB, 15 GB and so on (1 GB is 1,000,000,000 bytes). The
+notice lists what takes the space: their folder, their chats, their completed
+tasks and conversation records, long texts saved with their conversations,
+and chat uploads still kept.
+
+```yaml
+gateway:
+  storage_warnings:
+    person_step_gb: 5   # 0 turns these notices off
+```
+
+Administrators can also change the step, and the levels below, in
+**Settings → Team → File Retention**; the next check uses them, without a
+restart.
+
+Each crossing is announced once, also across restarts. Someone whose data is
+first measured at 16 GB gets one notice, for 15 GB. When stored data falls
+below a step, for example after files were deleted from the person's folder,
+and later grows past it again, that is a new crossing and is announced again.
+If the manager has not measured a person's data for three days, the gateway
+sends them no notice, because the total would be incomplete. Status checks
+both processes' measurements and warns administrators when either is out of
+date, identifying the gateway or manager and which log to check. New people
+have time for the next daily check, and the first gateway check waits 15
+minutes after startup. A folder that
+cannot be fully read keeps the previous total and measurement time, so a
+permission or filesystem failure cannot make a smaller total look current.
+The sizes are
+approximate: they count the stored text and files, not the space the
+databases and the disk use to hold them. Like other notices, these appear
+only in **Settings → Inbox**, not in a chat.
+
+Administrators hear about the instance's storage on the
+[Status page](features.md#status-page): the disk holding the instance
+folder, the disk of each SQLite database when it is another one, and the
+message server's stored messages when its account has a limit. A place
+nearing its limit is a warning and one Inbox notice; nearly full is a problem
+and another notice:
+
+```yaml
+gateway:
+  storage_warnings:
+    nearing_limit_percent: 80   # warning, and administrators are told
+    nearly_full_percent: 95     # problem; must be above nearing_limit_percent
+```
+
+If a disk cannot be measured, Status reports that its free space is unknown
+and asks administrators to check the folder's availability and permissions.
+Other disks and the message server still show their results.
+
+The bundled NATS server sets no limit for stored messages, so the page notes
+how much they take instead of a percentage; they are on the instance's disk.
+When a server does set a limit for the account, the percentage counts the
+bytes stored, not the space its streams reserve, so leave room for those
+reservations (64 MB for set-aside messages).
+
 ### Upgrading from the single workspace folder
 
 Earlier versions kept everything in `<instance_root>/workspace`. Upgrading the

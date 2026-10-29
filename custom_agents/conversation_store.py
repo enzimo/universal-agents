@@ -466,6 +466,16 @@ class ConversationStore:
 
         return self._repository.list_artifact_paths_created_before(cutoff, after_path=after_path, limit=limit)
 
+    def stored_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of each person's conversation text here (``custom_agents.storage_usage_runtime``)."""
+
+        return self._repository.stored_text_bytes_by_owner()
+
+    def conversation_owners(self) -> dict[str, str]:
+        """Each conversation's owner, for the files saved beside it (``custom_agents.storage_usage_runtime``)."""
+
+        return self._repository.conversation_owners()
+
     def create_context_epoch(self, **kwargs: Any) -> dict[str, Any]:
         return self._repository.create_context_epoch(**kwargs)
 

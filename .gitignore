@@ -59,6 +59,7 @@ LLM_OVERRIDES.yaml
 
 # Runtime databases and instance-owned state
 state/output_retention.json
+state/storage_levels.json
 *.db
 *.db-shm
 *.db-wal

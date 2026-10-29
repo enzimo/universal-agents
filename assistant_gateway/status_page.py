@@ -23,12 +23,24 @@ Sources, each producing ``StatusFindingV1`` items:
   people whose work goes to their own model provider (a note: conversations
   leave through an address the team did not configure);
 - the gateway's own configuration (authorization off, and checks between a
-  person's separate requests off, are deliberate choices, shown as notes).
+  person's separate requests off, are deliberate choices, shown as notes);
+- storage filling up (``assistant_gateway.storage_capacity``): the disks the
+  instance and its databases are on, and the message server's stored
+  messages against the account's limit. Nearing the limit is a warning that
+  administrators are told about anyway, nearly full a problem; a message
+  server that sets no limit is a note;
+- people's stored-data totals that the manager stopped measuring
+  (``assistant_gateway.storage_usage``), a warning: those people get no
+  storage notices meanwhile.
 
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.
 ``notify_new_problems`` sends administrators one Inbox notice per new set of
-problems, linking to the page; the page itself never changes anything. A
+problems, linking to the page; the page itself never changes anything. Storage
+nearing its limit counts as a problem for the notice, although the page shows
+it as a warning: administrators must hear before it fills, not when saving
+fails. Its finding id names the level and when it was entered, never the
+percentage, so it is announced once per level entered. A
 notice records what administrators were told and is not withdrawn when its
 problems go away; the page shows the current state. So the loop's first check
 waits for the gateway's start-up work that changes what it would find
@@ -50,6 +62,7 @@ from access_control.people import PERSON_ROLE_ADMIN
 from access_control.person_settings import PersonSettings
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.model_key_endpoints import configured_model_endpoints
+from assistant_gateway.storage_capacity import StorageCapacity, tells_administrators
 from custom_messages.contracts.access_v2 import (
     AccessNoticeKind,
     AccessNoticeV1,
@@ -93,6 +106,15 @@ BROKER_SOURCE = "secure tool broker"
 ACCESS_STORE_SOURCE = "access store"
 LAUNCHER_SOURCE = "launcher"
 GATEWAY_SOURCE = "gateway"
+MESSAGE_SERVER_SOURCE = "message server"
+STORAGE_SOURCE = "storage checks"
+PERSON_STORAGE_SOURCE = "stored-data totals"
+# The longest the page waits for the message server's account information.
+MESSAGE_SERVER_TIMEOUT_SECONDS = 10.0
+
+
+async def _no_message_storage() -> None:
+    return None
 
 
 class StatusPage:
@@ -108,6 +130,9 @@ class StatusPage:
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         open_access_store: Callable[[], Any] | None = None,
         stopped_receivers: Callable[[], Sequence[Any]] = lambda: (),
+        storage: StorageCapacity | None = None,
+        jetstream_usage: Callable[[], Awaitable[Any]] = _no_message_storage,
+        person_storage_totals: Callable[[], StatusFindingV1 | None] = lambda: None,
     ) -> None:
         self._config = config
         # People and their model settings; the gateway's own manager storage unless a test gives one.
@@ -118,6 +143,12 @@ class StatusPage:
         self._now = now
         # The gateway's own receive loops that stopped (custom_transport.nats_pull).
         self._stopped_receivers = stopped_receivers
+        # Disks, databases and stored messages (assistant_gateway.storage_capacity);
+        # the gateway always gives it, a test may leave it out.
+        self.storage = storage
+        self._jetstream_usage = jetstream_usage
+        # Out-of-date totals behind people's storage notices (storage_usage.StorageUsageNotices.stale_finding).
+        self._person_storage_totals = person_storage_totals
 
     async def report(self) -> StatusReportV1:
         # File and database reads run in worker threads: the gateway's loop
@@ -131,15 +162,21 @@ class StatusPage:
         findings.extend(self._receiver_findings())
         findings.extend(await asyncio.to_thread(self._person_findings, unavailable))
         findings.extend(self._configuration_findings())
+        findings.extend(await self._storage_findings(unavailable))
+        findings.extend(await asyncio.to_thread(self._person_storage_findings, unavailable))
         return StatusReportV1(
             checked_at=self._now(), findings=tuple(_ordered(_unique(findings))), unavailable_sources=tuple(unavailable)
         )
 
     async def notify_new_problems(self) -> None:
-        """One Inbox notice to administrators per set of problems (the set's digest is the notice id)."""
+        """One Inbox notice to administrators per set of findings they must hear about (the set's digest is the notice id).
+
+        Those are the problems, and storage nearing its limit
+        (``storage_capacity.tells_administrators``).
+        """
 
         report = await self.report()
-        problems = [item for item in report.findings if item.severity is StatusSeverity.PROBLEM]
+        problems = [item for item in report.findings if _tells_administrators(item)]
         if not problems:
             return
         digest = hashlib.sha256("\n".join(sorted(item.finding_id for item in problems)).encode("utf-8")).hexdigest()
@@ -150,7 +187,7 @@ class StatusPage:
                 team_id=self._config.manager.team_id,
                 kind=AccessNoticeKind.STATUS_PROBLEMS,
                 recipient_roles=(PERSON_ROLE_ADMIN,),
-                title=f"{len(problems)} problem(s) on the Status page",
+                title=_notice_title(problems),
                 summary="\n".join(f"- {item.title}" for item in problems)
                 + f"\n\nOpen the Status page ({STATUS_PAGE_PATH}) for what each one affects and what to do.",
                 created_at_utc=self._now(),
@@ -287,6 +324,38 @@ class StatusPage:
         from custom_transport.dead_letters import stopped_receiver_finding
 
         return [stopped_receiver_finding(receiver, source="Gateway") for receiver in self._stopped_receivers()]
+
+    async def _storage_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
+        if self.storage is None:
+            return []
+        try:
+            messages = await asyncio.wait_for(self._jetstream_usage(), timeout=MESSAGE_SERVER_TIMEOUT_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - listed as unavailable, never shown as healthy
+            LOGGER.warning(
+                "The message server did not say how much it stores. event=status_message_storage_unreadable error=%s",
+                str(exc) or type(exc).__name__,
+            )
+            unavailable.append(MESSAGE_SERVER_SOURCE)
+            messages = None
+        try:
+            return await asyncio.to_thread(self.storage.findings, messages)
+        except Exception:  # noqa: BLE001 - listed as unavailable; the rest of the page still shows
+            LOGGER.exception("The storage checks failed. event=status_storage_check_failed")
+            unavailable.append(STORAGE_SOURCE)
+            return []
+
+    def _person_storage_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
+        try:
+            finding = self._person_storage_totals()
+        except Exception as exc:  # noqa: BLE001 - listed as unavailable, never shown as current
+            LOGGER.warning(
+                "The Status page could not read people's stored-data totals. event=status_person_storage_unreadable "
+                "error=%s",
+                exc,
+            )
+            unavailable.append(PERSON_STORAGE_SOURCE)
+            return []
+        return [finding] if finding is not None else []
 
     def _configuration_findings(self) -> list[StatusFindingV1]:
         findings = [] if self._config.authorization.enabled else [_AUTHORIZATION_OFF]
@@ -503,6 +572,21 @@ def _rejection(endpoint: ModelEndpointStatusV1) -> StatusFindingV1:
         since=rejection.rejected_at,
         details=f"model {rejection.model_id or '-'}, provider {rejection.provider or '-'}",
     )
+
+
+def _tells_administrators(finding: StatusFindingV1) -> bool:
+    return finding.severity is StatusSeverity.PROBLEM or tells_administrators(finding)
+
+
+def _notice_title(findings: Sequence[StatusFindingV1]) -> str:
+    """For example "2 problems and 1 warning on the Status page"."""
+
+    counts = []
+    for severity, word in ((StatusSeverity.PROBLEM, "problem"), (StatusSeverity.WARNING, "warning")):
+        count = sum(1 for item in findings if item.severity is severity)
+        if count:
+            counts.append(f"{count} {word}{'' if count == 1 else 's'}")
+    return " and ".join(counts) + " on the Status page"
 
 
 def _unique(findings: Iterable[StatusFindingV1]) -> list[StatusFindingV1]:

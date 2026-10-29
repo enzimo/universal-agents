@@ -2,7 +2,9 @@
 
 It reads and writes the real saved ``instance_config.yaml`` of a temporary
 instance; only the person check is a stand-in, recording the change kind it
-was asked about.
+was asked about. The page holds the days files are kept and the storage
+warnings (``gateway.storage_warnings``); a save hands new numbers to the
+running upload cleanup and storage checks.
 """
 
 from __future__ import annotations
@@ -20,9 +22,12 @@ from assistant_gateway.application.file_retention_page import (
     FileRetentionConflict,
     FileRetentionInvalid,
     FileRetentionRefused,
+    StorageWarnings,
 )
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.file_retention import GatewayFileRetention
+from assistant_gateway.storage_capacity import StorageCapacity, StorageLevels
+from assistant_gateway.storage_usage import StorageUsageNotices
 from assistant_gateway.upload_retention import UploadRetention
 from custom_agents.runtime_settings_service import RUNTIME_SETTINGS_CHANGE_KIND
 from config_file_updates import ConfigFileConflict
@@ -58,8 +63,44 @@ def _service(tmp_path: Path, *, allowed: bool) -> tuple[GatewayFileRetention, Ga
         retention_days=config.interactive_apps.internal_website.attachments.retention_days,
         interval=timedelta(hours=6),
     )
-    service = GatewayFileRetention(config_path=config.config_path, person_changes=changes, uploads=uploads)
+    service = GatewayFileRetention(
+        config_path=config.config_path,
+        person_changes=changes,
+        uploads=uploads,
+        storage_usage=StorageUsageNotices(
+            team_id="team_test", step_gb=5, people=list, measure=dict, store=lambda: None,
+            send_notice_once=lambda notice: True,
+        ),
+        storage_capacity=StorageCapacity(
+            disks=list, databases=list, levels=StorageLevels(tmp_path / "levels.json"),
+            nearing_limit_percent=80, nearly_full_percent=95, message_storage_kind="file",
+        ),
+    )
     return service, config, changes
+
+
+# The storage warnings as new instances have them.
+DEFAULT_WARNINGS = {"person_step_gb": 5, "nearing_limit_percent": 80, "nearly_full_percent": 95}
+
+
+def _save(
+    service: GatewayFileRetention,
+    *,
+    person_id: str,
+    upload_days: object,
+    scratch_days: object,
+    output_days: object = 90,
+    **warnings: object,
+):
+    """Save the days with the storage warnings unchanged, unless a test names them."""
+
+    return service.save(
+        person_id=person_id,
+        upload_days=upload_days,
+        scratch_days=scratch_days,
+        output_days=output_days,
+        **{**DEFAULT_WARNINGS, **warnings},
+    )
 
 
 def _backups(config: GatewayInstanceConfig) -> list[Path]:
@@ -79,6 +120,7 @@ def test_new_instances_keep_uploads_and_saved_tool_outputs_three_months_and_scra
     page = service.page(person_id="usr_member")
 
     assert page.retention == FileRetention(upload_days=90, scratch_days=21, output_days=90)
+    assert page.warnings == StorageWarnings(person_step_gb=5, nearing_limit_percent=80, nearly_full_percent=95)
     assert page.can_change is False
     assert changes.asked == [("usr_member", RUNTIME_SETTINGS_CHANGE_KIND)]
 
@@ -94,9 +136,9 @@ def test_saving_changes_only_the_three_numbers_keeps_a_backup_and_tells_the_clea
     expected.tool_policy.output_retention_days = 180
     caplog.set_level(logging.INFO)
 
-    saved = service.save(person_id="usr_admin", upload_days=30, scratch_days=0, output_days=180)
+    saved = _save(service, person_id="usr_admin", upload_days=30, scratch_days=0, output_days=180)
 
-    assert saved == FileRetention(upload_days=30, scratch_days=0, output_days=180)
+    assert saved.retention == FileRetention(upload_days=30, scratch_days=0, output_days=180)
     after = _saved(config)
     assert after.interactive_apps.internal_website.attachments.retention_days == 30
     assert after.tool_policy.scratch_retention_days == 0
@@ -113,7 +155,7 @@ def test_saving_changes_only_the_three_numbers_keeps_a_backup_and_tells_the_clea
         "event=file_retention_changed person_id=usr_admin upload_days=90->30 scratch_days=21->0 "
         "output_days=90->180"
     ) in caplog.text
-    assert service.page(person_id="usr_admin").retention == saved
+    assert service.page(person_id="usr_admin").retention == saved.retention
 
 
 def test_someone_who_may_not_change_it_changes_nothing(tmp_path: Path) -> None:
@@ -121,7 +163,7 @@ def test_someone_who_may_not_change_it_changes_nothing(tmp_path: Path) -> None:
     previous = config.layout.instance_config_path.read_bytes()
 
     with pytest.raises(FileRetentionRefused, match="Only team administrators"):
-        service.save(person_id="usr_member", upload_days=30, scratch_days=7, output_days=60)
+        _save(service, person_id="usr_member", upload_days=30, scratch_days=7, output_days=60)
 
     assert config.layout.instance_config_path.read_bytes() == previous
     assert _backups(config) == []
@@ -149,7 +191,8 @@ def test_numbers_the_settings_cannot_hold_are_refused_and_nothing_is_saved(
     previous = config.layout.instance_config_path.read_bytes()
 
     with pytest.raises(FileRetentionInvalid, match="whole number|from 0"):
-        service.save(
+        _save(
+            service,
             person_id="usr_admin", upload_days=upload_days, scratch_days=scratch_days, output_days=output_days
         )
 
@@ -172,7 +215,7 @@ def test_a_settings_change_made_meanwhile_is_never_overwritten(
     monkeypatch.setattr(GatewayInstanceConfig, "load", classmethod(load_then_someone_else_saves))
 
     with pytest.raises(FileRetentionConflict, match="changed while this was being saved"):
-        service.save(person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
+        _save(service, person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
 
     assert path.read_text(encoding="utf-8").endswith("# changed by another settings writer\n")
     assert _backups(config) == []
@@ -208,7 +251,7 @@ def test_a_writer_racing_the_retention_backup_must_reload_before_it_can_save(tmp
 
     monkeypatch.setattr(config_file_updates, "atomic_write_bytes", pause_at_backup)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
+        first = pool.submit(_save, service, person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
         try:
             assert at_backup.wait(timeout=10)
             second = pool.submit(save_other)
@@ -216,7 +259,7 @@ def test_a_writer_racing_the_retention_backup_must_reload_before_it_can_save(tmp
             assert not second_done.wait(timeout=0.05), "the other writer must wait for the checked replacement"
         finally:
             continue_save.set()
-        assert first.result(timeout=10) == FileRetention(upload_days=30, scratch_days=7, output_days=60)
+        assert first.result(timeout=10).retention == FileRetention(upload_days=30, scratch_days=7, output_days=60)
         with pytest.raises(ConfigFileConflict):
             second.result(timeout=10)
     after = _saved(config)
@@ -246,13 +289,13 @@ def test_concurrent_retention_saves_keep_disk_and_live_values_in_the_same_order(
     def save_second():
         second_started.set()
         try:
-            return service.save(person_id="usr_admin", upload_days=60, scratch_days=9, output_days=120)
+            return _save(service, person_id="usr_admin", upload_days=60, scratch_days=9, output_days=120)
         finally:
             second_done.set()
 
     monkeypatch.setattr(GatewayInstanceConfig, "save", save_then_pause)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(service.save, person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
+        first = pool.submit(_save, service, person_id="usr_admin", upload_days=30, scratch_days=7, output_days=60)
         try:
             assert first_written.wait(timeout=10)
             second = pool.submit(save_second)
@@ -275,8 +318,37 @@ def test_a_save_without_saved_tool_output_days_keeps_the_saved_number(tmp_path: 
 
     saved = service.save(person_id="usr_admin", upload_days=30, scratch_days=7, output_days=KEEP_SAVED_DAYS)
 
-    assert saved == FileRetention(upload_days=30, scratch_days=7, output_days=120)
+    assert saved.retention == FileRetention(upload_days=30, scratch_days=7, output_days=120)
     assert _saved(config).tool_policy.output_retention_days == 120
+
+
+def test_a_save_from_an_open_older_page_keeps_custom_storage_warnings(tmp_path: Path) -> None:
+    service, config, _ = _service(tmp_path, allowed=True)
+    _save(
+        service, person_id="usr_admin", upload_days=90, scratch_days=21,
+        person_step_gb=10, nearing_limit_percent=70, nearly_full_percent=90,
+    )
+
+    saved = service.save(person_id="usr_admin", upload_days=30, scratch_days=7, output_days=120)
+
+    assert saved.warnings == StorageWarnings(person_step_gb=10, nearing_limit_percent=70, nearly_full_percent=90)
+    assert _saved(config).gateway.storage_warnings.person_step_gb == 10
+    assert service._storage_usage.step_gb == 10
+
+
+def test_a_missing_warning_keeps_its_value_but_explicit_null_is_invalid(tmp_path: Path) -> None:
+    from assistant_gateway.application.file_retention_page import KEEP_SAVED_WARNING
+
+    service, config, _ = _service(tmp_path, allowed=True)
+    saved = _save(
+        service, person_id="usr_admin", upload_days=30, scratch_days=7,
+        person_step_gb=10, nearing_limit_percent=KEEP_SAVED_WARNING, nearly_full_percent=90,
+    )
+    assert saved.warnings == StorageWarnings(person_step_gb=10, nearing_limit_percent=80, nearly_full_percent=90)
+    previous = config.config_path.read_bytes()
+    with pytest.raises(FileRetentionInvalid, match="whole percent"):
+        _save(service, person_id="usr_admin", upload_days=30, scratch_days=7, nearing_limit_percent=None)
+    assert config.config_path.read_bytes() == previous
 
 
 @pytest.mark.parametrize("days", [3651, 1_000_000])
@@ -290,3 +362,49 @@ def test_the_configuration_refuses_more_than_ten_years_of_saved_tool_outputs(day
     assert ToolPolicySettings.model_validate({"output_retention_days": 3650}).output_retention_days == 3650
     with pytest.raises(ValidationError):
         ToolPolicySettings.model_validate({"output_retention_days": days})
+
+
+def test_saving_storage_warnings_changes_the_saved_file_and_the_running_checks(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    service, config, _ = _service(tmp_path, allowed=True)
+    caplog.set_level(logging.INFO)
+
+    saved = _save(
+        service, person_id="usr_admin", upload_days=90, scratch_days=21,
+        person_step_gb=0, nearing_limit_percent=70, nearly_full_percent=90,
+    )
+
+    assert saved.warnings == StorageWarnings(person_step_gb=0, nearing_limit_percent=70, nearly_full_percent=90)
+    stored = _saved(config).gateway.storage_warnings
+    assert (stored.person_step_gb, stored.nearing_limit_percent, stored.nearly_full_percent) == (0, 70, 90)
+    assert service._storage_usage.step_gb == 0, "people's notices stop from the next check"
+    assert (service._storage_capacity.nearing_limit_percent, service._storage_capacity.nearly_full_percent) == (70, 90)
+    assert "person_step_gb=5->0 nearing_limit_percent=80->70 nearly_full_percent=95->90" in caplog.text
+    assert service.page(person_id="usr_admin").warnings == saved.warnings
+
+
+@pytest.mark.parametrize(
+    ("warnings", "message"),
+    [
+        ({"person_step_gb": -1}, "whole number of GB from 0"),
+        ({"person_step_gb": 10_001}, "whole number of GB from 0"),
+        ({"person_step_gb": "5"}, "whole number of GB from 0"),
+        ({"person_step_gb": 2.5}, "whole number of GB from 0"),
+        ({"nearing_limit_percent": 0}, "warning level must be a whole percent"),
+        ({"nearly_full_percent": 101}, "problem level must be a whole percent"),
+        ({"nearing_limit_percent": 95, "nearly_full_percent": 95}, "below the problem level"),
+    ],
+)
+def test_storage_warnings_the_settings_cannot_hold_are_refused_and_nothing_is_saved(
+    tmp_path: Path, warnings: dict, message: str
+) -> None:
+    service, config, _ = _service(tmp_path, allowed=True)
+    previous = config.layout.instance_config_path.read_bytes()
+
+    with pytest.raises(FileRetentionInvalid, match=message):
+        _save(service, person_id="usr_admin", upload_days=30, scratch_days=7, **warnings)
+
+    assert config.layout.instance_config_path.read_bytes() == previous
+    assert _backups(config) == []
+    assert service._storage_usage.step_gb == 5 and service._uploads.retention_days == 90

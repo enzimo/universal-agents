@@ -26,9 +26,10 @@ Callers decide which root and which path are allowed; this module only
 guarantees that the file opened is the one below that root. The agent file
 library (``custom_tools.file_access``), the broker's staged CLI files
 (``secure_tool_broker.task_files``), the gateway workspace browser and the
-holding of a removed person's folder (``access_control.held_person_folders``)
-and the deletion of a removed person's credentials folder
-(``secure_tool_broker.credential_state``) use it.
+holding of a removed person's folder (``access_control.held_person_folders``),
+the deletion of a removed person's credentials folder
+(``secure_tool_broker.credential_state``) and the measuring of people's
+stored data (``custom_agents.storage_usage_runtime``) use it.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ REASON_NOT_DIRECTORY = "not_directory"
 REASON_NOT_REGULAR_FILE = "not_regular_file"
 REASON_SEVERAL_LINKS = "several_links"
 REASON_TOO_LARGE = "too_large"
+REASON_TOO_DEEP = "too_deep"
 REASON_UNSAFE_NAME = "unsafe_name"
 REASON_ROOT_UNAVAILABLE = "root_unavailable"
 REASON_OPEN_FAILED = "open_failed"
@@ -492,6 +494,61 @@ def remove_directory(root: Path, parts: tuple[str, ...]) -> bool:
     finally:
         os.close(directory)
 
+# Measurement fails rather than returning a partial size beyond this depth.
+FOLDER_BYTES_MAX_DEPTH = 64
+
+
+def folder_bytes(root: Path, parts: tuple[str, ...] = ()) -> int:
+    """Total size in bytes of the regular files in ``root/parts`` and below; 0 when it does not exist.
+
+    Each folder is opened relative to the one before it with ``O_NOFOLLOW``,
+    so a link, or a folder swapped for one while the walk runs, is never
+    followed and nothing outside the folder is counted. Links, devices and
+    other entries count nothing; a file with several hard links counts in
+    full each time it is seen. Unreadable entries and folders deeper than
+    ``FOLDER_BYTES_MAX_DEPTH`` fail the measurement instead of returning a
+    partial total. For measuring, not for deciding access.
+    """
+
+    try:
+        directory = open_directory(root, parts)
+    except UnsafePath as exc:
+        if exc.reason == REASON_NOT_FOUND or (
+            exc.reason == REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError)
+        ):
+            return 0
+        raise
+    try:
+        return _folder_bytes(directory, depth=0)
+    finally:
+        os.close(directory)
+
+
+def _folder_bytes(directory: int, *, depth: int) -> int:
+    total = 0
+    for name in os.listdir(directory):
+        try:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue  # removed while listing
+        if stat.S_ISREG(info.st_mode):
+            total += info.st_size
+        elif stat.S_ISDIR(info.st_mode):
+            if depth >= FOLDER_BYTES_MAX_DEPTH:
+                raise UnsafePath(f"Folder measurement is too deep: {name}", reason=REASON_TOO_DEEP)
+            try:
+                child = os.open(name, _DIRECTORY_FLAGS, dir_fd=directory)
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                    continue  # removed, or replaced by a link or file, since the listing
+                raise
+            try:
+                total += _folder_bytes(child, depth=depth + 1)
+            finally:
+                os.close(child)
+    return total
+
+
 def list_directory(root: Path, parts: tuple[str, ...]) -> list[tuple[str, os.stat_result]]:
     """Entries of the folder ``root/parts`` with their own status (links not followed)."""
 
@@ -509,6 +566,7 @@ def list_directory(root: Path, parts: tuple[str, ...]) -> list[tuple[str, os.sta
 
 
 __all__ = [
+    "FOLDER_BYTES_MAX_DEPTH",
     "REASON_DESTINATION_EXISTS",
     "REASON_LINK",
     "REASON_NOT_DIRECTORY",
@@ -518,10 +576,12 @@ __all__ = [
     "REASON_ROOT_UNAVAILABLE",
     "REASON_SEVERAL_LINKS",
     "REASON_TOO_LARGE",
+    "REASON_TOO_DEEP",
     "REASON_UNSAFE_NAME",
     "UnsafePath",
     "copy_file",
     "entry_status",
+    "folder_bytes",
     "list_directory",
     "move_directory",
     "open_directory",

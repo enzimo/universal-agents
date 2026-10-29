@@ -119,6 +119,10 @@ gateway:
     web_user_token_ttl_days: 0                  # Reusable token lifetime in days; 0 disables automatic expiration.
     web_user_invite_ttl_seconds: 900            # One-time invitation lifetime in seconds; allowed range 60-86400.
     removed_data_retention_days: 7              # Days a removed person's folder, personal memory and conversations are held for /user restore; then a maintenance run deletes them.
+  storage_warnings:                         # When people hear that the data the team stores for them has grown, and when administrators hear that storage is filling up. Administrators can also change these in Settings > Team.
+    person_step_gb: 5                           # One Inbox notice to a person each time their stored data (chats, completed tasks, their files and folder) passes another multiple of this many GB (1 GB = 1,000,000,000 bytes); 0 turns these notices off.
+    nearing_limit_percent: 80                   # The Status page warns, and administrators get one Inbox notice, when a disk the instance uses or the message server's storage is this full.
+    nearly_full_percent: 95                     # At this percent full the Status page reports a problem and administrators get another notice; above nearing_limit_percent.
 
 # Main chat/reasoning model settings.
 llm:

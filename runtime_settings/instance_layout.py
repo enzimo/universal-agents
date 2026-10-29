@@ -17,7 +17,8 @@ Docker). The root is split by who may touch each area:
     records of published pages (which folder, whose, and the SHA-256 of each
     file), model failover state, diagnostics, execution artifacts, and the
     folders of people removed from the team, held until they are restored or
-    purged (``held_people/``, ``access_control.held_person_folders``).
+    purged (``held_people/``, ``access_control.held_person_folders``), and
+    when storage warning levels were entered (``storage_levels.json``).
     Trusted maintenance deletes old offloaded tool results here, and old
     conversation artifacts in ``dbs/`` (``custom_agents.output_retention``).
 ``workspaces/``
@@ -543,6 +544,15 @@ class InstanceLayout:
         task's attachment list and may copy it into the task's own folder."""
 
         return self.state_dir / "uploads"
+
+    @property
+    def storage_levels_path(self) -> Path:
+        """When each disk or message store entered a storage warning level on the Status page.
+
+        Written by the gateway (assistant_gateway.storage_capacity), so a
+        restart neither repeats an administrators' notice nor forgets one."""
+
+        return self.state_dir / "storage_levels.json"
 
     @property
     def attachment_copies_dir(self) -> Path:

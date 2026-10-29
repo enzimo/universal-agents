@@ -3057,15 +3057,78 @@ removes files left without a record, and the folders left empty. It shares the
 link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
 gateway is the only writer of `state/uploads`; agents work on their own copies.
 Administrators change the three retention numbers (chat uploads, scratch
-files, saved tool outputs) in Settings → Team → File Retention
-(`assistant_gateway/file_retention.py`). That is a `runtime_settings`
-change in the gateway's own controls, so `PersonChangeCheck` decides who may.
-The save changes only those three fields of `instance_config.yaml`, keeps a
-backup as the configuration editor does, and is refused when the file changed
-meanwhile. Upload retention applies from the next cleanup; scratch and saved
-output retention apply after a restart, because the manager reads its
-settings when it starts. The team transfer's settings section is version 7
-for `tool_policy.output_retention_days`.
+files, saved tool outputs), and the storage warnings
+(`gateway.storage_warnings`, below and in the Status page section), in
+Settings → Team → File Retention (`assistant_gateway/file_retention.py`). That
+is a `runtime_settings` change in the gateway's own controls, so
+`PersonChangeCheck` decides who may. The save changes only those fields of
+`instance_config.yaml`, keeps a backup as the configuration editor does, and
+is refused when the file changed meanwhile. Upload retention and the storage
+warnings apply from the next cleanup or check, because the gateway hands the
+new numbers to its running loops; scratch and saved output retention apply
+after a restart, because the manager reads its settings when it starts. The
+team transfer's settings section is version 7 for
+`tool_policy.output_retention_days`. The storage warnings share the page
+because both decide how the team's stored data stays in bounds: retention
+deletes what may go, and the warnings tell people and administrators about
+what stays.
+
+Chat transcripts and completed tasks are kept indefinitely (owner's decision
+of 2026-10-27), so each person's stored data only grows, and each person hears
+as it does (`assistant_gateway/storage_usage.py`). That data is split between
+the gateway and the manager, which do not read each other's records (the
+gateway imports no manager store, `test_gateway_runtime_has_no_manager_repository_imports`),
+so each side measures its own share in bytes and writes one row per active
+person to a shared table in the manager's database, beside the access store
+and the departure records both already open
+(`storage/person_storage_usage_repository.py`: person, side, bytes by kind,
+when measured):
+
+- the manager (`custom_agents/storage_usage_runtime.py`) measures
+  conversation turns, summaries and completed tasks, the long texts saved as
+  files beside conversations (`dbs/conversation_artifacts/<conversation id>/`,
+  owned through the conversation) and the person's folder, at its start and
+  once a day. It runs as its own task in the team lead's process, started and
+  restarted by the scheduler loop, which lives as long as the process; not in
+  the maintenance schedule, which can be switched off, and not on the storage
+  lane, which a long scan would hold up;
+- the gateway measures chat transcripts, requests, replies and kept uploads
+  in its own database once a day, 15 minutes after it starts, writes its
+  row, adds the manager's and sends the notices.
+
+Each repository answers for its own tables with one aggregate per table and
+no row loading; the byte size comes from the database
+(`SqlDialect.text_bytes`: `LENGTH(CAST(x AS BLOB))` on SQLite, whose `LENGTH`
+counts characters, and `octet_length` on PostgreSQL). Folders are walked
+without following links (`safe_open.folder_bytes`). Permission or I/O failures,
+and a walk exceeding its depth limit, fail the measurement and preserve the
+previous snapshot and its time; a partial total never becomes current. Missing
+folders and excluded symbolic links still count nothing. A side replaces all its
+rows at each measurement, so the table holds at most two rows per active
+person, plus one gateway row per disabled person. Disabled people's gateway
+rows retain their announcement progress and original measurement time, since
+their Inbox notices remain. Enabling them resumes that progress without
+reusing notice IDs. Removed people's rows can go because removal also deletes
+their notices. When a person's total passes the next multiple of
+`gateway.storage_warnings.person_step_gb` above the highest step announced to
+them (5 GB by default, 0 off), they get one Inbox notice (`storage_usage`) for
+the highest step reached. The announced step and a count of announcements are
+kept on the person's gateway row; when the total falls below the announced
+step it is lowered to the step reached, so passing it again is announced
+again. A notice's id is `storage_usage:<person folder>:<step in bytes>:<announcement
+number>`, and the notice is stored before the step is written, so a restart in
+between finds the same id and the crossing is announced once. When the
+manager's row for a person is missing or more than three days old, the gateway
+sends that person no notice, because a partial total could hide a step, logs
+`event=storage_usage_totals_stale` with their folder name, and the Status page
+warns that the totals are out of date; a person whose standing changed less
+than three days ago only waits for the next daily measurement. Status checks
+both processes' snapshots and identifies which one stopped measuring. A
+missing gateway snapshot waits for the initial 15-minute check before it can
+be reported; an already stale snapshot remains visible after a restart. The notices
+stay in the Inbox like all notices (decision D3); only stuck work is also sent
+to a chat, by a separate owner's decision. The team transfer's settings
+section is version 8 for `gateway.storage_warnings`.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
@@ -3461,7 +3524,8 @@ configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
 schedules for administrators, receive loops that stopped), whether TeamLead
-reports, and its own configuration and receive loops. A source that does not answer is listed and shown as a
+reports, its own configuration and receive loops, and storage filling up
+(`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
 gateway sends administrators one Inbox notice per new set of problems
 (`status_problems`), linking to the page. A notice records what
@@ -3474,6 +3538,40 @@ Why: conditions such as an
 environment variable silently overriding a saved setting or key, a rejected
 model key, or an MCP server that stopped answering were only in logs or only
 known to one process.
+
+Storage findings exist because nothing measured disk, database or message
+storage before, so a full disk was first noticed when saving failed, and
+administrators must hear before a limit is reached. On every check the
+gateway reads the free space (`statvfs`, counted as `df` does) of the
+filesystem holding the instance folder and of each SQLite database's folder on
+another filesystem, and the NATS account's JetStream use and limit
+(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). An
+unreadable disk produces a problem finding saying its free space is unknown;
+successful checks for other disks and NATS remain visible. At
+`gateway.storage_warnings.nearing_limit_percent` (80 by default) a place is
+a warning, at `nearly_full_percent` (95) a problem. The nearing level is a
+warning on the page but counts as a problem for the notice, so administrators
+are told before it fills. A finding's id names the place, the level and when
+the level was entered (`storage_nearing_limit:disk:instance:20261027T120000Z`),
+never the percentage, so the notice digest changes only when a level is
+entered, not every five minutes as the percentage moves. When each level was
+entered is kept in `state/storage_levels.json` (`StorageLevels`), so a restart
+neither repeats nor forgets a notice; a level ends only three percentage
+points below its threshold, so use moving around a threshold is not a new
+entry, while a disk that fills up again after space was freed is announced
+again. Database sizes (SQLite files with their write-ahead log,
+`pg_database_size` for PostgreSQL) have no limit of their own and appear in
+the findings' details. The bundled NATS server sets no JetStream limit
+(`docker/nats_service.py` passes no `max_file_store`), so the account reports
+none; the page then shows a note with the stored size instead of inventing a
+limit. Without `max_file_store` the server itself stops storing at three
+quarters of the disk space that was free when it started. The percentage
+counts bytes stored, not the space streams reserve, which the account
+information does not report, and the finding says so. An account limit must
+leave room for the streams' own reservations: the server refuses to create
+the dead-letter stream (64 MB) in an account allowed less. People's
+stored-data totals that the manager stopped measuring are a warning on the
+page too (`StorageUsageNotices.stale_finding`).
 
 ### Knowledge page
 

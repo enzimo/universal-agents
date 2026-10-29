@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import subprocess
@@ -196,3 +197,59 @@ def test_status_and_listing_report_links_without_following_them(root: Path, secr
     assert linked is not None and stat.S_ISLNK(linked.st_mode)
     assert stat.S_ISLNK(listed["linked.txt"].st_mode)
     assert safe_open.entry_status(root, ("docs", "missing.txt")) is None
+
+
+def test_folder_sizes_count_regular_files_below_and_never_follow_a_link(root: Path, secret: Path, tmp_path: Path) -> None:
+    (root / "docs" / "deep").mkdir()
+    (root / "docs" / "deep" / "data.bin").write_bytes(b"x" * 20)
+    os.symlink(secret.parent, root / "docs" / "deep" / "out")
+    os.symlink(secret, root / "docs" / "secret-link.txt")
+    os.symlink(secret.parent, root / "linked")
+
+    assert safe_open.folder_bytes(root, ("docs",)) == len("hello") + 20
+    assert safe_open.folder_bytes(root, ("missing",)) == 0
+    assert safe_open.folder_bytes(tmp_path / "no-root", ()) == 0
+    assert _reason(lambda: safe_open.folder_bytes(root, ("linked",))) == safe_open.REASON_LINK
+
+
+@pytest.mark.parametrize("failure", [errno.EACCES, errno.EIO])
+@pytest.mark.parametrize("operation", ["root", "stat", "child"])
+def test_folder_sizes_do_not_hide_permission_or_io_failures(root: Path, monkeypatch, failure: int, operation: str) -> None:
+    (root / "docs" / "deep").mkdir()
+    opened, stated = os.open, os.stat
+
+    def open_path(path, flags, *args, **kwargs):
+        if (operation == "root" and path == root) or (operation == "child" and path == "deep"):
+            raise OSError(failure, "measurement failed")
+        return opened(path, flags, *args, **kwargs)
+
+    def stat_path(path, *args, **kwargs):
+        if operation == "stat" and path == "note.txt" and "dir_fd" in kwargs:
+            raise OSError(failure, "measurement failed")
+        return stated(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_path)
+    monkeypatch.setattr(os, "stat", stat_path)
+    with pytest.raises(OSError):
+        safe_open.folder_bytes(root, ("docs",))
+
+
+def test_folder_sizes_refuse_a_partial_total_at_the_depth_limit(root: Path, monkeypatch) -> None:
+    (root / "docs" / "deep").mkdir()
+    monkeypatch.setattr(safe_open, "FOLDER_BYTES_MAX_DEPTH", 0)
+    with pytest.raises(OSError, match="deep"):
+        safe_open.folder_bytes(root, ("docs",))
+
+
+@pytest.mark.parametrize("failure", [errno.ENOENT, errno.ENOTDIR, errno.ELOOP])
+def test_folder_sizes_still_skip_entries_removed_or_replaced_during_the_walk(root: Path, monkeypatch, failure: int) -> None:
+    (root / "docs" / "deep").mkdir()
+    opened = os.open
+
+    def open_path(path, flags, *args, **kwargs):
+        if path == "deep":
+            raise OSError(failure, "entry changed during measurement")
+        return opened(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_path)
+    assert safe_open.folder_bytes(root, ("docs",)) == len("hello")
