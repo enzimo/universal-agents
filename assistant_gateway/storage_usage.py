@@ -101,7 +101,8 @@ class UsageStore(Protocol):
     """The shared totals (``storage.person_storage_usage_repository.PersonStorageUsageRepository``)."""
 
     def record_side(
-        self, team_id: str, side: StorageSide, usage: Mapping[str, Mapping[str, int]], *, measured_at: datetime
+        self, team_id: str, side: StorageSide, usage: Mapping[str, Mapping[str, int]], *, measured_at: datetime,
+        retain_people: Iterable[str] = (),
     ) -> None: ...
 
     def side_usage(self, team_id: str, side: StorageSide) -> dict[str, SideUsage]: ...
@@ -274,10 +275,14 @@ class StorageUsageNotices:
             logger.info("People's storage notices are turned off. event=storage_usage_disabled")
             return 0
         now = self._now()
-        people = {person.person_id: person for person in self._active_people()}
+        directory = list(self._people())
+        people = {person.person_id: person for person in directory if person.standing is PersonStanding.ACTIVE}
+        # Disable keeps notices, so preserve their counters without pretending
+        # their old sizes were remeasured. Removal deletes notices and may reset.
+        disabled = [person.person_id for person in directory if person.standing is PersonStanding.DISABLED]
         gateway = self._measure(sorted(people))
         store = self._store()
-        store.record_side(self._team_id, StorageSide.GATEWAY, gateway, measured_at=now)
+        store.record_side(self._team_id, StorageSide.GATEWAY, gateway, measured_at=now, retain_people=disabled)
         manager = store.side_usage(self._team_id, StorageSide.MANAGER)
         stored = 0
         unmeasured = 0

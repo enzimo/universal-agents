@@ -3105,7 +3105,11 @@ and a walk exceeding its depth limit, fail the measurement and preserve the
 previous snapshot and its time; a partial total never becomes current. Missing
 folders and excluded symbolic links still count nothing. A side replaces all its
 rows at each measurement, so the table holds at most two rows per active
-person. When a person's total passes the next multiple of
+person, plus one gateway row per disabled person. Disabled people's gateway
+rows retain their announcement progress and original measurement time, since
+their Inbox notices remain. Enabling them resumes that progress without
+reusing notice IDs. Removed people's rows can go because removal also deletes
+their notices. When a person's total passes the next multiple of
 `gateway.storage_warnings.person_step_gb` above the highest step announced to
 them (5 GB by default, 0 off), they get one Inbox notice (`storage_usage`) for
 the highest step reached. The announced step and a count of announcements are

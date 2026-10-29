@@ -16,9 +16,11 @@ So each side measures only its own data and writes one row per person here:
   ``announcements``), so a step is announced once per crossing, also across
   restarts.
 
-A side replaces all its rows at each measurement (``record_side``): people
-who are no longer active lose their rows, so the table holds at most two rows
-per active person and does not grow with time.
+A side replaces its measurements at each scan (``record_side``). The gateway
+retains disabled people's rows unchanged because their notices remain and
+their announcement numbers must not be reused after enabling them. Removed
+people lose their rows. The bound is two rows per active person, plus one
+gateway row per disabled person.
 
 The table is in the manager's database, beside the access store and the
 departure records, which both processes already open. This module reads and
@@ -33,7 +35,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
@@ -132,12 +134,15 @@ class PersonStorageUsageRepository:
         return connect_sqlite(str(self.settings.sqlite_path), row_factory=sqlite3.Row)
 
     def record_side(
-        self, team_id: str, side: StorageSide, usage: Mapping[str, Mapping[str, int]], *, measured_at: datetime
+        self, team_id: str, side: StorageSide, usage: Mapping[str, Mapping[str, int]], *, measured_at: datetime,
+        retain_people: Iterable[str] = (),
     ) -> None:
         """Replace this side's rows with ``usage`` (person id -> bytes by kind), in one transaction.
 
-        Rows of people not in ``usage`` are deleted; the gateway's row keeps
-        its announcements while the person stays.
+        Rows outside ``usage`` and ``retain_people`` are deleted. Retained
+        rows are not refreshed: their bytes, measurement time and announcement
+        progress stay exactly as recorded. No row is created for an unmeasured
+        person just because they are retained.
         """
 
         p = self.dialect.bind
@@ -162,7 +167,7 @@ class PersonStorageUsageRepository:
                         _utc(measured_at),
                     ),
                 )
-            kept = [person for person, _ in rows]
+            kept = sorted(set(usage) | set(retain_people))
             others = f" AND person_id NOT IN ({', '.join(p for _ in kept)})" if kept else ""
             conn.execute(
                 f"DELETE FROM {PERSON_STORAGE_USAGE_TABLE} WHERE team_id={p} AND side={p}{others}",

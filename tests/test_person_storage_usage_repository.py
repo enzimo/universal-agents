@@ -68,6 +68,25 @@ def test_the_announced_step_stays_with_the_person_and_goes_when_they_leave(backe
     assert gone == Announcement(0, 0)
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_retained_people_keep_only_this_sides_existing_snapshot_and_progress(backend: str, tmp_path: Path) -> None:
+    with knowledge_storage(backend, tmp_path) as settings:
+        store = PersonStorageUsageRepository(settings)
+        store.record_side(TEAM, StorageSide.GATEWAY, {"usr_a": {"chats": 10}, "usr_b": {"chats": 2}}, measured_at=NOW)
+        store.record_announcement(TEAM, "usr_a", Announcement(TEN_GB, 3))
+        store.record_side(TEAM, StorageSide.MANAGER, {"usr_a": {"folder": 20}}, measured_at=NOW)
+        store.record_side("other", StorageSide.GATEWAY, {"usr_b": {"chats": 99}}, measured_at=NOW)
+        before = store.side_usage(TEAM, StorageSide.GATEWAY)["usr_a"]
+        store.record_side(
+            TEAM, StorageSide.GATEWAY, {}, measured_at=NOW + timedelta(days=4), retain_people=["usr_a", "unmeasured"],
+        )
+        assert store.side_usage(TEAM, StorageSide.GATEWAY) == {"usr_a": before}
+        assert store.announcement(TEAM, "usr_a") == Announcement(TEN_GB, 3)
+        store.record_side(TEAM, StorageSide.MANAGER, {}, measured_at=NOW)
+        assert store.side_usage(TEAM, StorageSide.MANAGER) == {}
+        assert store.side_usage("other", StorageSide.GATEWAY)["usr_b"].total == 99
+
+
 def test_a_side_records_only_its_own_kinds_and_no_negative_size(tmp_path: Path) -> None:
     from storage.config import resolve_storage_settings
 

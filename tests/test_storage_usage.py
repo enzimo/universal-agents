@@ -315,6 +315,54 @@ def test_after_a_drop_passing_a_step_again_is_announced_again_once(team: _Team) 
     assert list(notices.stored) == ["storage_usage:usr_alice:10000000000:1", "storage_usage:usr_alice:10000000000:2"]
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_disabling_and_reenabling_keeps_notice_progress_across_restarts(backend: str, tmp_path: Path) -> None:
+    from storage.access_repository import AccessRepository
+
+    with knowledge_storage(backend, tmp_path) as settings:
+        access = AccessRepository(settings)
+        store = PersonStorageUsageRepository(settings)
+        people = [_person(ALICE)]
+        clock = _Clock()
+
+        def checker() -> StorageUsageNotices:
+            return StorageUsageNotices(
+                team_id=TEAM, step_gb=5, people=lambda: people,
+                measure=lambda ids: {person: {"chats": 0, "uploads": 0} for person in ids},
+                store=lambda: PersonStorageUsageRepository(settings),
+                send_notice_once=access.create_notice_if_absent, now=clock,
+            )
+
+        def scan(size: int) -> int:
+            store.record_side(TEAM, StorageSide.MANAGER, {ALICE: {"folder": size}}, measured_at=clock())
+            return checker().check()
+
+        assert scan(5 * GB) == 1
+        original = store.side_usage(TEAM, StorageSide.GATEWAY)[ALICE]
+        people[0] = _person(ALICE, standing=PersonStanding.DISABLED)
+        clock.now += timedelta(days=4)
+        for _ in range(2):
+            assert checker().check() == 0
+            assert checker().stale_finding() is None
+            assert store.announcement(TEAM, ALICE).count == 1
+            assert store.side_usage(TEAM, StorageSide.GATEWAY)[ALICE] == original
+        people[0] = _person(ALICE, changed=clock())
+        assert scan(5 * GB) == 0
+        assert scan(0) == 0
+        assert scan(5 * GB) == 1
+        assert len(access.notices_for(TEAM, person_id=ALICE, roles=())) == 2
+        assert store.announcement(TEAM, ALICE).count == 2
+
+        # Removal discards notices too, so its measurement/progress row may go.
+        access.forget_person_records(TEAM, ALICE, request_ids=())
+        people[0] = _person(ALICE, standing=PersonStanding.REMOVED)
+        assert checker().check() == 0
+        assert store.side_usage(TEAM, StorageSide.GATEWAY) == {}
+        people[0] = _person(ALICE, changed=clock())
+        assert scan(5 * GB) == 1
+        assert len(access.notices_for(TEAM, person_id=ALICE, roles=())) == 1
+
+
 def test_a_restart_between_the_notice_and_the_announced_step_announces_once(team: _Team, monkeypatch) -> None:
     notices = _Notices()
     team.manager_measures(usr_alice=5 * GB)
