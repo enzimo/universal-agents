@@ -7,7 +7,7 @@ policy-enforcement point. A future remote runtime installs its own local
 context and ACP-backed service adapters.
 
 Why the task comes from a context variable (``TaskWork``): an agent can run
-several model turns at once (threads started with Launch parallel thread,
+several model turns at once (threads set to Run concurrently,
 ``custom_agents.execution_lanes``). Each runner of a turn binds the task's work
 record for the whole handling of that task, the model turn and the saving of
 its result (``task_work``). Strands runs hooks in the turn's asyncio task and

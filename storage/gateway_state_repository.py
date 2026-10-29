@@ -1015,7 +1015,7 @@ class _RelationalGatewayStateRepository:
             self._ensure_column(
                 conn, "gateway_sessions", "owner_canonical_user_id", "TEXT"
             )
-            # Web Chat's Launch parallel thread (SessionRecord.parallel_thread).
+            # Web Chat's Run concurrently setting (SessionRecord.parallel_thread).
             self._ensure_column(
                 conn, "gateway_sessions", "parallel_thread", "INTEGER NOT NULL DEFAULT 0"
             )

@@ -1,10 +1,10 @@
 """Which execution lane runs a task's turns (``runtime_hosting.agent_execution``).
 
-A request a person sent in a thread they started with Web Chat's Launch
-parallel thread (``GatewayContext.parallel_thread``) runs in a lane of its own,
-named after its root task, so the team lead works on it at the same time as
-its other work. By starting such a thread the person says the request does
-not overlap their other work, so both may run at once (owner, 2026-10-27).
+A request a person sent in a thread set to Web Chat's Run concurrently
+(``GatewayContext.parallel_thread``) runs in a lane of its own, named after its
+root task, so the team lead works on it at the same time as its other work. By
+turning the switch on the person says the request does not overlap their other
+work, so both may run at once (owner, 2026-10-27).
 Work set up from a parallel thread runs in parallel too (owner, 2026-10-28):
 a schedule or Objective work created there copies the request's context,
 mark and delivery mode included (``custom_tools.providers.schedules``

@@ -313,6 +313,10 @@ class GatewayContext(BaseModel):
             "with it; copied unchanged onto delegated tasks and never saved on a schedule."
         ),
     )
+    # The description still names the switch's old label (now Run
+    # concurrently): it is part of the frozen fingerprint of the team-transfer
+    # schedules section (schedules/6), and a wording change alone is not worth
+    # a new section version and conversion step.
     parallel_thread: bool = Field(
         default=False,
         description=(

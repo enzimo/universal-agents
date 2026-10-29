@@ -800,8 +800,8 @@ that leads to it (owner's request 2026-10-12).
   every 10 seconds only while the panel is active. Retain the visible page during
   refresh and reject late responses from a closed panel or previous session.
   Accepted requests must appear even while the agent is busy or paused.
-  Append **Parallel** to the current, queued or waiting heading of a request
-  sent in a thread started with **Launch parallel thread**. The agent runs such
+  Append **Concurrent** to the current, queued or waiting heading of a request
+  sent in a thread set to **Run concurrently**. The agent runs such
   a request at the same time as its other work, up to four at once; a running
   one shows as current, not queued.
   When a task waits, show its reason as **Waiting on:** followed by the reason
@@ -1832,21 +1832,28 @@ its history. Steps with linked requests cannot use this correction.
 - The brand/UA icon in the config editor returns to Web Chat.
 - The input placeholder is `Type your message here...`.
 - The send action uses an ocean-blue icon button.
-- A compact **Launch parallel thread** switch sits below Send, off by default,
-  with no helper sentence.
-  It marks the current thread as safe to run in parallel when sending the
-  message (`{"parallel_thread": true}`). Keep its conversation and full
-  history. Create a thread only when none is selected. Every request sent in it runs at the
-  same time as the agent's other work. Admit its request without waiting for
-  the current model turn, so Settings → Tasks can show and control it
-  immediately. New Chat and `/new` start ordinary threads.
-  It applies to one ordinary message; slash commands keep their usual behavior.
-  Keep the message, files, name and replies in the selected chat. To start
-  without history, use New Chat first. An unchecked switch keeps the saved
-  parallel setting. Reset the switch once the message is submitted.
-  When no chat is selected, create one before clearing the composer. While creating it,
-  disable composer edits and New Chat, and announce **Preparing your chat…**.
-  A failed creation keeps the draft and files. **Retry** on a send failure
+- A compact **Run concurrently** switch sits below Send (owner, 2026-10-29;
+  it replaced **Launch parallel thread**, which opened an empty chat). It is a
+  setting of the selected thread, not of one message: show that thread's saved
+  setting, and save a change at once (`PATCH /api/web-chat/sessions/{key}` with
+  `parallel_thread` and the conversation shown). On, every request admitted in
+  the thread runs at the same time as the agent's other work; off, its requests
+  wait their turn. Admit such a request without waiting for the current model
+  turn, so Settings → Tasks can show and control it immediately. New Chat and
+  `/new` start with it off. Messages never carry it, and sending never moves it.
+  Keep the message, files, name and replies in the selected chat.
+  Lock the switch while a message is on its way or a request is open in the
+  thread (`open_request_session_keys` on every event page): a message sent then
+  is guidance for that request. While locked, show the muted note
+  **Available after this chat replies.** below it; otherwise show no helper
+  sentence. A refused change puts the saved position back and says why in red
+  in the same line (`role="alert"`), starting with **Run concurrently was not
+  changed.**; the next change replaces that message.
+  When no chat is selected, create one before clearing the composer, save the
+  switch's position for it, then send. While doing so, disable composer edits,
+  the switch and New Chat, and announce **Preparing your chat…**.
+  A failed creation or save keeps the draft and files. A failed send keeps the
+  thread's setting, so the person can change it before **Retry**, which
   resends the original message and files with the same request id and destination.
   Show each send error and its **Retry** beside the failed message, using the
   shared error text and compact secondary button. Later messages and their

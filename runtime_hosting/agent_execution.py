@@ -2,7 +2,7 @@
 
 An agent runs at most one model turn at a time in each lane. The main lane
 serves all ordinary work, one turn after another, as before. A request a person
-sent in a thread they started with Web Chat's Launch parallel thread gets a
+sent in a thread set to Web Chat's Run concurrently gets a
 lane of its own (``custom_agents.execution_lanes``), so its turns run beside the
 main lane's and other parallel lanes', while the turns of one request still run
 one at a time. A lane owns the turn's mutable state for the whole turn,

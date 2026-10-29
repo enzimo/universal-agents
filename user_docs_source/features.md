@@ -61,9 +61,9 @@ queue positions and waiting reasons. It refreshes every 10 seconds while open an
 20 tasks per agent per page. Other users' tasks remain private. If one agent cannot
 respond, its section reports that problem while the other sections remain usable.
 
-New tasks appear even when the agent is busy or paused. **Parallel** marks a
-request you sent in a thread started with **Launch parallel thread**, and each
-run of a schedule or Objective work you set up in such a thread. The team lead
+New tasks appear even when the agent is busy or paused. **Concurrent** marks a
+request you sent in a thread set to **Run concurrently**, and each run of a
+schedule or Objective work you set up in such a thread. The team lead
 works on these at the same time as its other work, up to four at once; a
 further one shows as queued until one of them finishes. Other work, such as
 ordinary chats, New Chat, schedules set up anywhere else and other chat apps,
@@ -302,18 +302,25 @@ unless you rename it. Updates the team sends you and notes from memory reviews
 appear as their own threads, **Updates** and **Memory review**, once there is
 something in them.
 
-To let the current conversation run alongside other work, turn on
-**Launch parallel thread** below Send and send your message. Chat keeps the
-current thread, its history, your files and replies together. The
-team lead starts on it right away, even while it is busy with your other work,
-and every later request you send in that thread runs the same way.
-A schedule or Objective work you set up in that thread also runs this way:
-each run starts when it is due and works beside your other work. Its runs
-count toward the limit of four, so a frequent schedule or long
-Objective work set up there can make a new parallel thread wait, and a run can
-happen while you send a new request in the same thread. Runs of one schedule
-still never overlap: a run that comes due while the previous one is still
-working is skipped.
+**Run concurrently**, the switch below Send, is a setting of the selected
+thread. With it on, each request you send in that thread runs alongside your
+other work: the team lead starts on it even while it is busy with your other
+requests. With it off, the thread's requests wait their turn. The switch shows
+each thread's own setting, and the thread keeps its conversation, history,
+files and replies either way. **New Chat** and `/new` start with it off. With
+no chat yet, the chat your first message creates takes the switch's position.
+While a request in the thread is still open, the switch is locked and shows
+**Available after this chat replies.** A message you send then goes to that
+request as extra instructions, where it already runs. So turn the switch on
+before you send; if you forget, it unlocks when the chat replies.
+A schedule or Objective work you set up in a thread while it is on also runs
+this way: each run starts when it is due and works beside your other work. It
+keeps that setting even if you later turn the thread's switch off, and work you
+set up while it was off stays ordinary. Its runs count toward the limit of
+four, so a frequent schedule or long Objective work set up there can make
+another concurrent request wait, and a run can happen while you send a new
+request in the same thread. Runs of one schedule still never overlap: a run
+that comes due while the previous one is still working is skipped.
 Each thread keeps its own conversation history and summaries. Saved team facts
 and your preferences remain available across your threads. Use it only for work
 that does not change the same things as your other running requests:
@@ -324,15 +331,15 @@ operator turned these checks off with `agent.request_conflict_checks`
 Memory facts, schedules, heartbeat items and Objectives refuse a change only
 when it was decided from an older version of the record, so one request can
 still change what another just changed. Commands the agent runs in its shell or
-Python, and files it writes with its file tools, are not checked. The switch
-turns off after sending, but the thread stays marked for parallel work.
-Use **New Chat** first if you want an empty conversation. An unchecked switch
-keeps the thread's existing setting. Slash commands keep their usual behavior.
-If the new chat cannot be created, your text and files stay in the composer.
+Python, and files it writes with its file tools, are not checked. Sending
+never moves the switch, and slash commands keep their usual behavior.
+If the new chat cannot be created, or its Run concurrently setting cannot be
+saved, your text and files stay in the composer.
 Selecting an existing conversation while a new chat is being created keeps
 your selection. Any message already submitted keeps its intended conversation.
-If sending fails, use **Retry** beside the failed message to resend the same
-request without creating another one. You can send other messages first;
+If sending fails, the thread keeps its Run concurrently setting; change it
+first if you want, then use **Retry** beside the failed message to resend the
+same request without creating another one. You can send other messages first;
 each failed message keeps its own Retry. Retry retains the original files and
 destination until that message is accepted, you sign out, archive its chat,
 or close the page.
