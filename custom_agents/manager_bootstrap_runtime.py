@@ -1,4 +1,4 @@
-"""Manager-owned bootstrap and legacy-state migrations.
+"""Manager-owned bootstrap, startup cleanup and legacy-state migrations.
 
 The gateway supplies only configuration values. This module performs every
 manager-store read and write from inside the manager process.
@@ -25,6 +25,21 @@ from storage.pinned_memory_repository import USERMEM_BANK
 ONBOARDING_USER_CONTEXT_SOURCE_KEY = "onboarding:user_context:v1"
 LEGACY_USER_MD_SOURCE_KEY = "legacy_workspace:USER.md:v1"
 LEGACY_ARCHIVE_DIR = "workspace_legacy_markdown"
+
+
+async def resume_manager_data_cleanups(agent: Any) -> None:
+    """After task recovery, settle departures before resuming approved history clean-ups.
+
+    This runs before the manager becomes ready, separately from the earlier
+    synchronous configuration bootstrap. Each service retains its own logging
+    and failure handling.
+    """
+
+    from custom_agents.person_departure_runtime import settle_departed_people_safely
+    from custom_agents.history_cleanup import resume_history_cleanups
+
+    await settle_departed_people_safely(agent, when="manager_start")
+    await resume_history_cleanups(agent)
 
 
 @dataclass(frozen=True)

@@ -134,7 +134,7 @@ from custom_agents.manager_control_runtime import (
     handle_manager_topic_command,
     handle_task_progress_status,
 )
-from custom_agents.manager_bootstrap_runtime import run_manager_bootstrap
+from custom_agents.manager_bootstrap_runtime import resume_manager_data_cleanups, run_manager_bootstrap
 from custom_agents.default_tools import builtin_tool_catalog
 from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
 from custom_agents.sdk.strands.skills import (
@@ -354,7 +354,6 @@ from custom_agents.access_request_runtime import handle_access_request_resolved
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from custom_tools.comms_tools import TeamComms
 from custom_tools.tool_stop import ToolStop
-from custom_agents.history_cleanup import resume_history_cleanups
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from storage.knowledge_repository import create_knowledge_repository
@@ -5078,14 +5077,7 @@ class UniversalAgent(BaseModel):
             # from a worker that is gone: tell each requester who holds them.
             await report_held_delegated_tasks(self)
             if self.is_team_lead:
-                # Safety net: end the work of anyone disabled or removed while
-                # this manager was stopped (custom_agents.person_departure_runtime).
-                from custom_agents.person_departure_runtime import settle_departed_people_safely
-
-                await settle_departed_people_safely(self, when="manager_start")
-                # And finish history clean-ups a stopped run left part way
-                # (custom_agents.history_cleanup).
-                await resume_history_cleanups(self)
+                await resume_manager_data_cleanups(self)
             from custom_agents.agent_instantiation_service import update_runtime_launch
             from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 
