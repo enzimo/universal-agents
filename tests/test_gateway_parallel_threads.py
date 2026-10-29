@@ -20,6 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from assistant_gateway.application.interactive_commands import GatewayCommandRequest
 from assistant_gateway.application.session_service import PARALLEL_MARK_CLEARED_NOTICE
+from assistant_gateway.application.website_application import WebChatParallelSettingResult
 from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
@@ -239,12 +240,12 @@ async def test_the_switch_refuses_other_people_stale_pages_and_bad_values(tmp_pa
         assert sessions.set_web_chat_session_parallel(
             session_key=thread["session_key"], conversation_id=thread["conversation_id"],
             parallel_thread=True, owner_canonical_user_id="another-person",
-        ) is ParallelSettingOutcome.NOT_FOUND
+        ) is WebChatParallelSettingResult.NOT_FOUND
         cli = gateway.application.start_new_session(channel_name="cli", user_id="user", chat_id="cli")
         assert sessions.set_web_chat_session_parallel(
             session_key=cli.session_key, conversation_id=cli.conversation_id,
             parallel_thread=True, owner_canonical_user_id=None,
-        ) is ParallelSettingOutcome.NOT_FOUND, "only Web Chat threads have the switch"
+        ) is WebChatParallelSettingResult.NOT_FOUND, "only Web Chat threads have the switch"
 
         stale = await _switch(client, thread, True, conversation_id="old-conversation")
         assert stale.status == 409

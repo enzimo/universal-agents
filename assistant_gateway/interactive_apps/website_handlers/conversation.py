@@ -16,9 +16,9 @@ from assistant_gateway.application.gateway_application import (
     GatewaySession,
 )
 from assistant_gateway.application.transcript_service import TranscriptCursorError
-from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from assistant_gateway.application.website_application import (
     GatewaySessionAliasConflict,
+    WebChatParallelSettingResult,
     WebTranscriptMessageV1,
     WebsiteGatewayApplication,
     web_chat_threads_revision,
@@ -337,13 +337,13 @@ class WebsiteConversationHandlers:
             parallel_thread=parallel_thread,
             owner_canonical_user_id=self.operations._web_session_owner_scope(web_session),
         )
-        if outcome is ParallelSettingOutcome.NOT_FOUND:
+        if outcome is WebChatParallelSettingResult.NOT_FOUND:
             raise web.HTTPNotFound(text="Thread not found.")
-        if outcome is ParallelSettingOutcome.REQUEST_OPEN:
+        if outcome is WebChatParallelSettingResult.REQUEST_OPEN:
             raise web.HTTPConflict(
                 text="This chat is working on a request. You can change Run concurrently after it replies."
             )
-        if outcome is ParallelSettingOutcome.CONVERSATION_CHANGED:
+        if outcome is WebChatParallelSettingResult.CONVERSATION_CHANGED:
             raise web.HTTPConflict(text="This chat moved to another conversation. Reload it and try again.")
         return web.json_response(
             {

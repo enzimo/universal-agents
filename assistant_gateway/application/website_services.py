@@ -52,6 +52,7 @@ from assistant_gateway.application.transient_presentation import PendingCredenti
 from assistant_gateway.application.transcript_service import GatewayTranscriptService
 from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from assistant_gateway.application.website_application import (
+    WebChatParallelSettingResult,
     ActivatedWebEnrollmentTokenV1,
     WEB_CHAT_CHAT_ID,
     WebChatThreadStatesV1,
@@ -469,7 +470,7 @@ class WebsiteSessionApplication:
         conversation_id: str,
         parallel_thread: bool,
         owner_canonical_user_id: str | None,
-    ) -> ParallelSettingOutcome:
+    ) -> WebChatParallelSettingResult:
         """Save the Run concurrently switch of one of the person's Web Chat threads.
 
         The person decides per thread (owner, 2026-10-29): on, each request
@@ -502,7 +503,7 @@ class WebsiteSessionApplication:
             conversation_id,
             parallel_thread,
         )
-        return outcome
+        return WebChatParallelSettingResult(outcome.value)
 
     def rename_web_chat_session(
         self,

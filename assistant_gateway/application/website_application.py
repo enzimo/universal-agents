@@ -9,6 +9,7 @@ from custom_messages.contracts.status_v1 import StatusReportV1
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 import hashlib
 import json
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -26,7 +27,6 @@ from assistant_gateway.application.gateway_application import (
     GatewaySession,
 )
 from assistant_gateway.application.procedures import ProcedureApplication
-from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from assistant_gateway.application.web_chat_threads import WebChatThread
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from runtime_settings.appearance import ACCENT_SHARE_RANGE, DARK_INTEGER_RANGES
@@ -716,6 +716,21 @@ class GatewaySessionAliasConflict(ValueError):
     """Raised when a requested session alias is owned by another session."""
 
 
+class WebChatParallelSettingResult(StrEnum):
+    """What a change to a thread's Run concurrently switch did.
+
+    The application's own copy of the store's ``ParallelSettingOutcome``:
+    public contracts stay free of persistence types, as sessions are projected
+    by ``gateway_session_view``. The switch is refused while a request is open
+    in the thread's conversation (owner, 2026-10-29).
+    """
+
+    SAVED = "saved"
+    REQUEST_OPEN = "request_open"
+    CONVERSATION_CHANGED = "conversation_changed"
+    NOT_FOUND = "not_found"
+
+
 @runtime_checkable
 class WebIdentityApplication(Protocol):
     """Authenticate browser identities and manage enrollment credentials."""
@@ -818,7 +833,7 @@ class WebSessionApplication(Protocol):
         conversation_id: str,
         parallel_thread: bool,
         owner_canonical_user_id: str | None,
-    ) -> ParallelSettingOutcome:
+    ) -> WebChatParallelSettingResult:
         """Save a visible thread's Run concurrently setting unless a request is open in it."""
         ...
 
