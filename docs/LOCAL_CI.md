@@ -123,7 +123,13 @@ On Apple Silicon Macs, Homebrew's Buildx plugin may be registered only in the
 account's Docker configuration. Jobs use a disposable `DOCKER_CONFIG`, so that
 registration does not apply. Provision the plugin in Docker's standard system
 plugin directory. If Homebrew provides the executable and the destination does
-not already exist, a Mac administrator can create the link:
+not already exist, a Mac administrator can create the link after checking the directory.
+
+Check the directory itself for a dangling link first. A removed Docker Desktop
+installation can leave `/usr/local/lib/docker/cli-plugins` pointing at its missing
+application folder. This makes `install -d` fail with a `stat` error. Verify that
+the link is broken and points at the removed application, then move only that
+link to an unused backup name before creating the real directory and plugin link:
 
 ```sh
 rtk proxy sudo install -d -m 0755 /usr/local/lib/docker/cli-plugins
