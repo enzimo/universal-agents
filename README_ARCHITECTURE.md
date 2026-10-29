@@ -1436,8 +1436,8 @@ run and Rust build folders in `agents/execution/`. A tool result's age is the
 UTC time its folder name starts with, else its manifest's `created_at`, else
 its last change; a conversation artifact's is its record's `created_at`. In
 `research/`, which people also use for their own folders, only folders named
-with the research tools' stamp (`<stamp>_<labels>_<hex>` and the older
-`<stamp>_<kind>_<label>`) are deleted, aged by that stamp; undated or
+with the complete generated name (`<stamp>_<labels>_<12 hex>`) are deleted,
+aged by that stamp. A date prefix alone cannot identify a tool result; unmatched or
 future-dated folders and loose files stay, and a task folder goes only when
 the run emptied it.
 Run and build folders are never deleted younger than two days (no run or
@@ -1446,7 +1446,10 @@ its build lock, after checking the folder's age again under the lock (a build
 may have finished meanwhile). The lock file is deleted after everything else,
 so a build arriving meanwhile waits on it rather than writing into a folder
 being emptied; a build that waited finds its lock file gone and starts over
-in a new folder (`runtime_hosting/builds.py`). Each kind runs on
+in a new folder (`runtime_hosting/builds.py`). If an abandoned build has no
+lock, a real pass creates one and leaves the now-recent folder for a later
+pass; a dry run leaves it unchanged. No build is deleted without its lock.
+Each kind runs on
 its own, so one failure is logged (`event=output_retention_failed`) and
 reported while the others still run, and the run's instructions carry the
 items, files and bytes deleted per kind, which the run records. Both trusted
@@ -1456,7 +1459,11 @@ the scheduler retries such an occurrence every 30 seconds. The manager keeps a
 record of each saved-output run (`state/output_retention.json`: time, last
 success, per kind items, files, bytes and failures), started at manager start;
 from it the manager's status heartbeat reports a Status page warning
-(`output_retention_overdue`) when no run succeeded for two days. The record
+(`output_retention_overdue`) when no run succeeded for two days. Filesystem
+permission errors and depth limits make a run incomplete and preserve its
+previous success time; expected skips such as links and busy builds do not.
+Tool-result manifest reads reject pipes before reading, so malformed outputs
+cannot block the maintenance scheduler. The record
 also keeps when retention became active (`active_since`): the first run with
 a period above 0 when it was not active (a new installation or upgrade, or a
 change from 0). For 7 days after that every run is a dry run: the same walks

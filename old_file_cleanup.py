@@ -25,6 +25,7 @@ write. Three walks:
 from __future__ import annotations
 
 import logging
+import errno
 import os
 import stat
 import time
@@ -67,6 +68,8 @@ class OldFilesRemoved:
     folders_removed: int = 0
     skipped: int = 0
     dry_run: bool = False
+    # Expected skips (links, busy builds) differ from an incomplete filesystem walk.
+    failures: int = 0
 
 
 def retention_cutoff(retention_days: int, now: float | None = None) -> float:
@@ -123,14 +126,14 @@ def remove_folder_tree(
     """
 
     if depth >= MAX_DEPTH:
-        note_skipped(counts, shown, SKIPPED_TOO_DEEP)
+        note_skipped(counts, shown, SKIPPED_TOO_DEEP, failed=True)
         return False
     try:
         folder = os.open(name, FOLDER_FLAGS, dir_fd=parent)
     except FileNotFoundError:
         return True
-    except OSError:
-        note_skipped(counts, shown, SKIPPED_CANNOT_OPEN)  # e.g. a link in place of the folder
+    except OSError as exc:
+        note_open_failure(counts, shown, exc)
         return False
     try:
         names = os.listdir(folder)
@@ -151,7 +154,9 @@ def remove_folder_tree(
         os.rmdir(name, dir_fd=parent)
     except FileNotFoundError:
         return True
-    except OSError:
+    except OSError as exc:
+        if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+            note_skipped(counts, shown, SKIPPED_CANNOT_REMOVE, failed=True)
         return False  # something could not be removed (logged) or was added meanwhile
     counts.folders_removed += 1
     return True
@@ -172,7 +177,7 @@ def _remove_entry(folder: int, name: str, shown: Path, counts: OldFilesRemoved, 
     except FileNotFoundError:
         return
     except OSError:
-        note_skipped(counts, shown, SKIPPED_CANNOT_REMOVE)
+        note_skipped(counts, shown, SKIPPED_CANNOT_REMOVE, failed=True)
         return
     if stat.S_ISREG(info.st_mode):
         counts.files_removed += 1
@@ -208,7 +213,7 @@ def remove_listed_file(root: Path, path: Path, counts: OldFilesRemoved) -> None:
             safe_open.remove_file(root, parts)
     except UnsafePath as exc:
         if exc.reason != safe_open.REASON_NOT_FOUND:
-            note_skipped(counts, path, exc.reason)
+            note_open_failure(counts, path, exc)
         return
     counts.files_removed += 1
     counts.bytes_removed += info.st_size
@@ -234,11 +239,27 @@ def _remove_emptied_folder(root: Path, parts: tuple[str, ...], counts: OldFilesR
     counts.folders_removed += 1
 
 
-def note_skipped(counts: OldFilesRemoved, path: Path, reason: str) -> None:
+def note_skipped(counts: OldFilesRemoved, path: Path, reason: str, *, failed: bool = False) -> None:
     counts.skipped += 1
-    logger.info(
+    counts.failures += int(failed)
+    logger.log(
+        logging.WARNING if failed else logging.INFO,
         "A cleanup left an entry in place. event=%s reason=%s path=%s", counts.SKIPPED_EVENT, reason, path
     )
+
+
+def note_open_failure(counts: OldFilesRemoved, path: Path, exc: OSError) -> None:
+    """Record expected missing/link races separately from errors that prevent a complete walk."""
+
+    reason = exc.reason if isinstance(exc, UnsafePath) else SKIPPED_CANNOT_OPEN
+    cause = exc.__cause__ if isinstance(exc.__cause__, OSError) else exc
+    if cause.errno == errno.ENOENT or reason == safe_open.REASON_NOT_FOUND:
+        return
+    expected = cause.errno in {errno.ELOOP, errno.ENOTDIR} or reason in {
+        safe_open.REASON_LINK, safe_open.REASON_NOT_DIRECTORY,
+        safe_open.REASON_NOT_REGULAR_FILE, safe_open.REASON_SEVERAL_LINKS,
+    }
+    note_skipped(counts, path, reason, failed=not expected)
 
 
 def remove_file_if_old(
@@ -256,7 +277,7 @@ def remove_file_if_old(
     except FileNotFoundError:
         return
     except OSError:
-        note_skipped(counts, shown / name, SKIPPED_CANNOT_REMOVE)
+        note_skipped(counts, shown / name, SKIPPED_CANNOT_REMOVE, failed=True)
         return
     counts.files_removed += 1
     counts.bytes_removed += info.st_size
@@ -274,12 +295,12 @@ def _remove_subfolder(
 ) -> None:
     path = shown / name
     if depth >= MAX_DEPTH:
-        note_skipped(counts, path, SKIPPED_TOO_DEEP)
+        note_skipped(counts, path, SKIPPED_TOO_DEEP, failed=True)
         return
     try:
         child = os.open(name, FOLDER_FLAGS, dir_fd=folder)
-    except OSError:
-        note_skipped(counts, path, SKIPPED_CANNOT_OPEN)  # e.g. replaced by a link since the listing
+    except OSError as exc:
+        note_open_failure(counts, path, exc)
         return
     removed_before = counts.files_removed + counts.folders_removed
     try:
@@ -306,6 +327,7 @@ __all__ = [
     "SKIPPED_OUTSIDE_FOLDER",
     "OldFilesRemoved",
     "note_skipped",
+    "note_open_failure",
     "remove_file_if_old",
     "remove_folder_tree",
     "remove_listed_file",

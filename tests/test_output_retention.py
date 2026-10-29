@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -164,6 +166,24 @@ def test_names_carry_their_write_time_with_or_without_microseconds() -> None:
     assert written_at_from_name("20261399T000000Z_bad_month") is None
 
 
+def test_an_undated_result_with_a_pipe_manifest_cannot_block_cleanup(layout: InstanceLayout) -> None:
+    folder = layout.tool_results_dir / "task_1" / "undated"
+    folder.mkdir(parents=True)
+    os.mkfifo(folder / "manifest.json")
+    completed = subprocess.run(
+        [sys.executable, "-c", "\n".join([
+            "import sys",
+            "from custom_agents.output_retention import remove_old_outputs",
+            "from runtime_settings.instance_layout import InstanceLayout",
+            "result = remove_old_outputs(InstanceLayout.at(sys.argv[1]), retention_days=90, conversation_records=None)",
+            "assert not any(kind.failed for kind in result.kinds)",
+        ]), str(layout.root)],
+        capture_output=True, text=True, timeout=8, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert folder.exists()
+
+
 # -- zero keeps everything ----------------------------------------------------------------
 
 
@@ -302,7 +322,7 @@ def test_a_failing_kind_is_reported_and_the_others_still_run(layout: InstanceLay
             raise RuntimeError("database unavailable")
 
     expired = _tool_result(layout, "task_old", EXPIRED)
-    research = layout.person_research_dir(None) / "task-1" / f"{_stamp(EXPIRED)}_web_q_abc"
+    research = layout.person_research_dir(None) / "task-1" / f"{_stamp(EXPIRED)}_web_q_0123456789ab"
     _file(research / "manifest.json", "{}")
 
     with caplog.at_level(logging.INFO):
@@ -326,9 +346,9 @@ def test_research_results_go_by_their_dated_names_in_every_person_folder(layout:
     _file(old_alice / "nested" / "page.md", "page")
     kept_alice = alice / "task-1" / f"{_stamp(KEPT)}_web_page_q_def0123456789"
     _file(kept_alice / "manifest.json", "{}")
-    old_agents = layout.person_research_dir(None) / "task-2" / f"{_stamp(EXPIRED)}_web_q_ghi012345678"
+    old_agents = layout.person_research_dir(None) / "task-2" / f"{_stamp(EXPIRED)}_web_q_abcdef012345"
     _file(old_agents / "manifest.json", "{}")
-    # The scheme before result folders got a random ending: <stamp>_<kind>_<label>.
+    # A date and labels alone cannot distinguish generated output from a person's notes.
     older_scheme = alice / "task-3" / f"{_stamp(EXPIRED)}_search_weather-in-paris"
     _file(older_scheme / "manifest.json", "{}")
     # Not tool results: files directly in research/ and in a task folder stay.
@@ -337,10 +357,11 @@ def test_research_results_go_by_their_dated_names_in_every_person_folder(layout:
 
     result = _run(layout)
 
-    assert not old_alice.exists() and not old_agents.exists() and not older_scheme.exists()
-    assert not old_agents.parent.exists() and not older_scheme.parent.exists(), "task folders this run emptied go"
+    assert not old_alice.exists() and not old_agents.exists()
+    assert older_scheme.exists()
+    assert not old_agents.parent.exists(), "task folders this run emptied go"
     assert kept_alice.exists() and notes.exists() and task_note.exists()
-    assert _kind(result, OutputKind.RESEARCH_RESULTS).items_removed == 3
+    assert _kind(result, OutputKind.RESEARCH_RESULTS).items_removed == 2
 
 
 def test_research_folders_without_the_tools_stamp_are_never_deleted(layout: InstanceLayout) -> None:
@@ -375,11 +396,51 @@ def test_research_folders_without_the_tools_stamp_are_never_deleted(layout: Inst
     assert (counts.items_removed, counts.files_removed, counts.folders_removed) == (0, 0, 0)
 
 
+def test_a_date_prefix_does_not_make_a_personal_research_folder_disposable(layout: InstanceLayout) -> None:
+    draft = _file(
+        layout.person_research_dir("alice") / "personal-project" / f"{_stamp(EXPIRED)}_notes" / "draft.md",
+        "edited today", mtime=NOW,
+    )
+    result = _run(layout)
+    assert draft.read_text() == "edited today"
+    assert _kind(result, OutputKind.RESEARCH_RESULTS).items_removed == 0
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="requires ordinary filesystem permission checks")
+@pytest.mark.parametrize("blocked_root", [False, True])
+def test_unreadable_outputs_keep_the_last_success_and_overdue_warning(
+    layout: InstanceLayout, store: ConversationStore, blocked_root: bool,
+) -> None:
+    from custom_agents.output_retention import overdue_since, read_run_record, remove_old_outputs_and_record
+
+    expired = _tool_result(layout, "task_1", EXPIRED)
+    previous_success = _iso(NOW - 3 * SECONDS_PER_DAY)
+    layout.output_retention_record_path.write_text(json.dumps({
+        "first_recorded_at": _iso(NOW - 10 * SECONDS_PER_DAY),
+        "active_since": _iso(NOW - 9 * SECONDS_PER_DAY),
+        "last_success_at": previous_success,
+        "retention_days": DAYS,
+    }))
+    blocked = layout.tool_results_dir if blocked_root else expired
+    blocked.chmod(0)
+    try:
+        result = remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=store, now=NOW)
+    finally:
+        blocked.chmod(0o755)
+    assert _kind(result, OutputKind.TOOL_RESULTS).failed
+    record = read_run_record(layout.output_retention_record_path)
+    assert record["last_success_at"] == previous_success
+    assert overdue_since(record, now=NOW) is not None
+    result = remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=store, now=NOW)
+    assert not any(kind.failed for kind in result.kinds)
+    assert read_run_record(layout.output_retention_record_path)["last_success_at"] == _iso(NOW)
+
+
 def test_links_in_research_folders_are_never_followed(layout: InstanceLayout, tmp_path: Path) -> None:
     protected = _file(layout.control_dir / "keep" / "control.yaml", "keep me", mtime=EXPIRED)
     _touch(protected.parent, EXPIRED)
     alice = layout.person_research_dir("alice")
-    old = alice / "task-1" / f"{_stamp(EXPIRED)}_web_q_abc"
+    old = alice / "task-1" / f"{_stamp(EXPIRED)}_web_q_0123456789ab"
     _file(old / "manifest.json", "{}")
     (old / "planted-file").symlink_to(protected)
     (old / "planted-folder").symlink_to(protected.parent, target_is_directory=True)
@@ -537,15 +598,28 @@ def test_a_build_folder_built_again_before_the_lock_was_taken_stays(
     assert _kind(result, OutputKind.EXECUTION_RUNS).items_removed == 0
 
 
-def test_an_old_build_folder_without_a_lock_file_goes_without_making_one(layout: InstanceLayout) -> None:
+def test_an_abandoned_build_gets_a_lock_and_only_a_later_expired_pass_deletes_it(layout: InstanceLayout) -> None:
     build = layout.execution_rust_builds_dir / ("f" * 64)
     _file(build / "main.rs", "fn main() {}", mtime=EXPIRED)
     _touch(build, EXPIRED)
 
     result = _run(layout)
 
+    assert build.exists() and (build / BUILD_LOCK_FILENAME).is_file()
+    assert _kind(result, OutputKind.EXECUTION_RUNS).items_removed == 0
+    _touch(build, EXPIRED)
+    result = _run(layout)
     assert not build.exists()
     assert _kind(result, OutputKind.EXECUTION_RUNS).items_removed == 1
+
+
+def test_a_dry_run_does_not_create_a_build_lock(layout: InstanceLayout) -> None:
+    build = layout.execution_rust_builds_dir / ("f" * 64)
+    _file(build / "main.rs", "fn main() {}", mtime=EXPIRED)
+    _touch(build, EXPIRED)
+    result = remove_old_outputs(layout, retention_days=DAYS, conversation_records=None, now=NOW, dry_run=True)
+    assert not (build / BUILD_LOCK_FILENAME).exists()
+    assert _kind(result, OutputKind.EXECUTION_RUNS).items_removed == 0
 
 
 def test_run_folders_are_never_deleted_younger_than_two_days(layout: InstanceLayout) -> None:

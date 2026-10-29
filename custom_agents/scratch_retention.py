@@ -35,6 +35,7 @@ from old_file_cleanup import (
     SKIPPED_NOT_FILE_OR_FOLDER,
     OldFilesRemoved,
     note_skipped,
+    note_open_failure,
     remove_old_files,
     retention_cutoff,
 )
@@ -103,7 +104,7 @@ def prune_scratch_folders(
             folder = safe_open.open_directory(workspaces_dir, parts)
         except UnsafePath as exc:
             if exc.reason != safe_open.REASON_NOT_FOUND:
-                note_skipped(result, shown, exc.reason)
+                note_open_failure(result, shown, exc)
             continue
         result.scratch_folders += 1
         try:
@@ -136,7 +137,7 @@ def person_area_folders(workspaces_dir: Path, leaf: str, counts: OldFilesRemoved
         entries = safe_open.list_directory(workspaces_dir, (USERS_DIRNAME,))
     except UnsafePath as exc:
         if exc.reason != safe_open.REASON_NOT_FOUND:
-            note_skipped(counts, workspaces_dir / USERS_DIRNAME, exc.reason)
+            note_open_failure(counts, workspaces_dir / USERS_DIRNAME, exc)
         return folders
     for name, info in sorted(entries):
         if stat.S_ISDIR(info.st_mode):

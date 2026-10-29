@@ -667,6 +667,32 @@ def test_the_maintenance_purge_deletes_held_conversation_artifact_files(world: W
     assert world.departures.held_row_count(TEAM, MIA) == 0
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="requires ordinary filesystem permission checks")
+@pytest.mark.parametrize("purger", ["gateway", "manager"])
+def test_an_unreadable_held_artifact_keeps_its_records_until_a_successful_retry(world: World, purger: str) -> None:
+    _give_work(world, MIA)
+    artifact = _give_artifact(world, MIA)
+    world.remove(ADAM, MIA)
+    held_rows = world.departures.held_row_count(TEAM, MIA)
+    world.clock.now = START + timedelta(days=8)
+    hold = world.departures.hold_of(TEAM, MIA)
+    artifact.parent.chmod(0)
+    try:
+        if purger == "manager":
+            assert purge_expired_holds(world.agent, now=world.clock.now) == 0
+        else:
+            with pytest.raises(OSError):
+                world.lifecycle._records._purge(world.departures, hold)
+        assert world.departures.held_row_count(TEAM, MIA) == held_rows
+        assert world.departures.hold_of(TEAM, MIA).purged_at is None
+    finally:
+        artifact.parent.chmod(0o755)
+    assert artifact.exists()
+    assert purge_expired_holds(world.agent, now=world.clock.now) == 1
+    assert not artifact.exists()
+    assert world.departures.held_row_count(TEAM, MIA) == 0
+
+
 def test_rows_held_after_the_purge_go_at_once_with_their_artifact_files(world: World) -> None:
     """A conversation recorded for the person after their hold was purged (for example by work still finishing)."""
 

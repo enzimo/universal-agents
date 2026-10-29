@@ -1223,6 +1223,13 @@ deleted under the retention policy, the output is gone and only its summary
 remains. Say so plainly and run the original tool again if the content is
 still needed; never retry the read or guess the content.
 
+An overdue saved-output cleanup means it has not completed successfully for
+two days. Permission errors and filesystem depth limits keep its previous
+success time; links and busy builds are expected skips. Report the failed kind
+and log event to TeamArchitect. Research cleanup deletes only complete
+generated result names with a 12-character hex ending, so dated personal notes
+remain in place.
+
 Use `inspect_memory_review_cleanup` during maintenance to review inactive expired
 memory-review jobs. Archive exact IDs with `maintain_memory_review_jobs`; purge
 only archived content after retention. Keep unknown outcomes unknown. Do not

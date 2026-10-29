@@ -130,6 +130,9 @@ def purge_held_artifact_files(layout: InstanceLayout, person_id: str, paths: Ite
     counts = OldFilesRemoved()
     for path in paths:
         remove_listed_file(layout.conversation_artifacts_dir, Path(path), counts)
+    if counts.failures:
+        # Keep the held rows that name these files so a later purge can retry.
+        raise OSError(f"Could not delete {counts.failures} held artifact file(s) for {person_id}")
     if counts.files_removed or counts.skipped:
         logger.info(
             "Deleted a removed person's held conversation artifact files. event=person_artifact_files_purged "

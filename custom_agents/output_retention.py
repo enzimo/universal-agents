@@ -27,11 +27,10 @@ of what a tool returned, and a tool can be run again.
    they would have if the person had stayed.
 3. **Research results** (``research/<task folder>/<result folder>/`` in each
    person's folder and in ``agents/``, ``custom_tools.research_identity``):
-   only result folders whose names start with the research tools' UTC stamp,
-   aged by that stamp: ``<stamp>_<labels>_<12 hex>`` (``result_folder_name``)
-   and the older ``<stamp>_<kind>_<label>``. People and agents also keep
-   their own folders and files under ``research/``, so a folder without that
-   stamp, or with one dated in the future, is never deleted, nor is any loose
+   only result folders with the complete generated name,
+   aged by its stamp: ``<stamp>_<labels>_<12 hex>`` (``result_folder_name``).
+   People and agents also keep their own dated folders and files under
+   ``research/``, so a folder without that full name, or with a stamp dated in the future, is never deleted, nor is any loose
    file, and a task folder goes only when this run emptied it.
 4. **Execution run folders** (``agents/execution``): a run's folder that an
    interrupted run left behind (a finished run deletes its own) and the
@@ -96,14 +95,15 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Iterator, Mapping
 from access_control import safe_open
 from access_control.safe_open import UnsafePath
 from custom_agents.scratch_retention import person_area_folders
+from custom_tools.research_identity import is_result_folder_name
 from default_values import TOOL_POLICY_DEFAULTS
 from old_file_cleanup import (
     FOLDER_FLAGS,
     SECONDS_PER_DAY,
-    SKIPPED_CANNOT_OPEN,
     SKIPPED_NOT_FILE_OR_FOLDER,
     OldFilesRemoved,
     note_skipped,
+    note_open_failure,
     remove_file_if_old,
     remove_folder_tree,
     remove_listed_file,
@@ -279,7 +279,13 @@ def remove_old_outputs(
                 "event=output_retention_failed kind=%s",
                 kind,
             )
+        counts.failed = counts.failed or counts.failures > 0
         result.kinds.append(counts)
+        if counts.failures:
+            logger.warning(
+                "Saved output cleanup was incomplete. event=output_retention_failed kind=%s failures=%s",
+                kind, counts.failures,
+            )
         logger.info(
             "Old saved tool outputs were %s. event=%s kind=%s retention_days=%s "
             "items_removed=%s files_removed=%s bytes_removed=%s folders_removed=%s skipped=%s failed=%s",
@@ -523,6 +529,8 @@ def _research_written_at(folder: int, name: str, info: os.stat_result, now: floa
     folders under ``research/`` and edit files in them.
     """
 
+    if not is_result_folder_name(name):
+        return None
     named = written_at_from_name(name)
     return named if named is not None and named <= now else None
 
@@ -535,14 +543,19 @@ def _manifest_created_at(folder: int, name: str) -> float | None:
     except OSError:
         return None
     try:
+        # Match safe_open's descriptor validation while retaining this opened
+        # parent: a planted FIFO must not block before its type is checked.
         descriptor = os.open(
-            TOOL_RESULT_MANIFEST_FILENAME, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=child
+            TOOL_RESULT_MANIFEST_FILENAME, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=child
         )
     except OSError:
         return None
     finally:
         os.close(child)
     with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return None
         raw = handle.read(MANIFEST_MAX_BYTES + 1)
     if len(raw) > MANIFEST_MAX_BYTES:
         return None
@@ -601,8 +614,8 @@ def _remove_old_results_in_task_folder(
         task = os.open(task_name, FOLDER_FLAGS, dir_fd=parent)
     except FileNotFoundError:
         return
-    except OSError:
-        note_skipped(counts, shown, SKIPPED_CANNOT_OPEN)
+    except OSError as exc:
+        note_open_failure(counts, shown, exc)
         return
     removed_before = counts.items_removed
     try:
@@ -633,8 +646,9 @@ def _remove_empty_folder(parent: int, name: str, counts: OutputsRemoved) -> None
 def _remove_old_tool_results(root_dir: Path, cutoff: float, now: float, counts: OutputsRemoved) -> None:
     try:
         root = safe_open.open_root(root_dir)
-    except UnsafePath:
-        return  # no tool result saved yet
+    except UnsafePath as exc:
+        note_open_failure(counts, root_dir, exc)
+        return
     try:
         for task_name, info in _entries(root):
             if not stat.S_ISDIR(info.st_mode):
@@ -662,7 +676,7 @@ def _remove_old_research_results(workspaces_dir: Path, cutoff: float, now: float
             research = safe_open.open_directory(workspaces_dir, parts)
         except UnsafePath as exc:
             if exc.reason != safe_open.REASON_NOT_FOUND:
-                note_skipped(counts, shown, exc.reason)
+                note_open_failure(counts, shown, exc)
             continue
         try:
             for task_name, info in _entries(research):
@@ -705,8 +719,9 @@ def _remove_old_conversation_artifacts(
     # Then every older file, which also removes files no record names any more.
     try:
         root = safe_open.open_root(root_dir)
-    except UnsafePath:
-        return  # nothing offloaded yet
+    except UnsafePath as exc:
+        note_open_failure(counts, root_dir, exc)
+        return
     try:
         remove_old_files(root, root_dir, cutoff, counts)
     finally:
@@ -759,7 +774,7 @@ def _remove_old_execution_runs(workspaces_dir: Path, cutoff: float, now: float, 
         runs = safe_open.open_directory(workspaces_dir, parts)
     except UnsafePath as exc:
         if exc.reason != safe_open.REASON_NOT_FOUND:
-            note_skipped(counts, shown, exc.reason)
+            note_open_failure(counts, shown, exc)
         return
     try:
         for name, info in _entries(runs):
@@ -789,8 +804,8 @@ def _remove_old_builds(parent: int, name: str, shown: Path, cutoff: float, count
 
     try:
         builds = os.open(name, FOLDER_FLAGS, dir_fd=parent)
-    except OSError:
-        note_skipped(counts, shown, SKIPPED_CANNOT_OPEN)
+    except OSError as exc:
+        note_open_failure(counts, shown, exc)
         return
     try:
         for build, info in _entries(builds):
@@ -810,24 +825,30 @@ def _remove_build_folder(parent: int, name: str, shown: Path, cutoff: float, cou
     emptied. A build waiting on the lock finds its lock file gone afterwards
     and starts over in a new folder (``runtime_hosting.builds``). After the
     lock is taken the folder's age is checked again, because a build may
-    have finished between the listing and the lock. A folder without a lock
-    file was never locked by a build; the lock is not created, since that
-    would change the folder's age.
+    have finished between the listing and the lock. Creating a missing lock
+    makes the folder recent, so an abandoned folder is kept until a later
+    run. This also closes the race with a builder creating its first lock.
+    A dry run never creates a lock and leaves such folders uncounted.
     """
 
     try:
         folder = os.open(name, FOLDER_FLAGS, dir_fd=parent)
-    except OSError:
-        note_skipped(counts, shown, SKIPPED_CANNOT_OPEN)
+    except OSError as exc:
+        note_open_failure(counts, shown, exc)
         return False
     try:
         try:
-            lock = _open_build_lock(folder)
-        except OSError:
-            note_skipped(counts, shown / BUILD_LOCK_FILENAME, SKIPPED_CANNOT_OPEN)
+            lock = _open_build_lock(folder, create=not counts.dry_run)
+        except OSError as exc:
+            note_open_failure(counts, shown / BUILD_LOCK_FILENAME, exc)
             return False
         try:
-            if lock is not None and not _locked_now(lock):
+            if lock is None:
+                return False
+            if not stat.S_ISREG(os.fstat(lock).st_mode) or os.fstat(lock).st_nlink != 1:
+                note_skipped(counts, shown / BUILD_LOCK_FILENAME, SKIPPED_NOT_FILE_OR_FOLDER)
+                return False
+            if not _locked_now(lock):
                 note_skipped(counts, shown, SKIPPED_BUILD_IN_USE)
                 return False
             if os.fstat(folder).st_mtime >= cutoff:
@@ -840,11 +861,12 @@ def _remove_build_folder(parent: int, name: str, shown: Path, cutoff: float, cou
         os.close(folder)
 
 
-def _open_build_lock(folder: int) -> int | None:
-    """The build folder's lock file, never through a link; None when it has none."""
+def _open_build_lock(folder: int, *, create: bool) -> int | None:
+    """The build folder's lock, optionally created; None when a dry run finds none."""
 
     try:
-        return os.open(BUILD_LOCK_FILENAME, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=folder)
+        flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+        return os.open(BUILD_LOCK_FILENAME, flags | (os.O_CREAT if create else 0), 0o600, dir_fd=folder)
     except FileNotFoundError:
         return None
 
