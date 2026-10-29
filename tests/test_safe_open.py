@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,25 @@ def _reason(call) -> str:
 
 def test_a_file_below_the_root_is_read(root: Path) -> None:
     assert safe_open.read_bytes(root, ("docs", "note.txt")) == b"hello"
+
+
+def test_a_pipe_is_refused_without_waiting_for_a_writer(root: Path) -> None:
+    os.mkfifo(root / "docs" / "pipe")
+    probe = """
+import sys
+from pathlib import Path
+from access_control import safe_open
+try:
+    safe_open.read_bytes(Path(sys.argv[1]), ("docs", "pipe"))
+except safe_open.UnsafePath as exc:
+    assert exc.reason == safe_open.REASON_NOT_REGULAR_FILE
+else:
+    raise AssertionError("A pipe was read as a regular file")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(root)], capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_a_link_as_the_file_or_on_the_way_is_refused(root: Path, secret: Path) -> None:

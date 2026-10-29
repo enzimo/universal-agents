@@ -2,8 +2,9 @@
 
 Locks live outside workspaces so generated code cannot replace a lock while
 maintenance uses it. Both tool calls and cleanup hold the same per-environment
-lock. Cleanup checks activity only after acquiring it, including after a long
-install or script run. Named environments are kept until explicitly deleted.
+lock. Cleanup skips busy locks so a long install or script cannot hold up
+the scheduler. It checks activity only after acquiring the lock on a later
+pass. Named environments are kept until explicitly deleted.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from access_control import safe_open
-from file_locking import exclusive_file_lock
+from file_locking import FileLockBusy, exclusive_file_lock
 from runtime_settings.instance_layout import (
     AGENTS_DIRNAME, PERSON_PYTHON_ENVS_DIRNAME, USERS_DIRNAME, InstanceLayout,
 )
@@ -40,12 +41,14 @@ def request_environment_name(context_id: str) -> str:
 
 @contextmanager
 def environment_lock(
-    layout: InstanceLayout, env_dir: Path, *, cancelled: Callable[[], bool] | None = None,
+    layout: InstanceLayout, env_dir: Path, *, cancelled: Callable[[], bool] | None = None, blocking: bool = True,
 ) -> Iterator[None]:
     relative = env_dir.relative_to(layout.workspaces_dir).as_posix()
     key = hashlib.sha256(relative.encode("utf-8")).hexdigest()
     layout.python_env_locks_dir.mkdir(parents=True, exist_ok=True)
-    with exclusive_file_lock(layout.python_env_locks_dir / key, purpose="Python environment", cancelled=cancelled):
+    with exclusive_file_lock(
+        layout.python_env_locks_dir / key, purpose="Python environment", cancelled=cancelled, blocking=blocking,
+    ):
         yield
 
 
@@ -73,9 +76,11 @@ def prune_request_environments(layout: InstanceLayout, *, now: float | None = No
                 logger.warning("Python environment cleanup skipped. event=python_env_prune_skipped folder=%s reason=not_a_folder", parts)
                 continue
             try:
-                with environment_lock(layout, layout.workspaces_dir.joinpath(*parts)):
+                with environment_lock(layout, layout.workspaces_dir.joinpath(*parts), blocking=False):
                     if _expired(layout, parts, cutoff):
                         removed += int(safe_open.remove_directory(layout.workspaces_dir, parts))
+            except FileLockBusy:
+                logger.debug("Python environment is in use. event=python_env_prune_busy folder=%s", parts)
             except (OSError, ValueError, TypeError, safe_open.UnsafePath) as exc:
                 logger.warning("Python environment cleanup skipped. event=python_env_prune_skipped folder=%s reason=%s", parts, exc)
     logger.info("Request Python environments removed. event=python_env_pruned removed=%s retention_days=%s",

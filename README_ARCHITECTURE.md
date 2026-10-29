@@ -1546,12 +1546,16 @@ context ID, shared by that request's lead and helpers. Other requests and each
 scheduled run get separate defaults, even in the same conversation. Explicit
 names allow deliberate reuse across requests and schedules. Supplying a name,
 including a default's returned name, keeps that environment until deleted.
+Later calls that omit the name, including recreation, preserve that choice.
 Trusted maintenance removes whole request-default environments after seven
 days without a `python_env` call. It takes the same per-environment lock as
-tool calls, then rechecks the last-use time, so an active install or script
-cannot be removed. The locks live outside workspaces, derived from
+tool calls without waiting: busy environments are skipped until a later pass,
+so an install or script cannot delay scheduling. Cleanup rechecks last use
+while holding the lock before deleting anything. The locks live outside workspaces, derived from
 `InstanceLayout.python_env_locks_dir`. File access still goes through
 `file_access`, and cleanup uses the descriptor-based `safe_open` operations.
+File reads open without blocking before checking the descriptor's file type,
+so a planted named pipe is refused without waiting for a writer.
 Tool calls waiting for a lock still respect their task's stop signal.
 Keep lasting results outside default environments. The previous shared
 `python_envs/default` is retained as an explicitly named environment.

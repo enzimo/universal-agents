@@ -1168,7 +1168,9 @@ default environment. Helpers share the current request's environment. Defaults
 are removed as whole environments after 7 days without use, once active tool
 calls have finished. Ask for a named environment when code and packages should
 be reused across requests or scheduled runs. Named environments stay until
-deleted. Keep lasting results outside default environments.
+deleted, even if later calls omit the name. Cleanup skips busy environments
+until a later run so it does not delay scheduling. Keep lasting results
+outside default environments.
 
 Agents can promote fixed Python or single-file Rust code into an immutable
 revision. A trusted profile records the exact language, toolchain, isolation

@@ -62,6 +62,10 @@ class FileLockCancelled(RuntimeError):
     """The caller stopped while waiting, so the protected work did not run."""
 
 
+class FileLockBusy(RuntimeError):
+    """Another holder owns a lock that the caller chose not to wait for."""
+
+
 def lock_file_path(path: Path) -> Path:
     """The lock file that guards ``path``: the same name with ``.lock`` added."""
 
@@ -70,7 +74,7 @@ def lock_file_path(path: Path) -> Path:
 
 @contextmanager
 def exclusive_file_lock(
-    path: Path, *, purpose: str, cancelled: Callable[[], bool] | None = None,
+    path: Path, *, purpose: str, cancelled: Callable[[], bool] | None = None, blocking: bool = True,
 ) -> Iterator[None]:
     """Hold an exclusive lock on ``<path>.lock`` while the body runs.
 
@@ -81,28 +85,39 @@ def exclusive_file_lock(
     running the body when the lock file cannot be opened or locked.
     When ``cancelled`` is provided, check it while waiting and raise
     :class:`FileLockCancelled` before entering the body if it reports a stop.
+    With ``blocking=False``, raise :class:`FileLockBusy` immediately when
+    another holder owns the lock. This is expected contention, not an
+    unavailable lock, and the protected work never runs unlocked.
     """
 
     lock_path = lock_file_path(path)
-    descriptor = _open_locked(lock_path, purpose=purpose, cancelled=cancelled)
+    descriptor = _open_locked(lock_path, purpose=purpose, cancelled=cancelled, blocking=blocking)
     try:
         yield
     finally:
         _release(descriptor, lock_path, purpose=purpose)
 
 
-def _open_locked(lock_path: Path, *, purpose: str, cancelled: Callable[[], bool] | None = None) -> int:
+def _open_locked(
+    lock_path: Path, *, purpose: str, cancelled: Callable[[], bool] | None = None, blocking: bool = True,
+) -> int:
     try:
         descriptor = os.open(lock_path, _LOCK_FILE_FLAGS, _LOCK_FILE_MODE)
     except OSError as exc:
         raise _lock_unavailable(lock_path, purpose=purpose, error=exc) from exc
     locked = False
     try:
-        if cancelled is None:
+        if not blocking:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif cancelled is None:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
         else:
             _lock_until_stopped(descriptor, lock_path, purpose, cancelled)
         locked = True
+    except BlockingIOError as exc:
+        if not blocking:
+            raise FileLockBusy(f"The {purpose} is in use.") from None
+        raise _lock_unavailable(lock_path, purpose=purpose, error=exc) from exc
     except OSError as exc:
         raise _lock_unavailable(lock_path, purpose=purpose, error=exc) from exc
     finally:

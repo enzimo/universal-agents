@@ -260,7 +260,9 @@ def _write_manifest(env_dir: Path, manifest: Mapping[str, Any]) -> None:
     file_access.write_text(env_dir / "manifest.json", json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _base_manifest(env_name: str, env_dir: Path, *, python_executable: str | None = None) -> dict[str, Any]:
+def _base_manifest(
+    env_name: str, env_dir: Path, *, request_default: bool, python_executable: str | None = None,
+) -> dict[str, Any]:
     existing = _load_manifest(env_dir)
     now = _utc_now()
     return {
@@ -272,6 +274,8 @@ def _base_manifest(env_name: str, env_dir: Path, *, python_executable: str | Non
         "created_at": existing.get("created_at") or now,
         "updated_at": now,
         "last_action": existing.get("last_action"),
+        REQUEST_DEFAULT_FIELD: request_default,
+        LAST_USED_FIELD: now,
     }
 
 
@@ -421,6 +425,7 @@ def _create_env(
     env_name: str,
     env_dir: Path,
     *,
+    request_default: bool,
     python_executable: str | None,
     recreate: bool,
     tool_stop: ToolStop | None,
@@ -428,8 +433,16 @@ def _create_env(
     if recreate:
         file_access.remove_tree(env_dir)
     _ensure_env_dirs(env_dir)
-    manifest = _base_manifest(env_name, env_dir, python_executable=_default_python_executable(python_executable))
+    manifest = _base_manifest(
+        env_name, env_dir, request_default=request_default,
+        python_executable=_default_python_executable(python_executable),
+    )
+    manifest["last_action"] = "create"
     if not _exists(env_dir / ".venv"):
+        # Save the captured retention before a long venv command, including
+        # after recreation removed the previous manifest. Every subsequent
+        # manifest write carries it even if final activity bookkeeping fails.
+        _write_manifest(env_dir, manifest)
         create_command = f"{shlex.quote(manifest['python_executable'])} -m venv --copies .venv"
         result = execute_non_interactive_command(
             {"command": create_command, "timeout": DEFAULT_CREATE_TIMEOUT_SECONDS},
@@ -443,7 +456,6 @@ def _create_env(
         if result.get("status") != "success":
             _write_manifest(env_dir, {**manifest, "last_action": "create_failed"})
             return {"manifest": manifest, "command_result": _command_result_payload(result)}
-    manifest["last_action"] = "create"
     _write_manifest(env_dir, manifest)
     return {"manifest": manifest, "command_result": manifest.get("last_create_result")}
 
@@ -688,9 +700,16 @@ def _python_env_action(
         with lock:
             if tool_stop is not None and tool_stop.is_requested():
                 return _tool_result("error", "python_env did not run because the task was stopped.")
+            # Explicit reuse keeps this directory until deletion. Capture that
+            # decision before an action replaces the manifest or recreates it.
+            request_default = (
+                not bool(str(env_name or "").strip())
+                and _load_manifest(env_dir).get(REQUEST_DEFAULT_FIELD) is not False
+            )
             try:
                 return _python_env_in_directory(
-                    normalized_action, safe_name, env_dir, path=path, content=content, code=code,
+                    normalized_action, safe_name, env_dir, request_default=request_default,
+                    path=path, content=content, code=code,
                     command=command, packages=packages, args=args, work_dir=work_dir, timeout=timeout,
                     python_executable=python_executable, recreate=recreate, reason=reason,
                     unconfined=unconfined, tool_stop=tool_stop,
@@ -698,7 +717,7 @@ def _python_env_action(
             finally:
                 if normalized_action != "delete" and _exists(env_dir):
                     manifest = _load_manifest(env_dir)
-                    manifest[REQUEST_DEFAULT_FIELD] = not bool(str(env_name or "").strip())
+                    manifest[REQUEST_DEFAULT_FIELD] = request_default
                     manifest[LAST_USED_FIELD] = _utc_now()
                     _write_manifest(env_dir, manifest)
     except Exception as exc:
@@ -710,7 +729,7 @@ def _python_env_action(
 
 
 def _python_env_in_directory(
-    normalized_action: str, safe_name: str, env_dir: Path, *, path: Optional[str],
+    normalized_action: str, safe_name: str, env_dir: Path, *, request_default: bool, path: Optional[str],
     content: Optional[str], code: Optional[str], command: Optional[str],
     packages: Optional[list[str] | str], args: Optional[list[str] | str], work_dir: Optional[str],
     timeout: Optional[int], python_executable: Optional[str], recreate: bool, reason: Optional[str],
@@ -725,7 +744,8 @@ def _python_env_in_directory(
 
     if normalized_action == "create":
         payload = _create_env(
-            safe_name, env_dir, python_executable=python_executable, recreate=recreate, tool_stop=tool_stop
+            safe_name, env_dir, request_default=request_default,
+            python_executable=python_executable, recreate=recreate, tool_stop=tool_stop,
         )
         command_result = payload.get("command_result") or {}
         status = "success" if not command_result or command_result.get("status") == "success" else "error"
@@ -734,13 +754,16 @@ def _python_env_in_directory(
 
     if not _exists(env_dir / ".venv"):
         create_payload = _create_env(
-            safe_name, env_dir, python_executable=python_executable, recreate=False, tool_stop=tool_stop
+            safe_name, env_dir, request_default=request_default,
+            python_executable=python_executable, recreate=False, tool_stop=tool_stop,
         )
         command_result = create_payload.get("command_result") or {}
         if command_result and command_result.get("status") != "success":
             return _tool_result("error", f"Failed to create Python env `{safe_name}`.", payload=create_payload)
 
-    manifest = _base_manifest(safe_name, env_dir, python_executable=python_executable)
+    manifest = _base_manifest(
+        safe_name, env_dir, request_default=request_default, python_executable=python_executable,
+    )
     if normalized_action == "install":
         payload = _install_packages(
             env_dir, packages, timeout=timeout, unconfined=bool(unconfined), tool_stop=tool_stop

@@ -1282,6 +1282,9 @@ a tool call is running. Save lasting results outside default environments.
 For a reusable script or a schedule that needs earlier code, give the
 environment a name explicitly. Named environments stay until deleted;
 the earlier shared environment remains available by the name `default`.
+This choice remains in effect if the original request later omits the name.
+Cleanup skips busy environments and checks them on a later maintenance run,
+so running Python code does not delay other scheduled work.
 
 Agents with `shell` or `python_env` run every command in a Linux Landlock
 sandbox unless `security_layer.mode` is `openshell` (see
