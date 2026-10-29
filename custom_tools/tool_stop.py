@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from custom_tools.runtime_context import bind_tool_call_task, get_agent_ref
+from custom_tools.runtime_context import get_agent_ref
 
 logger = logging.getLogger(__name__)
 
@@ -358,9 +358,9 @@ def _tool_use_id(tool_context: Any) -> str:
 def tracked_tool_call(tool_context: Any, tool_name: str) -> Iterator[ToolStop | None]:
     """Run one command tool call under its turn's ToolStop; yields it.
 
-    For the whole call the active task is the turn's task, so a call still
-    running after the agent moved on keeps its own person and folders. The
-    caller must do nothing when the yielded stop is already requested. Every
+    The call keeps its turn's task for its whole run, also after the agent
+    moved on: it inherits the turn's work record (``runtime_context.task_work``),
+    so it keeps its own person and folders. The caller must do nothing when the yielded stop is already requested. Every
     model turn runs with a ToolStop (custom_agents.sdk.strands.turn_tool_stop);
     a call without one cannot be stopped with its task, so it is logged
     rather than quietly run unstoppable.
@@ -377,7 +377,7 @@ def tracked_tool_call(tool_context: Any, tool_name: str) -> Iterator[ToolStop | 
         )
         yield None
         return
-    with stop.tool_call(tool_name, _tool_use_id(tool_context)), bind_tool_call_task(stop.task_id):
+    with stop.tool_call(tool_name, _tool_use_id(tool_context)):
         yield stop
 
 

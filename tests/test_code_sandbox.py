@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 import custom_tools.code_sandbox as code_sandbox
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.code_sandbox import (
     CodeSandboxUnavailable,
     landlock_abi,

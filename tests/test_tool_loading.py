@@ -34,14 +34,14 @@ from custom_agents.tool_loading import (
     loaded_tools,
     tool_limit,
 )
-from custom_agents.tool_sync import install_tool_sync, startup_tools
+from custom_agents.tool_sync import startup_tools
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from custom_tools.provider_contract import tool_name
 from custom_tools.providers import tool_loading
 from custom_tools.registry import ALL_PROVIDER_TOOLS
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, install_test_tool_sync, main_parts, set_agent_ref
 from storage.access_repository import AccessRepository
 from tests.test_access_request_tools import BINARY, make_agent
 from tests.test_access_request_tools import storage as access_storage
@@ -72,7 +72,7 @@ def model_view(agent):
     tools = startup_tools(agent, list(agent.tools))
     registry = ToolRegistry()
     registry.process_tools(tools)
-    hook = install_tool_sync(agent, tools)
+    hook = install_test_tool_sync(agent, tools)
     agent._strands_agent = SimpleNamespace(tool_registry=registry)
     return registry, hook
 
@@ -157,7 +157,7 @@ def test_using_a_loaded_function_keeps_its_group(storage, tmp_path) -> None:
     agent = lead_agent(storage, tmp_path)
     registry, hook = model_view(agent)
     use(OBJECTIVES)
-    tool_hook = OnRequestToolHook(agent)
+    tool_hook = OnRequestToolHook(agent, main_parts(agent))
     for _ in range(LOADED_TOOL_IDLE_MODEL_CALLS * 2):
         seen = next_model_call(hook, registry)
         call = SimpleNamespace(tool_use={"name": "objectives"}, selected_tool=registry.registry.get("objectives") or registry.dynamic_tools.get("objectives"))
@@ -258,10 +258,10 @@ def test_an_objective_work_session_has_the_objectives_tools(storage, tmp_path) -
     agent = lead_agent(storage, tmp_path)
     registry, hook = model_view(agent)
     meta = MessageMeta(conversation_id="conv-session")
-    meta.gateway_context = agent.task_manager.get_task_info(agent._active_execution_task_id).meta.gateway_context
+    meta.gateway_context = agent.task_manager.get_task_info(agent.test_task_id).meta.gateway_context
     meta.objective_work_session_id = "session-1"
     agent.task_manager.add_task(Task(task_id="task-session", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
-    agent._active_execution_task_id = "task-session"
+    bind_task("task-session")
 
     assert "record_objective_work_checkpoint" in next_model_call(hook, registry)
 
@@ -349,7 +349,7 @@ def test_a_loaded_group_that_becomes_required_for_the_work_cannot_be_evicted(sto
     registry, hook = model_view(agent)
     base = len(next_model_call(hook, registry))
     use(OBJECTIVES)
-    info = agent.task_manager.get_task_info(agent._active_execution_task_id)
+    info = agent.task_manager.get_task_info(agent.test_task_id)
     info.meta.objective_work_session_id = "session-started-in-this-task"
     cap(agent, base + len(objectives_functions()))
 
@@ -360,7 +360,7 @@ def test_a_loaded_group_that_becomes_required_for_the_work_cannot_be_evicted(sto
     seen = next_model_call(hook, registry)
     assert len(seen) <= tool_limit(agent)[0] and "record_objective_work_checkpoint" in seen
     cap(agent, len(seen) - 1)
-    ToolLimitHook(agent).before_model_call(SimpleNamespace(agent=SimpleNamespace(tool_registry=registry)))
+    ToolLimitHook(agent, main_parts(agent)).before_model_call(SimpleNamespace(agent=SimpleNamespace(tool_registry=registry)))
     assert loaded_tools(agent).loaded() == {OBJECTIVES}, "required tools cannot be removed to meet a smaller cap"
 
 
@@ -369,7 +369,7 @@ def test_over_the_cap_the_hook_unloads_loaded_groups_then_tells_administrators_o
     registry, hook = model_view(agent)
     use(OBJECTIVES)
     shown = len(next_model_call(hook, registry))
-    limit_hook = ToolLimitHook(agent)
+    limit_hook = ToolLimitHook(agent, main_parts(agent))
     cap(agent, shown - 1)
 
     limit_hook.before_model_call(SimpleNamespace(agent=SimpleNamespace(tool_registry=registry)))
@@ -393,7 +393,7 @@ def test_a_call_to_a_function_not_loaded_gets_its_tool_and_loads_the_group(stora
     next_model_call(hook, registry)
     event = SimpleNamespace(tool_use={"name": "objectives"}, selected_tool=None)
 
-    OnRequestToolHook(agent).before_tool_call(event)
+    OnRequestToolHook(agent, main_parts(agent)).before_tool_call(event)
 
     assert tool_name(event.selected_tool) == "objectives" and OBJECTIVES in loaded_tools(agent).loaded()
     assert "objectives" in next_model_call(hook, registry), "its definition is shown from the next call"
@@ -419,7 +419,7 @@ def test_with_authorization_off_only_the_definitions_tools_load(storage, tmp_pat
     seen = next_model_call(hook, registry)
     assert "create_objective" in seen and "objectives" not in seen, "only functions the definition gives"
     event = SimpleNamespace(tool_use={"name": "objectives"}, selected_tool=None)
-    OnRequestToolHook(agent).before_tool_call(event)
+    OnRequestToolHook(agent, main_parts(agent)).before_tool_call(event)
     assert event.selected_tool is None, "authorization off allows every catalog tool, so only the definition's load"
 
 
@@ -594,7 +594,7 @@ def test_a_real_team_lead_calling_a_function_it_has_not_loaded_runs_it(tmp_path,
 
 
 def limit_check(agent, registry) -> None:
-    ToolLimitHook(agent).before_model_call(SimpleNamespace(agent=SimpleNamespace(tool_registry=registry)))
+    ToolLimitHook(agent, main_parts(agent)).before_model_call(SimpleNamespace(agent=SimpleNamespace(tool_registry=registry)))
 
 
 def test_a_group_unloaded_for_the_cap_and_loaded_again_comes_back(storage, tmp_path) -> None:
@@ -639,6 +639,6 @@ def test_the_call_hook_does_not_load_a_group_that_is_shown(storage, tmp_path) ->
     next_model_call(hook, registry)
     event = SimpleNamespace(tool_use={"name": "add_heartbeat_item"}, selected_tool=None)
 
-    OnRequestToolHook(agent).before_tool_call(event)
+    OnRequestToolHook(agent, main_parts(agent)).before_tool_call(event)
 
     assert event.selected_tool is None and loaded_tools(agent).loaded() == frozenset()

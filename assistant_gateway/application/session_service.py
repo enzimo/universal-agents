@@ -17,6 +17,21 @@ from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.ports.repositories import SessionRepository
 
 
+# Added to the reply of a command that moved a parallel thread to another
+# conversation (``GatewaySessionService.switch_conversation``).
+PARALLEL_MARK_CLEARED_NOTICE = (
+    "This thread no longer runs in parallel: its requests now wait their turn with your other work."
+)
+
+
+def with_parallel_mark_notice(text: str, *, before: SessionRecord, after: SessionRecord) -> str:
+    """A switch command's reply, with ``PARALLEL_MARK_CLEARED_NOTICE`` when the switch cleared the mark."""
+
+    if before.parallel_thread and not after.parallel_thread:
+        return f"{text}\n{PARALLEL_MARK_CLEARED_NOTICE}"
+    return text
+
+
 @dataclass(frozen=True)
 class GatewaySessionRoute:
     """External route metadata persisted with a gateway session."""
@@ -51,6 +66,7 @@ class GatewaySessionService:
         manager_agent_id: str | None,
         owner_canonical_user_id: str | None,
         route: GatewaySessionRoute = GatewaySessionRoute(),
+        parallel_thread: bool = False,
     ) -> SessionRecord:
         return self._repository.create_session(
             session_key=self._id_generator.new_session_key(),
@@ -61,6 +77,7 @@ class GatewaySessionService:
             chat_id=route.chat_id,
             thread_id=route.thread_id,
             owner_canonical_user_id=owner_canonical_user_id,
+            parallel_thread=parallel_thread,
         )
 
     def resolve_session(
@@ -138,11 +155,20 @@ class GatewaySessionService:
         conversation_id: str,
         last_task_id: str | None,
     ) -> SessionRecord | None:
-        """Atomically select a conversation while preserving session routing."""
+        """Atomically select a conversation while preserving session routing.
+
+        A thread started with Launch parallel thread loses its parallel mark
+        when it moves to another conversation, so its next requests queue with
+        ordinary work. The mark is the person's word that this thread's work
+        does not overlap their other work; that word was about the thread's
+        own conversation, and an older one may be continued elsewhere (owner,
+        2026-10-29). Callers tell the person (``PARALLEL_MARK_CLEARED_NOTICE``).
+        """
 
         existing = self._repository.get_session(session_key)
         if existing is None:
             return None
+        clears_mark = existing.parallel_thread and conversation_id != existing.conversation_id
         self._repository.upsert_session(
             session_key=existing.session_key,
             session_alias=existing.session_alias,
@@ -155,7 +181,15 @@ class GatewaySessionService:
             thread_id=existing.thread_id,
             status=existing.status,
             owner_canonical_user_id=existing.owner_canonical_user_id,
+            parallel_thread=False if clears_mark else None,
         )
+        if clears_mark:
+            self._logger.info(
+                "A parallel thread moved to another conversation and no longer runs in parallel. "
+                "event=parallel_thread_mark_cleared session_key=%s conversation_id=%s",
+                session_key,
+                conversation_id,
+            )
         return self._repository.get_session(session_key)
 
     def _resolve_requested_session(

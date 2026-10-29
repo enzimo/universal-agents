@@ -46,7 +46,7 @@ from custom_messages.contracts.task_v1 import ACCESS_REQUEST_INTERRUPT_KIND, Tas
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_tools.providers import access as tools
 from custom_tools.providers import tool_loading
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import acting_as, bind_turn, set_agent_ref
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer, context_verify_keys
@@ -90,6 +90,13 @@ def a_request(person: PersonPrincipal = OWNER):
     return context_signer().issue(team_id=TEAM, person_id=person.person_id, person_roles=person.roles)
 
 
+def decide(agent, function, arguments):
+    """The access hook's decision for ``agent`` in the task it works on."""
+
+    with acting_as(agent):
+        return access_runtime.decide_call(agent, function, arguments)
+
+
 def make_agent(
     storage, tmp_path: Path, *, agent_type="WebResearchAgent", lead=False, enabled=True, request=None, task_id=None
 ):
@@ -113,10 +120,11 @@ def make_agent(
         authorization_config={"enabled": enabled, "cedar_binary_path": str(BINARY)},
         task_manager=manager,
         instance_root=None,
-        _active_execution_task_id=task_id,  # the task the agent is running now
+        test_task_id=task_id,  # the task the agent is running now
         _interrupted_turn_sessions={},
         paused=False,
         is_executing=False,
+        main_lane_busy=False,  # the main lane (runtime_hosting.agent_execution)
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _continue_pending_work=AsyncMock(),
@@ -155,7 +163,7 @@ def test_a_waiting_request_pauses_and_the_resumed_call_returns_the_decision(stor
 
     assert result["status"] == "granted" and "this task only" in result["message"]
     assert len(requests.service.store.list_requests(TEAM)) == 1, "the resumed call did not ask again"
-    assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
+    assert decide(worker, "create_scheduled_job", {}).allowed
 
 
 def test_automatic_hand_down_already_held_and_authorization_off(storage, tmp_path) -> None:
@@ -199,7 +207,7 @@ def test_a_workers_task_gets_what_the_team_lead_may_hand_on_and_restrictions_win
     set_agent_ref(worker)
 
     # The first call adds the access to the worker's task: no request, no turn ("access follows the work").
-    assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
+    assert decide(worker, "create_scheduled_job", {}).allowed
     store = access_runtime.runtime_requests(worker).service.store
     worker_type = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent")
     [handed] = [grant for grant in store.for_subjects(TEAM, [worker_type]) if grant.target.id == "fn:schedules"]
@@ -217,10 +225,10 @@ def test_a_workers_task_gets_what_the_team_lead_may_hand_on_and_restrictions_win
         reason="Only change existing schedules",
     )
     assert restricted["status"] == "restricted"
-    assert not access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
-    assert access_runtime.decide_call(worker, "update_scheduled_job", {}).allowed
+    assert not decide(worker, "create_scheduled_job", {}).allowed
+    assert decide(worker, "update_scheduled_job", {}).allowed
     assert call(tools.revoke_access, grant_id=restricted["grant_id"])["status"] == "revoked"
-    assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
+    assert decide(worker, "create_scheduled_job", {}).allowed
     assert "give_access" not in tools.ACCESS_TOOL_NAMES
 
 
@@ -245,8 +253,8 @@ def test_a_restriction_in_one_request_leaves_the_persons_other_requests_alone(st
     )
 
     assert restricted["status"] == "restricted"
-    assert not access_runtime.decide_call(worker_first, "create_scheduled_job", {}).allowed
-    assert access_runtime.decide_call(worker_second, "create_scheduled_job", {}).allowed, "the other request is not restricted"
+    assert not decide(worker_first, "create_scheduled_job", {}).allowed
+    assert decide(worker_second, "create_scheduled_job", {}).allowed, "the other request is not restricted"
     assert "in this request" in restricted["message"]
     set_agent_ref(worker_second)
     assert call(tools.list_my_access)["restrictions"] == []
@@ -260,7 +268,7 @@ def test_a_restriction_in_one_request_leaves_the_persons_other_requests_alone(st
     set_agent_ref(lead_second)
     refused = call(tools.revoke_access, grant_id=restricted["grant_id"])
     assert refused["status"] == "refused" and "request you are working on" in refused["reason"]
-    assert not access_runtime.decide_call(worker_first, "create_scheduled_job", {}).allowed
+    assert not decide(worker_first, "create_scheduled_job", {}).allowed
 
 
 def test_the_team_lead_cannot_revoke_what_it_handed_down_for_another_persons_request(storage, tmp_path) -> None:
@@ -270,7 +278,7 @@ def test_the_team_lead_cannot_revoke_what_it_handed_down_for_another_persons_req
     service.cedar.close()
     members_request = a_request(MEMBER)
     worker = make_agent(storage, tmp_path, request=members_request)
-    assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
+    assert decide(worker, "create_scheduled_job", {}).allowed
     store = access_runtime.runtime_requests(worker).service.store
     worker_type = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent")
     [handed] = [grant for grant in store.for_subjects(TEAM, [worker_type]) if grant.target.id == "fn:schedules"]
@@ -282,7 +290,7 @@ def test_the_team_lead_cannot_revoke_what_it_handed_down_for_another_persons_req
 
     assert refused["status"] == "refused"
     assert store.get(handed.grant_id).status.value == "active"
-    assert access_runtime.decide_call(worker, "create_scheduled_job", {}).allowed
+    assert decide(worker, "create_scheduled_job", {}).allowed
 
     # Working on the member's request, it may take the access back.
     set_agent_ref(
@@ -308,17 +316,17 @@ async def test_an_access_interrupt_waits_here_and_a_decision_resumes_the_task(st
         tools.request_access(tool_id="fn:schedules", level="write", reason="Track", tool_context=context)
     request_id = context.raised[0]["access_request_id"]
     manager = worker.task_manager
-    task_id = worker._active_execution_task_id
+    task_id = worker.test_task_id
     info = manager.get_task_info(task_id)
 
     # Scheduled work has no requester route; an access wait needs none.
+    bind_turn(info.task.task_id)
     await send_interrupt_request_for_result(
         worker,
         result=SimpleNamespace(interrupts=[raised.value.interrupt]),
         task=info.task,
         msg_header=info.header,
         msg_meta=info.meta,
-        strands_agent=object(),
         invoke_kwargs={},
         callback_handler=lambda **_: None,
         full_prompt="",
@@ -369,7 +377,7 @@ def test_a_request_is_withdrawn_when_its_task_ends_first(storage, tmp_path) -> N
         tools.request_access(tool_id="fn:schedules", level="write", reason="Track", tool_context=context)
 
     manager = worker.task_manager
-    manager.update_main_task_state(worker._active_execution_task_id, ProgressState.CANCELLED, "2026-09-25T00:00:00+00:00")
+    manager.update_main_task_state(worker.test_task_id, ProgressState.CANCELLED, "2026-09-25T00:00:00+00:00")
 
     request = access_runtime.runtime_requests(worker).service.store.get_request(context.raised[0]["access_request_id"])
     assert request.status is AccessRequestStatus.WITHDRAWN and "cancelled" in request.decision_note
@@ -395,7 +403,7 @@ def test_access_for_one_task_ends_with_the_task(storage, tmp_path) -> None:
     grant_id = approved_for_the_task(worker)
 
     manager = worker.task_manager
-    manager.update_main_task_state(worker._active_execution_task_id, ProgressState.COMPLETED, "2026-09-25T00:00:00+00:00")
+    manager.update_main_task_state(worker.test_task_id, ProgressState.COMPLETED, "2026-09-25T00:00:00+00:00")
 
     store = access_runtime.runtime_requests(worker).service.store
     assert store.get(grant_id).status.value == "revoked"
@@ -433,8 +441,8 @@ def test_the_team_lead_ends_task_access_that_no_task_can_use_any_more(storage, t
         return grant_id
 
     # Bound to one agent task (before access covered the whole request) that the archive has as finished.
-    worker.task_manager.complete_task(worker._active_execution_task_id, "2026-09-25T00:00:00+00:00")
-    finished = one_task_grant("grant_finished_task", worker._active_execution_task_id, now)
+    worker.task_manager.complete_task(worker.test_task_id, "2026-09-25T00:00:00+00:00")
+    finished = one_task_grant("grant_finished_task", worker.test_task_id, now)
     # Older than any task context lives, so no task can use it.
     too_old = one_task_grant("grant_too_old", "task_context_gone", now - timedelta(days=8))
 
@@ -471,13 +479,13 @@ def test_asking_again_for_more_leaves_one_entry_that_remove_takes_whole(storage,
     assert store.get(for_the_task).status.value == "revoked", "read-and-change for the task replaced read"
     assert store.get(task_grant).parent_grant_id == lead_grant
     assert [grant.grant_id for grant in requests.service.entry_grants(store.get(task_grant))] == [task_grant]
-    assert access_runtime.decide_call(worker, "publish_single_page_site", {}).allowed
+    assert decide(worker, "publish_single_page_site", {}).allowed
 
     # Removing the team lead's entry ends the worker's access too, even in the running task.
     requests.service.revoke_by_person(OWNER, lead_grant)
 
     assert store.get(task_grant).status.value == "revoked"
-    assert not access_runtime.decide_call(worker, "publish_single_page_site", {}).allowed
+    assert not decide(worker, "publish_single_page_site", {}).allowed
 
 
 def test_release_and_team_skill_changes_leave_silent_notices(storage, tmp_path) -> None:
@@ -524,11 +532,12 @@ async def _waiting_on_request(storage, tmp_path):
     context = Context()
     with pytest.raises(InterruptException) as raised:
         tools.request_access(tool_id="fn:schedules", level="write", reason="Track", tool_context=context)
-    task_id = worker._active_execution_task_id
+    task_id = worker.test_task_id
     info = worker.task_manager.get_task_info(task_id)
+    bind_turn(info.task.task_id)
     await send_interrupt_request_for_result(
         worker, result=SimpleNamespace(interrupts=[raised.value.interrupt]), task=info.task,
-        msg_header=info.header, msg_meta=info.meta, strands_agent=object(), invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
+        msg_header=info.header, msg_meta=info.meta, invoke_kwargs={}, callback_handler=lambda **_: None, full_prompt="",
     )
     return worker, context.raised[0]["access_request_id"], task_id
 
@@ -585,3 +594,51 @@ async def test_a_notice_reaches_the_restarted_agent_of_the_same_type(storage, tm
     other_type = _restarted(worker)
     other_type.named_agent_type = "PersonalAdminAgent"
     assert access_request_runtime._decided_request(other_type, message) is None
+
+
+@pytest.mark.asyncio
+async def test_two_peoples_overlapping_turns_are_each_decided_for_their_own_person(storage, tmp_path) -> None:
+    """PR #57 review: the team lead runs two people's parallel requests at once. Each tool call is
+    decided by the real access check for the person of the turn's own task
+    (``runtime_context.task_work``), never the other turn's, even when the turns interleave."""
+
+    from datetime import datetime, timezone
+
+    from custom_messages.contracts.access_v2 import GrantV1
+    from custom_tools.runtime_context import task_work
+
+    member = PersonPrincipal("user-2", TEAM, ("member",))
+    lead = make_agent(storage, tmp_path, agent_type="TeamArchitect", lead=True, task_id="task-owner")
+    member_meta = MessageMeta(conversation_id="conv-2")
+    member_meta.gateway_context = SimpleNamespace(task_context=a_request(member))
+    lead.task_manager.add_task(
+        Task(task_id="task-member", task_type=MessageMetaType.REQUEST), MessageHeader(), member_meta, owner_person_id=None
+    )
+    # The team lead's lasting access to schedules, for the owner's work only.
+    access_runtime.runtime_requests(lead).service.store.create(
+        GrantV1(
+            grant_id="grant_owner_schedules",
+            team_id=TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"),
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=datetime.now(timezone.utc),
+            for_person_id=OWNER.person_id,
+        )
+    )
+    set_agent_ref(lead)
+    both_running = asyncio.Barrier(2)
+
+    async def turn(task_id: str) -> list[bool]:
+        with task_work(task_id):
+            decisions = []
+            for _ in range(3):
+                await both_running.wait()  # the other turn is in flight too
+                decisions.append(access_runtime.decide_call(lead, "create_scheduled_job", {}).allowed)
+                await asyncio.sleep(0)
+            return decisions
+
+    owner_turn, member_turn = await asyncio.gather(turn("task-owner"), turn("task-member"))
+
+    assert owner_turn == [True, True, True]
+    assert member_turn == [False, False, False]

@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 from strands import tool
 
 from access_control.safe_open import UnsafePath
-from custom_tools.runtime_context import get_agent_ref
+from custom_tools.runtime_context import bound_task_id, get_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope, runtime_layout
 from runtime_settings.network import compose_public_base_url
 from default_values import INTERACTIVE_APP_DEFAULTS, NETWORK_DEFAULTS
@@ -234,7 +234,7 @@ def _current_task_context() -> dict[str, Any]:
     thread_id = None
     gateway_context: Any = None
     if agent is not None and getattr(agent, "task_manager", None) is not None:
-        task_id = (agent.task_manager.current_task_id if agent.task_manager is not None else None) or task_id
+        task_id = bound_task_id() or task_id
         task_info = agent.task_manager.get_task_info(task_id) if task_id != "no_active_task" else None
         meta = getattr(task_info, "meta", None)
         conversation_id = getattr(meta, "conversation_id", None)

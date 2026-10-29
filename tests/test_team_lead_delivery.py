@@ -45,6 +45,7 @@ def lead_delivery_probe(team_id="team_ua", *, is_team_lead=True, paused=False):
         is_team_lead=is_team_lead,
         paused=paused,
         is_executing=False,
+        main_lane_busy=False,
         task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime(), is_buffer_full=lambda: False),
         _logger=logging.getLogger("test.team_lead_delivery"),
         _requires_execution_slot=requires_execution_slot,

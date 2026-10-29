@@ -327,18 +327,17 @@ async def test_guidance_before_the_first_reply_reaches_the_new_request(tmp_path:
         assert team.lead_model.unexpected == []
 
 
-async def test_guidance_for_a_request_waiting_behind_other_work_is_held_until_it_starts(
+async def test_guidance_for_a_queued_thread_is_accepted_before_it_starts(
     tmp_path: Path,
 ) -> None:
-    """The lead is busy with another thread, so B waits in its queue; so does B's guidance."""
+    """A busy lead admits the other thread and accepts its guidance without a model slot."""
 
     hold_other = asyncio.Event()
     hold_bravo = asyncio.Event()
     turns = (
         _Turn("ALPHA-REQUEST", _answer("Alpha finished.")),
         _Turn("XRAY-REQUEST", _answer("Xray finished."), release=hold_other),
-        _Turn("BRAVO-REQUEST", _answer("Bravo draft."), release=hold_bravo),
-        _Turn("BRAVO-GUIDANCE", _answer("Bravo finished with guidance.")),
+        _Turn("BRAVO-REQUEST", _answer("Bravo finished with guidance."), release=hold_bravo),
     )
     async with _team(tmp_path, *turns) as team:
         _short_steering_status_wait(team.gateway)
@@ -360,8 +359,8 @@ async def test_guidance_for_a_request_waiting_behind_other_work_is_held_until_it
             [task.task_id for task in team.root_tasks_named("BRAVO-GUIDANCE")],
         )
         guidance_correlation = team.request_for(session, "BRAVO-GUIDANCE").correlation_id
-        # A duplicate NOT_FOUND response is still deduplicated by JetStream.
-        # It must not prevent a later ACCEPTED response from reaching us.
+        # The queued request is already known, so guidance is accepted once
+        # and is included in its first model turn.
         await team.gateway._thread_guidance.retry_held()
         def statuses():
             return [
@@ -369,23 +368,20 @@ async def test_guidance_for_a_request_waiting_behind_other_work_is_held_until_it
                 for envelope in team.steering_statuses
                 if envelope.msg_meta.msg_correlation_id == guidance_correlation
             ]
-        assert statuses() == [TaskSteeringStatus.STALE]
+        assert statuses() == [TaskSteeringStatus.ACCEPTED]
+        assert not turns[2].started.is_set()
         hold_other.set()
         await asyncio.wait_for(turns[2].started.wait(), WAIT_SECONDS)
-        # The lead pulls the queued request only when it can run it. Its
-        # startup report wakes held guidance, which applies at its next safe
-        # point, including deferring the first turn's draft answer.
         await _wait_until(
             lambda: team.request_for(session, "BRAVO-GUIDANCE").status == "accepted"
         )
         hold_bravo.set()
         await _settle(xray, bravo)
-        await _wait_until(lambda: turns[3].prompt is not None)
 
         assert team.root_tasks_named("BRAVO-GUIDANCE") == []
         assert {target for target, _correlation in team.steering_with("BRAVO-GUIDANCE")} == {task_b}
-        assert "BRAVO-GUIDANCE" in turns[3].prompt
-        assert statuses() == [TaskSteeringStatus.STALE, TaskSteeringStatus.ACCEPTED]
+        assert "BRAVO-GUIDANCE" in turns[2].prompt
+        assert statuses() == [TaskSteeringStatus.ACCEPTED]
         assert team.lead_model.unexpected == []
 
 

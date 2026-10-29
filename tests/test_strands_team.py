@@ -8,6 +8,7 @@ from custom_tools.providers.access_workflows import (
 from custom_tools.providers.access import ACCESS_TOOLS
 from unittest.mock import MagicMock, patch
 
+from custom_agents.access_runtime import AccessDecisionHook
 from custom_agents.agent_instructions import (
     ACCESS_PROMPT_RULE,
     shared_agent_base_prompt,
@@ -72,7 +73,8 @@ def test_create_strands_agent_forwards_runtime_config_to_universal_agent(tmp_pat
     assert not hasattr(agent, "broker_credential_binding_rules")
     assert agent.nats_url == "nats://transport.test:4222"
     assert agent.nats_process_consumer_inactive_threshold_seconds == 77.0
-    assert agent._access_decision_hook is not None
+    # Every function tool call is decided by the access hook on the agent's Strands agent.
+    assert any(isinstance(hook, AccessDecisionHook) for hook in strands_agent_class.call_args.kwargs["hooks"])
     # Record changes run first in each model step (custom_agents.sdk.strands.changes_first).
     executor = strands_agent_class.call_args.kwargs["tool_executor"]
     assert isinstance(executor, ChangesFirstToolExecutor)
@@ -88,7 +90,7 @@ def test_create_strands_agent_rejects_direct_mcp_without_instance_registry(
         "tool_name_prefix": "skills_mcp",
         "include_tools": ["load_skill"],
     }
-    with patch("custom_agents.strands_agent.Agent"), patch(
+    with patch("custom_agents.strands_agent.Agent") as strands_agent_class, patch(
         "custom_agents.strands_agent.UniversalAgent._configure_model",
         return_value=MagicMock(),
     ):
@@ -114,7 +116,8 @@ def test_create_strands_agent_rejects_direct_mcp_without_instance_registry(
     # Brokered MCP calls are decided by the broker's access gate; the agent
     # keeps no MCP rules of its own.
     assert not hasattr(agent, "protected_capability_invocations")
-    assert agent._access_decision_hook is not None
+    # Every function tool call is decided by the access hook on the agent's Strands agent.
+    assert any(isinstance(hook, AccessDecisionHook) for hook in strands_agent_class.call_args.kwargs["hooks"])
 
 
 def test_create_strands_agent_omits_optional_permission_surface_when_disabled(tmp_path) -> None:

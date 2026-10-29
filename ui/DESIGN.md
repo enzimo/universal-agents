@@ -799,6 +799,11 @@ that leads to it (owner's request 2026-10-12).
   IDs, states, queue positions and waiting reasons. Page each agent at 20 items and refresh
   every 10 seconds only while the panel is active. Retain the visible page during
   refresh and reject late responses from a closed panel or previous session.
+  Accepted requests must appear even while the agent is busy or paused.
+  Append **Parallel** to the current, queued or waiting heading of a request
+  sent in a thread started with **Launch parallel thread**. The agent runs such
+  a request at the same time as its other work, up to four at once; a running
+  one shows as current, not queued.
   When a task waits, show its reason as **Waiting on:** followed by the reason
   text. Do not add a request ID or claim that a request waits in the Inbox
   merely because the task is waiting.
@@ -1782,6 +1787,11 @@ its history. Steps with linked requests cannot use this correction.
   archive; choosing it focuses the composer) and an empty composer (owner's
   request, 2026-10-09). New Chat and the first submitted message explicitly
   create a conversation, which replaces that row.
+  Opening Settings during sign-in waits for the saved-thread lookup before
+  deciding whether a conversation is needed. A failed lookup shows its error
+  without creating a conversation. A late chat-creation response must preserve
+  a conversation the person selected while it was waiting; any submitted
+  request keeps the destination created for it.
 - A thread's name is fixed once given (owner's request, 2026-10-09; it used
   to follow the latest message, renaming the thread on every entry): the
   name the person gave it, else the first ordinary message typed in it (the
@@ -1824,6 +1834,11 @@ its history. Steps with linked requests cannot use this correction.
 - The send action uses an ocean-blue icon button.
 - A compact **Launch parallel thread** switch sits below Send, off by default,
   with no helper sentence.
+  It creates a parallel thread: the browser asks for it when it creates the
+  chat (`{"parallel_thread": true}`), and every request sent in it runs at the
+  same time as the agent's other work. Admit its request without waiting for
+  the current model turn, so Settings → Tasks can show and control it
+  immediately. New Chat and `/new` start ordinary threads.
   It applies to one ordinary message; slash commands keep their usual behavior.
   Create the new chat before clearing the composer, then show the message,
   files, name and replies only there. Keep the earlier chat in the sidebar.

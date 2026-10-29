@@ -10,7 +10,7 @@
       "version": "0.1.9",
       "archive_sha256": "93a8b0dbecf79be9329111093b493d256db2a573ed3f1cc827c96bdbbe32a936",
       "patched_files": {
-        "Cargo.toml": "511ad7545f2809caf6901de24b61892280f395af8b82ea6f96dade0ae6f56fd6"
+        "Cargo.toml": "4e69c8b79ddc0920d0a3e485ac2136daedd3cc32f6170bdc93a49f23772b5352"
       }
     },
     {
@@ -18,7 +18,7 @@
       "version": "0.36.1",
       "archive_sha256": "5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3",
       "patched_files": {
-        "Cargo.toml": "56e1196860383495399e5aaa5fa1d69c0c1e61fb3ee54f6a7358913f729303ff",
+        "Cargo.toml": "587c1ef3dc502aef949e07efe328e6377602c822eec141fee4baa4007008d6fb",
         "src/ods.rs": "7068155a869bf32ad58b119e90f0944173d1e8d33bea11008be81db0f93b1ec7",
         "src/utils.rs": "6d7ade533f164e29705f6ae528422771e248666963bc094f194647899ef2a09b",
         "src/xlsb/mod.rs": "01bb5e5721983100a1410d26a92d16b939febf45e862085d22aba6be0e2ca7c2",

@@ -65,7 +65,7 @@ from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.scheduled_run_context_v1 import ScheduledRunContextRequestV1
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.secure_cli_tool import trusted_broker_context
 from id_generation import new_id
 from secure_tool_broker.access_gate import build_broker_access_gate

@@ -49,11 +49,12 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
     sections = {section.name: section for section in TRANSFER_SECTIONS}
     fixtures = json.loads(FIXTURES.read_text())
     for name, version, target in SECTION_UPGRADES:
-        # The schedule section changed twice while retaining the frozen
-        # source fixture and the version exported by the last stable release.
+        # The schedule section changed three times while retaining the frozen
+        # source fixture; versions 4 and 5 were exported by stable releases
+        # (v0.9.6, and v0.9.7 to v0.9.8).
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
-            allowed.add(4)
+            allowed.update({4, 5})
         assert version in allowed, f"the conversion step from {name} version {version} has no supported release fixture"
         assert target == sections[name].schema_version
     for name, raw in fixtures.items():

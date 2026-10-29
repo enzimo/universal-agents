@@ -52,10 +52,9 @@ RUNTIME_LLM_REFERENCES = (
     "_conversation_summary_generator",
     "_context_engine",
     "_strands_agent",
+    "_strands_parts",
+    "_strands_generation",
     "_context_debug_dump_plugin",
-    "_runtime_guardrails_plugin",
-    "_runtime_steering_plugin",
-    "_tool_result_budget_monitor",
     "_skills_fingerprint",
 )
 

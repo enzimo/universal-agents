@@ -43,7 +43,7 @@ from custom_tools.providers.schedules import (
     update_scheduled_job,
 )
 from custom_tools.providers.changes import apply_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from tests.change_approval_support import (
     CEDAR_BINARY,
     ToolCall,

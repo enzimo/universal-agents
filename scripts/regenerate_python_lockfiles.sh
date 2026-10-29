@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/.." && pwd)"
 uv_executable="${UV_BIN:-uv}"
-required_uv_version="uv 0.13.4"
+required_uv_version="uv 0.13.6"
 
 actual_uv_version="$(${uv_executable} --version)"
 if [[ "${actual_uv_version}" != "${required_uv_version}" \

@@ -16,14 +16,15 @@ function harness() {
   const files = [{ file: new Blob(["notes"]), filename: "notes.txt" }];
   const sends = [], failures = [];
   let creations = 0, taken = 0, busy = false;
+  const creationOptions = [];
   const submission = createChatSubmission({
     readDraft: () => ({ ...draft }), context: () => ({ ...state }),
-    createThread() { creations++; return creation.promise; },
+    createThread(options) { creations++; creationOptions.push(options); return creation.promise; },
     takeDraft() { taken++; draft.content = ""; draft.separate = false; return files; },
     send(content, options) { sends.push({ content, ...options }); },
     preparing(value) { busy = value; }, failed(error, retry) { failures.push({ error, retry }); },
   });
-  return { submission, creation, state, draft, files, original, destination, sends, failures,
+  return { submission, creation, state, draft, files, original, destination, sends, failures, creationOptions,
     creations: () => creations, taken: () => taken, busy: () => busy };
 }
 
@@ -32,6 +33,8 @@ test("create the destination before consuming text and files; repeated Send crea
   const sending = h.submission.submit();
   await h.submission.submit();
   assert.equal(h.creations(), 1);
+  // The switch asks the server for a parallel thread.
+  assert.deepEqual(h.creationOptions[0], { parallelThread: true });
   assert.equal(h.taken(), 0);
   assert.equal(h.busy(), true);
   h.state.thread = { id: "selected-during-creation" };
@@ -70,6 +73,8 @@ test("an unchecked switch keeps the selected thread and a files-only message sti
   await sending;
   assert.equal(h.sends[1].thread, h.destination);
   assert.equal(h.sends[1].content, "");
+  // A chat started only because none was selected is an ordinary one.
+  assert.equal(h.creationOptions[0], undefined);
 });
 
 test("slash commands retain their existing routing even with the switch selected", async () => {

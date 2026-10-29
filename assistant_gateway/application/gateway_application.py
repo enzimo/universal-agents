@@ -39,6 +39,8 @@ class GatewaySession:
     owner_canonical_user_id: str | None = None
     latest_request_text: str | None = None
     updated_at: str | None = None
+    # Started with Web Chat's Launch parallel thread (SessionRecord.parallel_thread).
+    parallel_thread: bool = False
 
 
 @dataclass(frozen=True)
@@ -202,8 +204,9 @@ class GatewayApplication(Protocol):
         chat_id: str | None = None,
         thread_id: str | None = None,
         canonical_user_id: str | None = None,
+        parallel_thread: bool = False,
     ) -> GatewaySession:
-        """Create and activate a fresh gateway session."""
+        """Create and activate a fresh gateway session; ``parallel_thread`` marks one launched as parallel."""
 
     async def reply_to_pending_query(
         self,

@@ -15,6 +15,7 @@ from functools import partial
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from custom_agents.execution_lanes import is_parallel_request
 from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.control_v1 import FinishedTaskSummary
@@ -157,6 +158,10 @@ async def _inventory(
     response.task_total = len(rows)
     response.current_task_count = sum(row["is_current"] for row in rows)
     response.queued_task_count = len(rows) - response.current_task_count
+    # Parallel marks a request sent in a thread the person launched as
+    # parallel: the team lead runs it beside its other work, in a lane of its
+    # own (custom_agents.execution_lanes).
+    parallel_lanes = bool(getattr(agent.task_manager, "parallel_lanes_enabled", False))
     by_id = {root.task.task_id: root for root in roots}
     response.roots = []
     for row in rows[command.task_offset : command.task_offset + command.task_limit]:
@@ -164,6 +169,7 @@ async def _inventory(
         summary = await summarize_root(agent, root)
         summary.problem_statement = str(root.task.problem_statement or "")[:2000]
         summary.is_current = row["is_current"]
+        summary.is_parallel = parallel_lanes and is_parallel_request(root.meta)
         summary.queue_position = row["queue_position"]
         response.roots.append(summary)
     return [by_id[row["root_task_id"]] for row in rows]

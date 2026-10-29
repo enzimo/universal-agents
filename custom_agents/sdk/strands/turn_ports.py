@@ -336,7 +336,6 @@ class SendInterruptRequestForResultOperation(Protocol):
         task: Task,
         msg_header: MessageHeader,
         msg_meta: MessageMeta,
-        strands_agent: Any,
         invoke_kwargs: Dict[str, Any],
         callback_handler: Callable[..., None],
         full_prompt: str,

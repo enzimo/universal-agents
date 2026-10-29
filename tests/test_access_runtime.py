@@ -22,6 +22,7 @@ from access_control.decisions import AccessService
 from access_control.entities import PersonPrincipal
 from access_control.starter_profiles import REASON_PREFIX, applied_profile, apply_starter_profile, chosen_by_person
 from assistant_gateway.access_setup import apply_configured_starter_profile
+from tests.task_work_support import bind_task
 from custom_agents import access_runtime
 from custom_agents.access_runtime import AccessDecisionHook, decide_call
 from custom_messages.contracts.access_v2 import GrantStatus, GrantV1, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
@@ -60,6 +61,7 @@ def agent(storage, *, agent_type="WebResearchAgent", lead=False, role="worker", 
     )
     task_manager.add_task_terminal_callback = task_manager.terminal_callbacks.append
     task_manager.add_task_release_callback = task_manager.release_callbacks.append
+    bind_task("task-1")  # the test's direct calls work for this task (tests.task_work_support)
     return SimpleNamespace(
         id=f"agent-{agent_type}",
         named_agent_type=agent_type,

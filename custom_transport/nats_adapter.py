@@ -1494,20 +1494,3 @@ class NatsTransportAdapter:
             _term=_term,
             _in_progress=_in_progress,
         )
-
-    async def keepalive_while(
-        self, delivery: InboundDelivery, task: asyncio.Task[Any]
-    ) -> None:
-        ack_wait = delivery.ack_wait_seconds or float(self.config.ack_wait_seconds)
-        interval = max(1.0, min(30.0, float(ack_wait) / 2.0))
-        while not task.done():
-            await asyncio.sleep(interval)
-            if not task.done():
-                try:
-                    await delivery.in_progress()
-                except Exception as exc:
-                    self._logger.debug(
-                        "Failed to send NATS in-progress ack for %s: %s",
-                        delivery.transport_subject,
-                        exc,
-                    )

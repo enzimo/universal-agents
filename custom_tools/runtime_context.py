@@ -1,29 +1,74 @@
 """Process-local execution context shared by trusted tool providers.
 
-The context identifies the agent executing the current Strands tool call. It is
-deliberately process-local and carries no authorization authority: providers
-still call their domain service and final policy-enforcement point. A future
-remote runtime installs its own local context and ACP-backed service adapters.
+The context identifies the agent executing the current Strands tool call and
+the task that call works for. It is deliberately process-local and carries no
+authorization authority: providers still call their domain service and final
+policy-enforcement point. A future remote runtime installs its own local
+context and ACP-backed service adapters.
+
+Why the task comes from a context variable (``TaskWork``): an agent can run
+several model turns at once (threads started with Launch parallel thread,
+``custom_agents.execution_lanes``). Each runner of a turn binds the task's work
+record for the whole handling of that task, the model turn and the saving of
+its result (``task_work``). Strands runs hooks in the turn's asyncio task and
+starts tool calls with a copy of its context (``asyncio.create_task``,
+``asyncio.to_thread``), so every hook, tool call and thread a call starts reads
+its own task. An agent-wide "current task" would give a turn the task, person,
+grants and model keys of whichever turn started last.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from runtime_hosting.turn_context import turn_scoped
 
 if TYPE_CHECKING:
     from custom_agents.strands_agent import UniversalAgent
+    from custom_agents.strands_parts import StrandsParts
     from custom_messages.contracts.routing_v1 import MessageMeta
+    from custom_tools.tool_stop import ToolStop
 
 
 _agent_ctx: ContextVar[UniversalAgent | None] = ContextVar("agent_ctx", default=None)
-# The task a running tool call works on, fixed when the call started
-# (bind_tool_call_task). Without it, a call still running when the agent moved
-# on to its next task would read that task, and its person, for every later
-# step, such as each further command of a shell command list.
-_tool_call_task: ContextVar[str | None] = ContextVar("tool_call_task", default=None)
+
+
+@dataclass
+class TaskWork:
+    """One task's handling by this agent: its model turn and the saving of its result.
+
+    The runner creates it (``task_work``); the model turn fills in the rest
+    when it starts (``custom_agents.turn_registry.start_turn``), and the
+    runner reads them back afterwards, such as the turn's Strands messages.
+
+    - ``turn_owner``: the asyncio task running the model call; a stop cancels it.
+    - ``tool_stop``: the turn's stop for its tool commands (``custom_tools.tool_stop``).
+    - ``strands``: the Strands agent the turn calls, with its own tool state
+      (``custom_agents.strands_parts.StrandsParts``).
+    - ``person_model``: the person's own model while the turn uses it
+      (``custom_agents.person_model_runtime``).
+    - ``context_assembly``: the turn's latest prompt assembly, for
+      ``get_context_status``.
+    - ``handling_finished``: the runner left its scope. Inherited timer
+      callbacks may keep the record, but its SDK agent can have been reused
+      by another task, so its transcript is no longer safe to archive.
+    """
+
+    task_id: str | None
+    turn_owner: asyncio.Task[Any] | None = None
+    tool_stop: ToolStop | None = None
+    strands: StrandsParts | None = None
+    person_model: Any = None
+    context_assembly: Any = None
+    handling_finished: bool = False
+
+
+_task_work: ContextVar[TaskWork | None] = turn_scoped(ContextVar("task_work", default=None), None)
 
 
 def set_agent_ref(agent: UniversalAgent | None) -> None:
@@ -37,33 +82,44 @@ def get_agent_ref() -> UniversalAgent | None:
 
 
 @contextmanager
-def bind_tool_call_task(task_id: str | None) -> Iterator[None]:
-    """Make ``task_id`` the active task for the rest of this tool call (this context).
+def task_work(task_id: str | None) -> Iterator[TaskWork]:
+    """Make ``task_id`` this context's task until the block ends; yields its work record.
 
-    Threads the call starts with a copy of this context, such as the parallel
-    shell's pool threads, keep the same task.
+    Asynchronous tasks and threads started inside the block, such as a model
+    turn's child task and its tool calls, keep the same record.
     """
 
-    token = _tool_call_task.set(task_id)
+    work = TaskWork(task_id=task_id)
+    token = _task_work.set(work)
     try:
-        yield
+        yield work
     finally:
-        _tool_call_task.reset(token)
+        work.handling_finished = True
+        _task_work.reset(token)
+
+
+def current_task_work() -> TaskWork | None:
+    """The work record bound in this context, or None outside a task's handling."""
+
+    return _task_work.get()
+
+
+def bound_task_id() -> str | None:
+    """The task this context works for, or None outside a task's handling."""
+
+    work = _task_work.get()
+    return work.task_id if work is not None else None
 
 
 def active_task_context(
     agent: UniversalAgent,
 ) -> tuple[str | None, MessageMeta | None]:
-    """Resolve the active task id and its structured request metadata.
+    """Resolve the bound task id and its structured request metadata (module docstring).
 
-    Inside a tool call the task bound when the call started wins over the
-    agent's current one (bind_tool_call_task).
+    Outside a task's handling there is no active task: such work is the
+    agent's own (system work), never another turn's.
     """
-    task_id = (
-        _tool_call_task.get()
-        or getattr(agent, "_active_execution_task_id", None)
-        or getattr(getattr(agent, "task_manager", None), "current_task_id", None)
-    )
+    task_id = bound_task_id()
     if not task_id:
         return None, None
     task_manager: Any = getattr(agent, "task_manager", None)

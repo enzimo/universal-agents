@@ -344,7 +344,7 @@ async def test_a_task_queued_before_an_interrupted_pass_starts_after_the_holder(
     agent.task_manager.enqueue_task("task_queued")
     in_outbox, outbox_go = asyncio.Event(), asyncio.Event()
 
-    async def outbox_check():
+    async def outbox_check(_lane):
         in_outbox.set()
         await outbox_go.wait()  # storage I/O; the slot is free meanwhile
         return False

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from custom_agents.sdk.strands.skills import list_agent_skill_names
+from custom_agents.strands_parts import turn_strands_agent
 
 if TYPE_CHECKING:
     from custom_agents.strands_agent import UniversalAgent
@@ -19,7 +20,7 @@ def missing_objective_work_skills(agent: "UniversalAgent") -> list[str]:
         for plugin in (getattr(agent, "plugins", None) or [])
         for name in list_agent_skill_names(
             plugin,
-            getattr(agent, "_strands_agent", None),
+            turn_strands_agent(agent),
         )
     }
     return sorted(

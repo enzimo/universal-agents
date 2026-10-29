@@ -67,7 +67,7 @@ from custom_tools.providers.schedules import (
     resume_scheduled_job,
     update_scheduled_job,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -351,6 +351,8 @@ class _ToolAgent:
             task=Task(task_id="task_current", task_type=MessageMetaType.REQUEST, problem_statement="Schedules"),
         )
         self.task_manager = _ToolTaskManager(store._storage_settings, task_info)
+        # The tool calls below are this request's own turn.
+        self.test_task_id = "task_current"
         self._schedule_store = store
         self._conversation_store = ConversationStore(
             db_path=str(tmp_path / "conversations.db"), artifacts_dir=tmp_path / "conversation_artifacts"

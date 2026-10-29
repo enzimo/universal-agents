@@ -26,7 +26,7 @@ from custom_agents.model_keys import ModelKeys
 from custom_agents.runtime_settings_service import RuntimeSettingsService
 from custom_messages.contracts.status_v1 import EnvironmentOverridesV1
 from custom_tools.providers.runtime_settings import plan_runtime_setting_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from docker.settings_environment import write_environment_overrides
 from tests.model_key_support import env_model_keys
 from tests.test_runtime_settings_tools import (  # noqa: F401 - _signed_task_contexts is an autouse fixture

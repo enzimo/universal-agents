@@ -18,7 +18,7 @@ from custom_tools.providers.knowledge import (
     knowledge_search,
     knowledge_write,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from custom_tools.tool_results import result_text
 from storage.config import resolve_storage_settings
 from storage.change_ledger import ChangeRequestStore
@@ -33,6 +33,8 @@ TEAM = "team_test"
 @pytest.fixture(autouse=True)
 def _signed_task_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
     use_signed_contexts(monkeypatch)
+    # The agent's calls work for its current task (tests.task_work_support).
+    bind_task(_TaskManager.current_task_id)
 
 
 class _TaskManager:

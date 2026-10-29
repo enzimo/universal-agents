@@ -30,9 +30,10 @@ from functools import partial
 from typing import Any, Optional
 
 from custom_agents.delegated_work_runtime import delegated_tasks
+from custom_agents.execution_lanes_runtime import lane_of
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
 from custom_messages.enums import ProgressState, RequesterType, TaskHistoryImportance, TaskHistoryType
 from storage.delegated_task_repository import status_counts
 
@@ -66,18 +67,22 @@ async def wake_parent_for_decision(agent: Any, *, parent_task_id: str, directive
 
     Returns False when the parent is gone or no longer waiting.
 
-    The decision is taken while holding the agent's execution slot. The
-    callers (the scheduler pass and the claim handler) do not hold it, so a
-    delegated task's result handled meanwhile may already have resumed, or
-    finished, the parent. Before 2026-10-17 the parent was read before waiting
-    for the slot, and a second model turn then ran for a parent another path
-    had already completed. Moving WAITING to IN_PROGRESS with a compare-and-set
+    The decision is taken while holding the parent's execution lane: the main
+    lane, or its request's own lane for a request from a parallel thread
+    (``custom_agents.execution_lanes``). The turn it runs asks for that same
+    lane, and an owner holding one lane may not ask for another. The callers
+    (the scheduler pass and the claim handler) hold no lane, or already hold
+    the parent's lane when a worker's result is handled in it, so a delegated
+    task's result handled meanwhile may already have resumed, or finished,
+    the parent. Before 2026-10-17 the parent was read before waiting for the
+    lane, and a second model turn then ran for a parent another path had
+    already completed. Moving WAITING to IN_PROGRESS with a compare-and-set
     makes exactly one path resume it.
     """
 
     manager = agent.task_manager
     run = manager.operations_runtime.run
-    async with agent._execution_scope():
+    async with agent._execution_scope(await lane_of(agent, parent_task_id)):
         resumed = await run(
             partial(
                 manager.try_transition_task_state,
@@ -106,7 +111,7 @@ async def wake_parent_for_decision(agent: Any, *, parent_task_id: str, directive
 
 
 async def _resume_for_decision(agent: Any, parent: Any, *, directive: str, reason: str) -> None:
-    """Run the parent's turn; it waits again if work is still pending (caller holds the slot)."""
+    """Run the parent's turn; it waits again if work is still pending (caller holds its lane)."""
 
     manager = agent.task_manager
     run = manager.operations_runtime.run
@@ -186,7 +191,13 @@ async def wake_for_failed_delegation(agent: Any, *, parent_task_id: str, subtask
 
 
 async def wake_due_check_backs(agent: Any, *, now: Optional[datetime] = None) -> int:
-    """Wake parents whose check-back time passed; returns how many woke."""
+    """Wake parents whose check-back time passed; returns how many woke.
+
+    Runs in the scheduler pass, which must not wait for a turn: a parent whose
+    execution lane runs a turn now keeps its check-back time, and a later pass
+    wakes it. Before the parallel lanes, the whole pass skipped this while any
+    turn ran.
+    """
 
     moment = now or datetime.now(timezone.utc)
     repository = delegated_tasks(agent)
@@ -194,6 +205,8 @@ async def wake_due_check_backs(agent: Any, *, now: Optional[datetime] = None) ->
     woken = 0
     for wait in await run(repository.waits_for_requester, str(agent.team_id), str(agent.id)):
         if wait.check_back_at_utc is None or wait.check_back_at_utc > moment:
+            continue
+        if agent._execution_lanes.lane_busy(await lane_of(agent, wait.parent_task_id)):
             continue
         await run(
             partial(
@@ -230,7 +243,7 @@ def _route_for(root: Any) -> tuple[Optional[str], Any]:
     if getattr(root.meta, "requester_type", None) != RequesterType.USER_REQUESTER:
         return None, None
     context = getattr(root.meta, "gateway_context", None)
-    if str(getattr(context, "delivery_mode", "") or "").strip().lower() != "interactive":
+    if str(getattr(context, "delivery_mode", "") or "").strip().lower() != DELIVERY_MODE_INTERACTIVE:
         return None, None
     route = str(getattr(root.header, "response_routing_key", "") or "").strip()
     return (route or None), context

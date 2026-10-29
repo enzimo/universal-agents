@@ -23,6 +23,7 @@ import build_cache
 LOG = logging.getLogger("ua.ci")
 LABEL = "com.universalagents.ci.job"
 VERSION = "1"
+PUBLIC_JOB_POLICY_VERSION = "1"
 
 
 def run(*args: str, cwd: str | None = None) -> str:
@@ -149,21 +150,42 @@ def cleanup(config: dict, *, before_job: bool = False) -> None:
     manifest.unlink()
 
 
+def require_trusted_event(config: dict, environment: dict, event: dict) -> None:
+    """Admit work from the configured repositories, never from fork PRs.
+
+    The runner supplies this context before repository code runs. Keep this
+    check in the installed hook, outside the checkout, so a PR cannot remove it.
+    Repository visibility does not establish whether submitted code is trusted.
+    """
+    repository = environment.get("GITHUB_REPOSITORY")
+    if not repository or repository not in config["repositories"]:
+        raise ValueError("Runner is not configured for this repository")
+    if event.get("repository", {}).get("full_name") != repository:
+        raise ValueError("The event does not identify the configured repository")
+    public = not event.get("repository", {}).get("private")
+    if public and repository not in config.get("public_repositories", []):
+        raise ValueError("This public repository is not approved for the local runner")
+    event_name = environment.get("GITHUB_EVENT_NAME")
+    # Other private repositories share these hosts. This rollout restricts new
+    # public work without changing their existing non-PR trigger policy.
+    if public and event_name not in {"push", "pull_request", "workflow_dispatch", "schedule"}:
+        raise ValueError("This event type cannot execute on the local runner")
+    if event_name == "pull_request" or "pull_request" in event:
+        request = event.get("pull_request", {})
+        for side in ("head", "base"):
+            if request.get(side, {}).get("repo", {}).get("full_name") != repository:
+                raise ValueError("Fork or unidentified PRs cannot execute on local runners")
+    if public and event_name != "pull_request" and "pull_request" in event:
+        raise ValueError("The pull request payload does not match the event type")
+
+
 def begin(config: dict) -> None:
     state = Path(config["state"])
     state.mkdir(parents=True, exist_ok=True)
     cleanup(config, before_job=True)
-    repository = os.environ["GITHUB_REPOSITORY"]
-    if repository not in config["repositories"]:
-        raise ValueError(f"Runner is not configured for {repository}")
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    if not event.get("repository", {}).get("private"):
-        raise ValueError("These local runners accept private repositories only")
-    if (
-        "pull_request" in event
-        and event["pull_request"]["head"]["repo"]["full_name"] != repository
-    ):
-        raise ValueError("Fork PRs must not execute on personal build hosts")
+    require_trusted_event(config, os.environ, event)
+    repository = os.environ["GITHUB_REPOSITORY"]
     workspace = child(Path(os.environ["GITHUB_WORKSPACE"]), Path(config["work"]))
     name = repository.split("/")[1]
     if workspace != Path(config["work"]).resolve() / name / name:
@@ -201,6 +223,7 @@ def begin(config: dict) -> None:
         (cache / directory).mkdir()
     env = {
         "UA_CI_HOOK_VERSION": VERSION,
+        "UA_CI_PUBLIC_JOB_POLICY_VERSION": PUBLIC_JOB_POLICY_VERSION,
         "UA_CI_DOCKER_RESOURCES_VERSION": "1",
         "UA_CI_PYTHON": sys.executable,
         "UA_CI_ID": job_id,

@@ -1982,18 +1982,7 @@ async def _scheduler_pass(
     # permits, so workers without the key need not ask it for each run.
     await maybe_renew_schedule_permits(agent)
 
-    task_manager = getattr(agent, "task_manager", None)
-    can_claim_scheduled_work = (
-        not getattr(agent, "paused", False)
-        and not getattr(agent, "is_executing", False)
-        and (
-            task_manager is None
-            or not hasattr(task_manager, "can_start_new_task")
-            or await task_manager.operations_runtime.run(
-                task_manager.can_start_new_task,
-            )
-        )
-    )
+    can_claim_scheduled_work, parallel_only = await _schedule_claim_scope(agent)
     now = datetime.now(timezone.utc)
     # Deadlines persist across passes; drop only the expired retry holds.
     for schedule_id in [key for key, deadline in claim_retry_deadlines.items() if deadline <= now]:
@@ -2008,12 +1997,39 @@ async def _scheduler_pass(
             claim_ttl_seconds=DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
             allow_unscoped=bool(getattr(agent, "is_team_lead", False)),
             exclude_schedule_ids=tuple(claim_retry_deadlines),
+            parallel_thread=True if parallel_only else None,
         )
 
     if claimed_schedule:
         await _fire_claimed_schedule(agent, claimed_schedule, claim_retry_deadlines, sleep_fn)
         return None
-    return await _idle_sleep_seconds(agent, can_claim_scheduled_work)
+    return await _idle_sleep_seconds(agent, can_claim_scheduled_work, parallel_only=parallel_only)
+
+
+async def _schedule_claim_scope(agent: Any) -> tuple[bool, bool]:
+    """Whether this pass may claim due schedules, and whether only those set up in a parallel thread.
+
+    Due schedules are claimed while the main lane is free, where most runs
+    execute. While it is busy, the team lead still claims schedules set up in
+    a parallel thread: each of their runs gets a parallel lane of its own
+    (custom_agents.execution_lanes) and does not wait for other work (owner,
+    2026-10-29). At the limit of parallel lanes such a run waits in the queue
+    like any other parallel request. Before, every claim waited for the main
+    lane, so these runs started late whenever ordinary work was running.
+    """
+
+    if getattr(agent, "paused", False):
+        return False, False
+    task_manager = getattr(agent, "task_manager", None)
+    main_lane_free = not getattr(agent, "main_lane_busy", False) and (
+        task_manager is None
+        or not hasattr(task_manager, "can_start_new_task")
+        or await task_manager.operations_runtime.run(task_manager.can_start_new_task)
+    )
+    if main_lane_free:
+        return True, False
+    parallel_lanes = bool(getattr(task_manager, "parallel_lanes_enabled", False))
+    return parallel_lanes, parallel_lanes
 
 
 async def _fire_claimed_schedule(
@@ -2174,10 +2190,17 @@ async def _advance_after_admission(agent: Any, claimed_schedule: dict[str, Any])
 _EXPECTED_ADVANCE_MISSES = frozenset({AdvanceOutcome.NOT_FOUND, AdvanceOutcome.DUE_CHANGED})
 
 
-async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool) -> float:
-    """Wait until the next due schedule, capped by watchdog and lease cadence."""
+async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool, *, parallel_only: bool = False) -> float:
+    """Wait until the next due schedule this pass could claim, capped by watchdog and lease cadence.
+
+    With ``parallel_only`` (``_schedule_claim_scope``) the next due schedule
+    is the next one set up in a parallel thread: an ordinary one already due
+    waits for the main lane and must not wake the loop every second.
+    """
     earliest = await agent.task_manager.operations_runtime.run(
-        agent._schedule_store.get_earliest_fire_time
+        partial(agent._schedule_store.get_earliest_fire_time, parallel_thread=True)
+        if parallel_only
+        else agent._schedule_store.get_earliest_fire_time
     )
     watchdog_sleep = max(1.0, float(agent.subtask_watchdog_interval_seconds))
     if earliest and can_claim_scheduled_work:

@@ -11,7 +11,7 @@ from access_control.ownership import PRIVATE_UPDATE, private_access
 from custom_messages.contracts.routing_v1 import GatewayContext
 from custom_tools.providers.context_memory import compact_conversation_context
 from custom_tools.providers.memory import memory, topic_tags
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.tool_results import result_text
 from storage.config import resolve_storage_settings
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
@@ -67,6 +67,8 @@ class _FakeAgent:
     memory_config = {"usermem": {"max_facts_per_user": 10}}
     # The per-call access hook is not part of these tests.
     authorization_config = {"enabled": False}
+    # The tool calls are the person's request's own turn.
+    test_task_id = _FakeTaskManager.current_task_id
 
     def __init__(self, db_path: Path, canonical_user_id: str) -> None:
         self._pinned_memory_repository = SqlitePinnedMemoryRepository(str(db_path))

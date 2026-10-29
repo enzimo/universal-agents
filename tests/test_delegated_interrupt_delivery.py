@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.task_work_support import bind_turn
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import (
     WORKER_INTERRUPT_REFUSED,
@@ -73,6 +74,7 @@ async def test_parent_refuses_a_worker_input_request_and_the_worker_fails_its_ta
     worker.task_manager.add_task(task, header, meta, owner_person_id=None)
 
     # A tool other than an access request pauses the worker for input.
+    bind_turn(task.task_id)
     steering = await send_interrupt_request_for_result(
         worker,
         result=SimpleNamespace(
@@ -81,7 +83,6 @@ async def test_parent_refuses_a_worker_input_request_and_the_worker_fails_its_ta
         task=task,
         msg_header=header,
         msg_meta=meta,
-        strands_agent=object(),
         invoke_kwargs={},
         callback_handler=lambda **_: None,
         full_prompt="",

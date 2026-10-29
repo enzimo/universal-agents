@@ -16,6 +16,7 @@ from custom_messages.enums import ControlType, MessageMetaType, RoutingType
 from custom_tools.agent_team_port import current_agent_type_map
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import (
+    bound_task_id,
     get_agent_ref,
 )
 
@@ -151,7 +152,7 @@ def query_agent_state(
         live_requested = live.lower() in ("true", "1", "yes")
         live_targets: list[str] = []
         if live_requested:
-            current_task_id = agent.task_manager.current_task_id
+            current_task_id = bound_task_id()
             current_task_info = (
                 agent.task_manager.operations_runtime.run_sync(
                     agent.task_manager.get_task_info, current_task_id
@@ -550,7 +551,7 @@ def get_current_task_status() -> str:
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
 
     if not current_task_id:
         return json.dumps({"status": "No task currently in progress"})
