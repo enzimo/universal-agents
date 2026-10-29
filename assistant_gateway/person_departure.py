@@ -17,7 +17,8 @@ the gateway already owns or opens:
   record;
 - the hold record (``storage.person_departure_repository``) and the person's
   folder (``access_control.held_person_folders``), moved to the holding area
-  and back.
+  and back. A purge of an expired hold here deletes the held conversation
+  artifact files with the held records, as the manager's purge does.
 
 Every path comes from the instance layout.
 """
@@ -31,7 +32,12 @@ from datetime import datetime
 from pathlib import Path
 
 from access_control.folders import FOLDER_ROOT_USERS
-from access_control.held_person_folders import hold_folder, purge_folder, restore_folder
+from access_control.held_person_folders import (
+    hold_folder,
+    purge_folder,
+    purge_held_artifact_files,
+    restore_folder,
+)
 from access_control.requests import AccessRequests
 from access_control.safe_open import UnsafePath
 from assistant_gateway.application.identity_service import GatewayIdentityService
@@ -233,6 +239,10 @@ class GatewayPersonDeparture:
         return HeldPersonData(hold_until=existing.hold_until, folder_moved=moved)
 
     def _purge(self, departures: PersonDepartureRepository, hold: PersonHold) -> None:
+        # The files first: their records name them, so a failure keeps the records for the next purge.
+        purge_held_artifact_files(
+            self._layout, hold.person_id, departures.held_artifact_paths(hold.team_id, hold.person_id)
+        )
         purge_folder(self._layout, hold.person_id)
         departures.delete_held_rows(hold.team_id, hold.person_id)
         departures.mark_purged(hold.team_id, hold.person_id, at=self._clock.now_utc())

@@ -287,6 +287,49 @@ async def test_due_schedule_remains_pending_when_worker_cannot_be_started(monkey
     assert manager.team_comms.sent == []
 
 
+@pytest.mark.asyncio
+async def test_trusted_cleanups_run_once_per_occurrence_even_when_the_worker_cannot_start(monkeypatch) -> None:
+    """The scheduler retries an occurrence whose worker did not start every 30 seconds; clean up once."""
+
+    from custom_agents import internal_improvement_runtime as runtime
+
+    monkeypatch.setattr(
+        "custom_agents.agent_instantiation_service.AgentInstantiationService",
+        lambda agent: SimpleNamespace(default_idle_ttl=lambda name: 600, launch=lambda **kwargs: SimpleNamespace(status="denied", reason="not_allowed")),
+    )
+    ran: list[str] = []
+
+    async def scratch(agent, schedule_id):
+        ran.append("scratch")
+        return "scratch sentence"
+
+    async def outputs(agent, schedule_id):
+        ran.append("outputs")
+        return "outputs sentence"
+
+    monkeypatch.setattr(runtime, "prune_scratch_for_maintenance", scratch)
+    monkeypatch.setattr(runtime, "remove_old_outputs_for_maintenance", outputs)
+    manager = _Manager()
+    manager.availability_result = False
+    schedule = prepare_internal_improvement_schedule_for_manager(
+        manager, build_internal_improvement_schedule(_Worker("worker_missing"))
+    )
+    schedule.next_fire_at = "2026-10-28T06:00:00+00:00"
+
+    assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is False
+    assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is False
+    assert ran == ["scratch", "outputs"]
+    assert manager.team_comms.sent == []
+
+    # The next occurrence cleans up again, and its dispatch carries the sentences.
+    manager.availability_result = True
+    schedule.next_fire_at = "2026-10-28T12:00:00+00:00"
+    assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is True
+    assert ran == ["scratch", "outputs", "scratch", "outputs"]
+    problem = manager.team_comms.sent[0][0].msg_content.problem_statement
+    assert "scratch sentence" in problem and "outputs sentence" in problem
+
+
 def _due_maintenance_schedule(manager):
     schedule = build_internal_improvement_schedule(_Worker("worker_signed"))
     assert schedule is not None

@@ -876,6 +876,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "voice.request_timeout_seconds": "Voice HTTP request timeout in seconds.",
     "tool_policy": "Tool settings that are not access (access is given with grants).",
     "tool_policy.scratch_retention_days": "Days a file stays in a scratch/ folder (people's and agents/, including copies of files sent to people) before the internal-improvement maintenance run deletes it; 0 keeps them. Administrators can also change it in Settings > Team; it applies after a restart.",
+    "tool_policy.output_retention_days": "Days saved tool outputs are kept after they were written before the internal-improvement maintenance run deletes them: oversized tool results (state/tool_results), long tool output offloaded from conversations (dbs/conversation_artifacts and their records), research results (research/ in people's folders and agents/) and execution run folders (agents/execution). Conversations, their summaries, task links and completed tasks stay. 0 keeps them; at most 3650. Administrators can also change it in Settings > Team; it applies after a restart.",
     "authorization": "Access checks: agents and people need grants for the tools they use.",
     "authorization.enabled": "Check every agent tool call and broker request against grants; false runs every tool without requests while the sandbox, broker and protected folders still apply.",
     "authorization.cedar_binary_path": "Optional path or command name of the ua-cedar-authorizer access evaluator; null finds it.",

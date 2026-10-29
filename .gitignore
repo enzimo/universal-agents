@@ -58,6 +58,7 @@ LLM_OVERRIDES.yaml
 *.token
 
 # Runtime databases and instance-owned state
+state/output_retention.json
 *.db
 *.db-shm
 *.db-wal

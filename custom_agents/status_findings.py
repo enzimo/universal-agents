@@ -10,6 +10,7 @@ were only in logs or in the agent's own diagnostics.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from custom_agents.mcp_server_tools import LoadFailure, server_loader
@@ -24,7 +25,15 @@ def agent_status_findings(agent: Any) -> list[StatusFindingV1]:
 
     agent_type = str(getattr(agent, "named_agent_type", "") or "agent")
     findings: list[StatusFindingV1] = []
-    for check in (_memory_graph, _skill_catalog, _mcp_servers, _stale_schedules, _stopped_receivers):
+    for check in (
+        _memory_graph,
+        _skill_catalog,
+        _mcp_servers,
+        _stale_schedules,
+        _stopped_receivers,
+        _output_retention_overdue,
+        _output_retention_grace,
+    ):
         try:
             findings.extend(check(agent, agent_type))
         except Exception:  # noqa: BLE001 - a status check never stops the heartbeat that carries it
@@ -129,6 +138,92 @@ def _stale_schedules(agent: Any, agent_type: str) -> list[StatusFindingV1]:
             title=f"{len(findings)} schedule(s) need an administrator",
             summary="\n".join(f"{finding.line()} (owner {finding.schedule.owner_id or 'none'})" for finding in findings),
             action="Delete each one with /delete schedule <schedule_id>, or find out why ending its owner's work failed.",
+            source=agent_type,
+        )
+    ]
+
+
+def _output_retention_overdue(agent: Any, agent_type: str) -> list[StatusFindingV1]:
+    """The saved tool output cleanup has not succeeded for two days (only the team lead runs it).
+
+    It runs before each internal-improvement maintenance run and records
+    each run (``custom_agents.output_retention.write_run_record``); a schedule
+    that is off or paused, or a cleanup that keeps failing, shows here.
+    """
+
+    from custom_agents.output_retention import RETENTION_SETTING, overdue_since, read_run_record, retention_days_of
+    from custom_tools.workspace_scope import current_instance_layout
+
+    if not bool(getattr(agent, "is_team_lead", False)):
+        return []
+    days = retention_days_of(agent)
+    layout = current_instance_layout(agent)
+    if days <= 0 or layout is None:
+        return []
+    record = read_run_record(layout.output_retention_record_path)
+    since = overdue_since(record)
+    if since is None:
+        return []
+    when = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    last = f"last succeeded at {when}" if record.get("last_success_at") else f"has not succeeded since {when}"
+    return [
+        StatusFindingV1(
+            finding_id="output_retention_overdue",
+            severity=StatusSeverity.WARNING,
+            title="Old saved tool outputs are not being deleted",
+            summary=(
+                f"The cleanup that deletes saved tool outputs older than {days} days ({RETENTION_SETTING}) "
+                f"runs before each internal-improvement maintenance run; it {last}."
+            ),
+            action=(
+                "Check that the internal-improvement maintenance schedule is on and not paused "
+                "(agent.schedule_maintenance.internal_improvement_review_interval_seconds above 0), and look for "
+                "event=output_retention_failed in the manager log."
+            ),
+            source=agent_type,
+        )
+    ]
+
+
+def _output_retention_grace(agent: Any, agent_type: str) -> list[StatusFindingV1]:
+    """During the grace period: when deletion starts and what the latest dry run found.
+
+    Shown while the latest run was a dry run; it clears with the first run
+    that deletes (``custom_agents.output_retention.remove_old_outputs_and_record``).
+    """
+
+    from custom_agents.output_retention import read_run_record, retention_days_of, size_text
+    from custom_tools.workspace_scope import current_instance_layout
+
+    if not bool(getattr(agent, "is_team_lead", False)) or retention_days_of(agent) <= 0:
+        return []
+    layout = current_instance_layout(agent)
+    record = read_run_record(layout.output_retention_record_path) if layout is not None else {}
+    if not record.get("dry_run") or not record.get("deletes_from"):
+        return []
+    deletes_from = datetime.fromisoformat(str(record["deletes_from"])).strftime("%Y-%m-%d %H:%M UTC")
+    kinds = record.get("kinds") or {}
+    items = sum(int(kind.get("items") or 0) for kind in kinds.values())
+    size = sum(int(kind.get("bytes") or 0) for kind in kinds.values())
+    found = "; ".join(
+        f"{name.replace('_', ' ')}: {kind.get('items', 0)} items, {kind.get('files', 0)} files, "
+        f"{size_text(int(kind.get('bytes') or 0))}"
+        for name, kind in sorted(kinds.items())
+    )
+    return [
+        StatusFindingV1(
+            finding_id="output_retention_grace_period",
+            severity=StatusSeverity.NOTE,
+            title=f"Old saved tool outputs will be deleted from {deletes_from}",
+            summary=(
+                f"Saved tool outputs older than {record.get('retention_days')} days: about {items} items "
+                f"({size_text(size)}) at the latest maintenance run ({found}). Nothing is deleted before that date; "
+                "chat transcripts, task links, summaries and completed tasks are always kept."
+            ),
+            action=(
+                "Keep the default, change the number of days in Settings → Team → File Retention, or set it to 0 "
+                "to keep everything. A change applies after the next restart."
+            ),
             source=agent_type,
         )
     ]

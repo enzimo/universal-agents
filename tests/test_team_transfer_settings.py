@@ -148,15 +148,20 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-def test_a_version_5_export_keeps_its_values_and_the_new_setting_keeps_its_default(
-    tmp_path: Path,
+@pytest.mark.parametrize("exported_version", [5, 6])
+def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
+    tmp_path: Path, exported_version: int
 ) -> None:
-    """Version 6 added agent.request_conflict_checks; a version 5 export (v0.9.4 to v0.9.6) imports unchanged."""
+    """Version 6 added agent.request_conflict_checks and version 7 tool_policy.output_retention_days.
+
+    A version 5 export (v0.9.4 to v0.9.6) and a version 6 export (v0.9.8)
+    import unchanged.
+    """
 
     from assistant_gateway.config import GatewayInstanceConfig
 
-    class ExportedAsVersion5(SettingsSection):
-        schema_version = 5
+    class ExportedAsPreviousVersion(SettingsSection):
+        schema_version = exported_version
 
         def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
             records = [
@@ -166,7 +171,7 @@ def test_a_version_5_export_keeps_its_values_and_the_new_setting_keeps_its_defau
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
-    out = _export(tmp_path, path, ExportedAsVersion5())
+    out = _export(tmp_path, path, ExportedAsPreviousVersion())
     target = tmp_path / "new"
 
     plan = _import(out, target, dry_run=False)
@@ -178,6 +183,7 @@ def test_a_version_5_export_keeps_its_values_and_the_new_setting_keeps_its_defau
     assert imported.heartbeat.enabled is False
     assert imported.agent.max_queued_top_level_tasks == 22
     assert imported.agent.request_conflict_checks is True
+    assert imported.tool_policy.output_retention_days == 90
 
 
 def test_a_path_outside_the_instance_that_this_host_lacks_needs_attention(tmp_path: Path) -> None:

@@ -106,6 +106,7 @@ from custom_agents.memory_graph_embedding_profile_runtime import (
 )
 from custom_agents.memory_review_runtime import memory_review_notification_instruction
 from custom_agents.memory_plugins.manager import MemoryPluginManager
+from runtime_settings.governance import MAX_RETENTION_DAYS
 from runtime_settings.memory import MemoryConfig
 from custom_agents.automation_runtime import handle_automation_message
 from custom_agents.agent_instructions import MESSAGE_FILL_NAME
@@ -122,6 +123,7 @@ from custom_agents.conversation_summary import (
     build_conversation_summary_generator,
 )
 from custom_agents.memory_review_store import MemoryReviewStore
+from custom_agents.output_retention import SavedOutputRetention
 from custom_agents.internal_improvement_runtime import (
     publish_internal_improvement_schedule_ensure,
 )
@@ -729,6 +731,16 @@ class UniversalAgent(BaseModel):
         description=(
             "``tool_policy.scratch_retention_days``: the manager deletes older files from scratch/ folders "
             "when the internal-improvement maintenance schedule fires (custom_agents.scratch_retention); 0 keeps them."
+        ),
+    )
+    output_retention_days: int = Field(
+        default=TOOL_POLICY_DEFAULTS.output_retention_days.value,
+        ge=0,
+        le=MAX_RETENTION_DAYS,
+        description=(
+            "``tool_policy.output_retention_days``: the manager deletes saved tool outputs written longer ago "
+            "when the internal-improvement maintenance schedule fires, and the tools that read them say an "
+            "output was deleted under this period (custom_agents.output_retention); 0 keeps them."
         ),
     )
     llm_override_path: Optional[str] = Field(
@@ -1472,6 +1484,7 @@ class UniversalAgent(BaseModel):
                 openai_codex=self.openai_codex,
                 xai_oauth=self.xai_oauth,
                 instance_root=infer_instance_root(self),
+                saved_outputs=SavedOutputRetention.for_agent(self),
             ),
             logger=self._logger,
         )
@@ -1608,6 +1621,7 @@ class UniversalAgent(BaseModel):
             is_team_lead=self.is_team_lead,
             instance_config_path=self.instance_config_path,
             memory_plugin_manager=memory_plugin_manager,
+            saved_outputs=SavedOutputRetention.for_agent(self),
             adapters=ContextEngineAdapters(
                 build_request_time_context=lambda meta: build_request_time_context(
                     meta,
@@ -3415,6 +3429,7 @@ class UniversalAgent(BaseModel):
                 openai_codex=self.openai_codex,
                 xai_oauth=self.xai_oauth,
                 instance_root=infer_instance_root(self),
+                saved_outputs=SavedOutputRetention.for_agent(self),
             ),
             logger=self._logger,
         )

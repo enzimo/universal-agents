@@ -182,6 +182,26 @@ def test_instance_authorization_settings_reach_agent_runtime(
     }
 
 
+@pytest.mark.parametrize("agent_type", ["TeamArchitect", "InternalImprovementAgent"])
+def test_instance_retention_settings_reach_every_agent(tmp_path: Path, agent_type: str) -> None:
+    """The manager deletes with them; every agent's readers of saved outputs use the output period."""
+
+    config = _make_config(tmp_path)
+    config.tool_policy.scratch_retention_days = 7
+    config.tool_policy.output_retention_days = 30
+    runtime_config = _build_runtime_config_from_instance_config(config)
+
+    resolved = resolve_agent_type_settings(runtime_config, agent_type)
+
+    assert (resolved["scratch_retention_days"], resolved["output_retention_days"]) == (7, 30)
+
+
+def test_new_instances_keep_saved_tool_outputs_ninety_days(tmp_path: Path) -> None:
+    resolved = resolve_agent_type_settings(_build_runtime_config_from_instance_config(_make_config(tmp_path)), "TeamArchitect")
+
+    assert resolved["output_retention_days"] == 90
+
+
 def test_instance_yaml_drops_a_null_agent_types_section() -> None:
     assert "agent_types" not in yaml.safe_load(dump_instance_config_yaml({"agent_types": None}))
 

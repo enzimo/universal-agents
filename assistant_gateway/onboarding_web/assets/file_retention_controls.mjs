@@ -1,12 +1,13 @@
 /**
- * Settings > Team > File Retention: how long the team keeps chat uploads and
- * scratch files (assistant_gateway.file_retention).
+ * Settings > Team > File Retention: how long the team keeps chat uploads,
+ * scratch files and saved tool outputs (assistant_gateway.file_retention).
  *
  * Every signed-in member sees the numbers. The form appears only when the
  * gateway says this person may change them (`can_change`, from their current
  * roles), never from client state. Chat uploads follow a change at the
- * gateway's next cleanup, within six hours; the manager reads scratch
- * retention when it starts, so that number applies after the next restart.
+ * gateway's next cleanup, within six hours; the manager reads scratch and
+ * saved tool output retention when it starts, so those numbers apply after
+ * the next restart.
  *
  * All server text is set with textContent, never as HTML.
  */
@@ -15,12 +16,16 @@ import { element, failureMessage, setStatusLine, text } from "./settings_support
 
 export const FILE_RETENTION_API = "/api/web-chat/file-retention";
 export const FILE_RETENTION_TITLE = "File Retention";
-export const FILE_RETENTION_INTRO = "How long the team keeps files people send in chat, and the temporary "
-  + "files agents leave in scratch folders (which include copies of files sent to people). "
-  + "Older files are deleted. 0 keeps them forever.";
+export const FILE_RETENTION_INTRO = "How long the team keeps files people send in chat, the temporary "
+  + "files agents leave in scratch folders (which include copies of files sent to people), and the "
+  + "tool outputs agents save while they work. Older files are deleted; conversations themselves are kept. "
+  + "0 keeps them forever.";
 export const FILE_RETENTION_ADMIN_ONLY = "Only administrators change how long files are kept.";
 export const FILE_RETENTION_SAVED = "Saved. Chat uploads follow the new number at the next cleanup, "
-  + "within six hours. Scratch files follow it after the next restart.";
+  + "within six hours. Scratch files and saved tool outputs follow it after the next restart.";
+export const SAVED_OUTPUTS_HELP = "Large tool results, long tool output from conversations, research results "
+  + "and run folders. Applies after the next restart. Lowering the number deletes the older outputs at the next "
+  + "maintenance run; when it is first turned on, nothing is deleted for 7 days.";
 const LOAD_FAILED = "File retention could not be loaded because the gateway returned no explanation. "
   + "Select Refresh to try again.";
 const SAVE_FAILED = "File retention was not saved. Check the numbers and try again.";
@@ -95,6 +100,7 @@ export function createFileRetentionControls({ container, client, browser = globa
     rows.append(
       element(document, "dt", "", "Chat uploads"), element(document, "dd", "", retentionText(payload.upload_days)),
       element(document, "dt", "", "Scratch files"), element(document, "dd", "", retentionText(payload.scratch_days)),
+      element(document, "dt", "", "Saved tool outputs"), element(document, "dd", "", retentionText(payload.output_days)),
     );
     return [rows, element(document, "p", "settings-subsection-copy", FILE_RETENTION_ADMIN_ONLY)];
   }
@@ -105,6 +111,7 @@ export function createFileRetentionControls({ container, client, browser = globa
     node.setAttribute("aria-label", "File retention");
     const uploads = daysInput(document, payload.upload_days, max);
     const scratch = daysInput(document, payload.scratch_days, max);
+    const outputs = daysInput(document, payload.output_days, max);
     const group = element(document, "div", "permission-choice-row file-retention-actions");
     const submit = element(document, "button", "button primary permission-choice-button", "Save");
     submit.type = "submit";
@@ -112,13 +119,20 @@ export function createFileRetentionControls({ container, client, browser = globa
     node.append(
       labeledField(document, "Days to keep chat uploads", uploads, "Files people send in any chat app."),
       labeledField(document, "Days to keep scratch files", scratch, "Applies after the next restart."),
+      labeledField(document, "Days to keep saved tool outputs", outputs, SAVED_OUTPUTS_HELP),
       group,
     );
     node.addEventListener("submit", event => {
       if (event && typeof event.preventDefault === "function") event.preventDefault();
       if (submit.disabled) return;
-      const values = { upload_days: parsedDays(uploads.value, max), scratch_days: parsedDays(scratch.value, max) };
-      const wrong = values.upload_days === null ? uploads : values.scratch_days === null ? scratch : null;
+      const values = {
+        upload_days: parsedDays(uploads.value, max),
+        scratch_days: parsedDays(scratch.value, max),
+        output_days: parsedDays(outputs.value, max),
+      };
+      const wrong = values.upload_days === null ? uploads
+        : values.scratch_days === null ? scratch
+          : values.output_days === null ? outputs : null;
       if (wrong) {
         setStatus(`Enter a whole number of days from 0 (keep forever) to ${max}. Nothing was saved.`, true);
         wrong.focus();

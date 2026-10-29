@@ -563,6 +563,7 @@ def send_runtime_notice_once(
     summary: str,
     person_id: str | None = None,
     roles: tuple[str, ...] = (),
+    raise_on_error: bool = False,
 ) -> bool:
     """Store an Inbox notice from trusted runtime code once per ``notice_id``, in both authorization modes.
 
@@ -571,7 +572,9 @@ def send_runtime_notice_once(
     on; the Inbox shows notices in both modes. Unlike ``send_access_notice``,
     the caller derives ``notice_id`` from what it reports, so the same report
     from several agents or from every maintenance run reaches people once.
-    Returns True when stored; a failure is logged and returns False.
+    Returns True for a newly stored notice, False if it already exists. A
+    storage failure is logged and returns False unless ``raise_on_error``:
+    use that when subsequent work requires the notice to have been stored.
     """
 
     from datetime import datetime, timezone
@@ -589,10 +592,12 @@ def send_runtime_notice_once(
                 created_at_utc=datetime.now(timezone.utc),
             )
         )
-    except Exception:  # noqa: BLE001 - a notice informs; failing to store it never stops the work it reports
+    except Exception:  # noqa: BLE001 - best effort unless the caller requires durable notification
         logger.exception(
             "Could not store a runtime notice. event=runtime_notice_failed kind=%s notice_id=%s", kind.value, notice_id
         )
+        if raise_on_error:
+            raise
         return False
     if stored:
         logger.info("Stored a runtime notice. event=runtime_notice_stored kind=%s notice_id=%s", kind.value, notice_id)

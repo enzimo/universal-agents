@@ -661,6 +661,7 @@ authorization:                                  # Access checks: agents and the 
 # /access folders add <name> <path> or assistant_cli access folders add, not here.
 tool_policy:                                    # Tool settings that are not access; access is given with grants.
   scratch_retention_days: 21                    # Days a file stays in a scratch/ folder (each person's scratch/, which also holds the copies of files sent to them, and agents/scratch/) before the maintenance run deletes it; 0 keeps them. Administrators can also change it in Settings > Team; it applies after a restart.
+  output_retention_days: 90                     # Days saved tool outputs are kept after they were written (oversized tool results, long tool output offloaded from conversations, research results, execution run folders) before the maintenance run deletes them; conversations and their summaries stay. 0 keeps them; at most 3650. Administrators can also change it in Settings > Team; it applies after a restart.
 
 # Credential-owning secure tool broker / OpenShell integration. The broker always runs:
 # every credentialed tool call (web research, GitHub, Google, Hugging Face, X, MCP servers) goes through it.

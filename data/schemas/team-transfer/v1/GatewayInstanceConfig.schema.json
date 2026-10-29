@@ -4088,6 +4088,13 @@
     "ToolPolicySettings": {
       "description": "Tool settings that are not access (access is given with grants).",
       "properties": {
+        "output_retention_days": {
+          "default": 90,
+          "maximum": 3650,
+          "minimum": 0,
+          "title": "Output Retention Days",
+          "type": "integer"
+        },
         "scratch_retention_days": {
           "default": 21,
           "minimum": 0,

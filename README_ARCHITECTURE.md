@@ -1421,9 +1421,76 @@ internal-improvement maintenance schedule fires, trusted code in the manager
 deletes files there older than `tool_policy.scratch_retention_days` (21 by
 default, 0 turns it off) from every person's and the agents' `scratch/`,
 walking folders without following links, and gives InternalImprovementAgent
-the counts (`custom_agents/scratch_retention.py`). The maintenance run itself
-is system work for no person and cannot open people's folders, which is why
-trusted code does this part. The run may use the shared `team/` and `agents/`
+the counts (`custom_agents/scratch_retention.py`).
+
+In the same step it deletes saved tool outputs written longer ago than
+`tool_policy.output_retention_days` (90 by default, 0 turns it off;
+`custom_agents/output_retention.py`). One period covers four kinds, all
+copies of what a tool returned that the tool can produce again: oversized tool
+results in `state/tool_results/` (a folder per result, `manifest.json`
+deleted first), long tool output offloaded from conversations (each
+`conversation_artifacts` record with its file in `dbs/conversation_artifacts/`,
+the record first, then any older file no record names), research result
+folders in `research/` of every person's folder and `agents/`, and execution
+run and Rust build folders in `agents/execution/`. A tool result's age is the
+UTC time its folder name starts with, else its manifest's `created_at`, else
+its last change; a conversation artifact's is its record's `created_at`. In
+`research/`, which people also use for their own folders, only folders named
+with the complete generated name (`<stamp>_<labels>_<12 hex>`) are deleted,
+aged by that stamp. A date prefix alone cannot identify a tool result; unmatched or
+future-dated folders and loose files stay, and a task folder goes only when
+the run emptied it.
+Run and build folders are never deleted younger than two days (no run or
+build lasts more than one), and a build folder only while the cleanup holds
+its build lock, after checking the folder's age again under the lock (a build
+may have finished meanwhile). The lock file is deleted after everything else,
+so a build arriving meanwhile waits on it rather than writing into a folder
+being emptied; a build that waited finds its lock file gone and starts over
+in a new folder (`runtime_hosting/builds.py`). If an abandoned build has no
+lock, a real pass creates one and leaves the now-recent folder for a later
+pass; a dry run leaves it unchanged. No build is deleted without its lock.
+Each kind runs on
+its own, so one failure is logged (`event=output_retention_failed`) and
+reported while the others still run, and the run's instructions carry the
+items, files and bytes deleted per kind, which the run records. Both trusted
+clean-ups run before the check that a maintenance worker is available, so a
+worker that cannot start never skips them, and once per occurrence, because
+the scheduler retries such an occurrence every 30 seconds. The manager keeps a
+record of each saved-output run (`state/output_retention.json`: time, last
+success, per kind items, files, bytes and failures), started at manager start;
+from it the manager's status heartbeat reports a Status page warning
+(`output_retention_overdue`) when no run succeeded for two days. Filesystem
+permission errors and depth limits make a run incomplete and preserve its
+previous success time; expected skips such as links and busy builds do not.
+Tool-result manifest reads reject pipes before reading, so malformed outputs
+cannot block the maintenance scheduler. The record
+also keeps when retention became active (`active_since`): the first run with
+a period above 0 when it was not active (a new installation or upgrade, or a
+change from 0), after its administrator Inbox notice has been stored. If
+notice storage fails, no activation is recorded and the next successful
+attempt starts a full seven days. For 7 days after that every run is a dry run: the same walks
+with `OldFilesRemoved.dry_run` set count the items, files and bytes they
+would delete and delete nothing (conversation artifact records are counted,
+not deleted). Administrators get one Inbox notice per grace period
+(`AccessNoticeKind.SAVED_OUTPUT_RETENTION`, the first dry run's counts, the
+date, the reason and their options), and the Status page shows a note
+(`output_retention_grace_period`) with the latest counts until the first
+deleting run. A restart keeps `active_since`; a period of 0, at a run or at
+manager start, clears it, so turning retention on again starts a new grace
+period. Shortening an active period applies at once. The clean-ups
+exist only with the maintenance schedule: with its interval at 0 it is never
+installed, which the manager logs at start (`event=retention_cleanup_off`). The manager
+does this because the outputs sit in `state/`, `dbs/` and people's folders,
+which the maintenance run cannot open; it is the side that writes all four.
+Conversations (transcripts, task links, turn and context summaries) and
+completed tasks are never deleted by it. The content-addressed execution
+artifacts in `state/execution_artifacts/` are left alone: one stored object can
+serve many owners' execution records, which are kept, and deleting one a
+record still names breaks every later read of it. Deleting them needs a
+retention period for those records and a record of which objects they name.
+
+The maintenance run itself is system work for no person and cannot open
+people's folders, which is why trusted code does the clean-ups. The run may use the shared `team/` and `agents/`
 folders, sandboxed code there, the memory-review cleanup tools and model
 lookup, and it may read and record only its own schedule
 (`access_control/ownership.py`, `system_work_schedule_access`): people's
@@ -2119,9 +2186,14 @@ grants they gave, personal account links with their stored credentials,
 their GitHub, Google and X sign-ins and the broker's credentials folder for
 them, requests, notices and sandbox; their folder, personal memory, own knowledge pages and conversations
 are held out of every agent's reach for `gateway.users.removed_data_retention_days`
-(the folder under `state/held_people/`, the rows in `person_held_rows`) and
-then purged by a maintenance run, unless `/user restore` (or adding them back
-the usual way while held) brings them back. The gateway does its part after the
+(the folder under `state/held_people/`, the rows in `person_held_rows`, and
+the files of their conversations' offloaded long tool output in place in
+`dbs/conversation_artifacts/`) and then purged by a maintenance run, or by the
+gateway when it removes them again after an expired hold, unless
+`/user restore` (or adding them back the usual way while held) brings them
+back. Both purges, and the immediate deletion of rows held after a purge
+(work that finished late), delete those files before the held rows that name
+them (`access_control/held_person_folders.py`, `purge_held_artifact_files`). The gateway does its part after the
 identity change commits (`assistant_gateway/application/person_lifecycle.py`,
 `assistant_gateway/person_departure.py`) and sends the manager a typed
 `PersonStandingCommandV1`, which only a gateway-signed administrator context
@@ -2984,13 +3056,16 @@ it deletes every file in `state/uploads` older than the cutoff, which also
 removes files left without a record, and the folders left empty. It shares the
 link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
 gateway is the only writer of `state/uploads`; agents work on their own copies.
-Administrators change both retention numbers in Settings → Team → File
-Retention (`assistant_gateway/file_retention.py`). That is a `runtime_settings`
+Administrators change the three retention numbers (chat uploads, scratch
+files, saved tool outputs) in Settings → Team → File Retention
+(`assistant_gateway/file_retention.py`). That is a `runtime_settings`
 change in the gateway's own controls, so `PersonChangeCheck` decides who may.
-The save changes only those two fields of `instance_config.yaml`, keeps a
+The save changes only those three fields of `instance_config.yaml`, keeps a
 backup as the configuration editor does, and is refused when the file changed
-meanwhile. Upload retention applies from the next cleanup; scratch retention
-applies after a restart, because the manager reads its settings when it starts.
+meanwhile. Upload retention applies from the next cleanup; scratch and saved
+output retention apply after a restart, because the manager reads its
+settings when it starts. The team transfer's settings section is version 7
+for `tool_policy.output_retention_days`.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
@@ -3177,6 +3252,20 @@ and the inner-loop context manager,
 folder with `manifest.json` naming its agent, team and task, because
 `state/tool_results` is outside every agent folder and
 `inspect_tool_result_artifact` is the only way an agent reads it back.
+Saved results, research results and offloaded conversation outputs are
+deleted after `tool_policy.output_retention_days`
+(`custom_agents/output_retention.py`). Their readers never retry or make up a
+deleted one, and call an output deleted only when the retention deleted it:
+the two inspection tools answer `deleted_by_retention` with `retryable: false`
+and a plain note when the result folder's name dates it before the period and
+the folder is gone (a file missing from a folder that still exists is an
+ordinary "not found"); the thread renderer, the compactors and the
+conversation tools show that note in place of a stored path only when the
+period is above 0, the path is absolute and inside `state/tool_results/` or
+`dbs/conversation_artifacts/`, its `created_at`, when known, is before the
+cutoff, and nothing is there any more (`SavedOutputRetention`,
+`with_deleted_outputs_marked`). Relative paths, placeholders, URLs, paths an
+LLM summary reworded and older layouts are shown as stored.
 Projected context pressure shrinks only results the model has already read; a
 result it has not read yet (a staged change id, for example) is shrunk only
 after the provider actually rejects the request, and then after older ones.

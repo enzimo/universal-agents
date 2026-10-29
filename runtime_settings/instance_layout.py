@@ -18,6 +18,8 @@ Docker). The root is split by who may touch each area:
     file), model failover state, diagnostics, execution artifacts, and the
     folders of people removed from the team, held until they are restored or
     purged (``held_people/``, ``access_control.held_person_folders``).
+    Trusted maintenance deletes old offloaded tool results here, and old
+    conversation artifacts in ``dbs/`` (``custom_agents.output_retention``).
 ``workspaces/``
     The only area agents work in:
 
@@ -26,10 +28,13 @@ Docker). The root is split by who may touch each area:
       files, Python environments, uploads copied in for processing, published
       pages (``sites/``) and temporary files (``scratch/``, including the
       gateway's copies of files sent to the person in ``scratch/sent/``).
-      Trusted maintenance deletes old files from ``scratch/``.
+      Trusted maintenance deletes old files from ``scratch/`` and old result
+      folders from ``research/``.
     - ``team/`` is shared by everyone on the team, people and agents.
     - ``agents/`` is shared by the team's agents and is the working folder of
-      tasks that run for no person (system maintenance).
+      tasks that run for no person (system maintenance). Execution control's
+      run and build folders are in ``agents/execution``; trusted maintenance
+      deletes old ones.
 
 Operator files (``instance_config.yaml``, ``team.env``), broker credentials,
 ``auth/`` and ``runtime/`` stay directly under the root, outside every area an
@@ -89,8 +94,9 @@ GENERATED_AGENT_BUNDLES_DIRNAME = "team_lead_generated"
 SKILLS_DIRNAME = "skills"
 OBJECTIVE_PROFILES_DIRNAME = "objective_execution_profiles"
 TASK_DATABASE_FILENAME = "task_history.db"
-# Long texts offloaded from conversation turns; each file belongs to a row of the
-# task database (its full path is stored there), so it lives beside it in dbs/.
+# Long tool output offloaded from conversation turns (not chat messages); each
+# file belongs to a row of the task database (its full path is stored there),
+# so it lives beside it in dbs/.
 CONVERSATION_ARTIFACTS_DIRNAME = "conversation_artifacts"
 # Operator secrets file, used when launch.secrets_source is env_file.
 TEAM_ENV_FILENAME = "team.env"
@@ -133,6 +139,8 @@ XAI_OAUTH_AUTH_FILENAME = "xai_oauth_auth.json"
 HELD_PEOPLE_DIRNAME = "held_people"
 # Keys typed during onboarding until the gateway hands them to the broker.
 ONBOARDING_ACCOUNT_KEYS_FILENAME = "onboarding_account_keys.json"
+# What the latest saved tool output cleanup did (custom_agents.output_retention).
+OUTPUT_RETENTION_RECORD_FILENAME = "output_retention.json"
 
 PERSON_UPLOADS_DIRNAME = "uploads"
 PERSON_RESEARCH_DIRNAME = "research"
@@ -144,6 +152,10 @@ SCRATCH_DIRNAME = "scratch"
 SCRATCH_SENT_DIRNAME = "sent"
 # Pages published for a person (publish_single_page_site), one folder per site.
 PERSON_SITES_DIRNAME = "sites"
+# Run and build folders of execution control, in agents/ (execution_runs_dir).
+EXECUTION_DIRNAME = "execution"
+# Content-addressed Rust build folders inside the execution folder.
+EXECUTION_RUST_BUILDS_DIRNAME = "rust-builds"
 
 # The one legacy location: every file used to sit in <root>/workspace.
 LEGACY_WORKSPACE_DIRNAME = "workspace"
@@ -472,7 +484,7 @@ class InstanceLayout:
 
     @property
     def conversation_artifacts_dir(self) -> Path:
-        """Long texts offloaded from conversation turns, whatever the storage backend."""
+        """Long tool output offloaded from conversation turns, whatever the storage backend."""
 
         return self.dbs_dir / CONVERSATION_ARTIFACTS_DIRNAME
 
@@ -496,6 +508,16 @@ class InstanceLayout:
         return self.state_dir / "diagnostics"
 
     @property
+    def output_retention_record_path(self) -> Path:
+        """When the saved tool output cleanup last ran and what it deleted per kind.
+
+        Written by the manager after each run (``custom_agents.output_retention``)
+        and read for the Status page, which warns when no run succeeded for two days.
+        """
+
+        return self.state_dir / OUTPUT_RETENTION_RECORD_FILENAME
+
+    @property
     def execution_artifacts_dir(self) -> Path:
         """Content-addressed execution artifacts; verified by hash on every read."""
 
@@ -506,7 +528,13 @@ class InstanceLayout:
         """Run and build folders. OpenShell sandboxes mount workspaces/, so these
         must sit inside it; they hold materialized copies of verified artifacts."""
 
-        return self.agents_dir / "execution"
+        return self.agents_dir / EXECUTION_DIRNAME
+
+    @property
+    def execution_rust_builds_dir(self) -> Path:
+        """Content-addressed Rust build folders (``runtime_hosting.builds``)."""
+
+        return self.execution_runs_dir / EXECUTION_RUST_BUILDS_DIRNAME
 
     @property
     def uploads_dir(self) -> Path:
