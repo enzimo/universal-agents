@@ -65,7 +65,7 @@ from custom_messages.contracts.envelope_v1 import (
     ContentType,
     MessageEnvelope,
 )
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_HELD_BACK
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task, TaskQuery
@@ -516,7 +516,7 @@ async def _notify_user_delegated_work_started(
     gateway_context = getattr(parent_info.meta, "gateway_context", None)
     if (
         str(getattr(gateway_context, "delivery_mode", "") or "").strip().lower()
-        != "interactive"
+        != DELIVERY_MODE_INTERACTIVE
     ):
         return False
     if await _delegation_wait_notification_already_sent(self, parent_task_id):

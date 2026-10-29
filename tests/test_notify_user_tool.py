@@ -19,7 +19,8 @@ from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage, ScheduleTaskMemory
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
-from custom_tools.runtime_context import _agent_ctx, get_agent_ref, set_agent_ref
+from custom_tools.runtime_context import _agent_ctx, get_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.providers.communication import notify_user
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
@@ -99,6 +100,7 @@ def _fake_agent(
         workspace_dir=str(config_path.parent / "workspaces"),
         task_manager=task_manager,
         team_comms=team_comms or SimpleNamespace(send_message=AsyncMock()),
+        test_task_id="task_1",  # notify_user runs in this task's turn
     )
 
 

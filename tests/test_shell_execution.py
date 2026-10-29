@@ -21,7 +21,7 @@ from custom_tools.non_interactive_shell import (
 from custom_agents.code_access import REASON_NO_AGENT, embedded_commands
 from custom_tools.path_policy import WORKSPACE_PATH_DENIED, PathPolicyError
 from runtime_hosting.process_run import PROCESS_RUN_ID_ENV
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 from custom_tools.shell_execution import (
     ProcessRequest,

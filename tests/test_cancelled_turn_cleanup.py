@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_tools.runtime_context import task_work
+from tests.task_work_support import TurnHost
 from custom_agents.control_runtime import _interrupt_active_execution
 from custom_agents.pending_work_runtime import close_pending_work
 from custom_agents.sdk.strands.turn_tool_stop import TASK_STOPPED_REASON
@@ -56,9 +58,8 @@ def background_command():
 def prepared_turn(background_command):
     """Use the production turn executor and active-execution bookkeeping."""
 
-    host = SimpleNamespace(
-        id="independent", _active_execution_task=None, _active_execution_task_id=None,
-        _active_tool_stop=None, _logger=LOGGER, _should_exit=asyncio.Event(),
+    host = TurnHost(
+        id="independent", _logger=LOGGER, _should_exit=asyncio.Event(),
         _pending_work_task=None, _pending_work_timers=set(), _owned_tasks=set(),
     )
     children = []
@@ -84,10 +85,16 @@ async def stop(host):
 
 
 def start_turn(executor):
-    return asyncio.create_task(executor.process_llm_interaction(
-        Task(task_id="task", task_type=MessageMetaType.REQUEST, problem_statement="run"),
-        MessageHeader(), MessageMeta(),
-    ))
+    with task_work("task"):  # the turn's task copies this binding when it is created
+        return asyncio.create_task(executor.process_llm_interaction(
+            Task(task_id="task", task_type=MessageMetaType.REQUEST, problem_statement="run"),
+            MessageHeader(), MessageMeta(),
+        ))
+
+
+def running_stop(host):
+    [work] = host.running_turn_works()
+    return work.tool_stop
 
 
 @pytest.mark.asyncio
@@ -108,12 +115,12 @@ async def test_stop_during_error_handling_ends_the_turns_background_command(back
     running = start_turn(executor)
     try:
         await asyncio.wait_for(in_error_handler.wait(), 5)
-        assert host._active_tool_stop.running() == ()
+        assert running_stop(host).running() == ()
 
         await stop(host)
 
         assert not process_alive(children[0].pid)
-        assert host._active_tool_stop is None
+        assert host.running_turn_works() == []
         with pytest.raises(asyncio.CancelledError):
             await running
     finally:
@@ -139,7 +146,7 @@ async def test_repeated_cancellation_waits_for_forced_termination(background_com
     stopping = None
     try:
         await asyncio.wait_for(in_post_processing.wait(), 5)
-        tool_stop = host._active_tool_stop
+        tool_stop = running_stop(host)
         signal_groups = tool_stop.signal_process_groups
 
         def record_signal(sig):
@@ -163,7 +170,7 @@ async def test_repeated_cancellation_waits_for_forced_termination(background_com
         assert not process_alive(children[0].pid)
         assert signals == [signal.SIGTERM, signal.SIGKILL]
         assert tool_stop.reason == TASK_STOPPED_REASON
-        assert host._active_tool_stop is None
+        assert host.running_turn_works() == []
         with pytest.raises(asyncio.CancelledError):
             await running
     finally:

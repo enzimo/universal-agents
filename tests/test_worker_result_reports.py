@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from tests.task_work_support import bind_task
 from custom_agents.structured_llm_messages import (
     WORKER_RESULT_REQUIRES_RESPONSE,
     ModelWorkerTurnDecision,
@@ -209,6 +210,7 @@ async def test_report_terminal_state_keeps_its_original_signed_request_open(tmp_
         task_manager=lead, knowledge_config={}, _knowledge_repository=create_knowledge_repository(lead.storage_settings),
     )
     lead.task_state.current_in_progress_task_id = "request"
+    bind_task(lead.task_state.current_in_progress_task_id)
     saved = knowledge_service(facade).write(knowledge_actor(facade), "personal/notes", DraftInput(title="Notes", body="Still running."))
     assert saved.page.revision == 1
     lead.complete_task("request", datetime.now(timezone.utc).isoformat())

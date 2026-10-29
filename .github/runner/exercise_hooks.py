@@ -19,7 +19,10 @@ def main():
     source = Path(__file__).resolve().parent
     original_env = os.environ.copy()
     original_cwd = Path.cwd()
-    root = Path(tempfile.mkdtemp(prefix="ua-ci-hook-test-"))
+    # macOS's per-user temporary path can exceed its Unix socket path limit.
+    root = Path(tempfile.mkdtemp(
+        prefix="ua-ci-hook-test-", dir="/tmp" if sys.platform == "darwin" else None,
+    ))
     try:
         runner = root / "runner"
         work = runner / "_work"
@@ -43,6 +46,8 @@ def main():
                 str(destination),
                 "--repository",
                 "enzimo/universal-agents-desktop",
+                "--public-repository",
+                "enzimo/universal-agents-desktop",
             ]
             + reserve_args,
             check=True,
@@ -52,12 +57,15 @@ def main():
             os.environ[key] = value
         workspace = work / "universal-agents-desktop" / "universal-agents-desktop"
         event = root / "event.json"
-        event.write_text(json.dumps({"repository": {"private": True}}))
+        event.write_text(json.dumps({"repository": {
+            "private": False, "full_name": "enzimo/universal-agents-desktop",
+        }}))
         env_file = root / "env"
         path_file = root / "path"
         os.environ.update(
             {
                 "GITHUB_REPOSITORY": "enzimo/universal-agents-desktop",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
                 "GITHUB_WORKSPACE": str(workspace),
                 "GITHUB_EVENT_PATH": str(event),
                 "GITHUB_RUN_ID": "1",
@@ -84,7 +92,9 @@ def main():
             )
             subprocess.run(
                 ["rtk", "proxy", *command], check=True, timeout=240,
-                cwd=workspace if workspace.exists() else root,
+                # Windows keeps the RTK parent's working directory open even
+                # after the PowerShell wrapper moves its own directory.
+                cwd=root,
             )
 
         try:

@@ -51,6 +51,7 @@ async def test_runtime_shutdown_propagates_cancellation_without_cancelling_durab
     agent = SimpleNamespace(
         task_manager=manager,
         is_executing=False,
+        main_lane_busy=False,  # the main lane (runtime_hosting.agent_execution)
         paused=False,
         _logger=logging.getLogger(__name__),
         _refresh_self_agent_state=AsyncMock(),

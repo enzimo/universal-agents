@@ -27,7 +27,7 @@ from custom_messages.records.plans import PlanRecord
 from custom_messages.enums import ScheduleManagementClass
 from custom_tools.providers.objective_work import objective_work_profiles, propose_objective_work_profile
 from custom_tools.providers.objectives import objectives
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from live_storage_utils import (
     query_storage,
     storage_bind,
@@ -217,6 +217,7 @@ def _run_validation(*, config_path: str | None = None) -> dict[str, Any]:
         _scheduler_wake=_FakeWake(),
     )
     manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     set_agent_ref(agent)
 
     profile_proposal = json.loads(

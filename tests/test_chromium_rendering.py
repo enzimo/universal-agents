@@ -101,7 +101,7 @@ async def test_chromium_ui_settings_improvements(tmp_path):
 @pytest.mark.live
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.environ.get("RUN_CHROMIUM_TESTS") != "1", reason="set RUN_CHROMIUM_TESTS=1 with Node Playwright and Chromium installed")
-@pytest.mark.parametrize("probe", ["web_chat_history_probe.cjs", "web_chat_scroll_probe.cjs", "web_chat_submission_probe.cjs"])
+@pytest.mark.parametrize("probe", ["web_chat_history_probe.cjs", "web_chat_scroll_probe.cjs", "web_chat_submission_probe.cjs", "web_chat_startup_probe.cjs"])
 async def test_chromium_web_chat_transcript(probe):
     process = await asyncio.create_subprocess_exec(
         "rtk", "proxy", shutil.which("node") or "node",

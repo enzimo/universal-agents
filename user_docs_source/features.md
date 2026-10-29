@@ -61,6 +61,15 @@ queue positions and waiting reasons. It refreshes every 10 seconds while open an
 20 tasks per agent per page. Other users' tasks remain private. If one agent cannot
 respond, its section reports that problem while the other sections remain usable.
 
+New tasks appear even when the agent is busy or paused. **Parallel** marks a
+request you sent in a thread started with **Launch parallel thread**, and each
+run of a schedule or Objective work you set up in such a thread. The team lead
+works on these at the same time as its other work, up to four at once; a
+further one shows as queued until one of them finishes. Other work, such as
+ordinary chats, New Chat, schedules set up anywhere else and other chat apps,
+still runs one model turn at a time, and the agent can work on another task
+while a task waits for a worker, your answer, or an access decision.
+
 TeamArchitect appears first. Long descriptions, waiting reasons, and activity
 notes have compact previews; expand them to read the full available text.
 **Finished tasks** starts collapsed below active work. Expand it to browse
@@ -294,11 +303,33 @@ appear as their own threads, **Updates** and **Memory review**, once there is
 something in them.
 
 To start an unrelated request while keeping your earlier chat, turn on
-**Separate request** beside the composer and send your message. Chat creates a
+**Launch parallel thread** below Send and send your message. Chat creates a
 new thread for that message and its files, and keeps its replies there. The
-switch turns off after the message moves to the new chat. Leave it off to
-continue the selected thread. Slash commands keep their usual behavior.
+team lead starts on it right away, even while it is busy with your other work,
+and every later request you send in that thread runs the same way.
+A schedule or Objective work you set up in that thread also runs this way:
+each run starts when it is due and works beside your other work. Its runs
+count toward the limit of four, so a frequent schedule or long
+Objective work set up there can make a new parallel thread wait, and a run can
+happen while you send a new request in the same thread. Runs of one schedule
+still never overlap: a run that comes due while the previous one is still
+working is skipped.
+Each thread keeps its own conversation history and summaries. Saved team facts
+and your preferences remain available across your threads. Use it only for work
+that does not change the same things as your other running requests:
+the agent does not coordinate them. If two of your requests change the same
+page of your personal knowledge, the later change is refused, unless an
+operator turned these checks off with `agent.request_conflict_checks`
+([Separate requests changing the same record](configuration.md#separate-requests-changing-the-same-record)).
+Memory facts, schedules, heartbeat items and Objectives refuse a change only
+when it was decided from an older version of the record, so one request can
+still change what another just changed. Commands the agent runs in its shell or
+Python, and files it writes with its file tools, are not checked. The switch
+turns off after the message moves to the new chat. Leave it off to continue
+the selected thread. Slash commands keep their usual behavior.
 If the new chat cannot be created, your text and files stay in the composer.
+Selecting an existing conversation while a new chat is being created keeps
+your selection. Any message already submitted keeps its intended conversation.
 If sending fails, use **Retry** beside the failed message to resend the same
 request without creating another one. You can send other messages first;
 each failed message keeps its own Retry. Retry retains the original files and

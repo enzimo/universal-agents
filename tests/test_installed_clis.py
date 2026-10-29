@@ -64,7 +64,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from custom_tools import code_sandbox
 from custom_tools.providers.access_proposals import propose_access_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from secure_tool_broker import installed_clis as broker_clis
 from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING
 from secure_tool_broker.cli_passthrough import CommandRefused, check_installed_command_line

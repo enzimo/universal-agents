@@ -134,8 +134,8 @@ from custom_tools.providers.knowledge import (
     knowledge_write,
 )
 from custom_tools.providers.knowledge_curation import PROVIDER as CURATION_TOOLS
+from custom_tools.runtime_context import set_agent_ref, task_work
 from custom_tools.tool_results import result_text
-from custom_tools.runtime_context import set_agent_ref
 from knowledge_base.vocabulary import ContributionKind, ContributionStatus
 from model_providers.endpoints import (
     EndpointKind,
@@ -672,9 +672,10 @@ class StandIn:
         self.meta = MessageMeta(
             conversation_id=f"conv_{self.id}", gateway_context=gateway_context
         )
-        # Tool calls outside a model turn (seeding) act from this task; run_agent sets the turn's.
+        # The task its tool calls work on (``acting_as``): this one for calls
+        # outside a model turn (seeding); run_agent sets each turn's.
+        self.test_task_id = f"task_{self.id}_setup"
         self.task_manager = SimpleNamespace(
-            current_task_id=f"task_{self.id}_setup",
             storage_settings=storage,
             _db_path=str(db_path),
             get_task_info=lambda task_id: SimpleNamespace(meta=self.meta),
@@ -683,9 +684,12 @@ class StandIn:
 
 @contextmanager
 def acting_as(stand_in: StandIn) -> Iterator[StandIn]:
+    """Run the block as ``stand_in``, working on its task, as a turn binds it (``task_work``)."""
+
     set_agent_ref(stand_in)
     try:
-        yield stand_in
+        with task_work(stand_in.test_task_id):
+            yield stand_in
     finally:
         set_agent_ref(None)
 
@@ -925,7 +929,7 @@ def run_agent(
         problem_statement=problem_statement,
         parent_task_id="task_lead_request" if delegated else None,
     )
-    stand_in.task_manager.current_task_id = task.task_id
+    stand_in.test_task_id = task.task_id
     recorder = ToolCallRecorder(
         {tool.tool_name for tool in tools}, settings["max_tool_calls_per_task"]
     )

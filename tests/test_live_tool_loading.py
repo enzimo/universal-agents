@@ -98,7 +98,7 @@ def team_lead(tmp_path, monkeypatch, authorization: bool):
     from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
     from custom_messages.contracts.task_v1 import Task
     from custom_messages.enums import MessageMetaType
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import bind_task, set_agent_ref
     from tests.broker_access_support import context_signer, context_verify_keys
 
     base, model_id, values = _settings()
@@ -131,7 +131,7 @@ def team_lead(tmp_path, monkeypatch, authorization: bool):
         team_id="team_live", person_id="usr_live_owner", person_roles=("owner",)
     )
     agent.task_manager.add_task(Task(task_id="task-live", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
-    agent._active_execution_task_id = "task-live"
+    bind_task("task-live")
     agent._conversation_store.ensure_thread(
         conversation_id="conv-live", team_id="team_live", owner_agent_id=agent.id, owner_agent_name=agent.name,
         requester_name="Live test owner", requester_id="usr_live_owner", root_task_id="task-live",
@@ -231,7 +231,7 @@ def test_team_lead_raises_a_real_models_cap_through_staging_and_apply(tmp_path, 
     from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
     from custom_agents.tool_loading import tool_limit
     from custom_tools.providers.runtime_settings import plan_runtime_setting_change
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from custom_agents import access_runtime
     from tests.broker_access_support import context_verify_keys
     from tests.test_runtime_settings_tools import _apply_settings_change, _fake_agent, _overrides_path, _write_config

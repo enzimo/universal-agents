@@ -23,7 +23,7 @@ from custom_messages.enums import ChangeRecordKind
 from custom_tools.providers.changes import apply_change
 from custom_tools.providers.knowledge_curation import publish_contribution
 from custom_tools.providers.schedules import disable_scheduled_job, pause_scheduled_job
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from tests.change_approval_support import needs_cedar, owner, use_signed_contexts
 from tests.test_changes_first_executor import CALLS, DenyCall, ScriptedModel, not_run, read_note, step_results
 from tests.test_system_schedule_changes import _lead, _schedule, _stored, _version

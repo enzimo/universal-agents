@@ -25,6 +25,8 @@ from custom_tools.providers._user_scope import (
     _private_user_scope,
 )
 from custom_tools.runtime_context import (
+    current_task_work,
+    bound_task_id,
     get_agent_ref,
 )
 from id_generation import (
@@ -285,9 +287,7 @@ def create_focused_conversation(
     if not getattr(agent, "_conversation_store", None):
         return json.dumps({"error": "ConversationStore not initialized"})
 
-    current_task_id = (
-        agent.task_manager.current_task_id if agent.task_manager is not None else None
-    )
+    current_task_id = bound_task_id()
     current_task_info = (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_info, current_task_id
@@ -499,10 +499,9 @@ def get_context_status() -> str:
     agent = get_agent_ref()
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
-    assembly = agent.turn_executor.last_context_assembly
-    current_task_id = (
-        agent.task_manager.current_task_id if agent.task_manager is not None else None
-    )
+    work = current_task_work()
+    assembly = work.context_assembly if work is not None else None
+    current_task_id = bound_task_id()
     task_info = (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_info, current_task_id
@@ -552,9 +551,7 @@ def compact_conversation_context(
         return json.dumps(
             {"error": "Conversation context components are not initialized"}
         )
-    current_task_id = (
-        agent.task_manager.current_task_id if agent.task_manager is not None else None
-    )
+    current_task_id = bound_task_id()
     task_info = (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_info, current_task_id

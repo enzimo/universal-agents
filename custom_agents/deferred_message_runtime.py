@@ -15,6 +15,7 @@ from custom_messages.contracts.control_v1 import (
     AgentStatus,
     ControlInstruction,
 )
+from custom_messages.contracts.credentials_v1 import SecureCredentialCollectionResult, ToolSetupResultV1
 from custom_messages.contracts.delegated_work_v1 import DelegatedTaskClaimedV1
 from custom_messages.contracts.delivery_v1 import DeliveryReceipt
 from custom_messages.contracts.envelope_v1 import GATEWAY_MANAGER_CONTROL_TYPES, MessageEnvelope
@@ -33,6 +34,7 @@ from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from storage.runtime_state_repository import DeferredMessageSnapshotRow, RuntimeStateRepository
 from default_values import AGENT_DEFAULTS
 from runtime_hosting.blocking_io import BlockingIOLane
+from runtime_hosting.turn_context import turn_scoped
 from custom_agents.task_operation_runtime import submitting_task
 
 
@@ -76,7 +78,7 @@ class DeferredHandoff:
         return not (self.committed or self.closed)
 
 
-_CURRENT_HANDOFF: ContextVar[Optional[DeferredHandoff]] = ContextVar("deferred_handoff", default=None)
+_CURRENT_HANDOFF: ContextVar[Optional[DeferredHandoff]] = turn_scoped(ContextVar("deferred_handoff", default=None), None)
 
 
 def pending_deferred_handoff() -> Optional[DeferredHandoff]:
@@ -378,15 +380,23 @@ class DeferredMessageInbox:
         *,
         dispatch: Callable[[MessageEnvelope], Awaitable[None]],
         available: Callable[[], bool],
+        select: Optional[Callable[[MessageEnvelope], bool]] = None,
     ) -> bool:
         """Dispatch in order; consume requests at admission and other messages at completion.
 
-        Keep failed or cancelled work and end the pass without a tight retry
-        loop. If the row turns out to belong to another agent, every message is
-        dropped here and the pass ends (``RuntimeCustodyLost``).
+        ``select`` limits the pass to the messages one execution lane handles
+        (``custom_agents.execution_lanes``); the others keep their places for
+        their own lane. Keep failed or cancelled work and end the pass without
+        a tight retry loop. If the row turns out to belong to another agent,
+        every message is dropped here and the pass ends (``RuntimeCustodyLost``).
         """
         while self._messages and available():
-            envelope = self._messages[0]
+            envelope = next(
+                (item for item in self._messages if select is None or select(item)),
+                None,
+            )
+            if envelope is None:
+                break
             message_id = envelope.msg_header.message_id
             content = envelope.msg_content
             handoff = DeferredHandoff(
@@ -513,7 +523,33 @@ def is_priority_deferred_message(envelope: MessageEnvelope) -> bool:
     )
 
 
+def may_resume_a_turn(envelope: MessageEnvelope) -> bool:
+    """Whether handling the message can run a model turn: a worker's result, a question or
+    answer, or a credential form's or setup page's result.
+
+    Such a message is always saved to the deferred inbox and handled by the
+    execution lane of the task it concerns (``task_admission_runtime.handle_busy_delivery``,
+    ``custom_agents.execution_lanes``), never inside the delivery callback: the
+    mailbox waits for each callback, so a turn there held back every other
+    message, such as a new request for a parallel thread.
+    """
+    content = envelope.msg_content
+    if isinstance(content, Task):
+        return content.task_type == MessageMetaType.RESPONSE
+    return isinstance(content, (TaskQuery, SecureCredentialCollectionResult, ToolSetupResultV1))
+
+
 def requires_execution_slot(envelope: MessageEnvelope) -> bool:
+    """Whether a message's handling needs the main execution lane (or its task's lane).
+
+    Request handling only admits durable queued work and wakes the retained
+    drain. Requiring the model slot hid new threads in the deferred inbox
+    until the current turn finished. Messages that may resume a turn always
+    wait in the deferred inbox (``may_resume_a_turn``); the others are
+    handled at once under the main lane, or wait while it is held.
+    """
+    if isinstance(envelope.msg_content, Task) and envelope.msg_content.task_type == MessageMetaType.REQUEST:
+        return False
     return not isinstance(
         envelope.msg_content,
         (

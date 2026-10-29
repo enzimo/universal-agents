@@ -6,7 +6,9 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
+from custom_agents.execution_lanes import lane_for_task
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
+from runtime_hosting.agent_execution import MAIN_LANE
 
 QUEUE_REPAIR_EVENT = "task_queue_nonrunnable_removed"
 QUEUE_NOTICE_EVENT = "task_queue_safety_notice_sent"
@@ -63,21 +65,47 @@ def reconcile_queue(manager: Any) -> None:
         manager._persist_runtime_state()
 
 
-def next_ready_task(manager: Any) -> str | None:
-    if not manager.can_start_new_task():
+def next_ready_task(manager: Any, lane: str = MAIN_LANE) -> str | None:
+    """Take the first ready task of ``lane`` off the queue (``custom_agents.execution_lanes``).
+
+    The main lane takes one only while the main slot is free; a parallel
+    lane's own holder asks only when its lane is free. Tasks of other lanes
+    keep their places.
+    """
+
+    if lane == MAIN_LANE and not manager.can_start_new_task():
         return None
     reconcile_queue(manager)
-    if not manager.task_state.task_queue:
+    queue = manager.task_state.task_queue
+    position = next(
+        (index for index, task_id in enumerate(queue) if lane_for_task(manager, task_id) == lane),
+        None,
+    )
+    if position is None:
         return None
-    task_id = manager.task_state.task_queue.popleft()
+    previous = deque(queue)
+    task_id = queue[position]
+    del queue[position]
     try:
         manager._persist_runtime_state()
     except Exception:
-        manager.task_state.task_queue.appendleft(task_id)
+        manager.task_state.task_queue = previous
         raise
-    manager._logger.info("Next task to process: %s", task_id)
+    manager._logger.info("Next task to process: %s lane=%s", task_id, lane)
     manager._check_queue_backlog_warning()
     return str(task_id)
+
+
+def queued_parallel_lanes(manager: Any) -> list[str]:
+    """The parallel lanes with a ready task waiting in the queue, in queue order."""
+
+    reconcile_queue(manager)
+    lanes: list[str] = []
+    for task_id in manager.task_state.task_queue:
+        lane = lane_for_task(manager, task_id)
+        if lane != MAIN_LANE and lane not in lanes:
+            lanes.append(lane)
+    return lanes
 
 
 def _inspect_final_review(manager: Any, info: Any) -> None:

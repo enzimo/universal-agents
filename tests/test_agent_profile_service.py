@@ -19,7 +19,7 @@ from custom_tools.path_policy import (
     PathPolicyError,
     ensure_allowed_path,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 
 

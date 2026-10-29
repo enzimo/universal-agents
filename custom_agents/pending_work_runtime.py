@@ -26,6 +26,18 @@ message, scheduler enqueues and outbox retries each started their own drain).
   such as a locked database, stayed unhandled on an idle worker, which then
   stopped asking for work and never retired).
 - ``wake_pending_work_after`` wakes the drain at a later time with a timer.
+- The drain, the lane pass (and so its lane workers) and the timers start
+  without the values of the turn that happened to start them
+  (``runtime_hosting.turn_context.detached_context``): each piece of work
+  binds its own task. Before, a drain started inside one request's turn kept
+  that request bound and replayed another request's saved actions as its own.
+- Parallel requests run in lanes of their own (``custom_agents.execution_lanes``).
+  Every wake-up also runs the retained pass that starts a worker for each
+  parallel lane with work waiting (``execution_lanes_runtime.start_parallel_lanes``),
+  so a parallel request starts while the main lane runs a turn. A lane's
+  release runs that pass again, for a lane that waited for the limit. A lane
+  whose waiting work failed is not started again before a backoff delay
+  (``retry_lane_after_failure``), with the same delays as the drain.
 - ``start_owned_task`` runs short work that is safe to stop (its durable state
   is saved before it starts; see each caller). ``run_as_owned_task`` does the
   same for work submitted from another thread, such as a sync tool's send,
@@ -39,6 +51,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any
+
+from runtime_hosting.agent_execution import MAIN_LANE
+from runtime_hosting.turn_context import detached_context
 
 
 FAILURE_RETRY_FIRST_SECONDS = 5.0
@@ -61,14 +76,67 @@ def schedule_pending_work(agent: Any) -> None:
     pending = agent._pending_work_task
     if pending is None or pending.done():
         agent._pending_work_task = asyncio.create_task(
-            _drain_pending_work(agent), name=f"pending-work:{agent.id}"
+            _drain_pending_work(agent), name=f"pending-work:{agent.id}", context=detached_context()
         )
+    schedule_parallel_lanes(agent)
+
+
+def schedule_parallel_lanes(agent: Any) -> None:
+    """Make sure the retained pass that starts parallel lane workers runs (module docstring)."""
+    if not getattr(getattr(agent, "task_manager", None), "parallel_lanes_enabled", False):
+        return
+    if agent.paused or agent._should_exit.is_set():
+        return
+    state = agent._parallel_lanes
+    state.requested = True
+    pending = state.task
+    if pending is None or pending.done():
+        state.task = asyncio.create_task(
+            _start_parallel_lanes(agent), name=f"parallel-lanes:{agent.id}", context=detached_context()
+        )
+
+
+async def _start_parallel_lanes(agent: Any) -> None:
+    """Run passes while a wake-up is recorded; a failed pass is retried after a delay."""
+    state = agent._parallel_lanes
+    while state.requested and not (agent.paused or agent._should_exit.is_set()):
+        state.requested = False
+        try:
+            await agent._start_parallel_lanes()
+        except Exception:
+            agent._logger.exception(
+                "Starting parallel lanes failed; trying again in %.0f s. "
+                "event=parallel_lanes_start_failed agent_id=%s",
+                FAILURE_RETRY_FIRST_SECONDS,
+                agent.id,
+            )
+            wake_pending_work_after(agent, FAILURE_RETRY_FIRST_SECONDS)
+            return
+
+
+def retry_lane_after_failure(agent: Any, lane: str) -> float:
+    """Keep a parallel lane whose waiting work failed from starting again before a backoff delay."""
+    state = agent._parallel_lanes
+    failures: int = state.failures.get(lane, 0) + 1
+    state.failures[lane] = failures
+    delay = min(FAILURE_RETRY_MAX_SECONDS, FAILURE_RETRY_FIRST_SECONDS * 2.0 ** min(failures - 1, 16))
+    state.retry_after[lane] = asyncio.get_running_loop().time() + delay
+    agent._logger.warning(
+        "Work waiting in a parallel request's lane failed and was kept; the lane tries again in %.0f s. "
+        "event=parallel_lane_retry_scheduled agent_id=%s lane=%s failures=%s",
+        delay,
+        agent.id,
+        lane,
+        failures,
+    )
+    wake_pending_work_after(agent, delay)
+    return delay
 
 
 async def _drain_pending_work(agent: Any) -> None:
     """Run passes while a wake-up is recorded."""
     while agent._pending_work_requested and not (agent.paused or agent._should_exit.is_set()):
-        if agent.is_executing:
+        if agent.main_lane_busy:
             return  # the holder's release starts the next pass
         agent._pending_work_requested = False
         if not await _run_pass(agent):
@@ -107,7 +175,7 @@ async def _run_pass(agent: Any) -> bool:
         )
         return False
     agent._pending_work_failures = 0
-    if agent.is_executing:
+    if agent.main_lane_busy:
         # Another holder took the slot before this pass made all its checks;
         # its release starts the next pass.
         agent._pending_work_requested = True
@@ -142,15 +210,18 @@ def _first_waiting_message(agent: Any) -> tuple[str | None, str | None]:
     return envelope.msg_header.message_id, getattr(envelope.msg_content, "task_id", None)
 
 
-def wake_after_slot_release(agent: Any, owner: asyncio.Task[Any]) -> None:
-    """The execution slot's release callback: run a recorded wake-up after another holder.
+def wake_after_slot_release(agent: Any, owner: asyncio.Task[Any], lane: str = MAIN_LANE) -> None:
+    """An execution lane's release callback: run a recorded wake-up after another holder.
 
-    A delivery, a parent resume or the scheduler's orphaned-slot check may hold
-    the slot while work is saved; its wake-up is recorded and the drain waits
-    for this release. A release with no recorded wake-up starts nothing, so an
+    A parent resume or the scheduler's orphaned-slot check may hold the main
+    lane while work is saved; its wake-up is recorded and the drain waits for
+    this release. A release with no recorded wake-up starts nothing, so an
     idle scheduler pass costs no drain pass. The drain's own releases start
-    nothing either: it continues by itself.
+    nothing either: it continues by itself. A parallel lane's release lets a
+    lane that waited for the limit start (``schedule_parallel_lanes``).
     """
+    if lane != MAIN_LANE:
+        schedule_parallel_lanes(agent)
     if owner is agent._pending_work_task or not agent._pending_work_requested:
         return
     schedule_pending_work(agent)
@@ -191,7 +262,7 @@ def wake_pending_work_after(agent: Any, delay_seconds: float) -> asyncio.TimerHa
         timers.discard(handle)
         schedule_pending_work(agent)
 
-    handle = asyncio.get_running_loop().call_later(max(0.0, delay_seconds), wake)
+    handle = asyncio.get_running_loop().call_later(max(0.0, delay_seconds), wake, context=detached_context())
     timers.add(handle)
     return handle
 
@@ -290,7 +361,11 @@ async def close_pending_work(agent: Any) -> None:
     current = asyncio.current_task()
     running = [
         task
-        for task in (agent._pending_work_task, *agent._owned_tasks)
+        for task in (
+            agent._pending_work_task,
+            getattr(getattr(agent, "_parallel_lanes", None), "task", None),
+            *agent._owned_tasks,
+        )
         if task is not None and task is not current and not task.done()
     ]
     agent._logger.info(
@@ -304,3 +379,5 @@ async def close_pending_work(agent: Any) -> None:
         task.cancel()
     await asyncio.gather(*running, return_exceptions=True)
     agent._pending_work_task = None
+    if getattr(agent, "_parallel_lanes", None) is not None:
+        agent._parallel_lanes.task = None

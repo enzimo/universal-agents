@@ -20,6 +20,13 @@ class SessionRecord:
     created_at: str
     updated_at: str
     owner_canonical_user_id: str | None = None
+    # Started with Web Chat's Launch parallel thread: every request sent in it
+    # may run at the same time as the team lead's other work
+    # (custom_agents.execution_lanes). Stored as an integer column.
+    parallel_thread: bool = False
+
+    def __post_init__(self) -> None:
+        self.parallel_thread = bool(self.parallel_thread)
 
 
 @dataclass

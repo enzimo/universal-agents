@@ -10,7 +10,7 @@ from custom_tools.providers.memory_review_inspection import (
     get_memory_review_job,
     list_pending_memory_review_jobs,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.change_approval_support import SignedTaskManager, use_signed_contexts
 

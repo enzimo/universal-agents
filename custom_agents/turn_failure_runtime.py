@@ -1,7 +1,9 @@
 """End a task whose model turn failed, and never leave the execution slot held.
 
-The task manager has one execution slot (``current_in_progress_task_id``).
-A task claims it by moving to IN_PROGRESS just before its model turn runs,
+The task manager has one main execution slot (``current_in_progress_task_id``);
+a request sent in a parallel thread runs in a lane of its own instead
+(``custom_agents.execution_lanes``). A task claims its slot by moving to
+IN_PROGRESS just before its model turn runs,
 and gives it back when the turn's result moves it on (completed, waiting,
 failed). Every path that runs a turn must therefore also handle a failed
 turn; otherwise the task stays IN_PROGRESS with no turn running, and the
@@ -17,14 +19,16 @@ until the person stopped the task by hand.
   queue loop, the resumed-turn path and the resume-with-directive paths all
   use it.
 - ``release_orphaned_execution_slot`` is the safety net for any path that
-  still misses it. It runs where the next task is chosen, with the execution
-  gate freshly held, so no turn can be running in this process: an
-  IN_PROGRESS task there has lost its turn. It is logged
+  still misses it. It runs where the next task is chosen, with the main lane
+  freshly held, so no main-lane turn can be running in this process: an
+  IN_PROGRESS task in the main slot has lost its turn. It is logged
   (``event=execution_slot_orphaned``) and failed with a plain explanation,
   like a task restart recovery cannot retry
   (``runtime_recovery.fail_recovered_executing_task``). Other executing states
   are left alone: RETRYING keeps the slot on purpose while the turn-action
   outbox waits to retry an action.
+- ``release_orphaned_parallel_tasks`` does the same for parallel requests: a
+  task IN_PROGRESS in a parallel lane that nobody holds has lost its turn.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from typing import Any
 
 from strands.types.exceptions import MaxTokensReachedException
 
+from custom_agents.strands_parts import task_strands_messages
 from custom_agents.custody_loss import custody_moved
 from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from custom_agents.conversation_runtime import finalize_conversation_turn
@@ -48,6 +53,8 @@ from custom_agents.runtime_recovery import fail_recovered_executing_task
 from custom_agents.task_wait_limit import TaskWaitLimitReached, tell_person_about_wait_limit
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_messages.enums import ProgressState
+from custom_agents.execution_lanes import executing_parallel_task_ids, lane_for_task
+from runtime_hosting.agent_execution import MAIN_LANE
 
 MODEL_OUTPUT_LIMIT_MESSAGE = (
     "The model reached its output limit before completing this request. "
@@ -162,7 +169,7 @@ async def fail_task_after_turn_error(agent: Any, task_id: str, task_info: Any, e
         conversation_store=agent._conversation_store,
         conversation_compactor=agent._conversation_compactor,
         conversation_artifact_offloader=agent._conversation_artifact_offloader,
-        strands_messages=list(getattr(agent._strands_agent, "messages", []) or []),
+        strands_messages=task_strands_messages(task_info.task.task_id),
         task_manager=agent.task_manager,
         task_info=task_info,
         task_status=ProgressState.FAILED.value,
@@ -204,7 +211,8 @@ def _slot_holder(manager: Any) -> Any:
 async def release_orphaned_execution_slot(agent: Any) -> bool:
     """Fail an IN_PROGRESS task that holds the slot with no turn running (module docstring).
 
-    Call only with the execution gate freshly held, never nested inside a turn.
+    Call only with the main lane freshly held (``runtime_hosting.agent_execution``),
+    never nested inside a turn.
     """
 
     # Bind the manager: the operations lane deep-copies call arguments.
@@ -230,22 +238,65 @@ async def release_orphaned_execution_slot(agent: Any) -> bool:
 
 
 async def release_orphaned_slot_when_idle(agent: Any) -> bool:
-    """Run the orphaned-slot check from the scheduler pass when no turn holds the gate.
+    """Run the orphaned-slot checks from the scheduler pass when no turn holds the main lane.
 
     Before 2026-10-04 the check ran only when the next task was picked, so an
-    orphaned slot blocked the queue until new work arrived. The gate is taken
-    only when it is free: in asyncio, acquiring a free lock does not suspend, so
-    no turn can start in between, and a busy gate means a turn is running.
+    orphaned slot blocked the queue until new work arrived. The main lane is
+    taken only when it is free: in asyncio, acquiring a free lock does not
+    suspend, so no turn can start in between, and a busy main lane means a
+    turn is running. Parallel lanes are then checked one by one
+    (``release_orphaned_parallel_tasks``).
     """
 
-    gate = getattr(agent, "_execution_gate", None)
-    if gate is None or gate.busy or getattr(agent, "paused", False):
+    lanes = getattr(agent, "_execution_lanes", None)
+    if lanes is None or lanes.main_busy or getattr(agent, "paused", False):
         return False
-    async with gate.hold():
+    async with lanes.hold(MAIN_LANE):
         released = await release_orphaned_execution_slot(agent)
+    released = await release_orphaned_parallel_tasks(agent) or released
     if released:
         # Queued work starts now, not when unrelated traffic next wakes the drain.
         schedule_pending_work(agent)
+    return released
+
+
+async def release_orphaned_parallel_tasks(agent: Any) -> bool:
+    """Fail parallel requests' tasks left IN_PROGRESS in a lane nobody holds (module docstring).
+
+    A lane's holder claims a task and runs its turn while holding the lane, so
+    a free lane means no turn runs for it. The lane is taken for the check;
+    acquiring a free lock does not suspend, so no turn can start in between.
+    """
+
+    lanes = getattr(agent, "_execution_lanes", None)
+    manager = agent.task_manager
+    # Only the team lead opens parallel lanes (custom_agents.execution_lanes).
+    if lanes is None or getattr(agent, "paused", False) or not getattr(manager, "parallel_lanes_enabled", False):
+        return False
+    released = False
+    for task_id in await manager.operations_runtime.run(partial(executing_parallel_task_ids, manager)):
+        lane = await manager.operations_runtime.run(partial(lane_for_task, manager), task_id)
+        if lanes.lane_busy(lane):
+            continue
+        async with lanes.hold(lane):
+            holder = await manager.operations_runtime.run(manager.get_task_info, task_id)
+            if holder is None or holder.state != ProgressState.IN_PROGRESS:
+                continue
+            agent._logger.error(
+                "A parallel request's task was in progress with no turn running; ending it. "
+                "event=execution_slot_orphaned agent_id=%s task_id=%s lane=%s",
+                agent.id,
+                task_id,
+                lane,
+            )
+            await fail_recovered_executing_task(
+                agent,
+                holder,
+                now_ts=datetime.now(timezone.utc).isoformat(),
+                reason=ORPHANED_SLOT_MESSAGE,
+                snapshot_age_seconds=None,
+            )
+            released = True
     return released
 
 
@@ -257,6 +308,7 @@ __all__ = [
     "UnroutableTaskInterruptError",
     "fail_task_after_turn_error",
     "release_orphaned_execution_slot",
+    "release_orphaned_parallel_tasks",
     "release_orphaned_slot_when_idle",
     "settle_failed_turn",
     "task_runtime_error_message",

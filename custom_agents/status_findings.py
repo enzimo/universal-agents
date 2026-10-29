@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from custom_agents.mcp_server_tools import SERVER_TOOLS_ATTRIBUTE, LoadFailure
+from custom_agents.mcp_server_tools import LoadFailure, server_loader
 from custom_agents.stale_schedules import administrator_findings
 from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
 
@@ -91,7 +91,7 @@ def _skill_catalog(agent: Any, agent_type: str) -> list[StatusFindingV1]:
 
 
 def _mcp_servers(agent: Any, agent_type: str) -> list[StatusFindingV1]:
-    loader = getattr(agent, SERVER_TOOLS_ATTRIBUTE, None)
+    loader = server_loader(agent)
     if loader is None:
         return []
     findings = []

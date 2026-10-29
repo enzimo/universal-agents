@@ -25,6 +25,7 @@ from custom_messages.enums import TaskHistorySource
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.tool_results import failed
 from custom_tools.runtime_context import (
+    bound_task_id,
     get_agent_ref,
 )
 from storage.change_ledger import ChangeRefused
@@ -247,7 +248,7 @@ def add_heartbeat_item(
     try:
         resolved_source_id = _resolve_heartbeat_source_id(agent, source_id)
         resolved_objective_id, objective_refusal = _objective_to_link(
-            agent, objective_id, agent.task_manager.current_task_id or ""
+            agent, objective_id, bound_task_id() or ""
         )
         if objective_refusal:
             return failed({"error": objective_refusal})
@@ -476,7 +477,7 @@ def get_task_history_window(
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
 
-    resolved_task_id = task_id or agent.task_manager.current_task_id
+    resolved_task_id = task_id or bound_task_id()
     if not resolved_task_id:
         return json.dumps(
             {

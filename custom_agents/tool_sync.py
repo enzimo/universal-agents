@@ -41,9 +41,12 @@ which unloads groups idle too long or loaded for another task, and then show
 only the groups loaded now. A request carries at most the model's tool cap,
 which ``tool_loading.ToolLimitHook`` checks after these hooks.
 
-``install_tool_sync`` keeps the hook's MCP loader on the agent, so
-``custom_agents.mcp_server_tools.server_status`` can tell ``find_tools`` and
-``mcp_connections(action="list")`` why a server's tools are missing.
+Each Strands agent has its own hook, with its own record of what it shows
+and its own loaded groups (``custom_agents.strands_parts``), so two turns
+running at once never write each other's tool lists. The hook's MCP loader
+(``sync.servers``) lets ``custom_agents.mcp_server_tools.server_status`` tell
+``find_tools`` and ``mcp_connections(action="list")`` why a server's tools are
+missing.
 
 The operator's tool settings (``secure_cli`` off, allow and block lists,
 skill installation off) apply to added functions exactly as at startup
@@ -66,9 +69,9 @@ from access_catalog.tool_functions import functions_of_tool_sets, functions_of_t
 from access_control.identity import IdentityRejected
 from access_control.standard_grants import INTERNET_SET, STANDARD_TOOL_SETS_BY_ROLE
 from custom_agents.access_runtime import agent_principal, authorization_enabled, runtime_access, task_access
-from custom_agents.mcp_server_tools import SERVER_TOOLS_ATTRIBUTE, MCPServerTools
+from custom_agents.mcp_server_tools import MCPServerTools
 from custom_agents.providers.mcp_connections import CONFIGURED_CONNECTION_IDS, shown_without_authorization
-from custom_agents.tool_loading import SYNC_ATTRIBUTE, loaded_tools, offered, shown_names, work_key, work_preloaded
+from custom_agents.tool_loading import LoadedTools, offered, shown_names, work_key, work_preloaded
 from custom_messages.contracts.access_v2 import GrantKind
 from custom_tools.provider_contract import tool_name
 from storage.access_repository import AccessRepository
@@ -117,10 +120,10 @@ def startup_tools(agent: Any, tools: list[Any]) -> list[Any]:
     return [*base, *kept]
 
 
-def _begin_model_call(agent: Any) -> None:
+def _begin_model_call(agent: Any, loaded: LoadedTools) -> None:
     """Count the model call for loaded groups: those idle too long or loaded for another task leave."""
 
-    dropped, idle = loaded_tools(agent).begin_model_call(work_key(agent))
+    dropped, idle = loaded.begin_model_call(work_key(agent))
     if dropped or idle:
         logger.info(
             "Loaded tool groups left the agent's tool list. event=tool_groups_unloaded agent_id=%s "
@@ -198,8 +201,10 @@ class GrantToolSync:
 
     name = "grant_tool_sync"
 
-    def __init__(self, agent: Any, static_names: Iterable[str]) -> None:
+    def __init__(self, agent: Any, static_names: Iterable[str], parts: Any) -> None:
         self.agent = agent
+        # The Strands agent's own tool state (custom_agents.strands_parts).
+        self.parts = parts
         startup_names = frozenset(static_names)
         # Standard catalog functions obey grants too. Only plugins outside
         # the catalog remain static; a withdrawn standard function is restored
@@ -218,7 +223,7 @@ class GrantToolSync:
     async def before_model_call(self, event: BeforeModelCallEvent) -> None:
         registry = event.agent.tool_registry
         try:
-            await asyncio.to_thread(_begin_model_call, self.agent)
+            await asyncio.to_thread(_begin_model_call, self.agent, self.parts.loaded)
             view = await asyncio.to_thread(self.desired)
             if view is not None:
                 self.functions.apply(registry, view.functions)
@@ -245,7 +250,7 @@ class GrantToolSync:
         # A scheduled run counts its schedule's grants, so the schedule is part of the key.
         # Access for one task is bound to the request it works on (work_id).
         work_id = principal.work_id
-        loaded = loaded_tools(self.agent)
+        loaded = self.parts.loaded
         key = (
             access.service.store.version(access.team_id),
             work_id,
@@ -268,7 +273,8 @@ class GrantToolSync:
             grants += [g for g in access.service.valid_grants(person.subjects(), task_id=work_id) if g.kind is GrantKind.BLOCK]
         held_tools = tool_ids_of_grants(catalog, grants)
         view = ToolView(
-            functions=shown_names(self.agent, catalog, functions_of_tools(catalog, held_tools)) - self.static_names,
+            functions=shown_names(self.agent, catalog, functions_of_tools(catalog, held_tools), loaded=loaded)
+            - self.static_names,
             servers=mcp_tool_ids(catalog, held_tools),
         )
         # Expiry changes no store version. Reconsider this view at the next
@@ -284,10 +290,12 @@ class MCPServerSync:
 
     name = "mcp_server_sync"
 
-    def __init__(self, agent: Any, static_names: Iterable[str] = ()) -> None:
+    def __init__(self, agent: Any, static_names: Iterable[str], parts: Any) -> None:
         agent_type = str(getattr(agent, "named_agent_type", "") or "")
         configured = frozenset(getattr(agent, CONFIGURED_CONNECTION_IDS, None) or ())
         self.agent = agent
+        # The Strands agent's own tool state (custom_agents.strands_parts).
+        self.parts = parts
         self.static_names = frozenset(static_names)
         self.servers = MCPServerTools(
             agent,
@@ -304,7 +312,7 @@ class MCPServerSync:
     async def before_model_call(self, event: BeforeModelCallEvent) -> None:
         registry = event.agent.tool_registry
         try:
-            await asyncio.to_thread(_begin_model_call, self.agent)
+            await asyncio.to_thread(_begin_model_call, self.agent, self.parts.loaded)
             self.show_loaded(registry)
             key = await asyncio.to_thread(self.watched)
             changed, self._key = key != self._key, key
@@ -319,12 +327,13 @@ class MCPServerSync:
         """The definition's functions of the groups loaded now (authorization off has no grants to follow)."""
 
         catalog = runtime_access(self.agent).catalog
-        loaded_key = (loaded_tools(self.agent).version, frozenset(work_preloaded(self.agent)), id(catalog))
+        loaded = self.parts.loaded
+        loaded_key = (loaded.version, frozenset(work_preloaded(self.agent)), id(catalog))
         if loaded_key == self._loaded_key:
             return
         self._loaded_key = loaded_key
         names = {tool_name(tool) for tool in getattr(self.agent, "tools", ()) or ()}
-        self.functions.apply(registry, shown_names(self.agent, catalog, names) - self.static_names)
+        self.functions.apply(registry, shown_names(self.agent, catalog, names, loaded=loaded) - self.static_names)
 
     def watched(self) -> tuple[int, int]:
         """The access store's version (account links) and the current tool catalog (MCP records)."""
@@ -335,23 +344,19 @@ class MCPServerSync:
         return self._store.version(access.team_id), id(access.catalog)
 
 
-def install_tool_sync(agent: Any, tools: list[Any]) -> GrantToolSync | MCPServerSync:
-    """The model-call hook for an agent whose startup tools are ``tools``.
+def install_tool_sync(agent: Any, tools: list[Any], parts: Any) -> GrantToolSync | MCPServerSync:
+    """The model-call hook for one Strands agent whose startup tools are ``tools``.
 
     With authorization on it follows grants (``GrantToolSync``); with it off
-    it loads the MCP servers meant for the agent (``MCPServerSync``). Its MCP
-    loader is kept on the agent for ``mcp_server_tools.server_status``.
+    it loads the MCP servers meant for the agent (``MCPServerSync``). ``parts``
+    are that Strands agent's tool state; the caller keeps the hook in them
+    (``custom_agents.strands_parts``).
     """
 
-    hook: GrantToolSync | MCPServerSync
     static_names = [tool_name(tool) for tool in tools]
     if authorization_enabled(getattr(agent, "authorization_config", None)):
-        hook = GrantToolSync(agent, static_names)
-    else:
-        hook = MCPServerSync(agent, static_names)
-    setattr(agent, SERVER_TOOLS_ATTRIBUTE, hook.servers)
-    setattr(agent, SYNC_ATTRIBUTE, hook)
-    return hook
+        return GrantToolSync(agent, static_names, parts)
+    return MCPServerSync(agent, static_names, parts)
 
 
 __all__ = [

@@ -32,7 +32,7 @@ from custom_messages.system_schedules import (
     USERMEM_AUDIT_SCHEDULE_NAME_PREFIX,
 )
 from custom_tools.providers.memory import resolve_memory_review_job
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
 from storage.conversation_repository import (
     MEMORY_REVIEW_PROMPT_LIKE_PATTERN,

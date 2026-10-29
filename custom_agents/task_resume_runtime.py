@@ -11,6 +11,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from custom_tools.runtime_context import task_work
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.task_records import TaskInfo
 from custom_agents.turn_failure_runtime import settle_failed_turn
@@ -26,6 +27,12 @@ async def resume_task_with_directive(self: Any, parent_task_info: TaskInfo, dire
     nothing else is pending. Credential forms and tool setup pages share it.
     """
 
+    # The task's handling: its turn and the saving of its result (runtime_context.task_work).
+    with task_work(parent_task_info.task.task_id):
+        await _resume_task_with_directive(self, parent_task_info, directive)
+
+
+async def _resume_task_with_directive(self: Any, parent_task_info: TaskInfo, directive: str) -> None:
     parent_task_id = parent_task_info.task.task_id
     await self.task_manager.operations_runtime.run(
         self.task_manager.append_runtime_resume_directive, parent_task_id, directive

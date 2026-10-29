@@ -51,6 +51,7 @@ from assistant_gateway.people_directory_sync import PeopleDirectorySync
 from assistant_gateway.person_departure import GatewayPersonDeparture
 from assistant_gateway.runtime_ports import MembershipRoleIdentityAuthorizer
 from assistant_gateway.store import GatewayStateStore
+from tests.task_work_support import TurnHost
 from custom_agents import task_context_runtime
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.heartbeat_store import HeartbeatStore
@@ -318,7 +319,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     tasks.set_owner_identity("manager_1", "Manager", TEAM, LEAD)
     schedules = ScheduleStore(storage_settings=storage)
     conversations = ConversationStore(db_path=str(layout.task_database_path), storage_settings=storage, artifacts_dir=layout.conversation_artifacts_dir)
-    agent = SimpleNamespace(
+    agent = TurnHost(
         id="manager_1",
         name="Manager",
         is_team_lead=True,
@@ -330,8 +331,6 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         named_agent_type_queue_map={},
         _agent_id_by_name={},
         _stop_reasons_by_task_id={},
-        _active_execution_task=None,
-        _active_execution_task_id=None,
         _strands_agent=SimpleNamespace(),
         _conversation_store=conversations,
         _logger=logging.getLogger("test.departure.manager"),

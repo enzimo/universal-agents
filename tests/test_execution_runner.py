@@ -17,7 +17,7 @@ from access_control.decisions import AccessService
 from custom_agents.access_runtime import decide_call
 from custom_agents.execution_control_service import ExecutionControlService
 from custom_messages.contracts.access_v2 import ChangeApprovalMode
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_hosting.artifacts import FilesystemArtifactStore
 from runtime_hosting.authorization import ExecutionAccessGuard
 from runtime_hosting.builds import DeterministicBuilder

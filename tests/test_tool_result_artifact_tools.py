@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.task_work_support import bind_task
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -29,6 +30,7 @@ def own_agent(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(tools, "get_agent_ref", lambda: agent)
     monkeypatch.setattr(workspace_scope, "get_agent_ref", lambda: agent)
+    bind_task("task-1")  # the tool calls work for this task (tests.task_work_support)
     return agent
 
 

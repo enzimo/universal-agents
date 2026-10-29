@@ -28,7 +28,7 @@ from access_control.entities import PersonPrincipal
 from custom_agents import access_runtime
 from custom_messages.contracts.access_v2 import AccessRequestV1, AccessReviewChoice, ChangeApprovalMode
 from custom_tools.providers.changes import apply_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
 from tests.tool_result_support import tool_json
 
@@ -62,8 +62,19 @@ class SignedTaskManager:
     """The manager of one running task a person asked for through the gateway.
 
     ``current_task_id`` may be changed to act from another task of the same
-    person (plans must continue in the task that staged them).
+    person (plans must continue in the task that staged them). Setting it also
+    binds that task for the test's direct calls (tests.task_work_support), as
+    the runtime binds a task's work record around its handling.
     """
+
+    @property
+    def current_task_id(self) -> str | None:
+        return self._current_task_id
+
+    @current_task_id.setter
+    def current_task_id(self, task_id: str | None) -> None:
+        self._current_task_id = task_id
+        bind_task(task_id)
 
     def __init__(
         self,

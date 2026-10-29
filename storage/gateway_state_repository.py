@@ -262,6 +262,7 @@ class GatewayStateRepository(
         thread_id: Optional[str] = None,
         status: str = "active",
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: bool = False,
     ) -> SessionRecord: ...
 
     def upsert_session(
@@ -278,6 +279,7 @@ class GatewayStateRepository(
         thread_id: Optional[str] = None,
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: Optional[bool] = None,
     ) -> None: ...
 
     def upsert_session_without_switching_chat(
@@ -1001,12 +1003,17 @@ class _RelationalGatewayStateRepository:
                     owner_canonical_user_id TEXT,
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    parallel_thread INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
             self._ensure_column(
                 conn, "gateway_sessions", "owner_canonical_user_id", "TEXT"
+            )
+            # Web Chat's Launch parallel thread (SessionRecord.parallel_thread).
+            self._ensure_column(
+                conn, "gateway_sessions", "parallel_thread", "INTEGER NOT NULL DEFAULT 0"
             )
             conn.execute(
                 """
@@ -1507,7 +1514,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                        channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id
+                       owner_canonical_user_id, parallel_thread
                 FROM gateway_sessions
                 WHERE session_key = {self._dialect.bind}
                 """,
@@ -1535,7 +1542,7 @@ class _RelationalGatewayStateRepository:
                     f"""
                     SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                            channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                           owner_canonical_user_id
+                           owner_canonical_user_id, parallel_thread
                     FROM gateway_sessions
                     WHERE session_key = {self._dialect.bind}
                     LIMIT 1
@@ -1548,7 +1555,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                        channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id
+                       owner_canonical_user_id, parallel_thread
                 FROM gateway_sessions
                 WHERE conversation_id = {self._dialect.bind}
                 ORDER BY updated_at DESC
@@ -1652,7 +1659,7 @@ class _RelationalGatewayStateRepository:
         query = """
             SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                    channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                   owner_canonical_user_id
+                   owner_canonical_user_id, parallel_thread
             FROM gateway_sessions
         """
         params: list[Any] = []
@@ -1880,7 +1887,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                        channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id
+                       owner_canonical_user_id, parallel_thread
                 FROM gateway_sessions
                 WHERE lower(session_alias) = lower({self._dialect.bind})
                 LIMIT 1
@@ -1920,6 +1927,7 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str] = None,
         status: str = "active",
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: bool = False,
     ) -> SessionRecord:
         with _RepositoryTransaction(self) as transaction:
             session = self._create_session(
@@ -1933,6 +1941,7 @@ class _RelationalGatewayStateRepository:
                 thread_id=thread_id,
                 status=status,
                 owner_canonical_user_id=owner_canonical_user_id,
+                parallel_thread=parallel_thread,
             )
             transaction.commit()
             return session
@@ -1950,6 +1959,7 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str],
         status: str,
         owner_canonical_user_id: Optional[str],
+        parallel_thread: bool = False,
     ) -> SessionRecord:
         now = utc_now_iso()
         with self._connect() as conn:
@@ -1959,9 +1969,9 @@ class _RelationalGatewayStateRepository:
                 (
                     session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                     channel_name, user_id, chat_id, thread_id, owner_canonical_user_id,
-                    status, created_at, updated_at
+                    status, created_at, updated_at, parallel_thread
                 )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
                 ON CONFLICT(session_key) DO UPDATE SET
                     session_alias = excluded.session_alias,
                     conversation_id = excluded.conversation_id,
@@ -1974,7 +1984,8 @@ class _RelationalGatewayStateRepository:
                     owner_canonical_user_id = excluded.owner_canonical_user_id,
                     status = excluded.status,
                     created_at = excluded.created_at,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    parallel_thread = excluded.parallel_thread
                 """,
                 (
                     session_key,
@@ -1989,6 +2000,7 @@ class _RelationalGatewayStateRepository:
                     status,
                     now,
                     now,
+                    1 if parallel_thread else 0,
                 ),
             )
             conn.commit()
@@ -2022,6 +2034,7 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str] = None,
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: Optional[bool] = None,
     ) -> None:
         """Save a session and make it its chat's current one: for the person's own chat traffic.
 
@@ -2045,6 +2058,7 @@ class _RelationalGatewayStateRepository:
                 thread_id=thread_id,
                 status=status,
                 owner_canonical_user_id=owner_canonical_user_id,
+                parallel_thread=parallel_thread,
                 switch_chat=True,
             )
             transaction.commit()
@@ -2104,6 +2118,7 @@ class _RelationalGatewayStateRepository:
         status: Optional[str],
         owner_canonical_user_id: Optional[str],
         switch_chat: bool,
+        parallel_thread: Optional[bool] = None,
     ) -> None:
         existing = self.get_session(session_key)
         updated_at = utc_now_iso()
@@ -2120,9 +2135,9 @@ class _RelationalGatewayStateRepository:
                 (
                     session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                     channel_name, user_id, chat_id, thread_id, owner_canonical_user_id,
-                    status, created_at, updated_at
+                    status, created_at, updated_at, parallel_thread
                 )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
                 ON CONFLICT(session_key) DO UPDATE SET
                     session_alias = excluded.session_alias,
                     conversation_id = excluded.conversation_id,
@@ -2134,7 +2149,8 @@ class _RelationalGatewayStateRepository:
                     thread_id = excluded.thread_id,
                     owner_canonical_user_id = excluded.owner_canonical_user_id,
                     status = excluded.status,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    parallel_thread = excluded.parallel_thread
                 """,
                 (
                     session_key,
@@ -2168,6 +2184,9 @@ class _RelationalGatewayStateRepository:
                     else (existing.status if existing else "active"),
                     created_at,
                     updated_at,
+                    1
+                    if (parallel_thread if parallel_thread is not None else bool(existing and existing.parallel_thread))
+                    else 0,
                 ),
             )
             conn.commit()

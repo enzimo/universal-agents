@@ -22,6 +22,7 @@ from custom_messages.contracts.envelope_v1 import (
     MessageEnvelope,
 )
 from custom_messages.contracts.routing_v1 import (
+    DELIVERY_MODE_INTERACTIVE,
     GatewayContext,
     MessageHeader,
     MessageMeta,
@@ -191,7 +192,7 @@ def _active_gateway_context_can_receive_notification(active_context: Any) -> boo
     delivery_mode = (
         str(getattr(active_context, "delivery_mode", "") or "").strip().lower()
     )
-    if delivery_mode != "interactive":
+    if delivery_mode != DELIVERY_MODE_INTERACTIVE:
         return False
     channel_name = (
         str(getattr(active_context, "channel_name", "") or "").strip().lower()
@@ -245,7 +246,7 @@ def _current_thread_context(config: Any, active_context: Any) -> GatewayContext:
         canonical_user_id=getattr(active_context, "canonical_user_id", None) or config.user.canonical_user_id,
         chat_id=getattr(active_context, "chat_id", None),
         thread_id=getattr(active_context, "thread_id", None),
-        delivery_mode="interactive",
+        delivery_mode=DELIVERY_MODE_INTERACTIVE,
         scheduled_job_id=getattr(active_context, "scheduled_job_id", None),
         schedule_owner_agent_id=(
             getattr(active_context, "schedule_owner_agent_id", None) or config.manager.manager_agent_id

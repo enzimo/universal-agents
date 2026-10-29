@@ -22,6 +22,8 @@ from tests.tool_result_support import tool_json
 from custom_agents.scheduled_runtime import (
     enqueue_fired_scheduled_task,
     enqueue_isolated_recovery_checkpoint,
+    _idle_sleep_seconds,
+    _schedule_claim_scope,
     scheduler_loop,
 )
 from custom_agents.conversation_store import ConversationStore
@@ -58,7 +60,7 @@ from custom_tools.providers.schedules import (
     resume_scheduled_job,
     update_scheduled_job,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from tests.pending_work_support import call_tool_on_agent_loop
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -207,6 +209,8 @@ class _FakeAgent:
                 ),
             ),
         )
+        # The tool calls below are the person's request's own turn.
+        self.test_task_id = "task_current"
         self._schedule_store = ScheduleStore(db_path=db_path)
         self._conversation_store = ConversationStore(db_path=db_path, artifacts_dir=Path(db_path).parent / "conversation_artifacts")
         self._scheduler_wake = _FakeWake()
@@ -328,6 +332,7 @@ class _LoopScheduleStore:
 
     def claim_next_due(self, **kwargs):
         self.claim_calls += 1
+        self.claim_kwargs = kwargs
         if self.scheduled_message is None:
             return None
         return {
@@ -352,7 +357,8 @@ class _LoopScheduleStore:
         self.released_with = {"schedule_id": schedule_id, **kwargs}
         return True
 
-    def get_earliest_fire_time(self):
+    def get_earliest_fire_time(self, **kwargs):
+        self.earliest_kwargs = kwargs
         return None
 
 
@@ -373,6 +379,7 @@ class _LoopAgent:
         self._local_team_runtime = None
         self.schedule_workers = {}
         self.is_executing = not can_start
+        self.main_lane_busy = not can_start
         self.paused = False
         self.subtask_watchdog_interval_seconds = 1
         self._logger = logging.getLogger("test_scheduler_loop")
@@ -711,6 +718,35 @@ def test_scheduler_loop_updates_schedule_with_claim_token_after_acceptance():
     }
 
 
+def test_the_lead_claims_parallel_schedules_while_ordinary_work_holds_the_main_lane():
+    """Owner, 2026-10-29: a schedule set up in a parallel thread runs independently of other work.
+
+    Before, no schedule was claimed while the main lane was busy, so its runs
+    started late. A worker has no parallel lanes and still waits.
+    """
+
+    scheduled_message = ScheduledMessage(
+        schedule_id="sched_parallel",
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        payload=Task(task_id="task_parallel", task_type=MessageMetaType.REQUEST, problem_statement="run"),
+        interval_ms=1000,
+    )
+    lead = _LoopAgent(can_start=False, scheduled_message=scheduled_message)
+    lead.task_manager.parallel_lanes_enabled = True
+
+    # Bounded: without the claim the loop would sleep and never fire.
+    asyncio.run(asyncio.wait_for(scheduler_loop(lead), timeout=10))
+
+    assert lead._schedule_store.claim_kwargs["parallel_thread"] is True
+    assert lead.enqueued == [("sched_parallel", "sched_parallel")]
+    assert asyncio.run(_schedule_claim_scope(_LoopAgent(can_start=False))) == (False, False), "a busy worker"
+    assert asyncio.run(_schedule_claim_scope(_LoopAgent(can_start=True))) == (True, False)
+    asyncio.run(_idle_sleep_seconds(lead, True, parallel_only=True))
+    assert lead._schedule_store.earliest_kwargs == {"parallel_thread": True}, (
+        "an ordinary schedule already due must not wake the loop every second"
+    )
+
+
 def test_schedule_telemetry_reports_counts_timing_and_scheduler_identity(
     tmp_path: Path,
 ):
@@ -902,6 +938,7 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1006,6 +1043,7 @@ def test_aar_batch_review_schedule_skips_when_no_pending_reports(tmp_path: Path)
         task_manager=task_manager,
         paused=False,
         is_executing=False,
+        main_lane_busy=False,
         _conversation_store=None,
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=SimpleNamespace(
@@ -1077,6 +1115,7 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1154,6 +1193,7 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1249,6 +1289,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -1351,6 +1392,7 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
         task_manager=task_manager,
         paused=False,
         is_executing=True,
+        main_lane_busy=True,
         # The run's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the run stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,

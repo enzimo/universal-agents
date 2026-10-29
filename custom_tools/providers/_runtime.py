@@ -1,5 +1,6 @@
 """Runtime support for the trusted Strands tool surface."""
 
+from custom_tools.runtime_context import bound_task_id
 import asyncio
 import concurrent.futures
 import logging
@@ -154,7 +155,7 @@ def _task_person(agent: "UniversalAgent") -> Optional[PersonPrincipal]:
             "A tool refused a task without a verified identity. "
             "event=task_identity_unverified agent_id=%s task_id=%s reason=%s",
             getattr(agent, "id", None),
-            agent.task_manager.current_task_id,
+            bound_task_id(),
             exc,
         )
         raise _UnverifiedTask(str(exc)) from exc
@@ -220,7 +221,7 @@ def _resolve_objective_id_for_tool(
             agent.task_manager.get_plan_objective_id, plan_id
         )
     else:
-        resolved_task_id = task_id or agent.task_manager.current_task_id
+        resolved_task_id = task_id or bound_task_id()
         resolved = (
             agent.task_manager.operations_runtime.run_sync(
                 agent.task_manager.get_task_objective_id, resolved_task_id
@@ -355,7 +356,7 @@ def _resolve_heartbeat_source_id(
 ) -> str:
     if explicit_source_id.strip():
         return explicit_source_id.strip()
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     task_info = (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_info, current_task_id
@@ -378,7 +379,7 @@ def _new_conversation_id() -> str:
 
 
 def _get_current_task_info(agent: "UniversalAgent"):
-    current_task_id = agent.task_manager.current_task_id
+    current_task_id = bound_task_id()
     if not current_task_id:
         raise ValueError("No task currently in progress.")
     task_info = agent.task_manager.operations_runtime.run_sync(

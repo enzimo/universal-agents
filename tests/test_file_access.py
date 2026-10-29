@@ -182,7 +182,7 @@ def test_with_authorization_on_file_tools_ask_for_each_folder(layout: InstanceLa
         TargetRefV1,
     )
     from custom_tools.non_interactive_file_tools import file_read, file_write
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from tests.test_workspace_scope_policy import TEAM, task_agent
 
     agent = task_agent(layout, "alice")
@@ -238,7 +238,7 @@ def test_a_blocked_folder_cannot_be_sent_as_an_attachment(layout: InstanceLayout
         TargetRefV1,
     )
     from custom_tools.providers.communication import _attachment_access_errors
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from tests.test_workspace_scope_policy import TEAM, task_agent
 
     agent = task_agent(layout, "alice")

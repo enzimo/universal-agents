@@ -16,7 +16,7 @@ from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, 
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_tools.providers import worker_pools as tools
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from runtime_settings.worker_pools import WorkerPoolsConfig
 
 
@@ -64,6 +64,7 @@ def lead(tmp_path, monkeypatch):
         )
     manager.update_main_task_state("root", ProgressState.IN_PROGRESS, _iso())
     manager.task_state.current_in_progress_task_id = "root"
+    bind_task(manager.task_state.current_in_progress_task_id)
     monkeypatch.setattr(
         "custom_agents.worker_pool_settings.current_worker_pool_settings",
         lambda _agent: WorkerPoolsConfig(max_workers_per_type_ceiling=8),
