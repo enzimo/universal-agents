@@ -15,7 +15,8 @@ skill drafts) goes through this module. For a requested path it:
    (``custom_agents.folder_access``; folder ids from ``access_control.folders``);
 5. opens the real location from the folder it belongs to through
    ``access_control.safe_open``, one component at a time without following
-   links.
+   links. A write replaces a file in one rename, so readers and other writers
+   never see it half written.
 
 So a link inside the person's folder that points at their own files works, a
 link that points anywhere else is judged by where it points, and a link
@@ -197,7 +198,12 @@ def read_text(
 def writable(
     raw: str | Path, *, create_directories: bool = True, agent: Any = None
 ) -> Iterator[tuple[FileLocation, BinaryIO]]:
-    """A binary writer for a file in the task's folders (new, or replaced in place)."""
+    """A binary writer for a file in the task's folders, new or replaced.
+
+    The content replaces the file in one rename when the block ends
+    (``access_control.safe_open.writable_file``): readers see the old content
+    or the new, never a mix, and a block that raises leaves the file as it was.
+    """
 
     location = _for_writing(raw, agent)
     with _safely(location):
