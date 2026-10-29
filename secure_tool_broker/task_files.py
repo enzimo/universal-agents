@@ -164,7 +164,7 @@ class TaskFileStage:
 
     @staticmethod
     def _write_into(located: _Located, parts: tuple[str, ...], source: Path) -> None:
-        """Write a new file, or replace a one-link regular file in place; never through a link."""
+        """Write a new file, or replace a one-link regular file in one rename; never through a link."""
 
         with _rejected_when_unsafe():
             with safe_open.writable_file(located.root, parts) as writer, open(source, "rb") as reader:
