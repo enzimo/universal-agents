@@ -1369,11 +1369,19 @@ sensitive name), asks the access service for a folder
 decision when authorization is on, and then opens that real location through
 `access_control/safe_open.py`. `safe_open` walks from a trusted root one
 component at a time with `O_NOFOLLOW`, accepts only regular files with one
-link, creates files with `O_EXCL`, and replaces existing ones in place through
-the checked descriptor, so a link planted beforehand or swapped in after the
-check makes the open fail. The broker's staged CLI files
-(`secure_tool_broker/task_files.py`) and the gateway workspace browser use
-`safe_open` too. Sensitive names (env files such as `team.env`, SSH private
+link, and creates files with `O_EXCL`, so a link planted beforehand or swapped
+in after the check makes the open fail. A write that replaces a file writes a
+new temporary file in the same folder and renames it over the old one, keeping
+its mode and owner. A person's parallel threads can write one file at the same
+time, and the rename is atomic: readers see the old content or the new, never a
+half-written file, the last writer to finish wins with its whole content, and a
+write that fails part way leaves the file unchanged. Writes that only ever
+create a file (`exclusive`: `file_move`, delivered file shares, installed
+programs) still write the new file where it will stay: there is no old content
+to mix with, a second writer is refused, and the decision journal records a
+delivered share's or program's identity before writing it. The broker's staged
+CLI files (`secure_tool_broker/task_files.py`) and the gateway workspace
+browser use `safe_open` too. Sensitive names (env files such as `team.env`, SSH private
 keys, `.pem` files, credential folders such as `.ssh`) come from one list,
 `access_control/sensitive_paths.py`, used by the file tools, the shell tool's
 path arguments, attachments in both directions and the workspace browser, so

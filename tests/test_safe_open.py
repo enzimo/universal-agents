@@ -71,7 +71,7 @@ def test_writing_never_follows_a_link_and_leaves_its_target_alone(root: Path, se
     assert sorted(path.name for path in secret.parent.iterdir()) == ["secret.txt"]
 
 
-def test_an_existing_file_is_replaced_in_place_keeping_its_mode(root: Path) -> None:
+def test_an_existing_file_is_replaced_keeping_its_mode(root: Path) -> None:
     script = root / "docs" / "run.sh"
     script.write_text("old", encoding="utf-8")
     script.chmod(0o755)
@@ -80,6 +80,61 @@ def test_an_existing_file_is_replaced_in_place_keeping_its_mode(root: Path) -> N
 
     assert script.read_bytes() == b"new"
     assert stat.S_IMODE(script.stat().st_mode) == 0o755
+
+
+def test_a_reader_sees_the_old_content_until_the_new_content_is_complete(root: Path) -> None:
+    with safe_open.writable_file(root, ("docs", "note.txt")) as writer:
+        writer.write(b"new content, first half")
+        writer.flush()
+        # Mid-write, a reader still gets the whole old file, never an empty or partial one.
+        assert safe_open.read_bytes(root, ("docs", "note.txt")) == b"hello"
+        writer.write(b" and second half")
+
+    assert safe_open.read_bytes(root, ("docs", "note.txt")) == b"new content, first half and second half"
+
+
+def test_two_writers_of_one_file_never_mix_their_content(root: Path) -> None:
+    long_text, short_text = b"A" * 10, b"BB"
+    with safe_open.writable_file(root, ("docs", "note.txt")) as first:
+        with safe_open.writable_file(root, ("docs", "note.txt")) as second:
+            first.write(long_text)
+            first.flush()
+            second.write(short_text)
+            second.flush()
+        assert safe_open.read_bytes(root, ("docs", "note.txt")) == short_text
+
+    # The last writer to finish wins with its whole content.
+    assert safe_open.read_bytes(root, ("docs", "note.txt")) == long_text
+
+
+def test_a_write_that_fails_part_way_leaves_the_file_and_folder_as_they_were(root: Path) -> None:
+    with pytest.raises(RuntimeError):
+        with safe_open.writable_file(root, ("docs", "note.txt")) as writer:
+            writer.write(b"partial")
+            writer.flush()
+            raise RuntimeError("the source could not be read")
+
+    assert safe_open.read_bytes(root, ("docs", "note.txt")) == b"hello"
+    assert [name for name, _entry in safe_open.list_directory(root, ("docs",))] == ["note.txt"]
+
+
+def test_a_new_file_gets_the_usual_mode_and_no_temporary_file_stays(root: Path) -> None:
+    mask = os.umask(0o022)
+    try:
+        safe_open.write_bytes(root, ("docs", "new.txt"), b"made")
+    finally:
+        os.umask(mask)
+
+    assert (root / "docs" / "new.txt").read_bytes() == b"made"
+    assert stat.S_IMODE((root / "docs" / "new.txt").stat().st_mode) == 0o644
+    assert sorted(path.name for path in (root / "docs").iterdir()) == ["new.txt", "note.txt"]
+
+
+def test_a_folder_in_the_files_place_is_not_replaced(root: Path) -> None:
+    (root / "docs" / "folder").mkdir()
+
+    assert _reason(lambda: safe_open.write_bytes(root, ("docs", "folder"), b"x")) == safe_open.REASON_NOT_REGULAR_FILE
+    assert (root / "docs" / "folder").is_dir()
 
 
 def test_missing_folders_are_created_but_never_through_a_link(root: Path, secret: Path) -> None:

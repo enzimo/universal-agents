@@ -330,7 +330,9 @@ operator turned these checks off with `agent.request_conflict_checks`
 ([Separate requests changing the same record](configuration.md#separate-requests-changing-the-same-record)).
 Memory facts, schedules, heartbeat items and Objectives refuse a change only
 when it was decided from an older version of the record, so one request can
-still change what another just changed. Commands the agent runs in its shell or
+still change what another just changed. File tool writes replace the whole
+file at once, so the later of two writes wins whole, never mixed with the
+other. Commands the agent runs in its shell or
 Python, and files it writes with its file tools, are not checked. The switch
 never moves when you send, and slash commands keep their usual behavior.
 If the new chat cannot be created, or its Run concurrently setting cannot be

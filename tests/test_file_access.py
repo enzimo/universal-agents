@@ -94,6 +94,22 @@ def test_a_hard_linked_file_is_refused(layout: InstanceLayout) -> None:
     assert (layout.person_dir("bob") / "notes.txt").read_text(encoding="utf-8") == "bob"
 
 
+def test_a_write_that_fails_part_way_leaves_the_persons_file_as_it_was(layout: InstanceLayout) -> None:
+    # An attachment copy streams into file_access.writable; a source that
+    # fails part way must not leave the person's file cut short.
+    as_person(layout, "alice")
+    notes = layout.person_dir("alice") / "notes.txt"
+
+    with pytest.raises(OSError):
+        with file_access.writable("notes.txt") as (_location, writer):
+            writer.write(b"the first part of a copy")
+            writer.flush()
+            raise OSError("the source could not be read")
+
+    assert notes.read_text(encoding="utf-8") == "alice"
+    assert not [path.name for path in notes.parent.iterdir() if path.name.endswith(".tmp")]
+
+
 def _swap_after_check(monkeypatch, folder: Path, target: Path) -> None:
     """Replace ``folder`` with a link to ``target`` right after the path check passes."""
 
