@@ -1346,7 +1346,7 @@ function renderPendingAttachments() {
     });
   }
 
-function buildChatRequestBody(content, thread, attachments, clientRequestId) {
+function buildChatRequestBody(content, thread, attachments, clientRequestId, parallelThread) {
     if (!attachments.length) {
       return {
         headers: { "Content-Type": "application/json" },
@@ -1355,6 +1355,7 @@ function buildChatRequestBody(content, thread, attachments, clientRequestId) {
           session_key: thread.sessionKey,
           conversation_id: thread.conversationId,
           client_request_id: clientRequestId,
+          parallel_thread: Boolean(parallelThread),
         }),
       };
     }
@@ -1363,6 +1364,7 @@ function buildChatRequestBody(content, thread, attachments, clientRequestId) {
     formData.append("session_key", thread.sessionKey);
     formData.append("conversation_id", thread.conversationId);
     formData.append("client_request_id", clientRequestId);
+    formData.append("parallel_thread", String(Boolean(parallelThread)));
     attachments.forEach(function (item) {
       formData.append("attachments[]", item.file, item.filename);
     });
@@ -1513,29 +1515,20 @@ function fetchSessions(options) {
     return request;
   }
 
-function createServerThread(options) {
-    // Launch parallel thread asks for a thread whose requests the agent runs
-    // beside its other work; New Chat and /new start ordinary ones.
-    var parallelThread = Boolean(options && options.parallelThread);
+function createServerThread() {
     var authGeneration = sharedState.authSessionGeneration;
     if (!sharedState.authSessionActive) { return Promise.resolve(null); }
-    if (shellState.threadCreationRequest && shellState.threadCreationGeneration === authGeneration
-        && shellState.threadCreationParallel === parallelThread) {
+    if (shellState.threadCreationRequest && shellState.threadCreationGeneration === authGeneration) {
       return shellState.threadCreationRequest;
     }
     var previousThread = activeThread();
     var previousSelection = sharedState.activeThreadId;
     shellState.threadCreationGeneration = authGeneration;
-    shellState.threadCreationParallel = parallelThread;
     var init = {
       method: "POST",
       credentials: "same-origin",
       signal: AbortSignal.timeout(15000),
     };
-    if (parallelThread) {
-      init.headers = { "Content-Type": "application/json" };
-      init.body = JSON.stringify({ parallel_thread: true });
-    }
     var request = requestClient.fetch("/api/web-chat/sessions", init).then(function (response) {
       if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) { return null; }
       return parseApiResponse(response, "Unable to create a chat thread.", function () {
@@ -2431,7 +2424,8 @@ function sendMessage(content, options) {
       content,
       thread,
       attachments,
-      clientRequestId
+      clientRequestId,
+      options.parallelThread
     );
     var requestPromise = requestClient.fetch("/api/web-chat/chat", {
       method: "POST",

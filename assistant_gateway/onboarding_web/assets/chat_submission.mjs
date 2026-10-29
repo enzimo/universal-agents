@@ -19,13 +19,12 @@ export function createChatSubmission({ readDraft, context, createThread, takeDra
     preparing(true);
     try {
       let thread = origin.thread;
-      // The switch launches a parallel thread: the server runs its requests
-      // beside the agent's other work. Without a thread, a plain one starts.
-      if (!command && draft.separate) thread = await createThread({ parallelThread: true });
-      else if (!command && !thread) thread = await createThread();
+      // Keep the selected conversation, including its model history. The
+      // switch marks it for parallel work when this message is submitted.
+      if (!command && !thread) thread = await createThread();
       if (!current() || (!thread && !command)) return;
       const attachments = takeDraft();
-      send(draft.content, { thread, attachments });
+      send(draft.content, { thread, attachments, parallelThread: !command && draft.separate });
     } catch (error) {
       if (current()) failed(error, submit);
     } finally {

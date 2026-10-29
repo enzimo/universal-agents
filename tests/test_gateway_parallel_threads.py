@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from aiohttp import FormData
 
 from assistant_gateway.application.interactive_commands import GatewayCommandRequest
 from assistant_gateway.application.session_service import PARALLEL_MARK_CLEARED_NOTICE
@@ -24,6 +25,7 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType
 from tests.test_gateway_task_steering import _config as steering_config
 from tests.test_gateway_website_app import InternalWebsiteInteractiveApp, _config as website_config
+from tests.test_gateway_website_app import _StatefulFakeGateway
 
 
 class _AnsweringTransport:
@@ -97,6 +99,67 @@ async def test_web_chat_creates_a_parallel_thread_only_when_asked(tmp_path: Path
         assert refused.status == 400
         stored = gateway.session_repository.get_session(parallel_session["session_key"])
         assert stored is not None and stored.parallel_thread is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_files", [False, True])
+async def test_parallel_reply_keeps_the_conversation_and_marks_later_requests(tmp_path: Path, monkeypatch, with_files) -> None:
+    config = website_config(tmp_path)
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    config.interactive_apps.internal_website.web_chat_token_env_var = "WEB_CHAT_AUTH_TOKEN"
+    monkeypatch.setenv("WEB_CHAT_AUTH_TOKEN", "uaweb_parallel_test")
+    gateway = _StatefulFakeGateway(GatewayStateStore(str(tmp_path / "gateway.db")))
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        await client.post("/api/web-chat/auth", json={"token": "uaweb_parallel_test"})
+        session = (await (await client.post("/api/web-chat/sessions")).json())["session"]
+        for index, parallel in enumerate((False, True, False)):
+            payload = {
+                "session_key": session["session_key"], "conversation_id": session["conversation_id"],
+                "message": f"Message {index}", "client_request_id": f"parallel_reply_{index}",
+                "parallel_thread": parallel,
+            }
+            if with_files:
+                form = FormData()
+                for key, value in payload.items():
+                    form.add_field(key, str(value).lower() if isinstance(value, bool) else value)
+                form.add_field("attachments[]", b"notes", filename="notes.txt", content_type="text/plain")
+                response = await client.post("/api/web-chat/chat", data=form)
+            else:
+                response = await client.post("/api/web-chat/chat", json=payload)
+            assert response.status == 200, await response.text()
+        stored = gateway.session_repository.get_session(session["session_key"])
+        assert stored.parallel_thread is True
+        assert stored.conversation_id == session["conversation_id"]
+        assert {item["conversation_id"] for item in gateway.sent_user_messages} == {session["conversation_id"]}
+        history = await client.get(f"/api/web-chat/sessions/{session['session_key']}/messages")
+        messages = (await history.json())["messages"]
+        assert [item["content"] for item in messages if item["role"] == "user"] == ["Message 0", "Message 1", "Message 2"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_mark_refuses_other_owners_and_changed_conversations(tmp_path: Path, monkeypatch) -> None:
+    config = website_config(tmp_path)
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    monkeypatch.setenv("WEB_CHAT_AUTH_TOKEN", "uaweb_parallel_test")
+    gateway = _StatefulFakeGateway(GatewayStateStore(str(tmp_path / "gateway.db")))
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+    async with TestClient(TestServer(app.build_app())) as client:
+        await client.post("/api/web-chat/auth", json={"token": "uaweb_parallel_test"})
+        session = (await (await client.post("/api/web-chat/sessions")).json())["session"]
+        stored = gateway.session_repository.get_session(session["session_key"])
+        assert not app.application.sessions.mark_web_chat_session_parallel(
+            session_key=stored.session_key, conversation_id=stored.conversation_id,
+            owner_canonical_user_id="another-person",
+        )
+        assert not gateway.session_repository.mark_session_parallel(stored.session_key, "old-conversation")
+        for value in ("true", "yes", 1):
+            response = await client.post("/api/web-chat/chat", json={
+                "session_key": stored.session_key, "message": "Reply", "client_request_id": "invalid_mark",
+                "parallel_thread": value,
+            })
+            assert response.status == 400
+        assert not gateway.session_repository.get_session(stored.session_key).parallel_thread
 
 
 @pytest.mark.asyncio

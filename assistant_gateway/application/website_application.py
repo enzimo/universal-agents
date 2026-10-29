@@ -804,6 +804,12 @@ class WebSessionApplication(Protocol):
     ) -> GatewaySession | None:
         """Rename a visible Web Chat session or return ``None`` when absent."""
 
+    def mark_web_chat_session_parallel(
+        self, *, session_key: str, conversation_id: str, owner_canonical_user_id: str | None
+    ) -> bool:
+        """Mark the owner's current conversation as safe to run beside other work."""
+        ...
+
     def web_chat_thread_states(
         self,
         *,

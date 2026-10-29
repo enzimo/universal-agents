@@ -304,6 +304,8 @@ class GatewayStateRepository(
 
     def set_session_status(self, session_key: str, status: str) -> bool: ...
 
+    def mark_session_parallel(self, session_key: str, conversation_id: str) -> bool: ...
+
     def set_active_session_for_channel(
         self,
         *,
@@ -2250,6 +2252,22 @@ class _RelationalGatewayStateRepository:
                 WHERE session_key = {self._dialect.bind}
                 """,
                 (status, utc_now_iso(), session_key),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_session_parallel(self, session_key: str, conversation_id: str) -> bool:
+        """Do not overwrite a conversation switch or a concurrent task's last_task_id."""
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_sessions
+                SET parallel_thread = 1, updated_at = {self._dialect.bind}
+                WHERE session_key = {self._dialect.bind}
+                  AND conversation_id = {self._dialect.bind} AND status = 'active'
+                """,
+                (utc_now_iso(), session_key, conversation_id),
             )
             conn.commit()
             return cursor.rowcount > 0

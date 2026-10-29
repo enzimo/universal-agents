@@ -302,9 +302,9 @@ unless you rename it. Updates the team sends you and notes from memory reviews
 appear as their own threads, **Updates** and **Memory review**, once there is
 something in them.
 
-To start an unrelated request while keeping your earlier chat, turn on
-**Launch parallel thread** below Send and send your message. Chat creates a
-new thread for that message and its files, and keeps its replies there. The
+To let the current conversation run alongside other work, turn on
+**Launch parallel thread** below Send and send your message. Chat keeps the
+current thread, its history, your files and replies together. The
 team lead starts on it right away, even while it is busy with your other work,
 and every later request you send in that thread runs the same way.
 A schedule or Objective work you set up in that thread also runs this way:
@@ -325,8 +325,9 @@ Memory facts, schedules, heartbeat items and Objectives refuse a change only
 when it was decided from an older version of the record, so one request can
 still change what another just changed. Commands the agent runs in its shell or
 Python, and files it writes with its file tools, are not checked. The switch
-turns off after the message moves to the new chat. Leave it off to continue
-the selected thread. Slash commands keep their usual behavior.
+turns off after sending, but the thread stays marked for parallel work.
+Use **New Chat** first if you want an empty conversation. An unchecked switch
+keeps the thread's existing setting. Slash commands keep their usual behavior.
 If the new chat cannot be created, your text and files stay in the composer.
 Selecting an existing conversation while a new chat is being created keeps
 your selection. Any message already submitted keeps its intended conversation.

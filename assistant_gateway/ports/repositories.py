@@ -187,6 +187,10 @@ class SessionRepository(Protocol):
 
     def set_session_status(self, session_key: str, status: str) -> bool: ...
 
+    def mark_session_parallel(self, session_key: str, conversation_id: str) -> bool:
+        """Mark only the current conversation, without changing routing or history."""
+        ...
+
     def set_active_session_for_channel(
         self,
         *,

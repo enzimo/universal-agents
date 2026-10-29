@@ -342,6 +342,7 @@ class WebsiteConversationHandlers:
         # a refused, resent or misaddressed send leaves no file behind, least of
         # all in another person's conversation.
         payload, uploads = await self._web_chat_payload_and_uploads(request)
+        parallel_thread = self._parallel_thread_value(payload, multipart=request.content_type.startswith("multipart/"))
         text = str(payload.get("message") or "").strip()
         if not text and not uploads:
             raise web.HTTPBadRequest(text="message is required.")
@@ -373,6 +374,9 @@ class WebsiteConversationHandlers:
             raise web.HTTPBadRequest(
                 text="Attachments are not supported while answering a pending task query."
             )
+        if parallel_thread:
+            self._mark_parallel_reply(existing_session, owner=owner, text=text,
+                                      has_attachments=bool(uploads), waiting_question_id=waiting_question_id)
         # Saved under the checked conversation's own key, which names its owner
         # (the browser may name the conversation by an alias).
         attachments = self._store_web_chat_uploads(
@@ -433,6 +437,24 @@ class WebsiteConversationHandlers:
         web_response = web.json_response(response_payload)
         web_response.headers["Cache-Control"] = "no-store"
         return web_response
+
+    def _mark_parallel_reply(
+        self, session: GatewaySession, *, owner: str, text: str,
+        has_attachments: bool, waiting_question_id: str | None,
+    ) -> None:
+        """Mark ordinary replies; keep commands and task controls on their own paths."""
+
+        if waiting_question_id or (not has_attachments and (
+            text.startswith("/") or self.application.is_task_progress_status_request(text)
+        )):
+            return
+        if not session.conversation_id:
+            raise web.HTTPConflict(text="This chat has no conversation. Reload it and try again.")
+        if not self.application.sessions.mark_web_chat_session_parallel(
+            session_key=session.session_key, conversation_id=session.conversation_id,
+            owner_canonical_user_id=owner,
+        ):
+            raise web.HTTPConflict(text="The chat changed before it could be marked for parallel work. Reload it and try again.")
 
     def _senders_web_chat_session(
         self,
@@ -905,7 +927,15 @@ class WebsiteConversationHandlers:
         if not request.can_read_body:
             return False
         payload = await self.operations._json_payload(request)
+        return self._parallel_thread_value(payload)
+
+    @staticmethod
+    def _parallel_thread_value(payload: dict[str, Any], *, multipart: bool = False) -> bool:
+        """JSON uses a boolean; multipart form fields carry its text spelling."""
+
         value = payload.get("parallel_thread", False)
+        if multipart and value in ("true", "false"):
+            value = value == "true"
         if not isinstance(value, bool):
             raise web.HTTPBadRequest(text="parallel_thread must be true or false.")
         return value

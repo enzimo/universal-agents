@@ -28,13 +28,25 @@ function harness() {
     creations: () => creations, taken: () => taken, busy: () => busy };
 }
 
+test("a parallel reply retains the selected conversation and its history", async () => {
+  const h = harness();
+  h.original.conversationId = "conversation-with-history";
+  h.original.messages = [{ role: "user", content: "Earlier instructions" }];
+  const sending = h.submission.submit();
+  assert.equal(h.creations(), 0, "a reply must not create an empty conversation");
+  await sending;
+  assert.equal(h.sends[0].thread, h.original);
+  assert.equal(h.sends[0].parallelThread, true);
+  assert.equal(h.sends[0].thread.messages[0].content, "Earlier instructions");
+});
+
 test("create the destination before consuming text and files; repeated Send creates one request", async () => {
   const h = harness();
+  h.state.thread = null;
   const sending = h.submission.submit();
   await h.submission.submit();
   assert.equal(h.creations(), 1);
-  // The switch asks the server for a parallel thread.
-  assert.deepEqual(h.creationOptions[0], { parallelThread: true });
+  assert.equal(h.creationOptions[0], undefined);
   assert.equal(h.taken(), 0);
   assert.equal(h.busy(), true);
   h.state.thread = { id: "selected-during-creation" };
@@ -43,12 +55,14 @@ test("create the destination before consuming text and files; repeated Send crea
   assert.equal(h.sends.length, 1);
   assert.equal(h.sends[0].thread, h.destination);
   assert.equal(h.sends[0].attachments, h.files);
+  assert.equal(h.sends[0].parallelThread, true);
   assert.equal(h.draft.separate, false);
   assert.equal(h.busy(), false);
 });
 
 test("a failed creation preserves the draft and files and offers Retry", async () => {
   const h = harness();
+  h.state.thread = null;
   const sending = h.submission.submit();
   h.creation.reject(new Error("Connection lost"));
   await sending;
@@ -84,10 +98,12 @@ test("slash commands retain their existing routing even with the switch selected
   await h.submission.submit();
   assert.equal(h.creations(), 0);
   assert.equal(h.sends[0].thread, h.original);
+  assert.equal(h.sends[0].parallelThread, false);
 });
 
 test("a creation completing after sign-out cannot consume another person's draft", async () => {
   const h = harness();
+  h.state.thread = null;
   const sending = h.submission.submit();
   h.state.generation++;
   h.creation.resolve(h.destination);
@@ -98,6 +114,7 @@ test("a creation completing after sign-out cannot consume another person's draft
 
 test("reset cancels preparation ownership even before an old creation settles", async () => {
   const h = harness();
+  h.state.thread = null;
   const sending = h.submission.submit();
   h.submission.reset();
   assert.equal(h.busy(), false);

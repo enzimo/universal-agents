@@ -343,8 +343,10 @@ acknowledged, and handled by the execution lane of the task it concerns
 (`deferred_message_runtime.may_resume_a_turn`). The mailbox waits for each
 callback, so a turn there held back every other message.
 
-**Parallel threads.** A thread a person starts with Web Chat's **Launch
-parallel thread** is stored as parallel on its gateway session, and the
+**Parallel threads.** Web Chat's **Launch parallel thread** marks the current
+thread as parallel when the person sends a message. It keeps the conversation
+and its full model history, creating a thread only when none is selected.
+The mark is stored on its gateway session, and the
 gateway marks every request sent in it (`GatewayContext.parallel_thread`). The
 team lead runs each such request in an execution lane of its own
 (`custom_agents.execution_lanes` decides the lane,

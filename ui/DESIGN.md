@@ -1834,15 +1834,17 @@ its history. Steps with linked requests cannot use this correction.
 - The send action uses an ocean-blue icon button.
 - A compact **Launch parallel thread** switch sits below Send, off by default,
   with no helper sentence.
-  It creates a parallel thread: the browser asks for it when it creates the
-  chat (`{"parallel_thread": true}`), and every request sent in it runs at the
+  It marks the current thread as safe to run in parallel when sending the
+  message (`{"parallel_thread": true}`). Keep its conversation and full
+  history. Create a thread only when none is selected. Every request sent in it runs at the
   same time as the agent's other work. Admit its request without waiting for
   the current model turn, so Settings → Tasks can show and control it
   immediately. New Chat and `/new` start ordinary threads.
   It applies to one ordinary message; slash commands keep their usual behavior.
-  Create the new chat before clearing the composer, then show the message,
-  files, name and replies only there. Keep the earlier chat in the sidebar.
-  Reset the switch once the message moves to its chat. While creating the chat,
+  Keep the message, files, name and replies in the selected chat. To start
+  without history, use New Chat first. An unchecked switch keeps the saved
+  parallel setting. Reset the switch once the message is submitted.
+  When no chat is selected, create one before clearing the composer. While creating it,
   disable composer edits and New Chat, and announce **Preparing your chat…**.
   A failed creation keeps the draft and files. **Retry** on a send failure
   resends the original message and files with the same request id and destination.

@@ -458,6 +458,19 @@ class WebsiteSessionApplication:
             self._session_repository.set_session_status(session.session_key, "archived")
         )
 
+    def mark_web_chat_session_parallel(
+        self, *, session_key: str, conversation_id: str, owner_canonical_user_id: str | None
+    ) -> bool:
+        session = self._session_repository.resolve_session_reference(session_key)
+        if (
+            session is None
+            or session.channel_name != DELIVERY_CHANNEL_WEBSITE
+            or session.chat_id != WEB_CHAT_CHAT_ID
+            or not self._owner_allows(session, owner_canonical_user_id, action=PRIVATE_ACTION_UPDATE)
+        ):
+            return False
+        return self._session_repository.mark_session_parallel(session.session_key, conversation_id)
+
     def rename_web_chat_session(
         self,
         *,
