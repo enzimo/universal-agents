@@ -308,13 +308,16 @@ def remove_old_outputs_and_record(
     *,
     retention_days: int,
     conversation_records: ConversationStore | None,
+    notify_grace: Callable[[OutputRetentionResult], None],
     now: float | None = None,
 ) -> OutputRetentionResult:
     """``remove_old_outputs`` with the grace period, then save what it did; a failed save is logged.
 
     Retention becomes active at the first run with a period above 0 after the
     record says it was not (a new installation or upgrade, or the period
-    changed from 0); that time is kept in the record (``active_since``) and
+    changed from 0), after ``notify_grace`` stores its Inbox notice. The
+    callback must raise if storage fails: no activation is then recorded and
+    the next run starts a full new grace period. That time is kept in the record (``active_since``) and
     survives restarts. For ``GRACE_DAYS`` after it every run is a dry run, so
     administrators can see what will go and change the period first
     (``grace_notice``). A period of 0 forgets it. Shortening an active period
@@ -323,7 +326,8 @@ def remove_old_outputs_and_record(
 
     moment = datetime.now(timezone.utc).timestamp() if now is None else now
     path = layout.output_retention_record_path
-    active_since = _active_since(read_run_record(path), retention_days, moment)
+    previous = read_run_record(path)
+    active_since = _active_since(previous, retention_days, moment)
     deletes_from = None if active_since is None else active_since + GRACE_DAYS * SECONDS_PER_DAY
     dry_run = deletes_from is not None and moment < deletes_from
     result = remove_old_outputs(
@@ -335,6 +339,10 @@ def remove_old_outputs_and_record(
     )
     result.active_since = active_since
     result.deletes_from = deletes_from if dry_run else None
+    if dry_run and _time_of(previous.get("active_since")) is None:
+        # Persisting active_since attests the notice was stored. A failed
+        # delivery cannot consume the administrator's seven days of warning.
+        notify_grace(result)
     try:
         write_run_record(path, result, now=datetime.fromtimestamp(moment, timezone.utc))
     except OSError:

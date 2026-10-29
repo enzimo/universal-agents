@@ -594,6 +594,7 @@ async def remove_old_outputs_for_maintenance(agent: Any, schedule_id: str) -> st
             layout,
             retention_days=retention_days,
             conversation_records=getattr(agent, "_conversation_store", None),
+            notify_grace=lambda result: tell_administrators_of_grace_period(agent, result),
         )
     except Exception:
         agent._logger.exception(
@@ -605,12 +606,10 @@ async def remove_old_outputs_for_maintenance(agent: Any, schedule_id: str) -> st
             "Saved tool output cleanup failed before this review (manager log event=output_retention_failed); "
             "report it to TeamArchitect."
         )
-    if result.dry_run:
-        await asyncio.to_thread(tell_administrators_of_grace_period, agent, result)
     return result.instruction_sentence()
 
 
-def tell_administrators_of_grace_period(agent: Any, result: OutputRetentionResult) -> bool:
+def tell_administrators_of_grace_period(agent: Any, result: OutputRetentionResult) -> None:
     """One Inbox notice to administrators per grace period, with the first dry run's counts.
 
     The Status page shows the latest counts for the whole grace period
@@ -623,13 +622,14 @@ def tell_administrators_of_grace_period(agent: Any, result: OutputRetentionResul
     from custom_messages.contracts.access_v2 import AccessNoticeKind
 
     title, summary = grace_notice(result)
-    return send_runtime_notice_once(
+    send_runtime_notice_once(
         agent,
         notice_id=f"output_retention_grace:{int(result.active_since or 0)}",
         kind=AccessNoticeKind.SAVED_OUTPUT_RETENTION,
         roles=(PERSON_ROLE_ADMIN,),
         title=title,
         summary=summary,
+        raise_on_error=True,
     )
 
 

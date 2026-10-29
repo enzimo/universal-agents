@@ -1230,6 +1230,10 @@ and log event to TeamArchitect. Research cleanup deletes only complete
 generated result names with a 12-character hex ending, so dated personal notes
 remain in place.
 
+The seven-day period starts only after the administrator notice is stored.
+If storing it fails, cleanup reports a failure, keeps every output and retries
+with a full seven days after successful delivery.
+
 Use `inspect_memory_review_cleanup` during maintenance to review inactive expired
 memory-review jobs. Archive exact IDs with `maintain_memory_review_jobs`; purge
 only archived content after retention. Keep unknown outcomes unknown. Do not

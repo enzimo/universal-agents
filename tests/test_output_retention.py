@@ -424,14 +424,14 @@ def test_unreadable_outputs_keep_the_last_success_and_overdue_warning(
     blocked = layout.tool_results_dir if blocked_root else expired
     blocked.chmod(0)
     try:
-        result = remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=store, now=NOW)
+        result = remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=store, now=NOW, notify_grace=lambda result: None)
     finally:
         blocked.chmod(0o755)
     assert _kind(result, OutputKind.TOOL_RESULTS).failed
     record = read_run_record(layout.output_retention_record_path)
     assert record["last_success_at"] == previous_success
     assert overdue_since(record, now=NOW) is not None
-    result = remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=store, now=NOW)
+    result = remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=store, now=NOW, notify_grace=lambda result: None)
     assert not any(kind.failed for kind in result.kinds)
     assert read_run_record(layout.output_retention_record_path)["last_success_at"] == _iso(NOW)
 
@@ -703,14 +703,14 @@ def test_each_run_is_recorded_and_a_failing_kind_keeps_the_last_success(layout: 
 
     _tool_result(layout, "task_old", time.time() - (DAYS + 1) * SECONDS_PER_DAY)
 
-    remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=None)
+    remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=None, notify_grace=lambda result: None)
     first = read_run_record(layout.output_retention_record_path)
 
     class Broken:
         def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
             raise RuntimeError("database unavailable")
 
-    remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=Broken())
+    remove_old_outputs_and_record(layout, retention_days=DAYS, conversation_records=Broken(), notify_grace=lambda result: None)
     second = read_run_record(layout.output_retention_record_path)
 
     tool_results = first["kinds"]["tool_results"]
@@ -814,7 +814,7 @@ def _every_kind(layout: InstanceLayout, store: ConversationStore) -> dict[str, P
 def _graced(layout: InstanceLayout, store: ConversationStore, moment: float, *, days: int = DAYS):
     from custom_agents.output_retention import remove_old_outputs_and_record
 
-    return remove_old_outputs_and_record(layout, retention_days=days, conversation_records=store, now=moment)
+    return remove_old_outputs_and_record(layout, retention_days=days, conversation_records=store, now=moment, notify_grace=lambda result: None)
 
 
 def _counts(result) -> dict[str, tuple[int, int, int]]:
@@ -966,6 +966,45 @@ async def test_administrators_are_told_once_per_grace_period_and_the_status_page
     _grace_ended(layout)
     await remove_old_outputs_for_maintenance(manager, "internal_improvement_1")
     assert grace() == [], "it clears once deletion starts"
+
+
+@pytest.mark.asyncio
+async def test_failed_grace_notice_and_downtime_leave_a_full_week_after_successful_delivery(
+    layout: InstanceLayout, store: ConversationStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_agents import internal_improvement_runtime as runtime
+    from custom_agents.output_retention import read_run_record, remove_old_outputs_and_record
+    from storage.access_repository import AccessRepository
+
+    expired = _tool_result(layout, "task_1", EXPIRED)
+    settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(layout.task_database_path)}})
+    manager = _lead(layout, team_id="team_1", _conversation_store=store, task_manager=SimpleNamespace(storage_settings=settings))
+    moment = NOW
+    real_create = AccessRepository.create_notice_if_absent
+
+    def timed_cleanup(*args, **kwargs):
+        return remove_old_outputs_and_record(*args, **kwargs, now=moment)
+
+    def failed_store(*args, **kwargs):
+        raise OSError("notice storage unavailable")
+
+    monkeypatch.setattr(runtime, "remove_old_outputs_and_record", timed_cleanup)
+    monkeypatch.setattr(AccessRepository, "create_notice_if_absent", failed_store)
+    for moment in (NOW, NOW + 8 * SECONDS_PER_DAY):
+        sentence = await remove_old_outputs_for_maintenance(manager, "maintenance")
+        assert "cleanup failed" in sentence
+        assert expired.exists()
+        assert not read_run_record(layout.output_retention_record_path).get("active_since")
+    monkeypatch.setattr(AccessRepository, "create_notice_if_absent", real_create)
+    sentence = await remove_old_outputs_for_maintenance(manager, "maintenance")
+    assert "grace period" in sentence and expired.exists()
+    record = read_run_record(layout.output_retention_record_path)
+    assert record["active_since"] == _iso(moment)
+    assert record["deletes_from"] == _iso(moment + GRACE_DAYS * SECONDS_PER_DAY)
+    assert len(AccessRepository(settings).notices_for("team_1", person_id=None, roles=("admin",))) == 1
+    moment += GRACE_DAYS * SECONDS_PER_DAY
+    await remove_old_outputs_for_maintenance(manager, "maintenance")
+    assert not expired.exists()
 
 
 # -- readers of a deleted conversation artifact ---------------------------------------------

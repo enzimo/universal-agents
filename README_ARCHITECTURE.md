@@ -1466,7 +1466,9 @@ Tool-result manifest reads reject pipes before reading, so malformed outputs
 cannot block the maintenance scheduler. The record
 also keeps when retention became active (`active_since`): the first run with
 a period above 0 when it was not active (a new installation or upgrade, or a
-change from 0). For 7 days after that every run is a dry run: the same walks
+change from 0), after its administrator Inbox notice has been stored. If
+notice storage fails, no activation is recorded and the next successful
+attempt starts a full seven days. For 7 days after that every run is a dry run: the same walks
 with `OldFilesRemoved.dry_run` set count the items, files and bytes they
 would delete and delete nothing (conversation artifact records are counted,
 not deleted). Administrators get one Inbox notice per grace period
