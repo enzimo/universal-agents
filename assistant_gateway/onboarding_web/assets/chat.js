@@ -245,6 +245,12 @@ sharedState.messageInput = document.getElementById("message-input");
 
 shellState.separateRequest = document.getElementById("separate-request-toggle");
 
+shellState.separateRequestMessage = document.getElementById("separate-request-message");
+
+// The switch's position while no chat exists yet; the first message's new
+// chat takes it once created (chat_submission.mjs). A chat keeps its own.
+shellState.newThreadParallel = false;
+
 sharedState.attachmentInput = document.getElementById("message-attachment-input");
 
 sharedState.attachButton = document.getElementById("message-attach-button");
@@ -626,7 +632,8 @@ function clearThreadOptimisticDeliveries(thread) {
 
 function clearOptimisticDeliveries() {
     if (shellState.chatSubmission) shellState.chatSubmission.reset();
-    shellState.separateRequest.checked = false;
+    shellState.newThreadParallel = false;
+    renderParallelSwitch();
     sharedState.threads.forEach(clearThreadOptimisticDeliveries);
     shellState.deliveryTracker.clear();
   }
@@ -804,6 +811,12 @@ function threadFromSeed(seed) {
       historyLoaded: Boolean(seed.historyLoaded),
       transientError: null,
       transientItems: [],
+      // The thread's Run concurrently setting as the server saved it, and
+      // whether a request is open in its conversation (every event page).
+      parallelThread: Boolean(seed.parallelThread || seed.parallel_thread),
+      parallelSaving: false,
+      parallelError: "",
+      serverRequestOpen: false,
       updatedAt: Number(seed.updatedAt || Date.now()),
     };
   }
@@ -869,6 +882,7 @@ function setThreadPending(thread, isPending) {
       return;
     }
     thread.pendingReply = Boolean(isPending);
+    renderParallelSwitch();
   }
 
 // pendingReply is this page's own wait for a reply it sent; serverBusy is the
@@ -884,14 +898,22 @@ function applyThreadStates(payload) {
       return;
     }
     var busySessions = new Set(Array.isArray(payload.busy_session_keys) ? payload.busy_session_keys : []);
+    var openSessions = new Set(Array.isArray(payload.open_request_session_keys) ? payload.open_request_session_keys : []);
     var busyChanged = false;
+    var openChanged = false;
     sharedState.threads.forEach(function (thread) {
       var isBusy = busySessions.has(thread.sessionKey);
       if (Boolean(thread.serverBusy) !== isBusy) {
         thread.serverBusy = isBusy;
         busyChanged = true;
       }
+      var isOpen = openSessions.has(thread.sessionKey);
+      if (thread.serverRequestOpen !== isOpen) {
+        thread.serverRequestOpen = isOpen;
+        openChanged = true;
+      }
     });
+    if (busyChanged || openChanged) renderParallelSwitch();
     // Redrawing the list replaces an open rename field; wait until it closes.
     // The revision stays stale, so the next page still reloads the list.
     if (sharedState.editingThreadId) {
@@ -906,6 +928,80 @@ function applyThreadStates(payload) {
 
 function pendingReplyCount(thread) {
     return thread ? Math.max(0, Number(thread.pendingReplyCount || 0)) : 0;
+  }
+
+// Run concurrently is a setting of each thread (owner, 2026-10-29). It is
+// locked while a request is open in the thread: a message sent then is
+// guidance for that request and reaches it where it runs, so a change could
+// not apply to anything the person sees. The server refuses such a change too.
+function threadRequestOpen(thread) {
+    return Boolean(thread && (threadIsBusy(thread) || pendingReplyCount(thread) > 0 || thread.serverRequestOpen));
+  }
+
+function renderParallelSwitch() {
+    var toggle = shellState.separateRequest;
+    var message = shellState.separateRequestMessage;
+    if (!toggle || !message) {
+      return;
+    }
+    var thread = activeThread();
+    var locked = threadRequestOpen(thread);
+    var preparingChat = Boolean(shellState.chatSubmission && shellState.chatSubmission.isPreparing());
+    toggle.checked = thread ? Boolean(thread.parallelThread) : Boolean(shellState.newThreadParallel);
+    toggle.disabled = preparingChat || locked || Boolean(thread && thread.parallelSaving);
+    var error = thread ? thread.parallelError : "";
+    message.textContent = error || (locked ? "Available after this chat replies." : "");
+    message.classList.toggle("is-error", Boolean(error));
+    if (error) {
+      message.setAttribute("role", "alert");
+    } else {
+      message.removeAttribute("role");
+    }
+    message.hidden = !message.textContent;
+  }
+
+// Save the switch for one thread. The page shows the new position at once
+// and puts the saved one back, with the reason, when the server refuses.
+function saveParallelSetting(thread, value) {
+    var generation = sharedState.authSessionGeneration;
+    var current = function () {
+      return sharedState.authSessionActive && sharedState.authSessionGeneration === generation;
+    };
+    var previous = Boolean(thread.parallelThread);
+    thread.parallelThread = Boolean(value);
+    thread.parallelSaving = true;
+    thread.parallelError = "";
+    renderParallelSwitch();
+    return requestClient.fetch("/api/web-chat/sessions/" + encodeURIComponent(thread.sessionKey), {
+      method: "PATCH",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ parallel_thread: Boolean(value), conversation_id: thread.conversationId }),
+      signal: AbortSignal.timeout(15000),
+    }).then(function (response) {
+      return response.text().then(function (body) {
+        if (response.ok || !current()) {
+          return;
+        }
+        authentication.handleUnauthorizedResponse(response);
+        var payload = {};
+        try {
+          payload = body ? JSON.parse(body) : {};
+        } catch (error) {
+          payload = {};
+        }
+        throw new Error(payload.message || payload.error || body || response.statusText || "Try again.");
+      });
+    }).catch(function (error) {
+      if (current()) {
+        thread.parallelThread = previous;
+        thread.parallelError = "Run concurrently was not changed. " + (error.message || "Try again.");
+      }
+      throw error;
+    }).finally(function () {
+      thread.parallelSaving = false;
+      renderParallelSwitch();
+    });
   }
 
 function startTerminalReplyWait(thread) {
@@ -1346,7 +1442,7 @@ function renderPendingAttachments() {
     });
   }
 
-function buildChatRequestBody(content, thread, attachments, clientRequestId, parallelThread) {
+function buildChatRequestBody(content, thread, attachments, clientRequestId) {
     if (!attachments.length) {
       return {
         headers: { "Content-Type": "application/json" },
@@ -1355,7 +1451,6 @@ function buildChatRequestBody(content, thread, attachments, clientRequestId, par
           session_key: thread.sessionKey,
           conversation_id: thread.conversationId,
           client_request_id: clientRequestId,
-          parallel_thread: Boolean(parallelThread),
         }),
       };
     }
@@ -1364,7 +1459,6 @@ function buildChatRequestBody(content, thread, attachments, clientRequestId, par
     formData.append("session_key", thread.sessionKey);
     formData.append("conversation_id", thread.conversationId);
     formData.append("client_request_id", clientRequestId);
-    formData.append("parallel_thread", String(Boolean(parallelThread)));
     attachments.forEach(function (item) {
       formData.append("attachments[]", item.file, item.filename);
     });
@@ -1463,6 +1557,8 @@ function fetchSessions(options) {
           existing.conversationId = String(session.conversation_id || existing.conversationId || "");
           existing.updatedAt = Date.parse(session.updated_at || "") || existing.updatedAt || Date.now();
           existing.persisted = true;
+          // A save in flight owns the switch until the server answers it.
+          if (!existing.parallelSaving) existing.parallelThread = Boolean(session.parallel_thread);
           return existing;
         }
         return threadFromSeed({
@@ -1473,6 +1569,7 @@ function fetchSessions(options) {
           titleFull: title,
           sessionAlias: alias,
           persisted: true,
+          parallelThread: Boolean(session.parallel_thread),
           updatedAt: Date.parse(session.updated_at || "") || Date.now(),
         });
       }).filter(Boolean);
@@ -1551,6 +1648,7 @@ function createServerThread() {
         titleFull: NEW_CHAT_TITLE,
         persisted: true,
         historyLoaded: true,
+        parallelThread: Boolean(session.parallel_thread),
       });
       // Creating a destination does not replace a conversation the person
       // selected while the request was in flight. Its sender keeps `thread`.
@@ -2241,6 +2339,8 @@ function renderMessages(options) {
     var viewport = shellState.transcriptView.capture();
     stopTransientCountdown();
     var thread = activeThread();
+    // The switch shows the selected thread's setting.
+    renderParallelSwitch();
     sharedState.messageList.innerHTML = "";
     var errorThread = thread && thread.transientError ? thread : null;
     var errorNotice = errorThread ? errorThread.transientError : sharedState.historyHydrationError;
@@ -2424,8 +2524,7 @@ function sendMessage(content, options) {
       content,
       thread,
       attachments,
-      clientRequestId,
-      options.parallelThread
+      clientRequestId
     );
     var requestPromise = requestClient.fetch("/api/web-chat/chat", {
       method: "POST",
@@ -2690,7 +2789,7 @@ shellState.chatSubmission = createChatSubmission({
   readDraft: () => ({
     content: sharedState.messageInput.value.trim(),
     hasAttachments: shellState.pendingAttachments.length > 0,
-    separate: shellState.separateRequest.checked,
+    parallel: Boolean(shellState.newThreadParallel),
   }),
   context: () => ({
     authenticated: sharedState.authSessionActive,
@@ -2698,9 +2797,9 @@ shellState.chatSubmission = createChatSubmission({
     thread: activeThread(),
   }),
   createThread: createServerThread,
+  setParallel: (thread, value) => saveParallelSetting(thread, value).then(() => { shellState.newThreadParallel = false; }),
   takeDraft: () => {
     sharedState.messageInput.value = "";
-    shellState.separateRequest.checked = false;
     return detachPendingAttachmentsForSend();
   },
   send: sendMessage,
@@ -2711,6 +2810,8 @@ shellState.chatSubmission = createChatSubmission({
     const status = document.getElementById("composer-status");
     status.hidden = !pending;
     status.textContent = pending ? "Preparing your chat…" : "";
+    // Re-enabling the form must not unlock a switch that is locked.
+    renderParallelSwitch();
   },
   failed: (error, retry) => {
     appendSystemError(activeThread(), shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD,
@@ -2724,6 +2825,18 @@ authentication.resumeWebChatSession();
 lifecycle.listen(sharedState.messageForm, "submit", function (event) {
     event.preventDefault();
     shellState.chatSubmission.submit();
+  });
+
+lifecycle.listen(shellState.separateRequest, "change", function () {
+    var thread = activeThread();
+    var value = shellState.separateRequest.checked;
+    if (!thread) {
+      shellState.newThreadParallel = value;
+      renderParallelSwitch();
+      return;
+    }
+    // The error is shown by the switch (renderParallelSwitch).
+    saveParallelSetting(thread, value).catch(function () {});
   });
 
 // Match the platform's primary shortcut modifier and keep its visual cue local

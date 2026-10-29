@@ -1,5 +1,5 @@
 /** Keep a draft until its destination exists. Never resolve a send from the current selection later. */
-export function createChatSubmission({ readDraft, context, createThread, takeDraft, send, preparing, failed }) {
+export function createChatSubmission({ readDraft, context, createThread, setParallel, takeDraft, send, preparing, failed }) {
   let pending = null;
 
   async function submit() {
@@ -12,19 +12,24 @@ export function createChatSubmission({ readDraft, context, createThread, takeDra
       const now = context();
       return pending === attempt && now.authenticated && now.generation === origin.generation;
     };
-    // Slash commands keep their existing routing, including /new. The switch
-    // describes ordinary messages and must not create a second empty chat.
+    // Slash commands keep their existing routing, including /new, and never
+    // create a second empty chat.
     const command = draft.content.startsWith("/") && !draft.hasAttachments;
     pending = attempt;
     preparing(true);
     try {
+      // Keep the selected conversation, including its model history. Run
+      // concurrently is the thread's saved setting, so the message carries
+      // nothing. With no chat yet, the new chat takes the switch's position
+      // before the message is sent; if that fails, the draft stays.
       let thread = origin.thread;
-      // Keep the selected conversation, including its model history. The
-      // switch marks it for parallel work when this message is submitted.
-      if (!command && !thread) thread = await createThread();
+      if (!command && !thread) {
+        thread = await createThread();
+        if (thread && draft.parallel && current()) await setParallel(thread, true);
+      }
       if (!current() || (!thread && !command)) return;
       const attachments = takeDraft();
-      send(draft.content, { thread, attachments, parallelThread: !command && draft.separate });
+      send(draft.content, { thread, attachments });
     } catch (error) {
       if (current()) failed(error, submit);
     } finally {

@@ -8,56 +8,73 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+// `draft.parallel` is the switch's position while no chat exists yet; a chat
+// that exists keeps its own saved setting, which a message never carries.
 function harness() {
-  const creation = deferred();
+  const creation = deferred(), saving = deferred();
   const original = { id: "original" }, destination = { id: "destination" };
-  const draft = { content: "Research the options", hasAttachments: true, separate: true };
+  const draft = { content: "Research the options", hasAttachments: true, parallel: true };
   const state = { authenticated: true, generation: 1, thread: original };
   const files = [{ file: new Blob(["notes"]), filename: "notes.txt" }];
-  const sends = [], failures = [];
+  const sends = [], failures = [], saves = [];
   let creations = 0, taken = 0, busy = false;
   const creationOptions = [];
   const submission = createChatSubmission({
     readDraft: () => ({ ...draft }), context: () => ({ ...state }),
     createThread(options) { creations++; creationOptions.push(options); return creation.promise; },
-    takeDraft() { taken++; draft.content = ""; draft.separate = false; return files; },
+    setParallel(thread, value) { saves.push({ thread, value }); return saving.promise; },
+    takeDraft() { taken++; draft.content = ""; return files; },
     send(content, options) { sends.push({ content, ...options }); },
     preparing(value) { busy = value; }, failed(error, retry) { failures.push({ error, retry }); },
   });
-  return { submission, creation, state, draft, files, original, destination, sends, failures, creationOptions,
-    creations: () => creations, taken: () => taken, busy: () => busy };
+  return { submission, creation, saving, state, draft, files, original, destination, sends, failures, saves,
+    creationOptions, creations: () => creations, taken: () => taken, busy: () => busy };
 }
 
-test("a parallel reply retains the selected conversation and its history", async () => {
+test("a reply keeps the selected conversation and carries no setting", async () => {
   const h = harness();
-  h.original.conversationId = "conversation-with-history";
-  h.original.messages = [{ role: "user", content: "Earlier instructions" }];
   const sending = h.submission.submit();
   assert.equal(h.creations(), 0, "a reply must not create an empty conversation");
   await sending;
   assert.equal(h.sends[0].thread, h.original);
-  assert.equal(h.sends[0].parallelThread, true);
-  assert.equal(h.sends[0].thread.messages[0].content, "Earlier instructions");
+  assert.equal("parallelThread" in h.sends[0], false);
+  assert.deepEqual(h.saves, [], "an existing chat keeps its own saved setting");
 });
 
-test("create the destination before consuming text and files; repeated Send creates one request", async () => {
+test("a new chat takes the switch's position before its first message is sent", async () => {
   const h = harness();
   h.state.thread = null;
   const sending = h.submission.submit();
   await h.submission.submit();
   assert.equal(h.creations(), 1);
-  assert.equal(h.creationOptions[0], undefined);
+  assert.equal(h.creationOptions[0], undefined, "the chat itself is created ordinary");
   assert.equal(h.taken(), 0);
   assert.equal(h.busy(), true);
   h.state.thread = { id: "selected-during-creation" };
   h.creation.resolve(h.destination);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(h.saves, [{ thread: h.destination, value: true }]);
+  assert.equal(h.sends.length, 0, "the message waits for the setting");
+  h.saving.resolve();
   await sending;
   assert.equal(h.sends.length, 1);
   assert.equal(h.sends[0].thread, h.destination);
   assert.equal(h.sends[0].attachments, h.files);
-  assert.equal(h.sends[0].parallelThread, true);
-  assert.equal(h.draft.separate, false);
   assert.equal(h.busy(), false);
+});
+
+test("a refused setting keeps the draft and files and offers Retry", async () => {
+  const h = harness();
+  h.state.thread = null;
+  const sending = h.submission.submit();
+  h.creation.resolve(h.destination);
+  h.saving.reject(new Error("Run concurrently was not changed."));
+  await sending;
+  assert.equal(h.taken(), 0);
+  assert.equal(h.draft.content, "Research the options");
+  assert.equal(h.sends.length, 0);
+  assert.equal(typeof h.failures[0].retry, "function");
 });
 
 test("a failed creation preserves the draft and files and offers Retry", async () => {
@@ -68,37 +85,33 @@ test("a failed creation preserves the draft and files and offers Retry", async (
   await sending;
   assert.equal(h.taken(), 0);
   assert.equal(h.draft.content, "Research the options");
-  assert.equal(h.draft.separate, true);
+  assert.deepEqual(h.saves, []);
   assert.equal(h.sends.length, 0);
   assert.equal(h.busy(), false);
   assert.equal(typeof h.failures[0].retry, "function");
 });
 
-test("an unchecked switch keeps the selected thread and a files-only message still starts a chat", async () => {
+test("with the switch off a new chat stays ordinary and a files-only message still starts one", async () => {
   const h = harness();
-  h.draft.separate = false;
-  await h.submission.submit();
-  assert.equal(h.creations(), 0);
-  assert.equal(h.sends[0].thread, h.original);
+  h.draft.parallel = false;
   h.draft.content = "";
   h.state.thread = null;
   const sending = h.submission.submit();
   h.creation.resolve(h.destination);
   await sending;
-  assert.equal(h.sends[1].thread, h.destination);
-  assert.equal(h.sends[1].content, "");
-  // A chat started only because none was selected is an ordinary one.
-  assert.equal(h.creationOptions[0], undefined);
+  assert.deepEqual(h.saves, [], "nothing to save for an ordinary chat");
+  assert.equal(h.sends[0].thread, h.destination);
+  assert.equal(h.sends[0].content, "");
 });
 
-test("slash commands retain their existing routing even with the switch selected", async () => {
+test("slash commands retain their existing routing even with the switch on", async () => {
   const h = harness();
   h.draft.content = "/new";
   h.draft.hasAttachments = false;
   await h.submission.submit();
   assert.equal(h.creations(), 0);
+  assert.deepEqual(h.saves, []);
   assert.equal(h.sends[0].thread, h.original);
-  assert.equal(h.sends[0].parallelThread, false);
 });
 
 test("a creation completing after sign-out cannot consume another person's draft", async () => {
@@ -108,6 +121,7 @@ test("a creation completing after sign-out cannot consume another person's draft
   h.state.generation++;
   h.creation.resolve(h.destination);
   await sending;
+  assert.deepEqual(h.saves, [], "nor change the new chat's setting");
   assert.equal(h.taken(), 0);
   assert.equal(h.sends.length, 0);
 });
