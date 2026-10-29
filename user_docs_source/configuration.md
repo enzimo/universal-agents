@@ -358,9 +358,10 @@ Chat transcripts and completed tasks are kept; nothing deletes them. So that
 nobody's stored data grows unnoticed, the gateway and the manager each
 measure once a day how much they store for each active person, and the
 gateway sends the person an Inbox notice each time the total passes another
-step: at 5 GB, 10 GB, 15 GB and so on (1 GB is 1,000,000,000 bytes). The notice lists what takes the space: their folder,
-their chats, their completed tasks and conversation records, long texts saved
-with their conversations, and chat uploads still kept.
+step: at 5 GB, 10 GB, 15 GB and so on (1 GB is 1,000,000,000 bytes). The
+notice lists what takes the space: their folder, their chats, their completed
+tasks and conversation records, long texts saved with their conversations,
+and chat uploads still kept.
 
 ```yaml
 gateway:

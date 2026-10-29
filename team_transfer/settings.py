@@ -674,11 +674,10 @@ __all__ = [
 ]
 
 
-# V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days
-# and V8 gateway.storage_warnings. V5 records (v0.9.4 to v0.9.6) and V6 records
-# (v0.9.8) keep the same shape and carry only values that differ from the
-# defaults, so both steps pass them on unchanged and the new settings keep
-# their defaults (checks on, 90 days, storage warnings at 5 GB, 80% and 95%).
-# No release exported version 7, so it has no step.
+# V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
+# and V8 gateway.storage_warnings. Their records keep the same shape and carry
+# only values that differ from defaults, so old choices pass on unchanged and
+# settings absent from an older export use the current defaults.
 SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records
 SECTION_UPGRADES[(SettingsSection.name, 6, SettingsSection.schema_version)] = lambda records: records
+SECTION_UPGRADES[(SettingsSection.name, 7, SettingsSection.schema_version)] = lambda records: records

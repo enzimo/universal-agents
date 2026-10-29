@@ -55,11 +55,11 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
             allowed.update({4, 5})
-        # Likewise the settings section: the last stable release (v0.9.8)
-        # exports version 6, and this release reads it.
+        # Settings versions 6 and 7 are exercised by real export/import
+        # cases in test_team_transfer_settings, including keep-forever output retention.
         if name == "settings":
-            allowed.add(6)
-        assert version in allowed, f"the conversion step from {name} version {version} has no supported release fixture"
+            allowed.update((6, 7))
+        assert version in allowed, f"the conversion step from {name} version {version} has no supported export case"
         assert target == sections[name].schema_version
     for name, raw in fixtures.items():
         section = sections[name]
@@ -172,7 +172,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
     source_sections, expected_problem = {
         "0.8.5": (
             (SettingsAsV085(), PeopleSection(), AccessAsV085()),
-            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6 and 8.",
+            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7 and 8.",
         ),
         "0.9.0": (
             (SettingsSection(), PeopleSection(), AccessSection(), KnowledgeAsV090()),

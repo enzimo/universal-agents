@@ -322,6 +322,35 @@ def test_a_save_without_saved_tool_output_days_keeps_the_saved_number(tmp_path: 
     assert _saved(config).tool_policy.output_retention_days == 120
 
 
+def test_a_save_from_an_open_older_page_keeps_custom_storage_warnings(tmp_path: Path) -> None:
+    service, config, _ = _service(tmp_path, allowed=True)
+    _save(
+        service, person_id="usr_admin", upload_days=90, scratch_days=21,
+        person_step_gb=10, nearing_limit_percent=70, nearly_full_percent=90,
+    )
+
+    saved = service.save(person_id="usr_admin", upload_days=30, scratch_days=7, output_days=120)
+
+    assert saved.warnings == StorageWarnings(person_step_gb=10, nearing_limit_percent=70, nearly_full_percent=90)
+    assert _saved(config).gateway.storage_warnings.person_step_gb == 10
+    assert service._storage_usage.step_gb == 10
+
+
+def test_a_missing_warning_keeps_its_value_but_explicit_null_is_invalid(tmp_path: Path) -> None:
+    from assistant_gateway.application.file_retention_page import KEEP_SAVED_WARNING
+
+    service, config, _ = _service(tmp_path, allowed=True)
+    saved = _save(
+        service, person_id="usr_admin", upload_days=30, scratch_days=7,
+        person_step_gb=10, nearing_limit_percent=KEEP_SAVED_WARNING, nearly_full_percent=90,
+    )
+    assert saved.warnings == StorageWarnings(person_step_gb=10, nearing_limit_percent=80, nearly_full_percent=90)
+    previous = config.config_path.read_bytes()
+    with pytest.raises(FileRetentionInvalid, match="whole percent"):
+        _save(service, person_id="usr_admin", upload_days=30, scratch_days=7, nearing_limit_percent=None)
+    assert config.config_path.read_bytes() == previous
+
+
 @pytest.mark.parametrize("days", [3651, 1_000_000])
 def test_the_configuration_refuses_more_than_ten_years_of_saved_tool_outputs(days: int) -> None:
     """Like the page's limit; a period reaching before the year 1 could not even be turned into a date."""
