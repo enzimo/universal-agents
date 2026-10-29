@@ -7,7 +7,7 @@ resolver = "2"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.95"
-version = "0.9.8"
+version = "0.9.9"
 
 [workspace.dependencies]
 anydoc = "=0.1.9"
