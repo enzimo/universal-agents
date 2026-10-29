@@ -41,6 +41,7 @@ from custom_messages.contracts.access_v2 import (
     ClassificationSource,
     DelegationMode,
     GrantKind,
+    GrantStatus,
     GrantV1,
     OperationResolutionV1,
     OwnerScope,
@@ -193,6 +194,16 @@ def test_grants_other_than_the_persons_own_to_teamlead_are_refused(requests, by,
 def test_a_member_may_give_it_to_teamlead_for_their_own_work_and_remove_it(requests) -> None:
     given = requests.service.grant_by_person(ALICE, grant(ALICE))
     assert given.for_person_id == ALICE.person_id and given.delegation_depth == 0
+    assert requests.service.revoke_by_person(ALICE, given.grant_id)
+
+
+@pytest.mark.parametrize("other", [BOB, ADMIN])
+def test_only_the_person_may_remove_their_own_cleanup_permission(requests, other) -> None:
+    given = requests.service.grant_by_person(ALICE, grant(ALICE))
+    assert not requests.service.may_revoke(other, given)
+    with pytest.raises(HandDownRefused):
+        requests.service.revoke_by_person(other, given.grant_id)
+    assert requests.service.store.get(given.grant_id).status is GrantStatus.ACTIVE
     assert requests.service.revoke_by_person(ALICE, given.grant_id)
 
 

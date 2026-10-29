@@ -1534,13 +1534,14 @@ class AccessService:
         person: PersonPrincipal,
         grant: GrantV1,
         *,
-        could_give: Callable[[TargetRefV1, AccessLevel, str | None], bool] | None = None,
+        could_give: Callable[[TargetRefV1, AccessLevel, str | None, str | None], bool] | None = None,
     ) -> bool:
         """Whether a person may revoke a grant: they gave it, or they could give it.
 
         Blocks have their own, narrower rule (``AccessRequests.may_unblock``).
         ``could_give`` lets a caller that checks many grants reuse its own
-        cached ``may_give`` answers; the rule stays this one.
+        cached ``may_give`` answers, including whose work the grant serves;
+        the rule stays this one.
         """
 
         if grant.kind is GrantKind.BLOCK:
@@ -1550,8 +1551,12 @@ class AccessService:
         # A person may always withdraw what serves their own work (decision D13).
         if grant.for_person_id == person.person_id:
             return True
-        check = could_give or (lambda target, level, task_id: self.may_give(person, target, level, task_id=task_id))
-        return check(grant.target, grant.level, grant.task_id)
+        check = could_give or (
+            lambda target, level, task_id, for_person_id: self.may_give(
+                person, target, level, task_id=task_id, for_person_id=for_person_id
+            )
+        )
+        return check(grant.target, grant.level, grant.task_id, grant.for_person_id)
 
     def revoke_by_person(self, person: PersonPrincipal, grant_id: str) -> list[str]:
         """A person removes access: the grant's whole entry (``entry_grants``) and what was handed on from it.

@@ -737,3 +737,15 @@ def test_the_history_cleanup_switch_gives_and_removes_only_the_persons_own_grant
     turned_off = asyncio.run(harness.map.set_history_cleanup("member-1", False))
     assert turned_off["history_cleanup"]["on"] is False
     assert harness.agents.service.store.get(grant.grant_id).status is GrantStatus.REVOKED
+
+
+def test_other_people_cannot_remove_a_persons_history_cleanup_permission(harness: Harness) -> None:
+    turned_on = asyncio.run(harness.map.set_history_cleanup("member-1", True))
+    grant_id = turned_on["history_cleanup"]["grant_id"]
+    for person_id in ("member-2", "admin-1", "owner-1"):
+        rows = holder(harness.view(person_id), f"agent_type:{LEAD}")["grants"]
+        assert all(not row["can_revoke"] for row in rows if row["grant_id"] == grant_id)
+        with pytest.raises(HandDownRefused):
+            asyncio.run(harness.inbox.revoke_grant(person_id, grant_id))
+    assert harness.agents.service.store.get(grant_id).status is GrantStatus.ACTIVE
+    assert asyncio.run(harness.inbox.revoke_grant("member-1", grant_id)) == [grant_id]

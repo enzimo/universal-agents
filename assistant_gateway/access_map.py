@@ -267,7 +267,7 @@ class _MapRead:
         self.now = self.service.clock()
         self._display_name = display_name
         self._names: dict[str, str] = {}
-        self._may_give: dict[tuple[str, str, str, str | None], bool] = {}
+        self._may_give: dict[tuple[str, str, str, str | None, str | None], bool] = {}
         self._sharing: TeamAccountSharing | None = None
 
     @property
@@ -363,11 +363,15 @@ class _MapRead:
 
     # -- which buttons to show (each action is decided again when it runs) -----------
 
-    def may_give(self, target: TargetRefV1, level: AccessLevel, task_id: str | None) -> bool:
-        key = (target.kind.value, target.id, level.value, task_id)
+    def may_give(
+        self, target: TargetRefV1, level: AccessLevel, task_id: str | None, for_person_id: str | None = None
+    ) -> bool:
+        key = (target.kind.value, target.id, level.value, task_id, for_person_id)
         if key not in self._may_give:
             try:
-                self._may_give[key] = self.service.may_give(self.person, target, level, task_id=task_id)
+                self._may_give[key] = self.service.may_give(
+                    self.person, target, level, task_id=task_id, for_person_id=for_person_id
+                )
             except HandDownRefused:  # the target left the catalog
                 self._may_give[key] = False
         return self._may_give[key]
