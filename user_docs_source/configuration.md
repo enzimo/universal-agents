@@ -606,6 +606,9 @@ supported public broker route split, see
 
 ## Storage
 
+Independent instances must use separate PostgreSQL schemas or databases.
+Separate instance folders do not isolate records kept in the same schema.
+
 Storage can be SQLite or Postgres. Postgres-backed instances should keep DSNs in
 `team.env` or process env instead of `instance_config.yaml`.
 
