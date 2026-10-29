@@ -475,7 +475,6 @@ class WebsiteApplicationDouble(CoreApplicationDouble):
         chat_id=None,
         thread_id=None,
         canonical_user_id=None,
-        parallel_thread=False,
     ) -> GatewaySession:
         session = self._candidate.session_repository.create_session(
             session_key=UuidGatewayIdGenerator().new_session_key(),
@@ -486,7 +485,6 @@ class WebsiteApplicationDouble(CoreApplicationDouble):
             chat_id=chat_id,
             thread_id=thread_id,
             owner_canonical_user_id=canonical_user_id,
-            parallel_thread=parallel_thread,
         )
         return GatewaySession(
             session_key=session.session_key,

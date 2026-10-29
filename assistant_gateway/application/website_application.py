@@ -9,6 +9,7 @@ from custom_messages.contracts.status_v1 import StatusReportV1
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 import hashlib
 import json
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -595,13 +596,19 @@ class WebChatThreadStatesV1(WebsiteContractV1):
     threads_revision: str = Field(min_length=1, max_length=64)
     # Listed threads where the gateway still waits for the agent's reply.
     busy_session_keys: tuple[str, ...] = ()
+    # Listed threads whose current conversation has an open request, from the
+    # durable request record that turns a new message into guidance. The
+    # Run concurrently switch stays locked for them; busy_session_keys can end
+    # sooner (a reply wait times out or the gateway restarts).
+    open_request_session_keys: tuple[str, ...] = ()
 
 
 def web_chat_threads_revision(threads: list[WebChatThread]) -> str:
     """Digest of what the thread list shows, so pages refetch only on change."""
 
+    # The Run concurrently setting is shown too (the switch below Send).
     shown = sorted(
-        (thread.session_key, thread.session_alias or "", thread.title or "")
+        (thread.session_key, thread.session_alias or "", thread.title or "", thread.parallel_thread)
         for thread in threads
     )
     encoded = json.dumps(shown, separators=(",", ":")).encode()
@@ -709,6 +716,21 @@ class GatewaySessionAliasConflict(ValueError):
     """Raised when a requested session alias is owned by another session."""
 
 
+class WebChatParallelSettingResult(StrEnum):
+    """What a change to a thread's Run concurrently switch did.
+
+    The application's own copy of the store's ``ParallelSettingOutcome``:
+    public contracts stay free of persistence types, as sessions are projected
+    by ``gateway_session_view``. The switch is refused while a request is open
+    in the thread's conversation (owner, 2026-10-29).
+    """
+
+    SAVED = "saved"
+    REQUEST_OPEN = "request_open"
+    CONVERSATION_CHANGED = "conversation_changed"
+    NOT_FOUND = "not_found"
+
+
 @runtime_checkable
 class WebIdentityApplication(Protocol):
     """Authenticate browser identities and manage enrollment credentials."""
@@ -804,12 +826,23 @@ class WebSessionApplication(Protocol):
     ) -> GatewaySession | None:
         """Rename a visible Web Chat session or return ``None`` when absent."""
 
+    def set_web_chat_session_parallel(
+        self,
+        *,
+        session_key: str,
+        conversation_id: str,
+        parallel_thread: bool,
+        owner_canonical_user_id: str | None,
+    ) -> WebChatParallelSettingResult:
+        """Save a visible thread's Run concurrently setting unless a request is open in it."""
+        ...
+
     def web_chat_thread_states(
         self,
         *,
         owner_canonical_user_id: str | None,
     ) -> WebChatThreadStatesV1:
-        """Return the live thread-list revision and busy threads for one owner."""
+        """Return the live thread-list revision, busy threads and open requests for one owner."""
 
     def get_web_chat_attachment(
         self,

@@ -343,9 +343,20 @@ acknowledged, and handled by the execution lane of the task it concerns
 (`deferred_message_runtime.may_resume_a_turn`). The mailbox waits for each
 callback, so a turn there held back every other message.
 
-**Parallel threads.** A thread a person starts with Web Chat's **Launch
-parallel thread** is stored as parallel on its gateway session, and the
-gateway marks every request sent in it (`GatewayContext.parallel_thread`). The
+**Parallel threads.** Web Chat's **Run concurrently** switch is a setting of
+each thread (owner, 2026-10-29), stored on its gateway session
+(`gateway_sessions.parallel_thread`; internally such a thread is a parallel
+thread). The person changes it through the thread update route, and
+`set_session_parallel` saves it in one conditional update that refuses while
+a request is open in the thread's conversation (the durable running-request
+record, `open_request_session_keys` on every event page). Why the lock: a
+message sent while a request is open is guidance for that request and reaches
+it in its own lane, so a change then could not apply to anything the person
+sees. The gateway gives each request the setting it has when the request is
+recorded as open (`GatewayContext.parallel_thread`), read after admission so a
+change saved during the person-setup check is not missed. Messages carry no
+setting, the thread keeps its conversation and model history either way, and
+new threads (New Chat, `/new`) start with it off. The
 team lead runs each such request in an execution lane of its own
 (`custom_agents.execution_lanes` decides the lane,
 `custom_agents.execution_lanes_runtime` runs the lanes,
@@ -356,13 +367,16 @@ schedule or Objective work created in a parallel thread copies that request's
 context, mark included (`custom_tools.providers.schedules`, the turn action
 outbox), so each of its runs gets a parallel lane of its own and counts toward
 the limit (owner, 2026-10-28: work set up from a parallel thread runs in
-parallel). Its runs may therefore overlap a new request in the same thread;
+parallel). That copy is the setting at creation: turning the thread's switch
+off later leaves such work concurrent, and work made while it was off stays
+ordinary (owner, 2026-10-29), because the scheduler claims runs from the
+schedule row without asking the gateway. Its runs may therefore overlap a new request in the same thread;
 repeated runs of one schedule do not, because the scheduler skips a fire while
 the previous run is active. All other work (ordinary chats, New Chat, `/new`,
 schedules created elsewhere, heartbeat runs, other chat apps, and every
 worker) shares the main lane, one turn at a time, as before.
-Why: by launching a parallel thread the person says the request does not
-overlap their other work (owner, 2026-10-27). Overlapping changes are checked
+Why: by turning Run concurrently on the person says the thread's requests do
+not overlap their other work (owner, 2026-10-27). Overlapping changes are checked
 only where stores check them: the change ledger refuses the later of two
 requests' changes to a personal knowledge page (`agent.request_conflict_checks`
 turns this off); memory facts, schedules, heartbeat items and Objectives refuse
@@ -424,11 +438,15 @@ How the lanes run, and what they share (`custom_agents.execution_lanes_runtime`)
   `scheduled_runtime._schedule_claim_scope` limits the claim to such rows. At
   the limit of four, such a run waits in the queue like any other parallel
   request.
-- A thread loses its parallel mark when `/switch_conversation` or
-  `/switch_topic` moves it to another conversation, and the reply says so
-  (`GatewaySessionService.switch_conversation`). The mark is the person's word
-  that the thread's own conversation does not overlap their other work, and
-  an older conversation may be continued elsewhere.
+- A thread's Run concurrently setting turns off when `/switch_conversation`
+  or `/switch_topic` moves it to another conversation, and the reply says so
+  (`GatewaySessionService.switch_conversation`). The setting is the person's
+  word that the thread's own conversation does not overlap their other work,
+  and an older conversation may be continued elsewhere. Web Chat, the only
+  place a person changes the setting, does not offer these commands. A Web
+  Chat thread reaches them only after the debug-only `/switch_session` moves
+  it to Telegram, Discord or the command line, where the setting can no
+  longer be changed; the owner kept the rule for that case (2026-10-29).
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
