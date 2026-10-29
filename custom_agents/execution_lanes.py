@@ -71,6 +71,24 @@ def is_parallel_request(meta: Any) -> bool:
     )
 
 
+def runs_in_parallel_lane(manager: Any, root: Any) -> bool:
+    """Whether the root task ``root`` runs in a parallel lane of its own (module docstring).
+
+    The one rule for both the lane its turns take (``lane_for_task``) and the
+    parallel mark people and agents see on it (Settings -> Tasks and
+    ``list_task_queue``, through
+    ``custom_agents.manager_control_runtime._runtime_work_root_summary``):
+    only the team lead opens parallel lanes, and only for a request from a
+    parallel thread. Reads only ``root`` itself.
+    """
+
+    return bool(
+        getattr(manager, "parallel_lanes_enabled", False)
+        and root.task.parent_task_id is None
+        and is_parallel_request(root.meta)
+    )
+
+
 def parallel_lane(root_task_id: str) -> str:
     return f"{PARALLEL_LANE_PREFIX}{root_task_id}"
 
@@ -96,9 +114,9 @@ def lane_for_task(manager: Any, task_id: str | None) -> str:
         return MAIN_LANE
     root_task_id = manager.resolve_root_task_id(task_id) or task_id
     root = manager.get_task_info(root_task_id)
-    if root is None or root.task.parent_task_id is not None:
+    if root is None or not runs_in_parallel_lane(manager, root):
         return MAIN_LANE
-    return parallel_lane(root_task_id) if is_parallel_request(root.meta) else MAIN_LANE
+    return parallel_lane(root_task_id)
 
 
 def executing_parallel_task_ids(manager: Any) -> list[str]:
@@ -146,5 +164,6 @@ __all__ = [
     "lanes_for_messages",
     "parallel_lane",
     "root_of_lane",
+    "runs_in_parallel_lane",
     "task_of_message",
 ]
