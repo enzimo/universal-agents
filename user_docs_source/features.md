@@ -331,8 +331,8 @@ operator turned these checks off with `agent.request_conflict_checks`
 Memory facts, schedules, heartbeat items and Objectives refuse a change only
 when it was decided from an older version of the record, so one request can
 still change what another just changed. Commands the agent runs in its shell or
-Python, and files it writes with its file tools, are not checked. Sending
-never moves the switch, and slash commands keep their usual behavior.
+Python, and files it writes with its file tools, are not checked. The switch
+never moves when you send, and slash commands keep their usual behavior.
 If the new chat cannot be created, or its Run concurrently setting cannot be
 saved, your text and files stay in the composer.
 Selecting an existing conversation while a new chat is being created keeps
