@@ -45,6 +45,7 @@ from assistant_gateway.domain.request_state import (
     ToolSetupRecord,
 )
 from assistant_gateway.domain.sessions import (
+    ParallelSettingOutcome,
     SessionConversationListRecord,
     SessionConversationRecord,
     SessionListRecord,
@@ -262,7 +263,6 @@ class GatewayStateRepository(
         thread_id: Optional[str] = None,
         status: str = "active",
         owner_canonical_user_id: Optional[str] = None,
-        parallel_thread: bool = False,
     ) -> SessionRecord: ...
 
     def upsert_session(
@@ -304,7 +304,9 @@ class GatewayStateRepository(
 
     def set_session_status(self, session_key: str, status: str) -> bool: ...
 
-    def mark_session_parallel(self, session_key: str, conversation_id: str) -> bool: ...
+    def set_session_parallel(
+        self, session_key: str, *, conversation_id: str, parallel_thread: bool
+    ) -> ParallelSettingOutcome: ...
 
     def set_active_session_for_channel(
         self,
@@ -1765,7 +1767,10 @@ class _RelationalGatewayStateRepository:
         earliest message that is not a slash command, so later messages
         never rename it. The command prefix is bound, not written into the
         SQL, because PostgreSQL drivers read a literal percent sign as a
-        placeholder.
+        placeholder. Each row also carries the thread's Run concurrently
+        setting and whether a request is open in its current conversation
+        (the unique running-request index makes that lookup cheap); open
+        pages read both on every event page to show and lock the switch.
         """
 
         bind = self._dialect.bind
@@ -1789,7 +1794,14 @@ class _RelationalGatewayStateRepository:
                 (SELECT t.attachment_references_json {first_ordinary}) AS first_message_attachments_json,
                 EXISTS (
                     SELECT 1 FROM gateway_transcript_messages m WHERE m.session_key = s.session_key
-                ) AS has_messages
+                ) AS has_messages,
+                s.parallel_thread,
+                EXISTS (
+                    SELECT 1 FROM gateway_requests r
+                    WHERE r.session_key = s.session_key
+                      AND COALESCE(r.conversation_id, '') = COALESCE(s.conversation_id, '')
+                      AND r.run_state = {bind}
+                ) AS has_open_request
             FROM gateway_sessions s
             WHERE s.status = 'active'
               AND s.channel_name = {bind}
@@ -1799,7 +1811,7 @@ class _RelationalGatewayStateRepository:
             LIMIT {bind}
         """
         command = "/%"
-        params: list[Any] = [command, command, channel_name, chat_id]
+        params: list[Any] = [command, command, RUN_STATE_RUNNING, channel_name, chat_id]
         if owner_canonical_user_id is not None:
             params.append(owner_canonical_user_id)
         params.append(limit)
@@ -1808,7 +1820,8 @@ class _RelationalGatewayStateRepository:
         records = []
         for row in rows:
             values = dict(row)
-            values["has_messages"] = bool(values["has_messages"])
+            for flag in ("has_messages", "parallel_thread", "has_open_request"):
+                values[flag] = bool(values[flag])
             records.append(WebChatThreadRecord(**values))
         return records
 
@@ -1929,7 +1942,6 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str] = None,
         status: str = "active",
         owner_canonical_user_id: Optional[str] = None,
-        parallel_thread: bool = False,
     ) -> SessionRecord:
         with _RepositoryTransaction(self) as transaction:
             session = self._create_session(
@@ -1943,7 +1955,6 @@ class _RelationalGatewayStateRepository:
                 thread_id=thread_id,
                 status=status,
                 owner_canonical_user_id=owner_canonical_user_id,
-                parallel_thread=parallel_thread,
             )
             transaction.commit()
             return session
@@ -1961,8 +1972,9 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str],
         status: str,
         owner_canonical_user_id: Optional[str],
-        parallel_thread: bool = False,
     ) -> SessionRecord:
+        # A new or re-created session starts with Run concurrently off; the
+        # person turns it on with ``set_session_parallel``.
         now = utc_now_iso()
         with self._connect() as conn:
             conn.execute(
@@ -1973,7 +1985,7 @@ class _RelationalGatewayStateRepository:
                     channel_name, user_id, chat_id, thread_id, owner_canonical_user_id,
                     status, created_at, updated_at, parallel_thread
                 )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, 0)
                 ON CONFLICT(session_key) DO UPDATE SET
                     session_alias = excluded.session_alias,
                     conversation_id = excluded.conversation_id,
@@ -1987,7 +1999,7 @@ class _RelationalGatewayStateRepository:
                     status = excluded.status,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
-                    parallel_thread = excluded.parallel_thread
+                    parallel_thread = 0
                 """,
                 (
                     session_key,
@@ -2002,7 +2014,6 @@ class _RelationalGatewayStateRepository:
                     status,
                     now,
                     now,
-                    1 if parallel_thread else 0,
                 ),
             )
             conn.commit()
@@ -2256,21 +2267,51 @@ class _RelationalGatewayStateRepository:
             conn.commit()
             return cursor.rowcount > 0
 
-    def mark_session_parallel(self, session_key: str, conversation_id: str) -> bool:
-        """Do not overwrite a conversation switch or a concurrent task's last_task_id."""
+    def set_session_parallel(
+        self, session_key: str, *, conversation_id: str, parallel_thread: bool
+    ) -> ParallelSettingOutcome:
+        """Save a thread's Run concurrently setting unless a request is open in it.
 
+        One conditional UPDATE checks the expected conversation and the open
+        request and writes only the setting, so it never overwrites a
+        conversation switch or another write's ``last_task_id``, and a request
+        admitted at the same time either sees the new value or makes this
+        change wait for its reply (``ParallelSettingOutcome``). ``updated_at``
+        stays: the sidebar orders threads by activity, and changing a setting
+        is not activity. A second read only explains a refusal.
+        """
+
+        bind = self._dialect.bind
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE gateway_sessions
-                SET parallel_thread = 1, updated_at = {self._dialect.bind}
-                WHERE session_key = {self._dialect.bind}
-                  AND conversation_id = {self._dialect.bind} AND status = 'active'
+                SET parallel_thread = {bind}
+                WHERE session_key = {bind}
+                  AND conversation_id = {bind}
+                  AND status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM gateway_requests r
+                      WHERE r.session_key = gateway_sessions.session_key
+                        AND COALESCE(r.conversation_id, '') = gateway_sessions.conversation_id
+                        AND r.run_state = {bind}
+                  )
                 """,
-                (utc_now_iso(), session_key, conversation_id),
+                (1 if parallel_thread else 0, session_key, conversation_id, RUN_STATE_RUNNING),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            if cursor.rowcount > 0:
+                return ParallelSettingOutcome.SAVED
+            row = conn.execute(
+                f"SELECT conversation_id, status FROM gateway_sessions WHERE session_key = {bind}",
+                (session_key,),
+            ).fetchone()
+        current = dict(row) if row else None
+        if current is None or current["status"] != "active":
+            return ParallelSettingOutcome.NOT_FOUND
+        if current["conversation_id"] != conversation_id:
+            return ParallelSettingOutcome.CONVERSATION_CHANGED
+        return ParallelSettingOutcome.REQUEST_OPEN
 
     def set_active_session_for_channel(
         self,

@@ -173,8 +173,8 @@ async def test_waiting_task_shows_the_access_requests_it_waits_on(agent):
 
 @pytest.mark.asyncio
 async def test_parallel_marks_requests_from_parallel_threads_on_the_team_lead(agent):
-    # The team lead runs requests from threads started with Launch parallel
-    # thread in lanes of their own (custom_agents.execution_lanes).
+    # The team lead runs requests from threads set to Run concurrently in
+    # lanes of their own (custom_agents.execution_lanes).
     agent.task_manager.parallel_lanes_enabled = agent.is_team_lead
     add(agent, "ordinary", state=ProgressState.IN_PROGRESS)
     add(agent, "other-chat")

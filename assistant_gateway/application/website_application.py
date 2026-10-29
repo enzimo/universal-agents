@@ -26,6 +26,7 @@ from assistant_gateway.application.gateway_application import (
     GatewaySession,
 )
 from assistant_gateway.application.procedures import ProcedureApplication
+from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from assistant_gateway.application.web_chat_threads import WebChatThread
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from runtime_settings.appearance import ACCENT_SHARE_RANGE, DARK_INTEGER_RANGES
@@ -595,13 +596,19 @@ class WebChatThreadStatesV1(WebsiteContractV1):
     threads_revision: str = Field(min_length=1, max_length=64)
     # Listed threads where the gateway still waits for the agent's reply.
     busy_session_keys: tuple[str, ...] = ()
+    # Listed threads whose current conversation has an open request, from the
+    # durable request record that turns a new message into guidance. The
+    # Run concurrently switch stays locked for them; busy_session_keys can end
+    # sooner (a reply wait times out or the gateway restarts).
+    open_request_session_keys: tuple[str, ...] = ()
 
 
 def web_chat_threads_revision(threads: list[WebChatThread]) -> str:
     """Digest of what the thread list shows, so pages refetch only on change."""
 
+    # The Run concurrently setting is shown too (the switch below Send).
     shown = sorted(
-        (thread.session_key, thread.session_alias or "", thread.title or "")
+        (thread.session_key, thread.session_alias or "", thread.title or "", thread.parallel_thread)
         for thread in threads
     )
     encoded = json.dumps(shown, separators=(",", ":")).encode()
@@ -804,10 +811,15 @@ class WebSessionApplication(Protocol):
     ) -> GatewaySession | None:
         """Rename a visible Web Chat session or return ``None`` when absent."""
 
-    def mark_web_chat_session_parallel(
-        self, *, session_key: str, conversation_id: str, owner_canonical_user_id: str | None
-    ) -> bool:
-        """Mark the owner's current conversation as safe to run beside other work."""
+    def set_web_chat_session_parallel(
+        self,
+        *,
+        session_key: str,
+        conversation_id: str,
+        parallel_thread: bool,
+        owner_canonical_user_id: str | None,
+    ) -> ParallelSettingOutcome:
+        """Save a visible thread's Run concurrently setting unless a request is open in it."""
         ...
 
     def web_chat_thread_states(
@@ -815,7 +827,7 @@ class WebSessionApplication(Protocol):
         *,
         owner_canonical_user_id: str | None,
     ) -> WebChatThreadStatesV1:
-        """Return the live thread-list revision and busy threads for one owner."""
+        """Return the live thread-list revision, busy threads and open requests for one owner."""
 
     def get_web_chat_attachment(
         self,
