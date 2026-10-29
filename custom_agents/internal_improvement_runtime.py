@@ -32,6 +32,7 @@ from typing import Any, Mapping, Optional
 
 from custom_agents.conversation_runtime import start_new_conversation
 from custom_agents.scratch_retention import prune_scratch_folders
+from python_env_lifecycle import prune_request_environments
 from custom_agents.schedule_permits import sign_system_run
 from default_values import AGENT_DEFAULTS, TOOL_POLICY_DEFAULTS
 from custom_messages.contracts.runtime_v1 import (
@@ -355,6 +356,7 @@ async def enqueue_internal_improvement_job(
         return False
 
     scratch_sentence = await prune_scratch_for_maintenance(agent, schedule_id)
+    python_sentence = await prune_python_envs_for_maintenance(agent, schedule_id)
     schedules_sentence = await check_schedules_for_maintenance(agent, schedule_id)
     task = scheduled_message.payload.model_copy(deep=True)
     occurrence_id = operational_id(INTERNAL_IMPROVEMENT_ID_PREFIX, occurrence_key)
@@ -369,6 +371,7 @@ async def enqueue_internal_improvement_job(
         f"{str(task.problem_statement or '').strip()}\n\n"
         f"{MEMORY_REVIEW_CLEANUP_INSTRUCTION}\n\n"
         f"{scratch_sentence}\n\n"
+        f"{python_sentence}\n\n"
         f"{schedules_sentence}\n\n"
         f"Canonical schedule_id: {schedule_id}\n"
         "Current compact schedule memory:\n"
@@ -468,6 +471,26 @@ async def prune_scratch_for_maintenance(agent: Any, schedule_id: str) -> str:
             "report it to TeamArchitect."
         )
     return result.instruction_sentence()
+
+
+async def prune_python_envs_for_maintenance(agent: Any, schedule_id: str) -> str:
+    """Keep private workspace cleanup in trusted code; send only counts to the review."""
+
+    from custom_tools.workspace_scope import current_instance_layout
+
+    layout = current_instance_layout(agent)
+    if layout is None:
+        agent._logger.warning(
+            "Python environment cleanup needs an instance layout. event=python_env_prune_failed schedule_id=%s",
+            schedule_id,
+        )
+        return "Python environment cleanup did not run because this runtime has no instance folder layout; report it."
+    try:
+        removed = await asyncio.to_thread(prune_request_environments, layout)
+    except Exception:
+        agent._logger.exception("Python environment cleanup failed. event=python_env_prune_failed schedule_id=%s", schedule_id)
+        return "Python environment cleanup failed before this review; report event=python_env_prune_failed to TeamArchitect."
+    return f"Trusted maintenance removed {removed} request-default Python environments unused for 7 days. Named environments were kept."
 
 
 async def check_schedules_for_maintenance(agent: Any, schedule_id: str) -> str:

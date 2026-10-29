@@ -56,7 +56,10 @@ REASON_OPEN_FAILED = "open_failed"
 REASON_DESTINATION_EXISTS = "destination_exists"
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
-_FILE_READ_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+# A planted pipe must not wait for a writer before fstat can reject it.
+# O_NONBLOCK leaves regular-file reads unchanged; validate the opened file,
+# rather than checking its name before opening it, which would race a rename.
+_FILE_READ_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 _FILE_WRITE_FLAGS = os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW
 _NEW_FILE_MODE = 0o644
 _NEW_DIRECTORY_MODE = 0o777  # narrowed by the process umask, as mkdir does
