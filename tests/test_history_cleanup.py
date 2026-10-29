@@ -375,6 +375,78 @@ def test_running_the_manager_part_again_deletes_nothing_more(tmp_path: Path) -> 
     assert {"conv_later_t1", "conv_later_t1_sub"} <= _task_ids(agent)
 
 
+def test_retry_after_manager_commit_keeps_restarted_turn_and_finishes_original_vectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_agents import history_cleanup
+    from storage.memory_graph_repository import SqliteMemoryGraphRepository
+    from storage.memory_review_repository import create_memory_review_repository
+
+    agent = _agent(tmp_path, authorization_enabled=False)
+    person = _person(agent)
+    old_tasks = _seed(agent, person, "conv_restart", "Old", [400])
+    graph = SqliteMemoryGraphRepository(str(agent.storage.sqlite_path), vector_enabled=False)
+    _sql(agent, "INSERT INTO case_memories (case_memory_id, task_id, conversation_id, case_type, created_at) "
+         "VALUES ('case_old', ?, 'conv_restart', 'task', ?)", (old_tasks[0], _days(400)))
+    staged = _stage(agent, what="both", conversation_ids=["conv_restart"])
+    store = HistoryCleanupRepository(agent.storage)
+    assert store.start_deleting(staged["change_id"], approval={"mode": "agreement"}, artifact_paths=[], at=NOW)
+    order = store.get(staged["change_id"])
+    forgotten = []
+
+    def forget_vectors(_agent: Any, case_ids: list[str]) -> None:
+        forgotten.append(list(case_ids))
+        if len(forgotten) == 1:
+            raise OSError("temporary vector-store failure after the manager transaction")
+
+    monkeypatch.setattr(history_cleanup, "_forget_vectors", forget_vectors)
+    with pytest.raises(OSError, match="temporary vector-store failure"):
+        history_cleanup.carry_out_manager_part(agent, order)
+    assert store.get(staged["change_id"]).status is OrderStatus.DELETING
+    repo = agent._conversation_store
+    repo.ensure_thread(
+        conversation_id="conv_restart", team_id=agent.team_id, owner_agent_id=agent.id, owner_agent_name=LEAD,
+        requester_name=None, requester_id=None, root_task_id="task_after_cleanup", subject_preview="New",
+        owner_canonical_user_id=person,
+    )
+    repo.append_turn(
+        conversation_id="conv_restart", task_id="task_after_cleanup", followup_to_task_id=None,
+        owner_agent_id=agent.id, requester_name=None, requester_id=None, correlation_id=None,
+        problem_text="Keep this new question", task_status="completed", owner_canonical_user_id=person,
+    )
+    repo.tag_turn(conversation_id="conv_restart", turn_index=1, tag="kept")
+    repo.create_context_epoch(conversation_id="conv_restart", trigger="test", through_turn_index=1,
+                              preserved_suffix_start_turn=2, summary_markdown="New summary")
+    reviews = create_memory_review_repository(agent.storage)
+    reviews.enqueue_review_job(owner_team_id=agent.team_id, owner_named_agent_type=LEAD, task_id="task_after_cleanup",
+                    conversation_id="conv_restart", turn_index=1, source_payload={"question": "New"})
+    _sql(agent, "INSERT INTO case_memories (case_memory_id, task_id, conversation_id, case_type, created_at) "
+         "VALUES ('case_new', 'task_after_cleanup', 'conv_restart', 'task', ?)", (_days(0),))
+
+    assert finish_unfinished_history_cleanups(agent) == 1
+    assert _turn_ids(agent, "conv_restart") == ["task_after_cleanup"]
+    assert repo.list_turn_tags(conversation_id="conv_restart", turn_index=1)
+    assert len(_sql(agent, "SELECT * FROM conversation_context_epochs WHERE conversation_id='conv_restart'")) == 1
+    assert len(_sql(agent, "SELECT * FROM memory_review_jobs WHERE task_id='task_after_cleanup'")) == 1
+    assert [row["case_memory_id"] for row in _sql(agent, "SELECT case_memory_id FROM case_memories")] == ["case_new"]
+    assert forgotten == [["case_old"], ["case_old"]]
+    finished = store.get(staged["change_id"])
+    assert finished.status is OrderStatus.WAITING_FOR_GATEWAY
+    assert finished.manager_result["turns"] == 1 and finished.manager_result["finished_tasks"] == 2
+    del graph
+
+
+def test_age_plan_protects_gateway_questions_of_conversations_with_no_selected_turns(tmp_path: Path) -> None:
+    agent = _agent(tmp_path, authorization_enabled=False)
+    _seed(agent, _person(agent), "conv_newer", "Newer", [1])
+    staged = _stage(agent, what="conversations", older_than=_days(30)[:10])
+    plan = HistoryCleanupRepository(agent.storage).get(staged["change_id"]).plan
+    from assistant_gateway.history_cleanup import gateway_scope
+
+    assert plan.conversations == () and plan.gateway_kept_conversation_ids == ("conv_newer",)
+    assert "conv_newer" in gateway_scope(plan).kept_conversation_ids
+
+
 @needs_cedar
 def test_someone_elses_or_the_current_conversation_or_nothing_named_is_refused(tmp_path: Path) -> None:
     agent = _agent(tmp_path)

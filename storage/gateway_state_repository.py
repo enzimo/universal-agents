@@ -659,6 +659,10 @@ class GatewayStateRepository(
         self, scope: GatewayHistoryScope, *, removable_thread: Callable[[SessionRecord], bool]
     ) -> GatewayHistoryDeleted: ...
 
+    def history_cleanup_order_ids(self) -> tuple[str, ...]: ...
+
+    def forget_history_cleanup_order(self, order_id: str) -> None: ...
+
     def list_team_members(
         self,
         team_id: str,
@@ -1058,6 +1062,11 @@ class _RelationalGatewayStateRepository:
             )
             self._ensure_column(conn, "gateway_requests", "active_task_id", "TEXT")
             self._ensure_column(conn, "gateway_requests", "run_state", "TEXT")
+            # Pending upload removals and original counts survive the same
+            # commit that removes their attachment/transcript records.
+            conn.execute("""CREATE TABLE IF NOT EXISTS gateway_history_cleanups (
+                order_id TEXT PRIMARY KEY, person_id TEXT NOT NULL, result_json TEXT NOT NULL
+            )""")
             # One running request per thread (session conversation). The
             # store enforces it so two messages arriving together, or two
             # gateway processes, cannot both start a request in one thread.
@@ -4515,6 +4524,14 @@ class _RelationalGatewayStateRepository:
                 ).fetchall()
                 if row[0]
             )
+            paths += tuple(
+                path
+                for row in conn.execute(
+                    f"SELECT result_json FROM gateway_history_cleanups WHERE person_id = {bind}", (canonical_user_id,)
+                ).fetchall()
+                for path in json.loads(row[0]).get("attachment_paths", [])
+            )
+            conn.execute(f"DELETE FROM gateway_history_cleanups WHERE person_id = {bind}", (canonical_user_id,))
             transcript = conn.execute(
                 f"DELETE FROM gateway_transcript_messages WHERE owner_canonical_user_id = {bind}",
                 (canonical_user_id,),
@@ -4548,8 +4565,9 @@ class _RelationalGatewayStateRepository:
         closed questions, attachments, and delivered messages of those
         requests; with ``scope.older_than`` also every other record of the
         person from before it, except in ``scope.kept_conversation_ids``.
-        Nothing from after ``scope.selected_at`` is touched, so running it
-        again deletes nothing more. A session pointing at the last task of a
+        Nothing from after ``scope.selected_at`` is touched. With an order id,
+        deletion counts and upload paths are journaled in this transaction;
+        retries return that same result without deleting again. A session pointing at the last task of a
         whole deleted conversation stops pointing at it (its next message
         starts the conversation afresh), and a Web Chat thread left empty
         is removed when ``removable_thread`` allows it. Rows are found by
@@ -4560,6 +4578,25 @@ class _RelationalGatewayStateRepository:
         with self._connect() as conn:
             if not isinstance(conn, _BorrowedConnection):
                 conn.begin_write()  # reads then writes: take the write lock first
+            if scope.order_id:
+                bind = self._dialect.bind
+                # The insert also serializes concurrent PostgreSQL callers
+                # when this order has no journal row yet.
+                conn.execute(
+                    f"INSERT INTO gateway_history_cleanups (order_id, person_id, result_json) VALUES ({bind}, {bind}, '{{}}') "
+                    "ON CONFLICT(order_id) DO NOTHING", (scope.order_id, scope.person_id),
+                )
+                lock = " FOR UPDATE" if self._dialect is POSTGRES else ""
+                saved = conn.execute(
+                    f"SELECT person_id, result_json FROM gateway_history_cleanups WHERE order_id={bind}{lock}",
+                    (scope.order_id,),
+                ).fetchone()
+                if saved["person_id"] != scope.person_id:
+                    raise PermissionError("The clean-up journal belongs to another person.")
+                result = json.loads(saved["result_json"])
+                if result:
+                    result["attachment_paths"] = tuple(result.get("attachment_paths", ()))
+                    return GatewayHistoryDeleted(**result)
             request_ids: set[str] = set()
             paths: list[str] = []
             for cut in scope.conversations:
@@ -4571,9 +4608,25 @@ class _RelationalGatewayStateRepository:
             self._delete_history_deliveries(conn, scope, request_ids, deleted)
             self._restart_history_sessions(conn, scope, deleted)
             self._remove_emptied_threads(conn, scope, removable_thread, deleted, paths)
+            deleted.attachment_paths = tuple(path for path in paths if path)
+            if scope.order_id:
+                conn.execute(
+                    f"UPDATE gateway_history_cleanups SET result_json={self._dialect.bind} "
+                    f"WHERE order_id={self._dialect.bind}", (json.dumps(asdict(deleted)), scope.order_id),
+                )
             conn.commit()
-        deleted.attachment_paths = tuple(path for path in paths if path)
         return deleted
+
+    def history_cleanup_order_ids(self) -> tuple[str, ...]:
+        """Journal entries whose completed manager orders can be forgotten."""
+
+        with self._connect() as conn:
+            return tuple(str(row[0]) for row in conn.execute("SELECT order_id FROM gateway_history_cleanups").fetchall())
+
+    def forget_history_cleanup_order(self, order_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(f"DELETE FROM gateway_history_cleanups WHERE order_id={self._dialect.bind}", (order_id,))
+            conn.commit()
 
     def _history_person_clause(self) -> str:
         bind = self._dialect.bind
@@ -4617,7 +4670,9 @@ class _RelationalGatewayStateRepository:
 
     def _history_age_where(self, scope: GatewayHistoryScope) -> tuple[str, tuple[Any, ...]]:
         bind = self._dialect.bind
-        kept = tuple(scope.kept_conversation_ids)
+        # Each explicit cut already applied its first-kept-turn boundary.
+        # The age sweep covers only other conversations.
+        kept = tuple(sorted(set(scope.kept_conversation_ids) | {cut.conversation_id for cut in scope.conversations}))
         keep = (
             f" AND (conversation_id IS NULL OR conversation_id NOT IN ({', '.join(bind for _ in kept)}))" if kept else ""
         )
@@ -4698,7 +4753,7 @@ class _RelationalGatewayStateRepository:
             )
         if not scope.older_than:
             return
-        kept = tuple(scope.kept_conversation_ids)
+        kept = tuple(sorted(set(scope.kept_conversation_ids) | {cut.conversation_id for cut in scope.conversations}))
         keep = (
             " AND (correlation_id IS NULL OR correlation_id NOT IN (SELECT correlation_id FROM gateway_requests "
             f"WHERE conversation_id IN ({', '.join(bind for _ in kept)})))"

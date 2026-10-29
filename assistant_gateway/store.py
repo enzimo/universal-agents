@@ -920,6 +920,12 @@ class GatewayStateStore:
     ) -> GatewayHistoryDeleted:
         return self._repository.delete_history_records(scope, removable_thread=removable_thread)
 
+    def history_cleanup_order_ids(self) -> tuple[str, ...]:
+        return self._repository.history_cleanup_order_ids()
+
+    def forget_history_cleanup_order(self, order_id: str) -> None:
+        self._repository.forget_history_cleanup_order(order_id)
+
     def list_team_members(self, team_id: str) -> list[GatewayUserTeamMembershipRecord]:
         return self._repository.list_team_members(team_id)
 

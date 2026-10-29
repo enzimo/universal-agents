@@ -2089,9 +2089,19 @@ the order for the gateway; a gateway loop in both authorization modes
 (`assistant_gateway/history_cleanup.py`) deletes the chat transcripts and their
 copies, sends the person an Inbox notice with what was deleted and how it was
 approved, and closes the order. Each side logs a `history_cleanup` access
-event. Deletion is bounded by the plan (turn indexes, and the time it was
-staged), so it can run again after a failure and never touches later
-messages; the manager finishes interrupted orders at start and in maintenance.
+event. The manager commits the deleted-row counts and pending vector ids with
+the deletion, so a retry only finishes file and vector removal. It never
+replays SQL against a conversation that has started afresh and reused turn
+indexes. The gateway similarly journals its original counts and upload paths
+in `gateway_history_cleanups` in the same transaction as record deletion;
+failed file removals keep the order waiting. The notice therefore reports the
+original clean-up after a retry. Journals stay with their manager order for
+30 days so concurrent retries still find the original result, then are
+removed. These are runtime records, excluded from
+team transfer. The manager finishes interrupted orders at start and in
+maintenance. An age sweep leaves explicitly cut conversations to their own
+boundary, and preserves known conversations with no selected turns, so a
+kept turn's question stays even if the gateway wrote it just before the cutoff.
 Remembered facts are not part of it. A message that follows up a deleted
 conversation before the gateway applied its part starts the conversation
 afresh (`custom_agents.conversation_runtime`). Staging a

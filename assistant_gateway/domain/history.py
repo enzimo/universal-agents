@@ -46,6 +46,8 @@ class GatewayHistoryScope:
     conversations: tuple[ConversationCut, ...] = ()
     older_than: str | None = None
     kept_conversation_ids: tuple[str, ...] = ()
+    # Durable deletion journal key. Calls without a key are one-off repository operations.
+    order_id: str | None = None
 
 
 @dataclass

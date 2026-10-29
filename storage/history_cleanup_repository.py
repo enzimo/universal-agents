@@ -18,9 +18,10 @@ approved, and leaves the order for the gateway, which deletes its own
 records, sends the person a notice and closes the order
 (``assistant_gateway.history_cleanup``). No message on the wire is needed.
 
-Every deletion is bounded by the plan: by turn index for conversation turns
-and by the time it was staged (``selected_at``) for everything else, so it can
-run again after a failure and never touches what was written afterwards.
+The manager records the deletion result and pending vector ids in the same
+transaction as the deleted rows. A retry resumes its file/vector effects
+without running the SQL deletion again, even when a conversation has since
+started afresh and reused its turn indexes.
 
 This module writes other repositories' tables directly, on purpose, as
 ``storage.person_departure_repository`` does: the manager's part is one
@@ -148,6 +149,9 @@ class HistoryCleanupPlanV1(BaseModel):
     # Conversations left out: the one the clean-up was asked in, and those
     # with work still running.
     excluded_conversation_ids: tuple[str, ...] = ()
+    # Known conversations with no selected turns. Their first gateway
+    # question can predate the cutoff although their manager turn does not.
+    gateway_kept_conversation_ids: tuple[str, ...] = ()
     conversations: tuple[ConversationSelectionV1, ...] = ()
     task_count: int = 0
     task_chars: int = 0
@@ -644,13 +648,15 @@ class HistoryCleanupRepository:
         *,
         task_ids: Iterable[str],
         turn_task_ids: Iterable[str],
+        task_chars: int = 0,
     ) -> dict[str, int]:
         """Delete the manager's records a plan covers, in one transaction; rows deleted by table.
 
         ``task_ids`` are the finished tasks to delete (``task_ids_to_delete``),
         and ``turn_task_ids`` the tasks of the deleted turns and of the tasks
-        delegated from them (memory-graph rows are kept by task). Running it
-        again deletes nothing more.
+        delegated from them (memory-graph rows are kept by task). The approved
+        order journals its result and pending vector ids atomically here;
+        repeating the call returns that result without deleting again.
         """
 
         counts: dict[str, int] = {}
@@ -661,6 +667,20 @@ class HistoryCleanupRepository:
         p = self.dialect.bind
         with self._connect() as conn:
             conn.begin_write()
+            lock = " FOR UPDATE" if self.dialect is POSTGRES else ""
+            row = conn.execute(
+                f"SELECT status, manager_result_json FROM {ORDERS_TABLE} WHERE order_id={p}{lock}", (plan.order_id,)
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError(f"No history clean-up order {plan.order_id}.")
+            saved = json.loads(row["manager_result_json"] or "{}")
+            if "rows" in saved:
+                return dict(saved["rows"])
+            if row["status"] != OrderStatus.DELETING.value:
+                raise PermissionError("The history clean-up has not been approved for deletion.")
+            deleted_tasks = sorted(set(task_ids))
+            turn_tasks = sorted(set(turn_task_ids))
+            case_ids = self._case_memory_ids(conn, plan, turn_tasks) if plan.deletes_conversations else []
             tables = {
                 table
                 for table in (
@@ -679,9 +699,9 @@ class HistoryCleanupRepository:
             if plan.deletes_conversations:
                 for item in plan.conversations:
                     self._delete_conversation_turns(conn, item, plan.selected_at, tables, add)
-                self._delete_memory_graph_rows(conn, plan, list(turn_task_ids), tables, add)
+                self._delete_memory_graph_rows(conn, plan, turn_tasks, tables, add)
             if plan.deletes_tasks and "completed_tasks" in tables:
-                for batch in _batches(sorted(set(task_ids))):
+                for batch in _batches(deleted_tasks):
                     marks = ", ".join(p for _ in batch)
                     add(
                         "completed_tasks",
@@ -690,6 +710,15 @@ class HistoryCleanupRepository:
                             (plan.person_id, *batch),
                         ),
                     )
+            conn.execute(
+                f"UPDATE {ORDERS_TABLE} SET manager_result_json={p} WHERE order_id={p}",
+                (json.dumps({
+                    "rows": counts,
+                    "finished_task_chars": task_chars,
+                    "case_memory_ids": case_ids,
+                    "task_grant_ids": sorted(set(deleted_tasks) | set(turn_tasks)),
+                }, sort_keys=True), plan.order_id),
+            )
             conn.commit()
         return counts
 
@@ -699,11 +728,19 @@ class HistoryCleanupRepository:
         p = self.dialect.bind
         conversation = (item.conversation_id,)
         through = (item.conversation_id, item.through_turn_index)
+        # Another approved order can have removed these turns before this
+        # transaction starts. Reused indexes then belong to a fresh thread.
+        if "conversation_task_links" in tables and conn.execute(
+            f"SELECT 1 FROM conversation_task_links WHERE conversation_id={p} AND turn_index<={p} "
+            f"AND created_at<{p} LIMIT 1", (*through, selected_at)
+        ).fetchone() is None:
+            return
         if "conversation_task_links" in tables:
             add(
                 "conversation_task_links",
                 conn.execute(
-                    f"DELETE FROM conversation_task_links WHERE conversation_id = {p} AND turn_index <= {p}", through
+                    f"DELETE FROM conversation_task_links WHERE conversation_id = {p} AND turn_index <= {p} "
+                    f"AND created_at < {p}", (*through, selected_at)
                 ),
             )
         if "conversation_turn_tags" in tables:
@@ -780,27 +817,35 @@ class HistoryCleanupRepository:
                 add(table, conn.execute(f"DELETE FROM {table} WHERE task_id IN ({marks})", tuple(batch)))
             for batch in _batches(whole):
                 marks = ", ".join(p for _ in batch)
-                add(table, conn.execute(f"DELETE FROM {table} WHERE conversation_id IN ({marks})", tuple(batch)))
+                timestamp = "extracted_at" if table == "task_turn_deltas" else "created_at"
+                add(table, conn.execute(
+                    f"DELETE FROM {table} WHERE conversation_id IN ({marks}) AND {timestamp} < {p}",
+                    (*batch, plan.selected_at),
+                ))
 
     def case_memory_ids(self, plan: HistoryCleanupPlanV1, turn_task_ids: Iterable[str]) -> list[str]:
         """The memory graph's case memories a plan deletes, so their vectors go too."""
 
+        with self._connect() as conn:
+            return self._case_memory_ids(conn, plan, turn_task_ids)
+
+    def _case_memory_ids(self, conn: Any, plan: HistoryCleanupPlanV1, turn_task_ids: Iterable[str]) -> list[str]:
         p = self.dialect.bind
         found: set[str] = set()
         whole = [item.conversation_id for item in plan.conversations if item.whole]
-        with self._connect() as conn:
-            if not self._table_exists(conn, "case_memories"):
-                return []
-            for batch in _batches(sorted(set(turn_task_ids))):
-                marks = ", ".join(p for _ in batch)
-                rows = conn.execute(f"SELECT case_memory_id FROM case_memories WHERE task_id IN ({marks})", tuple(batch))
-                found.update(str(row["case_memory_id"]) for row in rows.fetchall())
-            for batch in _batches(whole):
-                marks = ", ".join(p for _ in batch)
-                rows = conn.execute(
-                    f"SELECT case_memory_id FROM case_memories WHERE conversation_id IN ({marks})", tuple(batch)
-                )
-                found.update(str(row["case_memory_id"]) for row in rows.fetchall())
+        if not self._table_exists(conn, "case_memories"):
+            return []
+        for batch in _batches(sorted(set(turn_task_ids))):
+            marks = ", ".join(p for _ in batch)
+            rows = conn.execute(f"SELECT case_memory_id FROM case_memories WHERE task_id IN ({marks})", tuple(batch))
+            found.update(str(row["case_memory_id"]) for row in rows.fetchall())
+        for batch in _batches(whole):
+            marks = ", ".join(p for _ in batch)
+            rows = conn.execute(
+                f"SELECT case_memory_id FROM case_memories WHERE conversation_id IN ({marks}) AND created_at < {p}",
+                (*batch, plan.selected_at),
+            )
+            found.update(str(row["case_memory_id"]) for row in rows.fetchall())
         return sorted(found)
 
 

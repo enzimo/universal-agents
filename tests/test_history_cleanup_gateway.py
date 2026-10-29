@@ -274,6 +274,48 @@ def test_the_loop_applies_the_order_tells_the_person_once_and_closes_it(gateway,
     assert len([event for event in access.events(TEAM) if event.kind == "history_cleanup"]) == 1
 
 
+@pytest.mark.parametrize("failure", ["crash", "file_failure", "notice_failure"])
+def test_retry_keeps_upload_paths_and_original_counts(
+    gateway, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from assistant_gateway import history_cleanup
+
+    repo, uploads, path = gateway
+    files = _seed(gateway)
+    store, order_id, storage = _order(tmp_path, mode=ChangeApprovalMode.PERSON_APPROVAL.value, grant_id=None)
+    access = AccessRepository(storage)
+    cleanup = GatewayHistoryCleanup(
+        team_id=TEAM, storage=storage, state_store=repo, uploads_dir=uploads, proactive_session_key=PROACTIVE,
+        send_notice_once=access.create_notice_if_absent,
+    )
+    real_remove = history_cleanup.remove_recorded_files
+    if failure == "notice_failure":
+        cleanup._send_notice_once = lambda _notice: (_ for _ in ()).throw(OSError("notice unavailable"))
+    else:
+        def fail_removal(*_args, **_kwargs):
+            if failure == "crash":
+                raise OSError("stopped after database commit")
+            return 0, 0, 1
+        monkeypatch.setattr(history_cleanup, "remove_recorded_files", fail_removal)
+    assert cleanup.run_once_sync() == 0
+    assert not _sql(path, "SELECT * FROM gateway_attachments")
+    assert store.get(order_id).status is OrderStatus.WAITING_FOR_GATEWAY
+    assert access.notices_for(TEAM, person_id=ALICE, roles=("member",)) == []
+    monkeypatch.setattr(history_cleanup, "remove_recorded_files", real_remove)
+    # A fresh repository models a restarted gateway, not an in-memory retry cache.
+    cleanup = GatewayHistoryCleanup(
+        team_id=TEAM, storage=storage, state_store=SqliteGatewayStateRepository(path), uploads_dir=uploads,
+        proactive_session_key=PROACTIVE, send_notice_once=access.create_notice_if_absent,
+    )
+    assert cleanup.run_once_sync() == 1
+    assert not files["upload"].exists()
+    order = store.get(order_id)
+    assert order.status is OrderStatus.DONE
+    assert order.gateway_result["transcript_messages"] == 4 and order.gateway_result["attachments"] == 1
+    notices = [n for n, _ in access.notices_for(TEAM, person_id=ALICE, roles=("member",))]
+    assert len(notices) == 1 and "4 chat messages" in notices[0].summary and "1 saved file" in notices[0].summary
+
+
 def test_the_web_chat_threads_kept_are_the_gateways_own_and_other_channels(tmp_path: Path, gateway) -> None:
     repo, uploads, _path = gateway
     store, _order_id, storage = _order(tmp_path, mode=ChangeApprovalMode.PERSON_APPROVAL.value, grant_id=None)
@@ -305,7 +347,8 @@ def test_the_notice_names_counts_and_how_it_was_approved_never_content(tmp_path:
     assert "1 conversation stayed" in summary
 
 
-def test_the_first_kept_question_stays_although_the_gateway_wrote_it_first(gateway) -> None:
+@pytest.mark.parametrize("age_based", [False, True])
+def test_the_first_kept_question_stays_although_the_gateway_wrote_it_first(gateway, age_based: bool) -> None:
     repo, _uploads, path = gateway
     _session(repo, "tg:alice:edge", ALICE, "conv_edge", chat_id="tg-chat")
     _message(path, "tg:alice:edge", ALICE, "conv_edge", 20, "deleted question", correlation="req_old")
@@ -316,6 +359,7 @@ def test_the_first_kept_question_stays_although_the_gateway_wrote_it_first(gatew
     scope = GatewayHistoryScope(
         person_id=ALICE,
         selected_at=NOW.isoformat(),
+        older_than=_days(10) if age_based else None,
         conversations=(
             ConversationCut(
                 "conv_edge", until=_days(10), whole=False, latest_task_id="edge_t1", keep_correlation_id="req_keep"
@@ -324,3 +368,58 @@ def test_the_first_kept_question_stays_although_the_gateway_wrote_it_first(gatew
     )
     repo.delete_history_records(scope, removable_thread=_removable(""))
     assert _contents(path) == {"first kept question", "first kept answer"}
+
+
+def test_a_conversation_with_only_kept_turns_keeps_its_question_before_the_cutoff(gateway) -> None:
+    repo, _uploads, path = gateway
+    _session(repo, "tg:edge", ALICE, "conv_new", chat_id="tg-chat")
+    _message(path, "tg:edge", ALICE, "conv_new", 10.0001, "kept question", correlation="req_keep")
+    _request(path, "req_keep", "tg:edge", ALICE, "conv_new", 10.0001)
+    _delivery(path, "del_keep", "tg:edge", ALICE, "req_keep", 10.00005, "delivered")
+    scope = GatewayHistoryScope(person_id=ALICE, selected_at=NOW.isoformat(), older_than=_days(10),
+                                kept_conversation_ids=("conv_new",))
+    repo.delete_history_records(scope, removable_thread=_removable(""))
+    assert _contents(path) == {"kept question"}
+    assert len(_sql(path, "SELECT * FROM gateway_requests")) == 1
+    assert len(_sql(path, "SELECT * FROM gateway_deliveries")) == 1
+
+
+def test_completed_gateway_journals_stay_until_their_manager_order_is_pruned(gateway, tmp_path: Path) -> None:
+    repo, uploads, _path = gateway
+    _seed(gateway)
+    store, order_id, storage = _order(tmp_path, mode=ChangeApprovalMode.PERSON_APPROVAL.value, grant_id=None)
+    order = store.get(order_id)
+    repo.delete_history_records(gateway_scope(order.plan), removable_thread=_removable(""))
+    assert repo.history_cleanup_order_ids() == (order_id,)
+    assert store.finish_gateway_part(order_id, result={}, at=NOW)
+    cleanup = GatewayHistoryCleanup(team_id=TEAM, storage=storage, state_store=repo, uploads_dir=uploads,
+                                    proactive_session_key=PROACTIVE, send_notice_once=lambda notice: True,
+                                    clock=lambda: NOW + timedelta(days=31))
+    assert cleanup.run_once_sync() == 0
+    assert repo.history_cleanup_order_ids() == ()
+
+
+def test_a_stale_completed_order_never_runs_the_gateway_deletion_again(gateway, tmp_path: Path) -> None:
+    repo, uploads, path = gateway
+    _seed(gateway)
+    store, order_id, storage = _order(tmp_path, mode=ChangeApprovalMode.PERSON_APPROVAL.value, grant_id=None)
+    stale = store.get(order_id)
+    cleanup = GatewayHistoryCleanup(team_id=TEAM, storage=storage, state_store=repo, uploads_dir=uploads,
+                                    proactive_session_key=PROACTIVE, send_notice_once=lambda notice: True)
+    cleanup.apply(stale)
+    # This request was running in the original pass. Its later completion
+    # does not make it part of the already finished deletion.
+    _sql(path, "UPDATE gateway_requests SET run_state='finished' WHERE correlation_id='req_part_running'")
+    cleanup.apply(stale)
+    assert _sql(path, "SELECT * FROM gateway_requests WHERE correlation_id='req_part_running'")
+
+
+def test_person_removal_keeps_pending_cleanup_upload_paths(gateway, tmp_path: Path) -> None:
+    repo, _uploads, _path = gateway
+    files = _seed(gateway)
+    store, order_id, _storage = _order(tmp_path, mode=ChangeApprovalMode.PERSON_APPROVAL.value, grant_id=None)
+    repo.delete_history_records(gateway_scope(store.get(order_id).plan), removable_thread=_removable(""))
+    assert files["upload"].exists()
+    removed = repo.forget_person_records(ALICE)
+    assert str(files["upload"]) in removed.attachment_paths
+    assert repo.history_cleanup_order_ids() == ()

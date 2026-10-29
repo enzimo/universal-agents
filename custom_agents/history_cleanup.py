@@ -357,7 +357,7 @@ def _task_selection(
     turn_tasks = {
         turn.task_id
         for turn in store.person_turns(plan.person_id, list(through))
-        if turn.turn_index <= through.get(turn.conversation_id, -1)
+        if turn.turn_index <= through.get(turn.conversation_id, -1) and turn.created_at < plan.selected_at
     }
     excluded_tasks = {turn.task_id for turn in store.person_turns(plan.person_id, list(plan.excluded_conversation_ids))}
     family = task_family(person_tasks, turn_tasks)
@@ -420,7 +420,14 @@ def stage_history_cleanup(
             f"Work is still running in {', '.join(running)}; ask again once it has finished."
         )
     draft = draft.model_copy(
-        update={"excluded_conversation_ids": tuple(sorted(set(left_out) | current)), "conversations": tuple(selections)}
+        update={
+            "excluded_conversation_ids": tuple(sorted(set(left_out) | current)),
+            "conversations": tuple(selections),
+            "gateway_kept_conversation_ids": tuple(sorted(
+                {turn.conversation_id for turn in store.person_turns(person_id)}
+                - {item.conversation_id for item in selections} - set(left_out) - current
+            )) if cutoff and not named and draft.deletes_conversations else (),
+        }
     )
     tasks, _family = _task_selection(store, draft, selections=selections)
     artifacts = store.artifact_rows(selections, selected_at=selected_at) if draft.deletes_conversations else []
@@ -680,31 +687,40 @@ def carry_out_manager_part(agent: Any, order: HistoryCleanupOrder) -> dict[str, 
     """Delete the manager's records an approved order covers, and hand the order to the gateway.
 
     Runs again safely after a failure (``finish_unfinished_history_cleanups``):
-    files first, while the records that name them are kept in the order,
-    then one transaction for the records.
+    one transaction deletes the records and journals their result and pending
+    vector ids; retries only finish file/vector effects, never replay the
+    deletion against a conversation that has started afresh.
     """
 
     store = cleanup_store(agent)
     plan = order.plan
+    saved = store.get(plan.order_id)
+    assert saved is not None
+    if "rows" not in saved.manager_result:
+        tasks, turn_family = _task_selection(store, plan, selections=plan.conversations)
+        agent.task_manager.operations_runtime.run_sync(
+            store.delete_manager_records,
+            plan,
+            task_ids=[task.task_id for task in tasks],
+            turn_task_ids=sorted(turn_family) if plan.deletes_conversations else [],
+            task_chars=sum(task.chars for task in tasks),
+        )
+        saved = store.get(plan.order_id)
+        assert saved is not None
+    counts = saved.manager_result["rows"]
     files, size, failed = remove_recorded_files(_artifacts_dir(agent), order.artifact_paths)
-    tasks, turn_family = _task_selection(store, plan, selections=plan.conversations)
-    case_memories = store.case_memory_ids(plan, turn_family) if plan.deletes_conversations else []
-    counts = agent.task_manager.operations_runtime.run_sync(
-        store.delete_manager_records,
-        plan,
-        task_ids=[task.task_id for task in tasks],
-        turn_task_ids=sorted(turn_family) if plan.deletes_conversations else [],
-    )
-    _forget_vectors(agent, case_memories)
-    _end_task_grants(agent, {task.task_id for task in tasks} | (turn_family if plan.deletes_conversations else set()))
+    if failed:
+        raise OSError(f"{failed} conversation artifact files could not be removed; the clean-up will retry.")
+    _forget_vectors(agent, saved.manager_result.get("case_memory_ids", []))
+    _end_task_grants(agent, set(saved.manager_result.get("task_grant_ids", [])))
     result = {
         "conversations": sum(1 for item in plan.conversations if item.whole) if plan.deletes_conversations else 0,
         "conversations_partly": sum(1 for item in plan.conversations if not item.whole) if plan.deletes_conversations else 0,
         "turns": counts.get("conversation_task_links", 0),
         "turn_chars": sum(item.text_chars for item in plan.conversations) if plan.deletes_conversations else 0,
         "finished_tasks": counts.get("completed_tasks", 0),
-        "finished_task_chars": sum(task.chars for task in tasks),
-        "artifact_files": files,
+        "finished_task_chars": saved.manager_result["finished_task_chars"],
+        "artifact_files": len(order.artifact_paths),
         "artifact_bytes": size,
         "artifact_files_not_removed": failed,
         "rows": counts,
@@ -730,11 +746,11 @@ def _forget_vectors(agent: Any, case_memory_ids: list[str]) -> None:
     forget = getattr(repository, "forget_case_memory_vectors", None)
     if not callable(forget):
         logger.warning(
-            "Case memories of a cleaned-up history have vectors this process cannot open; they stay until the "
-            "memory graph is rebuilt. event=history_cleanup_vectors_skipped count=%d",
+            "Case memories of a cleaned-up history have vectors this process cannot open; the clean-up will "
+            "retry. event=history_cleanup_vectors_skipped count=%d",
             len(case_memory_ids),
         )
-        return
+        raise RuntimeError("The memory graph is unavailable; the clean-up will retry its pending vector deletion.")
     forget(case_memory_ids)
 
 

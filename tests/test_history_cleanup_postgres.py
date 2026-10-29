@@ -140,12 +140,23 @@ def test_the_manager_part_deletes_old_turns_and_tasks_on_postgres(storage: Stora
     assert not store.start_deleting(plan.order_id, approval={}, artifact_paths=[], at=NOW)
     counts = store.delete_manager_records(plan, task_ids=[task.task_id for task in tasks], turn_task_ids=[mixed[0], "pg_old_t1"])
     assert counts["conversation_task_links"] == 2 and counts["completed_tasks"] == 4
+    repo = create_conversation_repository(storage, artifacts_dir=tmp_path)
+    repo.ensure_thread(
+        conversation_id="pg_old", team_id=TEAM, owner_agent_id="lead", owner_agent_name="TeamArchitect",
+        requester_name=None, requester_id=None, root_task_id="pg_after", subject_preview="New question",
+        owner_canonical_user_id=ALICE,
+    )
+    repo.append_turn(conversation_id="pg_old", task_id="pg_after", followup_to_task_id=None, owner_agent_id="lead",
+                     requester_name=None, requester_id=None, correlation_id=None, problem_text="Keep this question",
+                     owner_canonical_user_id=ALICE)
+    repo.create_context_epoch(conversation_id="pg_old", trigger="test", through_turn_index=1,
+                              preserved_suffix_start_turn=2, summary_markdown="Keep this new summary")
     again = store.delete_manager_records(plan, task_ids=[task.task_id for task in tasks], turn_task_ids=[])
-    assert again.get("conversation_task_links", 0) == 0 and again.get("completed_tasks", 0) == 0
+    assert again == counts, "a retry returns the committed result without deleting again"
     remaining = {row["task_id"] for row in _execute(storage, "SELECT task_id FROM conversation_task_links")}
-    assert remaining == {mixed[1], "pg_bob_t1"}
-    assert {row["conversation_id"] for row in _execute(storage, "SELECT conversation_id FROM conversation_threads")} == {"pg_mixed", "pg_bob"}
-    assert {row["conversation_id"] for row in _execute(storage, "SELECT conversation_id FROM conversation_context_epochs")} == {"pg_bob"}
+    assert remaining == {mixed[1], "pg_bob_t1", "pg_after"}
+    assert {row["conversation_id"] for row in _execute(storage, "SELECT conversation_id FROM conversation_threads")} == {"pg_mixed", "pg_bob", "pg_old"}
+    assert {row["conversation_id"] for row in _execute(storage, "SELECT conversation_id FROM conversation_context_epochs")} == {"pg_bob", "pg_old"}
     assert store.finish_manager_part(plan.order_id, result={}, at=NOW)
     assert [order.plan.order_id for order in store.waiting_for_gateway(TEAM)] == [plan.order_id]
     assert store.conversation_deleted(TEAM, ALICE, "pg_old") and not store.conversation_deleted(TEAM, ALICE, "pg_mixed")
@@ -154,7 +165,7 @@ def test_the_manager_part_deletes_old_turns_and_tasks_on_postgres(storage: Stora
     assert store.prune(TEAM, now=NOW + timedelta(days=31)) == 1
 
 
-def test_the_gateway_part_deletes_chat_records_on_postgres(storage: StorageSettings) -> None:
+def test_the_gateway_part_deletes_chat_records_on_postgres(storage: StorageSettings, tmp_path: Path) -> None:
     repo = create_gateway_state_repository(storage)
     repo.create_session(
         session_key="web:pg", conversation_id="pg_conv", manager_agent_id="lead", channel_name="website",
@@ -178,9 +189,22 @@ def test_the_gateway_part_deletes_chat_records_on_postgres(storage: StorageSetti
         conversations=(ConversationCut("pg_conv", until=NOW.isoformat(), whole=True, latest_task_id="pg_t1"),),
         older_than=_days(100),
         kept_conversation_ids=("pg_kept",),
+        order_id="history_cleanup_pg_gateway",
     )
+    upload = tmp_path / "upload.txt"
+    upload.write_text("uploaded", encoding="utf-8")
+    _execute(storage, "INSERT INTO gateway_attachments (attachment_id, session_key, conversation_id, "
+             "owner_canonical_user_id, filename, content_type, kind, size_bytes, sha256, local_path, created_at) "
+             "VALUES ('pg_attachment', 'web:pg', 'pg_conv', %s, 'f.txt', 'text/plain', 'file', 8, 'x', %s, %s)",
+             (ALICE, str(upload), _days(400)))
     deleted = repo.delete_history_records(scope, removable_thread=lambda session: session.chat_id == "web-chat")
     # The thread keeps a message of the kept conversation, so it stays.
     assert deleted.transcript_messages == 2 and deleted.sessions_removed == 0
     remaining = {row["content"] for row in _execute(storage, "SELECT content FROM gateway_transcript_messages")}
     assert remaining == {"message 3", "message 4"}
+    restarted = create_gateway_state_repository(storage)
+    again = restarted.delete_history_records(scope, removable_thread=lambda session: True)
+    assert again.counts() == deleted.counts() and again.attachment_paths == (str(upload),)
+    assert restarted.history_cleanup_order_ids() == (scope.order_id,)
+    restarted.forget_history_cleanup_order(scope.order_id)
+    assert restarted.history_cleanup_order_ids() == ()

@@ -5,20 +5,20 @@ leaves its order in the manager's database
 (``storage.history_cleanup_repository``), which the gateway already opens.
 A loop here, running in both authorization modes, applies each waiting order:
 
-1. delete the person's chat records the order covers in the gateway's
-   database, in one transaction (``delete_history_records``): transcripts,
+1. delete the person's chat records the order covers and journal the counts
+   and upload paths in the same gateway transaction (``delete_history_records``): transcripts,
    finished requests, closed questions, attachments and delivered messages;
    sessions stop following up the deleted conversations' last tasks, and Web
    Chat threads left empty are removed;
 2. delete the chat upload files those attachments named, only inside the
-   uploads folder and never through a link;
+   uploads folder and never through a link; failures retain the journal for retry;
 3. send the person one Inbox notice with what both sides deleted, how it was
    approved and, when TeamLead used the person's standing permission, that
    grant for one-click removal;
 4. close the order and log the gateway's side in the access event log.
 
-Every step can run again: the deletion is bounded by the plan, the notice
-has the order's id, and only the call that closes the order logs it. The
+Every step can run again: the journal returns the original deletion result,
+the notice has the order's id, and only the call that closes the order logs it. The
 loop also removes old orders (``HistoryCleanupRepository.prune``).
 """
 
@@ -50,6 +50,7 @@ from storage.history_cleanup_repository import (
     HistoryCleanupOrder,
     HistoryCleanupPlanV1,
     HistoryCleanupRepository,
+    OrderStatus,
     remove_recorded_files,
     size_words,
 )
@@ -86,7 +87,8 @@ def gateway_scope(plan: HistoryCleanupPlanV1) -> GatewayHistoryScope | None:
         # With no named conversations, every other chat record from before
         # the date goes too (Updates and Memory review threads included).
         older_than=plan.cutoff_at if not plan.named_conversation_ids else None,
-        kept_conversation_ids=plan.excluded_conversation_ids,
+        kept_conversation_ids=tuple(sorted(set(plan.excluded_conversation_ids) | set(plan.gateway_kept_conversation_ids))),
+        order_id=plan.order_id,
     )
 
 
@@ -171,6 +173,9 @@ class GatewayHistoryCleanup:
         """Apply one order's gateway part, tell the person and close it (safe to run again)."""
 
         plan = order.plan
+        current = _orders(self._storage).get(plan.order_id)
+        if current is None or current.status is not OrderStatus.WAITING_FOR_GATEWAY:
+            return GatewayHistoryDeleted()
         scope = gateway_scope(plan)
         deleted = (
             self._state_store.delete_history_records(scope, removable_thread=self.removable_thread)
@@ -178,6 +183,8 @@ class GatewayHistoryCleanup:
             else GatewayHistoryDeleted()
         )
         files, size, failed = remove_recorded_files(self._uploads_dir, deleted.attachment_paths)
+        if failed:
+            raise OSError(f"{failed} upload files could not be removed; the clean-up will retry.")
         title, summary = notice_text(order, deleted)
         grant_id = order.approval.get("grant_id") if order.approval.get("mode") == ChangeApprovalMode.HELD_ACCESS.value else None
         self._send_notice_once(
@@ -249,6 +256,13 @@ class GatewayHistoryCleanup:
             removed = store.prune(self._team_id, now=now)
             if removed:
                 logger.info("Removed old history clean-up orders. event=history_cleanup_orders_pruned count=%d", removed)
+            # Retain results with the manager order for its 30-day lifetime,
+            # so a concurrent caller with a stale waiting order still finds
+            # the original result. Remove journals only after order pruning.
+            for order_id in self._state_store.history_cleanup_order_ids():
+                stored_order = store.get(order_id)
+                if stored_order is None:
+                    self._state_store.forget_history_cleanup_order(order_id)
         return applied
 
     async def run(self, stop_event: asyncio.Event, *, interval: float = HISTORY_CLEANUP_INTERVAL_SECONDS) -> None:
