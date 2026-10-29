@@ -140,7 +140,9 @@ including a helper agent still working on it. Changes made from a page that is
 out of date ("changed since you read it") are always refused. Memory facts,
 schedules, heartbeat items and Objectives have only that "changed since you
 read it" check. Files the agent writes with its file tools, and its shell or
-Python commands, are not checked.
+Python commands, are not checked. A file tool write replaces the whole file at
+once, so another request never reads a half-written file and two writes never
+mix, but the later write still replaces the earlier one.
 
 `agent.request_conflict_checks` (default `true`) turns the checks between
 requests on or off. With `false`, the later change is saved over the earlier
