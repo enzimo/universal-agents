@@ -37,6 +37,7 @@ from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.application.session_service import (
     GatewaySessionRoute,
     GatewaySessionService,
+    with_parallel_mark_notice,
 )
 from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.application.route_context import GatewayRouteContextV1
@@ -930,8 +931,10 @@ class GatewayCommandOperationsApplication:
                 return session.session_key, (
                     f"Could not switch to topic thread {target['conversation_id']}."
                 )
-            return session.session_key, (
-                f"Switched to topic {tag}: conversation {target['conversation_id']}"
+            return session.session_key, with_parallel_mark_notice(
+                f"Switched to topic {tag}: conversation {target['conversation_id']}",
+                before=session,
+                after=updated,
             )
         return session_key, _TOPIC_USAGE
 

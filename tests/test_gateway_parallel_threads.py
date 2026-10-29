@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from assistant_gateway.application.interactive_commands import GatewayCommandRequest
+from assistant_gateway.application.session_service import PARALLEL_MARK_CLEARED_NOTICE
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -95,3 +97,45 @@ async def test_web_chat_creates_a_parallel_thread_only_when_asked(tmp_path: Path
         assert refused.status == 400
         stored = gateway.session_repository.get_session(parallel_session["session_key"])
         assert stored is not None and stored.parallel_thread is True
+
+
+@pytest.mark.asyncio
+async def test_a_parallel_thread_moved_to_another_conversation_queues_with_other_work(tmp_path: Path) -> None:
+    """Owner, 2026-10-29: the mark is the person's word about the thread's own conversation.
+
+    ``/switch_conversation`` and ``/switch_topic`` move a thread to another
+    conversation, which may be continued elsewhere, so they clear the mark and
+    tell the person; the thread's next request runs with ordinary work.
+    """
+
+    transport = _AnsweringTransport()
+    gateway = UserGateway(steering_config(tmp_path), manager_transport=transport)
+    transport.gateway = gateway
+    route = {"channel_name": "cli", "user_id": "user", "chat_id": "cli"}
+    thread = gateway.application.start_new_session(**route, parallel_thread=True)
+
+    kept = gateway._session_service.switch_conversation(
+        session_key=thread.session_key, conversation_id=thread.conversation_id, last_task_id=None
+    )
+    assert kept is not None and kept.parallel_thread, "staying in its own conversation keeps the mark"
+
+    gateway.state_store.register_conversation_session(
+        session_key=thread.session_key, conversation_id="conv_older", last_task_id="task_older"
+    )
+    result = await gateway.command_application.execute(
+        GatewayCommandRequest(
+            raw_text="/switch_conversation conv_older", current_session_key=thread.session_key, **route
+        )
+    )
+
+    assert result.text == f"Active conversation: conv_older\n{PARALLEL_MARK_CLEARED_NOTICE}"
+    moved = gateway.session_repository.get_session(thread.session_key)
+    assert moved is not None and moved.conversation_id == "conv_older" and not moved.parallel_thread
+    await gateway.application.send_user_message("Next request", session_key=thread.session_key, **route)
+    assert transport.durable[-1].msg_meta.gateway_context.parallel_thread is False
+    again = await gateway.command_application.execute(
+        GatewayCommandRequest(
+            raw_text=f"/switch_conversation {thread.conversation_id}", current_session_key=thread.session_key, **route
+        )
+    )
+    assert again.text == f"Active conversation: {thread.conversation_id}", "no notice once the mark is gone"

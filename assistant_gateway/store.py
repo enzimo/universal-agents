@@ -362,6 +362,7 @@ class GatewayStateStore:
         thread_id: Optional[str] = None,
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: Optional[bool] = None,
     ) -> None:
         self._repository.upsert_session(
             session_key=session_key,
@@ -375,6 +376,7 @@ class GatewayStateStore:
             thread_id=thread_id,
             status=status,
             owner_canonical_user_id=owner_canonical_user_id,
+            parallel_thread=parallel_thread,
         )
 
     def set_session_alias(self, session_key: str, session_alias: Optional[str]) -> None:

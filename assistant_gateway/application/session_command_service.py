@@ -25,6 +25,7 @@ from assistant_gateway.domain.sessions import (
     SessionRecord,
     SessionSearchRecord,
 )
+from assistant_gateway.application.session_service import with_parallel_mark_notice
 from assistant_gateway.ports.repositories import RequestRepository, SessionRepository
 from time_presentation import format_user_timestamp
 
@@ -355,7 +356,11 @@ class GatewaySessionCommandService:
             )
         return SessionCommandResult(
             request.current_session_key,
-            f"Active conversation: {conversation.conversation_id}",
+            with_parallel_mark_notice(
+                f"Active conversation: {conversation.conversation_id}",
+                before=session,
+                after=selected,
+            ),
         )
 
     def _rename_session(self, request: SessionCommandRequest) -> SessionCommandResult:

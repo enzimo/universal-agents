@@ -416,9 +416,19 @@ How the lanes run, and what they share (`custom_agents.execution_lanes_runtime`)
   (another turn switched after the same outage) retries on the current model
   without recording a failure or switching again
   (`custom_agents.model_failover_runtime`).
-- The scheduler still claims a due schedule only while the main lane is free,
-  so a run of a schedule made in a parallel thread can start late while the
-  main lane is busy, then runs in its own lane.
+- The scheduler claims due schedules while the main lane is free. While it is
+  busy, the team lead still claims the schedules set up in a parallel thread,
+  so their runs start on time beside other work (owner, 2026-10-29). The
+  schedule row records this (`scheduled_messages.parallel_thread`, from
+  `custom_agents.schedule_store.runs_in_parallel`), and
+  `scheduled_runtime._schedule_claim_scope` limits the claim to such rows. At
+  the limit of four, such a run waits in the queue like any other parallel
+  request.
+- A thread loses its parallel mark when `/switch_conversation` or
+  `/switch_topic` moves it to another conversation, and the reply says so
+  (`GatewaySessionService.switch_conversation`). The mark is the person's word
+  that the thread's own conversation does not overlap their other work, and
+  an older conversation may be continued elsewhere.
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
