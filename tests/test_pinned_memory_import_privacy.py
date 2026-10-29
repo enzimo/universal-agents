@@ -19,7 +19,7 @@ from custom_agents.memory_review_runtime import enqueue_pinned_memory_audit_job
 from custom_agents.memory_review_store import MemoryReviewStore
 from custom_agents.pinned_memory_runtime import pinned_memory_record_digest
 from custom_tools.providers.memory import memory
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.pinned_memory_repository import (
     COREMEM_BANK,
     USERMEM_BANK,

@@ -1513,19 +1513,30 @@ function fetchSessions(options) {
     return request;
   }
 
-function createServerThread() {
+function createServerThread(options) {
+    // Launch parallel thread asks for a thread whose requests the agent runs
+    // beside its other work; New Chat and /new start ordinary ones.
+    var parallelThread = Boolean(options && options.parallelThread);
     var authGeneration = sharedState.authSessionGeneration;
     if (!sharedState.authSessionActive) { return Promise.resolve(null); }
-    if (shellState.threadCreationRequest && shellState.threadCreationGeneration === authGeneration) {
+    if (shellState.threadCreationRequest && shellState.threadCreationGeneration === authGeneration
+        && shellState.threadCreationParallel === parallelThread) {
       return shellState.threadCreationRequest;
     }
     var previousThread = activeThread();
+    var previousSelection = sharedState.activeThreadId;
     shellState.threadCreationGeneration = authGeneration;
-    var request = requestClient.fetch("/api/web-chat/sessions", {
+    shellState.threadCreationParallel = parallelThread;
+    var init = {
       method: "POST",
       credentials: "same-origin",
       signal: AbortSignal.timeout(15000),
-    }).then(function (response) {
+    };
+    if (parallelThread) {
+      init.headers = { "Content-Type": "application/json" };
+      init.body = JSON.stringify({ parallel_thread: true });
+    }
+    var request = requestClient.fetch("/api/web-chat/sessions", init).then(function (response) {
       if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) { return null; }
       return parseApiResponse(response, "Unable to create a chat thread.", function () {
         if (!sharedState.authSessionActive || sharedState.authSessionGeneration !== authGeneration) {
@@ -1548,7 +1559,9 @@ function createServerThread() {
         persisted: true,
         historyLoaded: true,
       });
-      sharedState.activeThreadId = thread.id;
+      // Creating a destination does not replace a conversation the person
+      // selected while the request was in flight. Its sender keeps `thread`.
+      if (sharedState.activeThreadId === previousSelection) sharedState.activeThreadId = thread.id;
       clearSystemError(previousThread, shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD);
       clearSystemError(null, shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD);
       saveThreads();
@@ -2604,36 +2617,37 @@ lifecycle.listen(sharedState.newThreadButton, "click", function () {
     });
   });
 
-lifecycle.listen(sharedState.settingsButton, "click", function () {
-    var thread = activeThread();
-    if (!thread) {
-      createServerThread().then(function (created) {
-        if (created) { sharedState.settingsButton.click(); }
-      }).catch(function (error) {
-        appendSystemError(
-          null,
-          shellState.SYSTEM_ERROR_SOURCE.CREATE_THREAD,
-          error.message || "Unable to create a chat thread."
-        );
-        renderMessages();
-      });
-      return;
-    }
-    sharedState.settingsControls.open(null, thread.sessionKey)
-      .then(function () {
+lifecycle.listen(sharedState.settingsButton, "click", async function () {
+    var generation = sharedState.authSessionGeneration;
+    var current = () => sharedState.authSessionActive && sharedState.authSessionGeneration === generation;
+    try {
+      var thread = activeThread();
+      if (!thread) {
+        // Sign-in shows the shell before its saved conversations arrive.
+        // Absence during that lookup must not create a fresh conversation.
+        var loaded = await fetchSessions();
+        if (!current()) return;
+        if (!loaded) throw new Error("Your conversations could not be loaded. Select Settings to retry.");
+        thread = activeThread() || await createServerThread();
+      }
+      if (!thread || !current()) return;
+      await sharedState.settingsControls.open(null, thread.sessionKey);
+      if (current()) {
         if (clearSystemError(thread, shellState.SYSTEM_ERROR_SOURCE.OPEN_SETTINGS)) {
           renderMessages();
         }
-      })
-      .catch(function (error) {
+      }
+    } catch (error) {
+      if (current()) {
         appendSystemError(
-          thread,
+          thread || activeThread(),
           shellState.SYSTEM_ERROR_SOURCE.OPEN_SETTINGS,
           error.message || "Unable to open Settings."
         );
         saveThreads();
         renderMessages();
-      });
+      }
+    }
   });
 
 lifecycle.listen(sharedState.settingsAppearanceReset, "click", function () {

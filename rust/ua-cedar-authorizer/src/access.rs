@@ -132,7 +132,11 @@ impl AccessEvaluator {
         hasher.update(schema_source.as_bytes());
         hasher.update(b"\0");
         hasher.update(policy_source.as_bytes());
-        let policy_digest = format!("{:x}", hasher.finalize());
+        let policy_digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         Ok(Self {
             schema,
             base,

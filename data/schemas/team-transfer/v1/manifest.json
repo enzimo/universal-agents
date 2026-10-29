@@ -156,7 +156,7 @@
     {
       "filename": "ScheduledMessage.schema.json",
       "model": "ScheduledMessage",
-      "sha256": "ec3a0d46288e68a240c6aebb6d1da56d675cb1e5654205855778c26687ba4413"
+      "sha256": "87b38c00001bb8e372cef854e9886e0c0d415d040655bd47c63f66549e9980dd"
     },
     {
       "filename": "ScheduleWorkerBindingV1.schema.json",
@@ -302,7 +302,7 @@
         "WorkerPoolLimitV1"
       ],
       "record_model": "ScheduleTransferRecordV2",
-      "schema_version": 5
+      "schema_version": 6
     },
     {
       "name": "pinned_memory",

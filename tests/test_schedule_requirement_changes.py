@@ -27,7 +27,7 @@ from custom_tools.providers.schedule_workers import (
     install_scheduled_worker_draft,
     prepare_scheduled_job_access,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.secure_cli_tool import secure_cli
 from tests.test_schedule_worker_service import lead  # noqa: F401  (fixture)
 from tests.tool_result_support import tool_json

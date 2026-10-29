@@ -139,7 +139,7 @@ def _trusted(agent: SimpleNamespace, person: PersonPrincipal) -> list[GrantV1]:
 
 
 def _stage(agent: SimpleNamespace, changes: list[dict[str, Any]], **target: str) -> dict[str, Any]:
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
 
     set_agent_ref(agent)
     return RuntimeSettingsService(agent).stage(changes, reason="The person asked for a faster model.", **target)

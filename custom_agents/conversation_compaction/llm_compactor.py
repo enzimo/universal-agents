@@ -1,14 +1,13 @@
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
-from strands.agent.conversation_manager.null_conversation_manager import NullConversationManager
 
 from custom_agents.conversation_compaction.base import ConversationCompactionConfig
 from custom_agents.conversation_compaction.heuristic_compactor import HeuristicSlidingWindowCompactor
 from custom_agents.conversation_summary import strip_redundant_answer_from_context_summary
-from custom_agents.person_model_runtime import SummaryAgents
+from custom_agents.person_model_runtime import new_summary_agent
 from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
 
 
@@ -50,26 +49,22 @@ class LLMSummarizingConversationCompactor(HeuristicSlidingWindowCompactor):
     def __init__(
         self,
         config: ConversationCompactionConfig,
-        logger=None,
+        logger: Optional[logging.Logger] = None,
+        summarization_model: Any = None,
     ) -> None:
         super().__init__(config=config, logger=logger)
-        self._summarization_agent: Optional[Agent] = None
-        # A person's own model for their conversations (custom_agents.person_model_runtime).
-        self._person_agents = SummaryAgents(LLM_COMPACTION_SYSTEM_PROMPT)
+        self._summarization_model = summarization_model
+        if self._summarization_model is not None:
+            return
         try:
-            self._summarization_agent = Agent(
-                model=self._build_model(),
-                tools=[],
-                system_prompt=LLM_COMPACTION_SYSTEM_PROMPT,
-                conversation_manager=NullConversationManager(),
-            )
+            self._summarization_model = self._build_model()
         except Exception as exc:
             self.logger.warning(
                 "Failed to initialize llm_summarizing compactor model; falling back to heuristic summaries: %s",
                 exc,
             )
 
-    def _build_model(self):
+    def _build_model(self) -> Any:
         provider = self.config.compaction_model_provider or self.config.default_model_provider
         model_id = self.config.compaction_model_id or self.config.default_model_id
         return build_strands_model(
@@ -143,15 +138,17 @@ class LLMSummarizingConversationCompactor(HeuristicSlidingWindowCompactor):
         existing_synopsis: Dict[str, Any],
         turns: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        if self._summarization_agent is None:
-            raise RuntimeError("LLM summarization agent is not available.")
+        if self._summarization_model is None:
+            raise RuntimeError("LLM summarization model is not available.")
 
         prompt = (
             "Update the durable conversation synopsis.\n\n"
             f"Existing synopsis JSON:\n{json.dumps(existing_synopsis or {}, ensure_ascii=True, indent=2)}\n\n"
             f"New turn block JSON:\n{json.dumps([self._turn_payload(turn) for turn in turns], ensure_ascii=True, indent=2)}"
         )
-        summarizer = self._person_agents.agent_for(self._summarization_agent)
+        summarizer = new_summary_agent(
+            self._summarization_model, system_prompt=LLM_COMPACTION_SYSTEM_PROMPT
+        )
         result = summarizer(prompt, structured_output_model=StructuredConversationSynopsis)
         structured_output = result.structured_output
         if structured_output is None:

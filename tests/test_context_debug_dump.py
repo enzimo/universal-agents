@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from strands import Agent
+from strands.models import Model
 
 from custom_agents.context_debug_dump import (
     ContextDebugDumpPlugin,
@@ -287,8 +289,7 @@ def test_context_debug_redaction_preserves_token_accounting_and_redacts_secret_t
 async def test_model_call_observer_captures_normal_and_forced_calls_with_optional_details(
     tmp_path: Path,
 ) -> None:
-    from strands._middleware.registry import MiddlewareRegistry
-    from strands._middleware.stages import InvokeModelContext, InvokeModelStage
+    from strands.middleware import InvokeModelContext, InvokeModelStage
 
     plugin = ContextDebugDumpPlugin(
         config={
@@ -302,9 +303,11 @@ async def test_model_call_observer_captures_normal_and_forced_calls_with_optiona
         agent_metadata_provider=lambda: {"agent_id": "agent_debug", "system_prompt": "Base prompt"},
     )
     plugin.assemble(_request(), _assembly())
-    fake_agent = SimpleNamespace(_middleware_registry=MiddlewareRegistry())
+    handlers = []
+    fake_agent = SimpleNamespace(add_middleware=lambda stage, handler: handlers.append((stage, handler)))
     fake_model = SimpleNamespace(model_id="test-model")
     assert register_context_debug_model_observer(fake_agent, plugin) is True
+    assert handlers[0][0] == InvokeModelStage.Wrap
 
     invocation_state = {
         ContextDebugDumpPlugin.INVOCATION_CONTEXT_KEY: {
@@ -327,11 +330,7 @@ async def test_model_call_observer_captures_normal_and_forced_calls_with_optiona
                 )
             }
 
-        async for _event in fake_agent._middleware_registry.invoke(
-            InvokeModelStage,
-            context,
-            terminal,
-        ):
+        async for _event in handlers[0][1](context, terminal):
             pass
 
     await invoke(
@@ -398,6 +397,51 @@ async def test_model_call_observer_captures_normal_and_forced_calls_with_optiona
     }
 
 
+@pytest.mark.asyncio
+async def test_public_model_observer_records_a_real_sdk_invocation(tmp_path: Path) -> None:
+    class OfflineModel(Model):
+        def update_config(self, **config):
+            pass
+
+        def get_config(self):
+            return {"model_id": "offline-debug"}
+
+        async def structured_output(self, *args, **kwargs):
+            raise AssertionError("No structured output expected")
+            yield
+
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs):
+            yield {"messageStart": {"role": "assistant"}}
+            yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "done"}}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": "end_turn"}}
+            yield {"metadata": {"usage": {"inputTokens": 12, "outputTokens": 3, "totalTokens": 15}, "metrics": {"latencyMs": 1}}}
+
+    plugin = ContextDebugDumpPlugin(
+        config={"enabled": True, "mode": "always", "capture_model_calls": True, "include_model_call_inputs": True},
+        output_dir=_dump_dir(tmp_path),
+        agent_metadata_provider=lambda: {"agent_id": "agent_debug"},
+    )
+    plugin.assemble(_request(), _assembly())
+    agent = Agent(model=OfflineModel(), callback_handler=None)
+    assert register_context_debug_model_observer(agent, plugin)
+    # Rebuilding turn setup may register twice; capture must remain once per call.
+    assert register_context_debug_model_observer(agent, plugin)
+    result = await agent.invoke_async(
+        "api_key: hidden-value",
+        invocation_state={plugin.INVOCATION_CONTEXT_KEY: {"task_id": "task_debug_1", "correlation_id": "corr_debug_1"}},
+    )
+    assert result.message["content"] == [{"text": "done"}]
+    plugin.post_invocation(_request(), _assembly(), result={"status": "ok"})
+
+    dump_dir = next((_dump_dir(tmp_path) / "task_debug_1").iterdir())
+    model_calls = json.loads((dump_dir / "model_calls.json").read_text())
+    assert model_calls["call_count"] == 1
+    assert model_calls["usage_totals"] == {"inputTokens": 12, "outputTokens": 3, "totalTokens": 15}
+    detail = json.loads((dump_dir / "model_calls" / "call_001.json").read_text())
+    assert detail["captured_inputs"]["messages"][0]["content"][0]["text"] == "api_key=[REDACTED]"
+
+
 def test_model_call_observer_registration_is_opt_in(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -414,7 +458,7 @@ def test_model_call_observer_registration_is_opt_in(
     assert registered is False
     assert plugin.model_call_observer_status == {
         "registered": False,
-        "api": "strands._middleware.InvokeModelStage.Wrap",
+        "api": "strands.middleware.InvokeModelStage.Wrap",
         "reason": "capture_model_calls_disabled",
     }
     assert "continuing without it" not in caplog.text

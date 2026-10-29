@@ -17,6 +17,7 @@ from custom_agents.deferred_message_runtime import requires_execution_slot
 from custom_agents.skill_catalog_runtime import (
     handle_managed_skill_catalog_notification,
     publish_managed_skill_catalog_notification,
+    refresh_agent_skill_catalog,
     repair_agent_skill_catalog,
 )
 from custom_agents.skill_installation import resolve_skill_installation_paths
@@ -411,3 +412,30 @@ async def test_skill_reload_does_not_yield_to_event_loop(tmp_path: Path, monkeyp
         elif inside:
             window.append(event)
     assert window == [], "a skill reload let other work run halfway through"
+
+
+@pytest.mark.asyncio
+async def test_a_new_lane_agent_leaves_running_turns_their_skills_and_changes_reach_every_agent(
+    tmp_path: Path,
+) -> None:
+    """Regression (PR #57 review): building a parallel lane's Strands agent re-read the
+    skill folders, which cleared the skills of turns running in other lanes until their
+    next model call; Objective work then found its required skills missing."""
+
+    config, config_path = _instance(tmp_path)
+    runtime, plugin = await _specialist_runtime(config, config_path)
+    lane_agent = _LocalSkillAgent()
+    await plugin.init_agent(lane_agent)  # type: ignore[arg-type]
+    runtime._parallel_lanes = SimpleNamespace(parts={"parallel:request": SimpleNamespace(agent=lane_agent)})
+    runtime._running_turns = {}
+
+    # What building another lane's Strands agent does (strands_agent_builder).
+    runtime._refresh_skills_plugins()
+    assert list_agent_skill_names(plugin, lane_agent) == ["base"]
+    assert list_agent_skill_names(plugin, runtime._strands_agent) == ["base"]
+
+    # A skill added meanwhile reaches the lane's running agent, not only the main one.
+    _write_skill(config.layout.skills_dir, "added")
+    await refresh_agent_skill_catalog(runtime, force=False, publish_presence=False, reason="test")
+    assert list_agent_skill_names(plugin, lane_agent) == ["added", "base"]
+    assert list_agent_skill_names(plugin, runtime._strands_agent) == ["added", "base"]

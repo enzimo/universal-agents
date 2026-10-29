@@ -53,6 +53,7 @@ SCHEDULE_COLUMNS: tuple[str, ...] = (
     "run_permit_json",
     "run_permit_owner",
     "run_permit_recheck_at",
+    "parallel_thread",
 )
 
 
@@ -128,6 +129,7 @@ class ScheduleRepository(Protocol):
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: bool = False,
     ) -> bool: ...
 
     def get_schedule_row(self, schedule_id: str) -> Optional[tuple]: ...
@@ -149,6 +151,7 @@ class ScheduleRepository(Protocol):
         claim_token: str,
         allow_unscoped: bool = False,
         exclude_schedule_ids: tuple[str, ...] = (),
+        parallel_thread: Optional[bool] = None,
     ) -> Optional[dict]: ...
 
     def release_claim(
@@ -161,7 +164,7 @@ class ScheduleRepository(Protocol):
 
     def prune_expired(self, *, now_iso: str) -> list[str]: ...
 
-    def get_next_wake_time(self) -> Optional[str]: ...
+    def get_next_wake_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]: ...
 
     def count_enabled(self) -> int: ...
 
@@ -195,6 +198,11 @@ _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
     "run_permit_json": "TEXT",
     "run_permit_owner": "TEXT",
     "run_permit_recheck_at": "TEXT",
+    # Whether the schedule's runs are parallel requests, worked out from its
+    # saved run metadata when the definition is written
+    # (custom_agents.schedule_store._definition_columns). The scheduler claims
+    # such a schedule while the main lane is busy (scheduled_runtime).
+    "parallel_thread": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
@@ -240,7 +248,8 @@ class _RelationalScheduleRepository:
                         claimed_at TEXT,
                         run_permit_json TEXT,
                         run_permit_owner TEXT,
-                        run_permit_recheck_at TEXT
+                        run_permit_recheck_at TEXT,
+                        parallel_thread INTEGER NOT NULL DEFAULT 0
                     )
                     """
                 )
@@ -445,6 +454,13 @@ class _RelationalScheduleRepository:
             return ""
         return f"AND schedule_id NOT IN ({','.join([self._dialect.bind] * len(schedule_ids))})"
 
+    def _parallel_claim_sql(self, parallel_thread: Optional[bool]) -> tuple[str, tuple[Any, ...]]:
+        """Limit a claim or wake-time query to parallel schedules (True), the others (False), or neither (None)."""
+
+        if parallel_thread is None:
+            return "", ()
+        return f"AND parallel_thread = {self._dialect.bind}", (1 if parallel_thread else 0,)
+
     def _claim_eligibility_sql(self) -> str:
         return f"""
             enabled = 1
@@ -535,10 +551,11 @@ class _RelationalScheduleRepository:
             conn.commit()
         return [str(row[0]) for row in rows]
 
-    def get_next_wake_time(self) -> Optional[str]:
+    def get_next_wake_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]:
+        parallel_sql, parallel_params = self._parallel_claim_sql(parallel_thread)
         with self._connect() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT
                     MIN(
                         CASE
@@ -553,7 +570,9 @@ class _RelationalScheduleRepository:
                     )
                 FROM scheduled_messages
                 WHERE enabled = 1
-                """
+                {parallel_sql}
+                """,
+                parallel_params,
             ).fetchone()
         return row[0] if row else None
 
@@ -661,6 +680,7 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: bool = False,
     ) -> bool:
         """Atomically insert a schedule without mutating an existing row."""
 
@@ -671,8 +691,8 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
                    (schedule_id, payload_json, schedule_name, objective_id, interval_ms, cron_expression,
                     schedule_json, repeat_count, remaining_count, next_fire_at, paused_until, created_at, enabled,
                     expires_at_utc, claim_team_id, claim_named_agent_type, claim_agent_id, owner_canonical_user_id,
-                    claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
-                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
+                    parallel_thread, claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
+                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
                 """,
                 (
                     schedule_id,
@@ -693,6 +713,7 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
                     claim_named_agent_type,
                     claim_agent_id,
                     owner_canonical_user_id,
+                    1 if parallel_thread else 0,
                 ),
             )
             conn.commit()
@@ -710,7 +731,9 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
         claim_token: str,
         allow_unscoped: bool = False,
         exclude_schedule_ids: tuple[str, ...] = (),
+        parallel_thread: Optional[bool] = None,
     ) -> Optional[dict]:
+        parallel_sql, parallel_params = self._parallel_claim_sql(parallel_thread)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -718,6 +741,7 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
                 SELECT * FROM scheduled_messages
                  WHERE {self._claim_eligibility_sql()}
                    {self._excluded_claim_sql(exclude_schedule_ids)}
+                   {parallel_sql}
                  ORDER BY next_fire_at ASC LIMIT 1
                 """,
                 self._claim_eligibility_params(
@@ -726,7 +750,7 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
                     claimer_named_agent_type=claimer_named_agent_type,
                     claimer_team_id=claimer_team_id,
                     allow_unscoped=allow_unscoped,
-                ) + exclude_schedule_ids,
+                ) + exclude_schedule_ids + parallel_params,
             ).fetchone()
             if row is None:
                 conn.commit()
@@ -809,6 +833,7 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: bool = False,
     ) -> bool:
         """Atomically insert a schedule without mutating an existing row."""
 
@@ -819,8 +844,8 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
                    (schedule_id, payload_json, schedule_name, objective_id, interval_ms, cron_expression,
                     schedule_json, repeat_count, remaining_count, next_fire_at, paused_until, created_at, enabled,
                     expires_at_utc, claim_team_id, claim_named_agent_type, claim_agent_id, owner_canonical_user_id,
-                    claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
-                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
+                    parallel_thread, claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
+                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
                 ON CONFLICT(schedule_id) DO NOTHING
                 """,
                 (
@@ -842,6 +867,7 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
                     claim_named_agent_type,
                     claim_agent_id,
                     owner_canonical_user_id,
+                    1 if parallel_thread else 0,
                 ),
             )
             conn.commit()
@@ -858,13 +884,16 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
         claim_token: str,
         allow_unscoped: bool = False,
         exclude_schedule_ids: tuple[str, ...] = (),
+        parallel_thread: Optional[bool] = None,
     ) -> Optional[dict]:
+        parallel_sql, parallel_params = self._parallel_claim_sql(parallel_thread)
         with self._connect() as conn:
             row = conn.execute(
                 f"""
                 SELECT * FROM scheduled_messages
                  WHERE {self._claim_eligibility_sql()}
                    {self._excluded_claim_sql(exclude_schedule_ids)}
+                   {parallel_sql}
                  ORDER BY next_fire_at ASC LIMIT 1
                  FOR UPDATE SKIP LOCKED
                 """,
@@ -874,7 +903,7 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
                     claimer_named_agent_type=claimer_named_agent_type,
                     claimer_team_id=claimer_team_id,
                     allow_unscoped=allow_unscoped,
-                ) + exclude_schedule_ids,
+                ) + exclude_schedule_ids + parallel_params,
             ).fetchone()
             if row is None:
                 conn.commit()

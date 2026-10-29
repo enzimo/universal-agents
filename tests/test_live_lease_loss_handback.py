@@ -46,7 +46,7 @@ from storage.worker_handback_repository import (
     WorkerHandbackRepository,
 )
 from custom_tools.non_interactive_shell import shell
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from tests.turn_tool_stop_support import ScriptedShellModel, kill_if_alive, process_alive
 from tests.test_live_multi_agent_state_boundaries import (

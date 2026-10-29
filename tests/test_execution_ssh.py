@@ -29,7 +29,7 @@ from custom_messages.contracts.access_v2 import ChangeApprovalMode
 from custom_messages.contracts.common_v1 import contract_sha256
 from custom_tools.providers import execution_control as tools
 from custom_tools.providers.changes import apply_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_hosting.artifacts import FilesystemArtifactStore
 from runtime_hosting.authorization import ExecutionAccessGuard, ExecutionAuthorizationDenied
 from runtime_hosting.execution_contracts import (

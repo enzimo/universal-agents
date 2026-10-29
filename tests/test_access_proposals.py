@@ -41,7 +41,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from custom_tools.providers import access as access_tools
 from custom_tools.providers.access_proposals import get_proposal_status, propose_access_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING, REASON_UNLISTED_HOST, BrokerAccessGate
 from storage.access_repository import AccessRepository
 from tests.access_decision_support import uncertain_store

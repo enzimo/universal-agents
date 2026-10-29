@@ -8,6 +8,7 @@ import logging
 
 import pytest
 
+from tests.task_work_support import strands_parts
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_human_interaction_blockers import (
     record_human_interaction_blocker,
@@ -133,7 +134,7 @@ async def test_access_resume_clears_old_blocker_before_final_review(
     sdk = SimpleNamespace(invoke_async=invoke)
     session = StrandsInterruptedTurnSession(
         task.task_id,
-        sdk,
+        strands_parts(sdk),
         {},
         lambda **_: None,
         "prompt",

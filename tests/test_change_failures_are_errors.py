@@ -50,7 +50,7 @@ from custom_tools.providers.schedules import (
     resume_scheduled_job,
     update_scheduled_job,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 
 # A schedule version as list_scheduled_jobs returns it (record_digest).
 SCHEDULE_VERSION = "0" * 64

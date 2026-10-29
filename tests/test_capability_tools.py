@@ -29,9 +29,9 @@ from custom_tools.providers.capabilities import (
     mcp_connections,
     specialist_definitions,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from tests.change_approval_support import change_agent, run_apply_change, use_signed_contexts
-from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
+from tests.test_access_request_tools import BINARY, OWNER, TEAM, decide, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
 from tests.tool_result_support import tool_json
 
@@ -140,10 +140,10 @@ def test_access_is_decided_per_action_so_a_block_stops_exactly_one(storage, tmp_
     try:
         for function in ("mcp_connections", "hosted_mcp_servers", "installed_permissions", "specialist_definitions"):
             for action in catalog.functions[function].values:
-                decision = access_runtime.decide_call(lead_agent, function, {"action": action})
+                decision = decide(lead_agent, function, {"action": action})
                 assert decision.allowed, (function, action, decision.reason)
                 assert decision.operation == f"{function}.{action}"
-        assert not access_runtime.decide_call(worker, "hosted_mcp_servers", {"action": "list"}).allowed
+        assert not decide(worker, "hosted_mcp_servers", {"action": "list"}).allowed
 
         AccessRequests(service=service, inbox=None, lead_agent_type="TeamArchitect").block(
             OWNER,
@@ -152,9 +152,9 @@ def test_access_is_decided_per_action_so_a_block_stops_exactly_one(storage, tmp_
             reason="No starting hosted servers this week",
         )
 
-        assert not access_runtime.decide_call(lead_agent, "hosted_mcp_servers", {"action": "start"}).allowed
-        assert access_runtime.decide_call(lead_agent, "hosted_mcp_servers", {"action": "stop"}).allowed
-        assert access_runtime.decide_call(lead_agent, "mcp_connections", {"action": "list"}).allowed
+        assert not decide(lead_agent, "hosted_mcp_servers", {"action": "start"}).allowed
+        assert decide(lead_agent, "hosted_mcp_servers", {"action": "stop"}).allowed
+        assert decide(lead_agent, "mcp_connections", {"action": "list"}).allowed
     finally:
         service.cedar.close()
         access_runtime._runtime_access.cache_clear()

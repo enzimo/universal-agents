@@ -22,6 +22,7 @@ from custom_messages.enums import MessageMetaType
 from custom_tools.comms_tools import TeamComms
 from test_live_nats_replacement_semantics import _adapter, _subscribe_queue, _team
 from test_turn_action_outbox import _make_agent
+from tests.pending_work_support import idle_runtime_coordinator
 from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
 
 
@@ -70,8 +71,8 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
     for name in ("_refresh_self_agent_state", "_notify_context_after_turn"):
         object.__setattr__(agent, name, AsyncMock())
     object.__setattr__(agent, "_drain_due_turn_action_outbox", AsyncMock(return_value=False))
-    object.__setattr__(agent, "_runtime_coordinator", lambda: SimpleNamespace(
-        drain_all_deferred_events=AsyncMock(return_value=False)))
+    # No runtime mailbox events: every lane's drain finds none.
+    object.__setattr__(agent, "_runtime_coordinator", idle_runtime_coordinator)
     agent._nats_transport_adapter = adapter
     reply = f"{team}_gateway_response"
     try:

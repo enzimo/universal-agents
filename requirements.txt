@@ -3,7 +3,7 @@
 
 # Agent runtime
 # The resilient client requires the SDK's per-invocation cancel_signal contract.
-strands-agents>=1.57.0
+strands-agents>=1.62.0
 mcp>=1.28.1,<2
 anyio>=4.12.1
 httpx>=0.28.1
@@ -23,16 +23,19 @@ python-dotenv>=1.2.2
 # Persistence
 psycopg[binary]>=3.2.9
 sqlite-vec==0.1.9
-pysqlite3==0.6.0; sys_platform == "darwin"
+pysqlite3==0.6.1; sys_platform == "darwin"
 
 # Model providers
 # Strands' Anthropic adapter (llm.provider: anthropic); its optional extra pins below 1.0.
 anthropic>=0.40.0,<1.0.0
-google-genai>=2.7.0
-# Installed directly: repository HTTP integration tests cover this adapter beyond
-# the older LiteLLM cap in Strands' optional extra.
-litellm>=1.86.2
-# Strands (through 1.57) constrains its OpenAI provider to v2; OpenAI v3 changes the HTTP client contract.
+# GenAI v3 changes automatic function calling; keep the current adapter contract.
+google-genai>=2.33.0,<3
+# Keep LiteLLM unchanged during this refresh (owner, 2026-10-28).
+litellm==1.105.0
+# LiteLLM requires filelock<4. Version 3.20.3 includes the earlier soft-lock
+# fix and predates the vulnerable reader/writer and lease implementations.
+filelock==3.20.3
+# Strands constrains its OpenAI provider to v2; OpenAI v3 changes the HTTP client contract.
 openai>=2.54.0,<3
 tiktoken>=0.13.0
 # Own the hf CLI contract and generated skill, previously only transitive.

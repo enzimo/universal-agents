@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 
 
@@ -32,6 +32,7 @@ class _FakeAgent:
     id = "agent_web_test"
     named_agent_type = "WebResearchAgent"
     task_manager = _FakeTaskManager()
+    test_task_id = _FakeTaskManager.current_task_id  # the tool calls are this task's turn
 
     def __init__(self, layout: InstanceLayout) -> None:
         self.instance_root = str(layout.root)
@@ -314,6 +315,7 @@ def test_task_id_matching_another_tasks_folder_keeps_research_separate(layout, m
     results = []
     for task_id in task_ids:
         agent.task_manager.current_task_id = task_id
+        bind_task(task_id)  # the next call works for this task (tests.task_work_support)
         results.append(_payload(tools.brave_web_search_artifact("agent frameworks")))
 
     assert Path(results[0]["artifact_dir"]).parent != Path(results[1]["artifact_dir"]).parent

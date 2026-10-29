@@ -44,7 +44,7 @@ from assistant_gateway.domain.request_state import (
 from assistant_gateway.ports.repositories import SessionRepository
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import (
     TaskQuery,
     TaskQueryChoiceOption,
@@ -309,7 +309,7 @@ class GatewayClarificationCore:
                 is_response_requested=True,
                 gateway_context=self._request_context.build_gateway_context(
                     session_key=session.session_key,
-                    delivery_mode="interactive",
+                    delivery_mode=DELIVERY_MODE_INTERACTIVE,
                     route=GatewayRequestRoute(
                         channel_name=session.channel_name,
                         user_id=session.user_id,

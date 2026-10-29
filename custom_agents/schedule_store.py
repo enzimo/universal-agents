@@ -40,6 +40,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import TYPE_CHECKING, Any, Callable, List, Mapping, Optional, TypedDict
 
 from storage.backends import STORAGE_BACKEND_SQLITE
+from custom_agents.execution_lanes import is_parallel_request
 from custom_agents.schedule_fields import schedule_memory_now, trim_schedule_memory_ledger
 from storage.runtime_custody import DeferredMessageClaim
 from custom_agents.schedule_management import (
@@ -503,7 +504,20 @@ def _definition_columns(msg: "ScheduledMessage", *, remaining_count: Optional[in
         "claim_named_agent_type": msg.claim_named_agent_type,
         "claim_agent_id": msg.claim_agent_id,
         "owner_canonical_user_id": owner_canonical_user_id_for_schedule(msg),
+        "parallel_thread": 1 if runs_in_parallel(msg) else 0,
     }
+
+
+def runs_in_parallel(msg: "ScheduledMessage") -> bool:
+    """Whether the schedule's runs are parallel requests: it was set up in a parallel thread.
+
+    Its saved run metadata keeps that thread's request context, so each run
+    gets a parallel lane of its own (``custom_agents.execution_lanes``). The
+    row stores the answer so the scheduler can claim such schedules while the
+    main lane is busy (``scheduled_runtime``).
+    """
+
+    return is_parallel_request(msg.payload_meta)
 
 
 def _next_run_changed(candidate: "ScheduledMessage", base: "ScheduledMessage") -> bool:
@@ -928,6 +942,7 @@ class ScheduleStore:
                 claim_named_agent_type=getattr(msg, "claim_named_agent_type", None),
                 claim_agent_id=getattr(msg, "claim_agent_id", None),
                 owner_canonical_user_id=owner_canonical_user_id_for_schedule(msg),
+                parallel_thread=runs_in_parallel(msg),
             )
             if created:
                 self._logger.info(
@@ -1402,7 +1417,13 @@ class ScheduleStore:
         claim_ttl_seconds: int = DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
         allow_unscoped: bool = False,
         exclude_schedule_ids: tuple[str, ...] = (),
+        parallel_thread: Optional[bool] = None,
     ) -> Optional[dict]:
+        """Claim the earliest due schedule this agent may run.
+
+        ``parallel_thread`` limits the claim to schedules whose runs are
+        parallel requests (True) or to the others (False); None claims either.
+        """
         now_dt = datetime.now(timezone.utc)
         claim_expires_at = (
             now_dt + timedelta(seconds=max(1, int(claim_ttl_seconds)))
@@ -1419,6 +1440,7 @@ class ScheduleStore:
                 claim_token=claim_token,
                 allow_unscoped=allow_unscoped,
                 exclude_schedule_ids=exclude_schedule_ids,
+                parallel_thread=parallel_thread,
             )
         except Exception as e:
             self._logger.error(f"Failed to claim next due schedule: {e}")
@@ -1471,16 +1493,17 @@ class ScheduleStore:
             and expires_at > moment
         )
 
-    def get_next_wake_time(self) -> Optional[str]:
+    def get_next_wake_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]:
+        """When the next schedule is due; ``parallel_thread`` limits it as in ``claim_next_due``."""
         try:
             self.prune_expired()
-            return self._repository.get_next_wake_time()
+            return self._repository.get_next_wake_time(parallel_thread=parallel_thread)
         except Exception as e:
             self._logger.error(f"Failed to query next wake time: {e}")
             return None
 
-    def get_earliest_fire_time(self) -> Optional[str]:
-        return self.get_next_wake_time()
+    def get_earliest_fire_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]:
+        return self.get_next_wake_time(parallel_thread=parallel_thread)
 
     def set_enabled(
         self,

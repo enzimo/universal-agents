@@ -132,7 +132,7 @@ async def test_the_scheduler_pass_frees_an_orphaned_slot_without_new_work(tmp_pa
     turn_started, finish_turn = asyncio.Event(), asyncio.Event()
 
     async def running_turn() -> None:
-        async with agent._execution_gate.hold():
+        async with agent._execution_lanes.hold():
             turn_started.set()
             await finish_turn.wait()
 

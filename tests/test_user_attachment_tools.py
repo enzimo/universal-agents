@@ -13,7 +13,8 @@ from custom_messages.contracts.attachments_v1 import (
 )
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
-from custom_tools.runtime_context import _agent_ctx, set_agent_ref
+from custom_tools.runtime_context import _agent_ctx
+from tests.task_work_support import set_agent_ref
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
@@ -76,6 +77,7 @@ def _set_person_agent(attachment: UserTaskAttachment, layout, person: str) -> No
             task_manager=task_manager,
             instance_root=str(layout.root),
             workspace_dir=str(layout.workspaces_dir),
+            test_task_id="task_1",  # the tool calls are this task's turn
         )
     )
 

@@ -22,7 +22,7 @@ import pytest
 
 from custom_tools import non_interactive_shell
 from custom_tools.non_interactive_shell import shell
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.shell_execution import AnyCancel, ProcessRequest, run_process
 from custom_agents.sdk.strands.turn_tool_stop import stop_tool_calls
 from custom_tools.tool_stop import (

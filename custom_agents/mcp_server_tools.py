@@ -31,7 +31,13 @@ A server whose tools could not be listed is not tried on every model call:
   notice per day. It then waits for the same changes as after a refusal. An
   access change also makes a server that is still being retried due at once.
 
-The state is small and lives in this process; a restart starts afresh.
+The state is small and lives in this process; a restart starts afresh. The
+failures are kept per agent and shared by all its Strands agents
+(``ServerFailures``): the main one and each parallel lane's
+(``custom_agents.execution_lanes_runtime``). Whether a server answers does not
+depend on which of them asks; with a table per Strands agent, every new
+parallel request waited again for each server known not to answer and
+started its retry window afresh (PR #57 review).
 ``MCPServerTools.status`` describes a server that did not load, for
 ``find_tools`` and ``mcp_connections(action="list")``, so an agent can tell the person
 why a server's tools are missing. Showing a tool decides nothing: the
@@ -44,7 +50,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
@@ -63,8 +69,6 @@ RETRY_GAPS = tuple(timedelta(minutes=minutes) for minutes in (1, 2, 4, 8, 16))
 LATER_RETRY_GAP = timedelta(minutes=30)
 MAX_ERROR_TEXT = 300
 UNAVAILABLE_NOTICE_PREFIX = "mcp_server_unavailable"
-# Where custom_agents.tool_sync.install_tool_sync keeps an agent's loader.
-SERVER_TOOLS_ATTRIBUTE = "_mcp_server_tools"
 
 
 def _utc_now() -> datetime:
@@ -165,6 +169,29 @@ _FAILURE_LOGS = {
 }
 
 
+@dataclass
+class ServerFailures:
+    """One agent's failed MCP servers by tool id, shared by its Strands agents (module docstring).
+
+    ``access_version`` is the access store version the failures were last
+    checked against, so one access change retries each server once, not once
+    per Strands agent.
+    """
+
+    by_tool: dict[str, ServerFailure] = field(default_factory=dict)
+    access_version: int | None = None
+
+
+def shared_failures(agent: Any) -> ServerFailures:
+    """The agent's ``ServerFailures``, created on first use."""
+
+    failures: ServerFailures | None = getattr(agent, "_mcp_server_failures", None)
+    if failures is None:
+        failures = ServerFailures()
+        agent._mcp_server_failures = failures
+    return failures
+
+
 def _mcp_store(agent: Any) -> Any:
     from custom_agents.providers.mcp_connections import resolve_agent_mcp_connection_paths
     from mcp_control.registry import MCPConnectionStore
@@ -210,7 +237,8 @@ class MCPServerTools:
         self.clock = clock
         self.retry_window = load_retry_window(agent)
         self._loaded: dict[str, _LoadedServer] = {}
-        self._failures: dict[str, ServerFailure] = {}
+        self._shared = shared_failures(agent)
+        self._failures: dict[str, ServerFailure] = self._shared.by_tool
         self._shown: frozenset[str] = frozenset()  # the servers shown at the last registry read
         self._access_version: int | None = None
 
@@ -246,7 +274,9 @@ class MCPServerTools:
         records = await asyncio.to_thread(self._active_records)
         shown = {tool_id: record for tool_id, record in records.items() if self._shows(record)}
         self._shown = frozenset(shown)
-        self._forget_failures(records, access_changed=access_changed, now=now)
+        failures_access_changed = access_version != self._shared.access_version
+        self._shared.access_version = access_version
+        self._forget_failures(records, access_changed=failures_access_changed, now=now)
         self._unload_hidden(registry, shown)
         for tool_id, record in sorted(shown.items()):
             failure = self._failures.get(tool_id)
@@ -378,10 +408,22 @@ class MCPServerTools:
         )
 
 
+def server_loader(agent: Any) -> MCPServerTools | None:
+    """The MCP loader of the Strands agent the current turn calls, else of the agent's main one.
+
+    Each Strands agent's tool-list sync has its own (``custom_agents.strands_parts``).
+    """
+
+    from custom_agents.strands_parts import current_parts
+
+    parts = current_parts(agent)
+    return getattr(getattr(parts, "sync", None), "servers", None)
+
+
 def server_status(agent: Any, tool_id: str) -> str | None:
     """Why an MCP server's tools are not loaded for this agent, in plain words; None when nothing failed."""
 
-    servers = getattr(agent, SERVER_TOOLS_ATTRIBUTE, None)
+    servers = server_loader(agent)
     return servers.status(tool_id) if servers is not None else None
 
 
@@ -411,13 +453,15 @@ __all__ = [
     "LoadFailure",
     "MCPServerTools",
     "RETRY_GAPS",
-    "SERVER_TOOLS_ATTRIBUTE",
+    "server_loader",
     "ServerFailure",
+    "ServerFailures",
     "error_text",
     "load_retry_window",
     "load_server_tools",
     "register_dynamic",
     "retry_gap",
     "server_status",
+    "shared_failures",
     "unavailable_notice_id",
 ]

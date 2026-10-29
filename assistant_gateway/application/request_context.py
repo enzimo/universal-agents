@@ -311,6 +311,7 @@ class GatewayRequestContextService:
         route: GatewayRequestRoute = GatewayRequestRoute(),
         manager_agent_id: str | None,
         scheduled_job_id: str | None = None,
+        parallel_thread: bool = False,
     ) -> GatewayContext:
         canonical_user_id = self.canonical_user_id(route)
         # The signed context is what enforcement points trust: the person and
@@ -339,4 +340,5 @@ class GatewayRequestContextService:
             heartbeat_source_id=self.settings.heartbeat_source_id,
             original_message_id=route.original_message_id,
             task_context=task_context,
+            parallel_thread=parallel_thread,
         )

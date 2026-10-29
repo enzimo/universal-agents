@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import re
 import shlex
 import tomllib
 
+from packaging.requirements import Requirement
 import yaml
 
 
@@ -80,8 +82,9 @@ def test_cognitive_complexity_advisory_is_repository_owned() -> None:
     assert config["ignore-complexity"] is True
     assert config["check-script"] is False
     assert "tests" not in config["paths"]
-    assert "complexipy>=7.0.1" in requirements
-    assert "complexipy==8.0.1" in lock
+    requirement = Requirement(next(line for line in requirements.splitlines() if line.startswith("complexipy")))
+    locked = re.search(r"^complexipy==([^\s\\]+)", lock, re.MULTILINE)
+    assert locked and locked[1] in requirement.specifier
     assert checkout["with"]["fetch-depth"] == "0"
     assert advisory["continue-on-error"] == "true"
     assert "github.event.pull_request.base.sha" in advisory["env"]["COMPLEXITY_BASE_SHA"]

@@ -16,7 +16,7 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from custom_tools.providers.knowledge import knowledge_add_note, knowledge_history, knowledge_write
 from custom_tools.providers.knowledge import knowledge_read
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.providers.knowledge_curation import (
     freeze_knowledge_page,
     knowledge_activity_report,

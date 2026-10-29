@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.task_work_support import TurnHost
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 
 import asyncio
@@ -838,7 +839,7 @@ async def test_runtime_work_command_cancels_the_complete_owned_execution_graph(
     )
 
     comms = _CaptureComms()
-    agent = SimpleNamespace(
+    agent = TurnHost(
         id="manager_1",
         name="Manager",
         is_team_lead=True,
@@ -850,8 +851,6 @@ async def test_runtime_work_command_cancels_the_complete_owned_execution_graph(
         },
         _agent_id_by_name={"worker_exact": "worker_exact"},
         _stop_reasons_by_task_id={},
-        _active_execution_task=None,
-        _active_execution_task_id=None,
         _strands_agent=SimpleNamespace(),
         _logger=logging.getLogger("test.runtime_work_control"),
         _ensure_schedule_store=lambda: ScheduleStore(

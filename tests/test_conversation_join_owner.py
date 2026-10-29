@@ -103,6 +103,7 @@ def _agent(tmp_path: Path, agent_type: str = "TeamArchitect") -> SimpleNamespace
         _conversation_store=ConversationStore(db_path, artifacts_dir=tmp_path / "artifacts"),
         paused=False,
         is_executing=True,  # queue the run instead of starting a model turn
+        main_lane_busy=True,  # the main lane (runtime_hosting.agent_execution)
         _ensure_request_timezone=lambda meta, top_level_request: meta,
         _logger=logging.getLogger("test.conversation_join"),
     )
