@@ -8,7 +8,8 @@ is reached (owner's decision of 2026-10-27). The Status page
 - **Disks.** Free space on the filesystem holding the instance folder, and on
   the folder of each SQLite database (task, gateway, activity) that is on
   another filesystem, as ``df`` counts it: space reserved for the system
-  administrator is neither used nor free.
+  administrator is neither used nor free. An unreadable place is an explicit
+  problem; other disks and the message server are still checked.
 - **Message storage.** The NATS account's JetStream use against the account's
   limit (``js.account_info()``), when the account has one. The percentage
   counts bytes stored, not the space streams reserve (the account
@@ -113,26 +114,37 @@ class MessageStorage:
         return cls(kind="file", used=usage.storage, limit=usage.max_storage)
 
 
+@dataclass(frozen=True)
+class UnmeasuredDisk:
+    """A configured disk whose capacity could not be read; it must remain visible on Status."""
+
+    key: str
+    label: str
+    location: str
+    error: str
+
+
 # -- measuring ----------------------------------------------------------------------------
 
 
-def disk_spaces(places: Iterable[tuple[str, str, Path]]) -> list[SpaceUse]:
-    """One entry per filesystem among ``places`` (key, label, folder); the first place naming it wins."""
+def disk_spaces(places: Iterable[tuple[str, str, Path]]) -> list[SpaceUse | UnmeasuredDisk]:
+    """Each readable filesystem once, plus explicit failures for places that could not be measured."""
 
     seen: set[int] = set()
-    spaces: list[SpaceUse] = []
+    spaces: list[SpaceUse | UnmeasuredDisk] = []
     for key, label, folder in places:
-        existing = _nearest_existing(folder)
         try:
+            existing = _nearest_existing(folder)
             device = os.stat(existing).st_dev
             stats = os.statvfs(existing)
         except OSError as exc:
             logger.warning(
                 "Could not read a disk's free space. event=storage_disk_unreadable place=%s path=%s error=%s",
                 key,
-                existing,
+                folder,
                 exc,
             )
+            spaces.append(UnmeasuredDisk(key=key, label=label, location=str(folder), error=f"{type(exc).__name__}: {exc.strerror or exc}"))
             continue
         if device in seen:
             continue
@@ -147,9 +159,14 @@ def disk_spaces(places: Iterable[tuple[str, str, Path]]) -> list[SpaceUse]:
 
 def _nearest_existing(folder: Path) -> Path:
     current = folder
-    while not current.exists() and current.parent != current:
-        current = current.parent
-    return current
+    while True:
+        try:
+            current.stat()
+            return current
+        except FileNotFoundError:
+            if current.parent == current:
+                raise
+            current = current.parent
 
 
 def database_sizes(stores: Iterable[tuple[str, StorageSettings]]) -> list[StoredSize]:
@@ -302,7 +319,7 @@ class StorageCapacity:
     def __init__(
         self,
         *,
-        disks: Callable[[], list[SpaceUse]],
+        disks: Callable[[], Sequence[SpaceUse | UnmeasuredDisk]],
         databases: Callable[[], list[StoredSize]],
         levels: StorageLevels,
         nearing_limit_percent: int,
@@ -321,7 +338,8 @@ class StorageCapacity:
     def findings(self, messages: JetStreamAccountUsage | None) -> list[StatusFindingV1]:
         """This check's storage findings; reads disks and databases, so it runs off the gateway's loop."""
 
-        spaces = list(self._disks())
+        disks = self._disks()
+        spaces = [disk for disk in disks if isinstance(disk, SpaceUse)]
         message_storage = MessageStorage.of(messages, kind=self._message_storage_kind) if messages else None
         if message_storage is not None and message_storage.limit:
             spaces.append(
@@ -344,9 +362,22 @@ class StorageCapacity:
             for space in spaces
             if space.key in levels
         ]
+        findings.extend(unmeasured_disk_finding(disk) for disk in disks if isinstance(disk, UnmeasuredDisk))
         if message_storage is not None and not message_storage.limit:
             findings.append(no_message_limit_finding(message_storage))
         return findings
+
+
+def unmeasured_disk_finding(disk: UnmeasuredDisk) -> StatusFindingV1:
+    return StatusFindingV1(
+        finding_id=f"storage_unmeasured:{disk.key}",
+        severity=StatusSeverity.PROBLEM,
+        title=f"{disk.label} could not be measured",
+        summary="Its free space is unknown, so the team cannot warn before this disk fills up.",
+        action="Check that this folder and its filesystem are available and readable by the running instance, then check Status again.",
+        source=SOURCE,
+        details=f"Folder: {disk.location}\n{disk.error}"[:2000],
+    )
 
 
 def space_finding(
@@ -472,6 +503,7 @@ __all__ = [
     "StorageCapacity",
     "StorageLevels",
     "StoredSize",
+    "UnmeasuredDisk",
     "build_storage_capacity",
     "database_sizes",
     "disk_spaces",

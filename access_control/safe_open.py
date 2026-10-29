@@ -51,6 +51,7 @@ REASON_NOT_DIRECTORY = "not_directory"
 REASON_NOT_REGULAR_FILE = "not_regular_file"
 REASON_SEVERAL_LINKS = "several_links"
 REASON_TOO_LARGE = "too_large"
+REASON_TOO_DEEP = "too_deep"
 REASON_UNSAFE_NAME = "unsafe_name"
 REASON_ROOT_UNAVAILABLE = "root_unavailable"
 REASON_OPEN_FAILED = "open_failed"
@@ -493,7 +494,7 @@ def remove_directory(root: Path, parts: tuple[str, ...]) -> bool:
     finally:
         os.close(directory)
 
-# Folders deeper than this below the measured one are not counted (folder_bytes).
+# Measurement fails rather than returning a partial size beyond this depth.
 FOLDER_BYTES_MAX_DEPTH = 64
 
 
@@ -504,14 +505,17 @@ def folder_bytes(root: Path, parts: tuple[str, ...] = ()) -> int:
     so a link, or a folder swapped for one while the walk runs, is never
     followed and nothing outside the folder is counted. Links, devices and
     other entries count nothing; a file with several hard links counts in
-    full each time it is seen. Folders deeper than ``FOLDER_BYTES_MAX_DEPTH``
-    count nothing. For measuring, not for deciding access.
+    full each time it is seen. Unreadable entries and folders deeper than
+    ``FOLDER_BYTES_MAX_DEPTH`` fail the measurement instead of returning a
+    partial total. For measuring, not for deciding access.
     """
 
     try:
         directory = open_directory(root, parts)
     except UnsafePath as exc:
-        if exc.reason in {REASON_NOT_FOUND, REASON_ROOT_UNAVAILABLE}:
+        if exc.reason == REASON_NOT_FOUND or (
+            exc.reason == REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError)
+        ):
             return 0
         raise
     try:
@@ -525,15 +529,19 @@ def _folder_bytes(directory: int, *, depth: int) -> int:
     for name in os.listdir(directory):
         try:
             info = os.stat(name, dir_fd=directory, follow_symlinks=False)
-        except OSError:
+        except FileNotFoundError:
             continue  # removed while listing
         if stat.S_ISREG(info.st_mode):
             total += info.st_size
-        elif stat.S_ISDIR(info.st_mode) and depth < FOLDER_BYTES_MAX_DEPTH:
+        elif stat.S_ISDIR(info.st_mode):
+            if depth >= FOLDER_BYTES_MAX_DEPTH:
+                raise UnsafePath(f"Folder measurement is too deep: {name}", reason=REASON_TOO_DEEP)
             try:
                 child = os.open(name, _DIRECTORY_FLAGS, dir_fd=directory)
-            except OSError:
-                continue  # removed, or replaced by a link, since the listing
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                    continue  # removed, or replaced by a link or file, since the listing
+                raise
             try:
                 total += _folder_bytes(child, depth=depth + 1)
             finally:
@@ -568,6 +576,7 @@ __all__ = [
     "REASON_ROOT_UNAVAILABLE",
     "REASON_SEVERAL_LINKS",
     "REASON_TOO_LARGE",
+    "REASON_TOO_DEEP",
     "REASON_UNSAFE_NAME",
     "UnsafePath",
     "copy_file",

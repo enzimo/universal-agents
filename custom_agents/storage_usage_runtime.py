@@ -30,7 +30,8 @@ due schedules or stuck-work reports. If the task ever ends, the next pass
 starts it again.
 
 If the manager cannot measure (no instance folder layout, no conversation
-store, or a failure), it writes nothing: the gateway then sees the totals age,
+store, an unreadable folder, a depth limit or a failure), it writes nothing
+and preserves the previous snapshot: the gateway then sees the totals age,
 sends no notice on partial data, and the Status page says the totals are out
 of date (``assistant_gateway.storage_usage``). Silence must not look like
 "under the limit".
@@ -40,7 +41,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Protocol
@@ -107,15 +107,16 @@ def _conversation_file_bytes(artifacts_dir: Path, owners: dict[str, str], people
     """Bytes of the files saved beside each person's conversations, one folder per conversation."""
 
     totals: dict[str, int] = {}
-    try:
-        entries = safe_open.list_directory(artifacts_dir, ())
-    except safe_open.UnsafePath:
-        return totals  # nothing saved yet
-    for name, info in entries:
-        owner = owners.get(name)
-        if owner is None or owner not in people or not stat.S_ISDIR(info.st_mode):
+    for name, owner in owners.items():
+        if owner not in people:
             continue
-        totals[owner] = totals.get(owner, 0) + safe_open.folder_bytes(artifacts_dir, (name,))
+        try:
+            size = safe_open.folder_bytes(artifacts_dir, (name,))
+        except safe_open.UnsafePath as exc:
+            if exc.reason not in {safe_open.REASON_LINK, safe_open.REASON_NOT_DIRECTORY}:
+                raise
+            continue  # an entry replaced by a link or file is excluded
+        totals[owner] = totals.get(owner, 0) + size
     return totals
 
 
@@ -126,6 +127,8 @@ def _person_folder_bytes(layout: InstanceLayout, person: str) -> int:
     try:
         return safe_open.folder_bytes(layout.users_dir, (folder,))
     except safe_open.UnsafePath as exc:
+        if exc.reason not in {safe_open.REASON_LINK, safe_open.REASON_NOT_DIRECTORY}:
+            raise
         logger.warning(
             "A person's folder could not be measured, so it counts nothing. "
             "event=storage_usage_folder_unmeasured person_folder=%s reason=%s",
@@ -166,7 +169,15 @@ def record_manager_usage(agent: Any, *, now: datetime | None = None) -> int | No
         return None
     team_id = str(getattr(agent, "team_id", "") or "")
     people = [person for person, now_known in people_directory(agent).people().items() if now_known.active]
-    usage = measure_manager_side(people, conversations=conversations, tasks=tasks, layout=layout)
+    try:
+        usage = measure_manager_side(people, conversations=conversations, tasks=tasks, layout=layout)
+    except OSError:
+        logger.exception(
+            "People's stored data could not be fully measured; previous totals are kept and will age. "
+            "event=storage_usage_failed agent_id=%s",
+            getattr(agent, "id", ""),
+        )
+        return None
     PersonStorageUsageRepository(storage_settings).record_side(
         team_id, StorageSide.MANAGER, usage, measured_at=now or datetime.now(timezone.utc)
     )

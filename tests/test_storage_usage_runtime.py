@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -143,6 +143,46 @@ def test_the_manager_writes_its_share_for_active_people_and_drops_people_who_lef
     assert set(rows) == {ALICE, BOB}  # not the disabled person, and not someone who left
     assert rows[ALICE].bytes_by_kind == {"tasks": 20, "conversation_files": 0, "folder": 1234}
     assert rows[ALICE].measured_at == NOW and rows[BOB].total == 0
+
+
+@pytest.mark.parametrize("place", ["person", "nested", "artifacts"])
+def test_an_unreadable_folder_preserves_the_prior_totals_until_they_are_reported_stale(
+    tmp_path: Path, caplog, place: str
+) -> None:
+    from assistant_gateway.storage_usage import StorageUsageNotices
+
+    agent = _agent(tmp_path)
+    layout = InstanceLayout.at(Path(agent.instance_root))
+    agent._conversation_store.ensure_thread(
+        conversation_id="conv_a", team_id=TEAM, owner_agent_id="lead", owner_agent_name="Nova",
+        requester_name=None, requester_id=None, root_task_id="task_a", owner_canonical_user_id=ALICE,
+    )
+    personal = layout.users_dir / person_folder_name(ALICE)
+    nested = personal / "nested"
+    artifacts = layout.conversation_artifacts_dir / "conv_a"
+    for folder in (nested, artifacts):
+        folder.mkdir(parents=True)
+        with (folder / "sparse.bin").open("wb") as stream:
+            stream.truncate(6_000_000_000)
+    shared = PersonStorageUsageRepository(agent.task_manager.storage_settings)
+    assert record_manager_usage(agent, now=NOW) == 2
+    before = shared.side_usage(TEAM, StorageSide.MANAGER)
+    blocked = {"person": personal, "nested": nested, "artifacts": layout.conversation_artifacts_dir}[place]
+    blocked.chmod(0)
+    later = NOW + timedelta(days=4)
+    try:
+        with caplog.at_level(logging.ERROR, logger="custom_agents.storage_usage_runtime"):
+            assert record_manager_usage(agent, now=later) is None
+    finally:
+        blocked.chmod(0o700)
+    assert shared.side_usage(TEAM, StorageSide.MANAGER) == before
+    assert "event=storage_usage_failed" in caplog.text
+    notices = StorageUsageNotices(
+        team_id=TEAM, step_gb=5,
+        people=lambda: [TeamPersonV1(team_id=TEAM, person_id=ALICE, standing=PersonStanding.ACTIVE, changed_at_utc=NOW)],
+        measure=dict, store=lambda: shared, send_notice_once=lambda notice: True, now=lambda: later,
+    )
+    assert notices.stale_finding() is not None
 
 
 @pytest.mark.parametrize("missing", ["workspace_dir", "_conversation_store", "task_manager"])

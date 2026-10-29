@@ -3100,7 +3100,10 @@ Each repository answers for its own tables with one aggregate per table and
 no row loading; the byte size comes from the database
 (`SqlDialect.text_bytes`: `LENGTH(CAST(x AS BLOB))` on SQLite, whose `LENGTH`
 counts characters, and `octet_length` on PostgreSQL). Folders are walked
-without following links (`safe_open.folder_bytes`). A side replaces all its
+without following links (`safe_open.folder_bytes`). Permission or I/O failures,
+and a walk exceeding its depth limit, fail the measurement and preserve the
+previous snapshot and its time; a partial total never becomes current. Missing
+folders and excluded symbolic links still count nothing. A side replaces all its
 rows at each measurement, so the table holds at most two rows per active
 person. When a person's total passes the next multiple of
 `gateway.storage_warnings.person_step_gb` above the highest step announced to
@@ -3535,7 +3538,9 @@ administrators must hear before a limit is reached. On every check the
 gateway reads the free space (`statvfs`, counted as `df` does) of the
 filesystem holding the instance folder and of each SQLite database's folder on
 another filesystem, and the NATS account's JetStream use and limit
-(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). At
+(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). An
+unreadable disk produces a problem finding saying its free space is unknown;
+successful checks for other disks and NATS remain visible. At
 `gateway.storage_warnings.nearing_limit_percent` (80 by default) a place is
 a warning, at `nearly_full_percent` (95) a problem. The nearing level is a
 warning on the page but counts as a problem for the notice, so administrators

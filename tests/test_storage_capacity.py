@@ -17,6 +17,7 @@ without a JetStream limit.
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import shutil
 import socket
@@ -132,6 +133,21 @@ def test_a_database_not_created_yet_is_left_out(tmp_path: Path) -> None:
     settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "absent.db")}})
 
     assert database_sizes([("Activity database", settings)]) == []
+
+
+def test_a_disk_path_permission_failure_is_not_treated_as_a_missing_folder(tmp_path: Path, monkeypatch) -> None:
+    stated = Path.stat
+    blocked = tmp_path / "blocked"
+
+    def stat_path(path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError(errno.EACCES, "permission denied")
+        return stated(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_path)
+    [reading] = disk_spaces([("disk:blocked", "The blocked disk", blocked)])
+    assert reading.key == "disk:blocked" and reading.location == str(blocked)
+    assert "PermissionError" in reading.error
 
 
 # -- levels ----------------------------------------------------------------------------------
@@ -376,6 +392,39 @@ async def test_a_failing_storage_check_is_listed_and_the_rest_of_the_page_still_
 
     assert report.unavailable_sources == ("storage checks",)
     assert "event=status_storage_check_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [errno.EACCES, errno.EIO])
+async def test_an_unmeasured_disk_is_a_problem_and_keeps_other_disk_and_message_findings(
+    tmp_path: Path, monkeypatch, failure: int
+) -> None:
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    original = os.statvfs
+
+    def read_space(path):
+        if Path(path) == unreadable:
+            raise OSError(failure, "measurement failed")
+        return original(path)
+
+    monkeypatch.setattr(os, "statvfs", read_space)
+    capacity = StorageCapacity(
+        disks=lambda: disk_spaces([
+            ("disk:unreadable", "The unreadable disk", unreadable),
+            ("disk:instance", "The instance disk", tmp_path),
+        ]),
+        databases=list, levels=StorageLevels(tmp_path / "levels.json"), nearing_limit_percent=1,
+        nearly_full_percent=2, message_storage_kind="file", now=_Clock(),
+    )
+    report = await _page(
+        _config(tmp_path), capacity, _Notices(), _Clock(),
+        messages=JetStreamAccountUsage(storage=9 * GB, memory=0, max_storage=10 * GB, max_memory=None),
+    ).report()
+    assert any(finding.finding_id == "storage_unmeasured:disk:unreadable" and finding.severity is StatusSeverity.PROBLEM
+               for finding in report.findings)
+    assert any(finding.finding_id.startswith("storage_nearly_full:disk:instance:") for finding in report.findings)
+    assert any("message_storage:file:" in finding.finding_id for finding in report.findings)
 
 
 @pytest.mark.asyncio
