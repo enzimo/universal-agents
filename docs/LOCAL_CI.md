@@ -88,6 +88,12 @@ hook also requires explicit public approval in its own `config.json` through
 `public_repositories`, outside the checkout. Add only Universal Agents and Desktop
 to that public list for this rollout.
 
+After an API update, read back both repository and workflow access. Include
+`selected_workflows` in each update while workflow restrictions are enabled;
+omitting it clears the list and leaves jobs queued even when runners are online.
+Group policy updates can also clear selected repositories. Apply the repository
+list after the final group update, then verify both lists again.
+
 For public work, the hook accepts pushes, schedules, manual runs, and PRs whose head
 and base both belong to the configured repository. Fork PRs, missing or mismatched
 repository identity, `pull_request_target`, `workflow_run`, and other trigger types
@@ -217,6 +223,16 @@ If the error remains, investigate it before accepting more jobs.
 Keep the Mac awake while it serves CI. For a temporary verification session,
 run `rtk proxy caffeinate -dimsu` in a terminal and leave it running until the
 jobs finish. A launch agent cannot accept work while its host is asleep.
+
+If an assigned Windows job never starts a workflow step, inspect the listener's
+worker-startup logs. A 30-second worker-channel timeout recovered after restarting
+the idle runner's existing interactive task during this rollout; its initial cause
+remains unconfirmed. End the stalled job and verify no worker is active before
+restarting that task. Keep the logs if it recurs.
+
+OpenSSH can report `WinError 448` when traversing a runner's versioned junctions
+even though the physical binaries start. An SSH-only error does not establish why
+an interactive runner failed; inspect that runner's logs before changing its files.
 
 ### WSL disk maintenance
 
