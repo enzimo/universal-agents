@@ -780,6 +780,34 @@ def test_the_dry_run_counts_match_what_is_then_deleted(layout: InstanceLayout, s
     assert (dry.items, dry.bytes) == (real.items, real.bytes)
 
 
+def test_the_dry_run_counts_expired_artifacts_whose_files_changed_recently(
+    layout: InstanceLayout, store: ConversationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_agents import output_retention
+
+    monkeypatch.setattr(output_retention, "RECORD_BATCH", 2)
+    paths = []
+    for index in range(3):
+        artifact = store.offload_large_text(
+            conversation_id="conv_old", task_id=f"task_{index}", artifact_type="tool_output",
+            raw_text=f"saved output {index}", summary_text="summary",
+        )
+        _age_artifact(layout, artifact, EXPIRED)
+        path = Path(artifact["storage_path"])
+        _touch(path, NOW)
+        paths.append(path)
+
+    dry = remove_old_outputs(layout, retention_days=DAYS, conversation_records=store, now=NOW, dry_run=True)
+    assert all(path.exists() for path in paths)
+    real = remove_old_outputs(layout, retention_days=DAYS, conversation_records=store, now=NOW)
+
+    assert _counts(dry) == _counts(real)
+    artifacts = _kind(dry, OutputKind.CONVERSATION_ARTIFACTS)
+    assert artifacts.items_removed == artifacts.files_removed == 3
+    assert artifacts.bytes_removed == sum(len(f"saved output {index}") for index in range(3))
+    assert not any(path.exists() for path in paths)
+
+
 def test_the_grace_period_starts_again_after_retention_was_turned_off(
     layout: InstanceLayout, store: ConversationStore
 ) -> None:

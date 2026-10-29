@@ -697,9 +697,9 @@ def _remove_old_conversation_artifacts(
             "store. event=output_retention_records_skipped"
         )
     elif counts.dry_run:
-        # Their files are as old as they are, so the age walk below counts them.
         cutoff_text = datetime.fromtimestamp(cutoff, timezone.utc).isoformat()
         counts.items_removed += records.count_artifacts_created_before(cutoff_text)
+        _count_recent_artifact_files(records, root_dir, cutoff, cutoff_text, counts)
     else:
         _remove_old_artifact_records(records, root_dir, cutoff, counts)
     # Then every older file, which also removes files no record names any more.
@@ -711,6 +711,26 @@ def _remove_old_conversation_artifacts(
         remove_old_files(root, root_dir, cutoff, counts)
     finally:
         os.close(root)
+
+
+def _count_recent_artifact_files(
+    records: ConversationStore, root_dir: Path, cutoff: float, cutoff_text: str, counts: OutputsRemoved
+) -> None:
+    """Count expired records' files even when their mtimes changed; the age walk counts older files."""
+
+    after_path = ""
+    while paths := records.list_artifact_paths_created_before(cutoff_text, after_path=after_path, limit=RECORD_BATCH):
+        for raw in paths:
+            path = Path(raw)
+            try:
+                parts = Path(os.path.abspath(path)).relative_to(root_dir).parts
+                info = safe_open.entry_status(root_dir, parts)
+            except (ValueError, UnsafePath):
+                remove_listed_file(root_dir, path, counts)  # log the same unsafe path as a real deletion
+                continue
+            if info is not None and info.st_mtime >= cutoff:
+                remove_listed_file(root_dir, path, counts)
+        after_path = paths[-1]
 
 
 def _remove_old_artifact_records(

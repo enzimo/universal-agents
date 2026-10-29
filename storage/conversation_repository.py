@@ -313,6 +313,8 @@ class ConversationRepository(Protocol):
 
     def count_artifacts_created_before(self, cutoff: str) -> int: ...
 
+    def list_artifact_paths_created_before(self, cutoff: str, *, after_path: str, limit: int) -> tuple[str, ...]: ...
+
     def create_context_epoch(
         self,
         *,
@@ -1917,6 +1919,21 @@ class _RelationalConversationRepository:
                 (cutoff,),
             ).fetchone()
         return int(row[0]) if row else 0
+
+    def list_artifact_paths_created_before(self, cutoff: str, *, after_path: str, limit: int) -> tuple[str, ...]:
+        """One bounded page of distinct files named by expired records, for the retention dry run."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT storage_path FROM conversation_artifacts
+                WHERE created_at < {bind} AND storage_path > {bind}
+                ORDER BY storage_path LIMIT {bind}
+                """,
+                (cutoff, after_path, int(limit)),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
 
     def create_context_epoch(
         self,

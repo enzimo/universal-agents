@@ -461,6 +461,11 @@ class ConversationStore:
 
         return self._repository.count_artifacts_created_before(cutoff)
 
+    def list_artifact_paths_created_before(self, cutoff: str, *, after_path: str, limit: int) -> tuple[str, ...]:
+        """One bounded page of files that expired artifact records name, for the retention dry run."""
+
+        return self._repository.list_artifact_paths_created_before(cutoff, after_path=after_path, limit=limit)
+
     def create_context_epoch(self, **kwargs: Any) -> dict[str, Any]:
         return self._repository.create_context_epoch(**kwargs)
 
