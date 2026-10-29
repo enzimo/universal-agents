@@ -35,7 +35,7 @@ but requires its own Linux Actions runner. A Windows runner cannot execute
 GitHub Linux container actions directly.
 
 The shared host setup uses the `Universal Agents` organization runner group
-for private repositories, with repository allowlists enforced by installed hooks.
+for explicitly approved repositories, with allowlists enforced by installed hooks.
 One Windows host runs a Windows runner and two Linux runners; the Linux runners
 use a dedicated `Ubuntu-24.04` WSL 2 distribution and its own Docker daemon. A
 Mac runs the ARM64 runner.
@@ -47,9 +47,9 @@ runner administration role while their base organization membership remains
 ## Public documentation publishing
 
 `publish-docs.yml` uses GitHub-hosted `ubuntu-24.04` runners for both build and
-deployment. The repository is public, while the managed local runners deliberately
-accept only private repositories. Keep those local guards intact; public pull
-requests must never execute on personal build hosts.
+deployment. Documentation PRs use disposable hosted machines, including fork
+PRs. The managed local runners accept explicitly approved repositories and
+same-repository work under the installed public-job policy described below.
 
 The documentation job installs RTK 0.51.0 from its upstream Linux release with a
 pinned SHA-256 through a JavaScript action before running any shell steps. Those
@@ -80,6 +80,41 @@ run and an HTTP check of the published quickstart complete deployment verificati
 
 ## Toolchains and isolation
 
+### Public repository access
+
+The runner group must allow public repositories and select only approved
+repositories, preserving already approved private repositories. Each installed
+hook also requires explicit public approval in its own `config.json` through
+`public_repositories`, outside the checkout. Add only Universal Agents and Desktop
+to that public list for this rollout.
+
+After an API update, read back both repository and workflow access. Include
+`selected_workflows` in each update while workflow restrictions are enabled;
+omitting it clears the list and leaves jobs queued even when runners are online.
+Group policy updates can also clear selected repositories. Apply the repository
+list after the final group update, then verify both lists again.
+
+For public work, the hook accepts pushes, schedules, manual runs, and PRs whose head
+and base both belong to the configured repository. Fork PRs, missing or mismatched
+repository identity, `pull_request_target`, `workflow_run`, and other trigger types
+are refused before job state or commands are created. Same-repository branches
+are trusted team code: only people and automation trusted with the machines may
+push them. Documentation validation stays on disposable GitHub-hosted runners.
+
+Private repositories sharing the hosts keep their existing non-PR trigger policy.
+
+Every local job requires `UA_CI_PUBLIC_JOB_POLICY_VERSION=1` from the installed
+hook beside the existing hook/cache markers. Jobs never replace installed hooks
+from their checkout. Install the reviewed code and public allowlist before
+enabling group access; preserve every existing host path, cache setting, disk
+reserve and private-repository entry.
+
+Verify the policy with `.github/runner/test_ci_hook.py` and the CI workflow tests.
+The hook suite exercises accepted public work and proves fork requests leave no
+job state. After rollout, dispatch **Local runner preflight** for each repository,
+inspect cleanup, and confirm both Linux runners, Windows and macOS are online.
+Do not create release tags or run publishing workflows to validate runners.
+
 Provision RTK 0.48.0, system Python 3.12+, Node.js 22+, Git, Rust 1.95.0,
 Docker, Buildx, QEMU/binfmt, and GitHub CLI 2.100.0. Sidecar jobs select Node.js 24.20.0. Runtime
 installation checks use Python 3.12 and 3.13; other Python CI selects 3.13.
@@ -89,6 +124,26 @@ which GitHub's downloaded Python needs to find its shared library. CI checks
 the scanner without that variable before running the live installation canary.
 Rust setup uses `--no-self-update` and the job's `RUSTUP_TOOLCHAIN`, leaving
 the account's default toolchain unchanged. Each runner owns its work directory.
+
+On Apple Silicon Macs, Homebrew's Buildx plugin may be registered only in the
+account's Docker configuration. Jobs use a disposable `DOCKER_CONFIG`, so that
+registration does not apply. Provision the plugin in Docker's standard system
+plugin directory. If Homebrew provides the executable and the destination does
+not already exist, a Mac administrator can create the link after checking the directory.
+
+Check the directory itself for a dangling link first. A removed Docker Desktop
+installation can leave `/usr/local/lib/docker/cli-plugins` pointing at its missing
+application folder. This makes `install -d` fail with a `stat` error. Verify that
+the link is broken and points at the removed application, then move only that
+link to an unused backup name before creating the real directory and plugin link:
+
+```sh
+rtk proxy sudo install -d -m 0755 /usr/local/lib/docker/cli-plugins
+rtk proxy sudo ln -s /opt/homebrew/opt/docker-buildx/bin/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
+```
+
+Verify `docker buildx version` with an empty `DOCKER_CONFIG` before accepting
+build jobs. This preserves the job's Docker credential isolation.
 
 Install reviewed `.github/runner` hooks outside both the checkout and runner
 application directory, using system Python. Restart the idle runner afterward.
@@ -103,7 +158,9 @@ rtk proxy python3 .github/runner/install_hooks.py \
   --runner /opt/actions-runner \
   --destination /opt/ua-ci-hooks \
   --repository enzimo/universal-agents \
-  --repository enzimo/universal-agents-desktop
+  --repository enzimo/universal-agents-desktop \
+  --public-repository enzimo/universal-agents \
+  --public-repository enzimo/universal-agents-desktop
 rtk proxy python3 -m unittest discover -s .github/runner -v
 ```
 
@@ -153,6 +210,29 @@ covers native Windows/macOS prerequisites and the shared host setup in detail.
 On WSL the hook installer requires `--reserve-path /mnt/c`, or the mount for
 the Windows drive actually holding the distro VHD. This checks physical Windows
 free space as well as Linux filesystem space before admitting a job.
+
+### Runner recovery
+
+If the dedicated CI distribution reports I/O errors before it can start a
+command, first check that its runners are offline and no job is active. Restarting
+the distribution stops every process inside it. With the operator's approval,
+terminate only that distribution, then start it again and verify command execution
+and both runner services. Keep Docker Desktop and other distributions untouched.
+If the error remains, investigate it before accepting more jobs.
+
+Keep the Mac awake while it serves CI. For a temporary verification session,
+run `rtk proxy caffeinate -dimsu` in a terminal and leave it running until the
+jobs finish. A launch agent cannot accept work while its host is asleep.
+
+If an assigned Windows job never starts a workflow step, inspect the listener's
+worker-startup logs. A 30-second worker-channel timeout recovered after restarting
+the idle runner's existing interactive task during this rollout; its initial cause
+remains unconfirmed. End the stalled job and verify no worker is active before
+restarting that task. Keep the logs if it recurs.
+
+OpenSSH can report `WinError 448` when traversing a runner's versioned junctions
+even though the physical binaries start. An SSH-only error does not establish why
+an interactive runner failed; inspect that runner's logs before changing its files.
 
 ### WSL disk maintenance
 

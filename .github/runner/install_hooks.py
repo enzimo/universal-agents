@@ -15,6 +15,10 @@ def main():
     parser.add_argument("--destination", required=True, type=Path)
     parser.add_argument("--repository", action="append", required=True)
     parser.add_argument(
+        "--public-repository", action="append", default=[],
+        help="Explicitly approve a public repository already named by --repository",
+    )
+    parser.add_argument(
         "--reserve-path",
         action="append",
         default=[],
@@ -28,6 +32,8 @@ def main():
     parser.add_argument("--cache-days", type=int, default=7, help="Expire scopes unused for this many days")
     parser.add_argument("--cache-server-port", type=int, default=48227, help="Dedicated Windows sccache port")
     args = parser.parse_args()
+    if not set(args.public_repository).issubset(args.repository):
+        parser.error("Every public repository must also be named by --repository")
     if not args.sccache.is_file() or args.cache_gib < 1 or args.cache_days < 1:
         parser.error("Provide an installed sccache binary and positive cache limits")
     if not 1024 <= args.cache_server_port <= 65535:
@@ -64,6 +70,7 @@ def main():
                 "work": str(work),
                 "state": str(destination / "state"),
                 "repositories": args.repository,
+                "public_repositories": args.public_repository,
                 "min_free_gib": 30,
                 "colima_profile": args.colima_profile,
                 "reserve_paths": [str(path.resolve()) for path in args.reserve_path],
