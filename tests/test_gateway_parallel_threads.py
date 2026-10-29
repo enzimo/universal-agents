@@ -300,6 +300,8 @@ async def test_a_thread_moved_to_another_conversation_turns_the_setting_off(tmp_
     ``/switch_conversation`` and ``/switch_topic`` move a thread to another
     conversation, which may be continued elsewhere, so they turn the setting
     off and tell the person; the thread's next request runs with ordinary work.
+    Web Chat does not offer them; a Web Chat thread reaches them after the
+    debug-only ``/switch_session`` moves it to another app.
     """
 
     gateway, transport = _gateway(tmp_path)

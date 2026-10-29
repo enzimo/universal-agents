@@ -443,8 +443,10 @@ How the lanes run, and what they share (`custom_agents.execution_lanes_runtime`)
   (`GatewaySessionService.switch_conversation`). The setting is the person's
   word that the thread's own conversation does not overlap their other work,
   and an older conversation may be continued elsewhere. Web Chat, the only
-  place a person changes the setting, does not offer these commands, so no
-  Web Chat thread reaches this rule today.
+  place a person changes the setting, does not offer these commands. A Web
+  Chat thread reaches them only after the debug-only `/switch_session` moves
+  it to Telegram, Discord or the command line, where the setting can no
+  longer be changed; the owner kept the rule for that case (2026-10-29).
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including

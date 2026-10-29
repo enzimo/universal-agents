@@ -160,8 +160,11 @@ class GatewaySessionService:
         The setting is the person's word that this conversation's work does
         not overlap their other work; an older conversation may be continued
         elsewhere (owner, 2026-10-29). Callers tell the person
-        (``PARALLEL_MARK_CLEARED_NOTICE``). Web Chat, the only place the
-        setting is changed, does not offer the switch commands.
+        (``PARALLEL_MARK_CLEARED_NOTICE``). Only Web Chat changes the
+        setting, and it does not offer the switch commands; a marked thread
+        reaches them when the debug-only ``/switch_session`` moves it to
+        Telegram, Discord or the command line, where it can no longer be
+        turned off (owner kept this rule for that case, 2026-10-29).
         """
 
         existing = self._repository.get_session(session_key)
