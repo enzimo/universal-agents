@@ -12,6 +12,14 @@
       "title": "Busy Session Keys",
       "type": "array"
     },
+    "open_request_session_keys": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Open Request Session Keys",
+      "type": "array"
+    },
     "schema_version": {
       "const": 1,
       "default": 1,

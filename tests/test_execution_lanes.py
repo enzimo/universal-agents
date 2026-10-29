@@ -1,7 +1,7 @@
 """Requests sent in a parallel thread run in execution lanes of their own.
 
-The team lead runs a request a person sent in a thread started with Web Chat's
-Launch parallel thread beside its other work; everything else shares the main
+The team lead runs a request a person sent in a thread set to Run concurrently
+in Web Chat beside its other work; everything else shares the main
 lane, one turn at a time (custom_agents.execution_lanes,
 runtime_hosting.agent_execution).
 """

@@ -50,7 +50,9 @@ from assistant_gateway.application.session_service import (
 )
 from assistant_gateway.application.transient_presentation import PendingCredentialAction
 from assistant_gateway.application.transcript_service import GatewayTranscriptService
+from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from assistant_gateway.application.website_application import (
+    WebChatParallelSettingResult,
     ActivatedWebEnrollmentTokenV1,
     WEB_CHAT_CHAT_ID,
     WebChatThreadStatesV1,
@@ -420,6 +422,9 @@ class WebsiteSessionApplication:
                 for thread in threads
                 if thread.session_key in awaiting
             ),
+            open_request_session_keys=tuple(
+                thread.session_key for thread in threads if thread.has_open_request
+            ),
         )
 
     def can_access_web_chat_session(
@@ -457,6 +462,48 @@ class WebsiteSessionApplication:
         return bool(
             self._session_repository.set_session_status(session.session_key, "archived")
         )
+
+    def set_web_chat_session_parallel(
+        self,
+        *,
+        session_key: str,
+        conversation_id: str,
+        parallel_thread: bool,
+        owner_canonical_user_id: str | None,
+    ) -> WebChatParallelSettingResult:
+        """Save the Run concurrently switch of one of the person's Web Chat threads.
+
+        The person decides per thread (owner, 2026-10-29): on, each request
+        admitted in it may run beside the team lead's other work; off, it
+        waits its turn. ``conversation_id`` is the conversation the page
+        shows, so a stale page cannot change a conversation it no longer
+        shows, and the repository refuses while a request is open there.
+        Someone else's or a missing thread reads as not found.
+        """
+
+        session = self._session_repository.resolve_session_reference(session_key)
+        if (
+            session is None
+            or session.channel_name != DELIVERY_CHANNEL_WEBSITE
+            or session.chat_id != WEB_CHAT_CHAT_ID
+            or not self._owner_allows(session, owner_canonical_user_id, action=PRIVATE_ACTION_UPDATE)
+        ):
+            outcome = ParallelSettingOutcome.NOT_FOUND
+        else:
+            outcome = self._session_repository.set_session_parallel(
+                session.session_key,
+                conversation_id=conversation_id,
+                parallel_thread=parallel_thread,
+            )
+        LOGGER.info(
+            "Web Chat Run concurrently change. event=web_chat_parallel_setting outcome=%s "
+            "session_key=%s conversation_id=%s parallel_thread=%s",
+            outcome.value,
+            session.session_key if session is not None else session_key,
+            conversation_id,
+            parallel_thread,
+        )
+        return WebChatParallelSettingResult(outcome.value)
 
     def rename_web_chat_session(
         self,

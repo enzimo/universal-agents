@@ -3,6 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class ParallelSettingOutcome(StrEnum):
+    """What a change to a thread's **Run concurrently** setting did.
+
+    The setting belongs to the thread's current conversation, and each request
+    takes it when the gateway admits the request. It changes only while no
+    request is open in that conversation: a message sent while one is open is
+    guidance for that request and reaches it in its own lane, so a change then
+    could not apply to anything the person can see (owner, 2026-10-29).
+    """
+
+    SAVED = "saved"
+    REQUEST_OPEN = "request_open"
+    CONVERSATION_CHANGED = "conversation_changed"
+    NOT_FOUND = "not_found"
 
 
 @dataclass
@@ -20,9 +37,10 @@ class SessionRecord:
     created_at: str
     updated_at: str
     owner_canonical_user_id: str | None = None
-    # Started with Web Chat's Launch parallel thread: every request sent in it
-    # may run at the same time as the team lead's other work
-    # (custom_agents.execution_lanes). Stored as an integer column.
+    # The thread's Run concurrently setting in Web Chat: a request admitted
+    # while it is on may run at the same time as the team lead's other work
+    # (custom_agents.execution_lanes). Changed only through
+    # ``set_session_parallel``; stored as an integer column.
     parallel_thread: bool = False
 
     def __post_init__(self) -> None:
@@ -83,6 +101,9 @@ class WebChatThreadRecord:
     the thread's first ordinary message the person typed: the earliest user
     transcript row that is not a slash command and has text or attachments.
     ``has_messages`` says whether the thread has any transcript row at all.
+    ``parallel_thread`` is its Run concurrently setting, and
+    ``has_open_request`` whether a request is open in its current
+    conversation, which locks that setting (``ParallelSettingOutcome``).
     """
 
     session_key: str
@@ -93,6 +114,8 @@ class WebChatThreadRecord:
     first_message_text: str | None
     first_message_attachments_json: str | None
     has_messages: bool
+    parallel_thread: bool = False
+    has_open_request: bool = False
 
 
 @dataclass

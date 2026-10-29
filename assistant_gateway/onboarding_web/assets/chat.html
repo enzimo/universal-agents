@@ -99,9 +99,10 @@
           </div>
           <div class="composer-options">
             <div class="composer-separate-request">
-              <span id="separate-request-label">Launch parallel thread</span>
-              <label class="toggle"><input id="separate-request-toggle" type="checkbox" role="switch" aria-labelledby="separate-request-label"><span></span></label>
+              <span id="separate-request-label">Run concurrently</span>
+              <label class="toggle"><input id="separate-request-toggle" type="checkbox" role="switch" aria-labelledby="separate-request-label" aria-describedby="separate-request-message"><span></span></label>
             </div>
+            <p id="separate-request-message" class="composer-switch-message" hidden></p>
           </div>
           <p id="composer-status" class="composer-help" role="status" hidden></p>
         </form>
