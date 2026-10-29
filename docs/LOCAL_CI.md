@@ -452,6 +452,12 @@ additional registry tag for manual builds.
 
 Both native builds must succeed before any combined tags are published. Release
 attachments are added only after the configured attestation requirement succeeds.
+The attestation is pushed to the registry with the job's own login. `actions/attest`
+reads logins only from `$HOME/.docker/config.json` and ignores `DOCKER_CONFIG`, so
+the workflow runs that one step with `HOME` set to a new private folder in the
+job's cache, whose `.docker` links to the job's private `DOCKER_CONFIG`; the
+login is never copied, and the hooks delete the cache when the job ends. Without
+this, v0.9.9 published its images but stopped at the attestation.
 Private repositories without GitHub Enterprise Cloud require the user's explicit
 per-release waiver before setting `PRIVATE_RELEASE_ATTESTATION_WAIVER` to the exact
 release tag. An unset waiver never exempts a manual branch build. The workflow

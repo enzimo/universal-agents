@@ -309,12 +309,40 @@ jobs:
           fi
           echo "::warning title=Image attestation waived::Release ${RELEASE_REF} for private repository ${REPOSITORY} is publishing without an image attestation under ${waiver}."
 
+      # actions/attest pushes the attestation with the registry login it reads
+      # from $HOME/.docker/config.json only (sigstore's OCI client ignores
+      # DOCKER_CONFIG). This job's login stays in its private $UA_CI_CACHE/docker
+      # folder, so the attestation runs with HOME set to a new folder in the
+      # job's cache whose .docker links to that folder: the login is not copied,
+      # and the runner hooks delete the whole cache when the job ends.
+      - name: Point the attestation at this job's registry login
+        id: attestation-home
+        if: >-
+          !inputs.build_only && (env.RELEASE_TAG == '' || github.event.repository.private == false ||
+          (vars.PRIVATE_RELEASE_ATTESTATION_WAIVER != env.RELEASE_TAG &&
+          (steps.release.outputs.kind != 'nightly' || vars.PRIVATE_NIGHTLY_ATTESTATION_WAIVER != 'true')))
+        run: |
+          if [ -z "$UA_CI_CACHE" ] || [ "$DOCKER_CONFIG" != "$UA_CI_CACHE/docker" ] ||
+            [ -L "$DOCKER_CONFIG" ] || [ -L "$DOCKER_CONFIG/config.json" ] ||
+            [ ! -f "$DOCKER_CONFIG/config.json" ]; then
+            echo "::error::The attestation needs this job's private Docker settings from the runner hooks"
+            exit 1
+          fi
+          home="$UA_CI_CACHE/attestation-home"
+          umask 077
+          # mkdir without -p refuses a folder something else already made.
+          mkdir "$home"
+          ln -s "$DOCKER_CONFIG" "$home/.docker"
+          echo "home=${home}" >> "$GITHUB_OUTPUT"
+
       - name: Attest published image
         if: >-
           !inputs.build_only && (env.RELEASE_TAG == '' || github.event.repository.private == false ||
           (vars.PRIVATE_RELEASE_ATTESTATION_WAIVER != env.RELEASE_TAG &&
           (steps.release.outputs.kind != 'nightly' || vars.PRIVATE_NIGHTLY_ATTESTATION_WAIVER != 'true')))
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        env:
+          HOME: ${{ steps.attestation-home.outputs.home }}
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.merge.outputs.digest }}
