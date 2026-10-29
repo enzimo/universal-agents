@@ -22,6 +22,8 @@ from tests.tool_result_support import tool_json
 from custom_agents.scheduled_runtime import (
     enqueue_fired_scheduled_task,
     enqueue_isolated_recovery_checkpoint,
+    _idle_sleep_seconds,
+    _schedule_claim_scope,
     scheduler_loop,
 )
 from custom_agents.conversation_store import ConversationStore
@@ -330,6 +332,7 @@ class _LoopScheduleStore:
 
     def claim_next_due(self, **kwargs):
         self.claim_calls += 1
+        self.claim_kwargs = kwargs
         if self.scheduled_message is None:
             return None
         return {
@@ -354,7 +357,8 @@ class _LoopScheduleStore:
         self.released_with = {"schedule_id": schedule_id, **kwargs}
         return True
 
-    def get_earliest_fire_time(self):
+    def get_earliest_fire_time(self, **kwargs):
+        self.earliest_kwargs = kwargs
         return None
 
 
@@ -712,6 +716,35 @@ def test_scheduler_loop_updates_schedule_with_claim_token_after_acceptance():
         "claimer_agent_id": "manager_id",
         "due_at": scheduled_message.next_fire_at,
     }
+
+
+def test_the_lead_claims_parallel_schedules_while_ordinary_work_holds_the_main_lane():
+    """Owner, 2026-10-29: a schedule set up in a parallel thread runs independently of other work.
+
+    Before, no schedule was claimed while the main lane was busy, so its runs
+    started late. A worker has no parallel lanes and still waits.
+    """
+
+    scheduled_message = ScheduledMessage(
+        schedule_id="sched_parallel",
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        payload=Task(task_id="task_parallel", task_type=MessageMetaType.REQUEST, problem_statement="run"),
+        interval_ms=1000,
+    )
+    lead = _LoopAgent(can_start=False, scheduled_message=scheduled_message)
+    lead.task_manager.parallel_lanes_enabled = True
+
+    # Bounded: without the claim the loop would sleep and never fire.
+    asyncio.run(asyncio.wait_for(scheduler_loop(lead), timeout=10))
+
+    assert lead._schedule_store.claim_kwargs["parallel_thread"] is True
+    assert lead.enqueued == [("sched_parallel", "sched_parallel")]
+    assert asyncio.run(_schedule_claim_scope(_LoopAgent(can_start=False))) == (False, False), "a busy worker"
+    assert asyncio.run(_schedule_claim_scope(_LoopAgent(can_start=True))) == (True, False)
+    asyncio.run(_idle_sleep_seconds(lead, True, parallel_only=True))
+    assert lead._schedule_store.earliest_kwargs == {"parallel_thread": True}, (
+        "an ordinary schedule already due must not wake the loop every second"
+    )
 
 
 def test_schedule_telemetry_reports_counts_timing_and_scheduler_identity(

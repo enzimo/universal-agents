@@ -308,9 +308,8 @@ new thread for that message and its files, and keeps its replies there. The
 team lead starts on it right away, even while it is busy with your other work,
 and every later request you send in that thread runs the same way.
 A schedule or Objective work you set up in that thread also runs this way:
-each run works beside your other work. The team lead still picks up a due
-schedule only while no ordinary work is running, so a run can start a little
-late. Its runs count toward the limit of four, so a frequent schedule or long
+each run starts when it is due and works beside your other work. Its runs
+count toward the limit of four, so a frequent schedule or long
 Objective work set up there can make a new parallel thread wait, and a run can
 happen while you send a new request in the same thread. Runs of one schedule
 still never overlap: a run that comes due while the previous one is still

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from types import SimpleNamespace
 
@@ -28,9 +28,11 @@ from custom_agents.execution_lanes import (
 from custom_agents import execution_lanes_runtime
 from custom_agents.execution_lanes_runtime import ParallelLanes
 from custom_agents.pending_work_runtime import schedule_parallel_lanes
+from custom_agents.schedule_store import ScheduleStore
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_queue_safety import queued_parallel_lanes
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
+from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task, TaskQuery
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType
 from custom_tools.providers.schedules import _build_schedule_payload_meta
@@ -158,6 +160,47 @@ def test_each_run_of_a_schedule_made_in_a_parallel_thread_gets_a_lane_of_its_own
             owner_person_id="owner",
         )
         assert lane_for_task(manager, run_id) == (parallel_lane(run_id) if parallel else MAIN_LANE)
+
+
+def test_a_schedule_set_up_in_a_parallel_thread_is_claimed_while_the_main_lane_is_busy(tmp_path):
+    """Owner, 2026-10-29: such runs start independently of whatever else runs.
+
+    The schedule row records that its runs are parallel requests
+    (``schedule_store.runs_in_parallel``), so a claim limited to them takes it
+    and leaves an earlier ordinary one for the main lane
+    (``scheduled_runtime._schedule_claim_scope``).
+    """
+
+    manager = _manager(tmp_path)
+    _add(manager, "parallel", parallel=True)
+    _add(manager, "ordinary", parallel=False)
+    store = ScheduleStore(db_path=str(tmp_path / "schedules.db"))
+    lead = SimpleNamespace(id="lead")
+    now = datetime.now(timezone.utc)
+    due = {"ordinary": now - timedelta(minutes=2), "parallel": now - timedelta(minutes=1)}
+    for source, due_at in due.items():
+        schedule_id = f"schedule-{source}"
+        header, meta = _build_schedule_payload_meta(lead, schedule_id, task_info=manager.get_task_info(source))
+        store.add(
+            ScheduledMessage(
+                schedule_id=schedule_id,
+                next_fire_at=due_at.isoformat(),
+                payload=Task(task_id=f"run-of-{source}", task_type=MessageMetaType.REQUEST, problem_statement="Run"),
+                payload_header=header,
+                payload_meta=meta,
+                interval_ms=3_600_000,
+            )
+        )
+    claim = partial(
+        store.claim_next_due, claimer_agent_id="lead", claimer_named_agent_type=None,
+        claimer_team_id=None, allow_unscoped=True,
+    )
+
+    assert store.get_earliest_fire_time(parallel_thread=True) == due["parallel"].isoformat()
+    assert store.get_earliest_fire_time() == due["ordinary"].isoformat()
+    assert claim(parallel_thread=True)["schedule_id"] == "schedule-parallel"
+    assert claim(parallel_thread=True) is None, "the ordinary schedule waits for the main lane"
+    assert claim()["schedule_id"] == "schedule-ordinary"
 
 
 def test_a_message_goes_to_the_lane_of_the_task_it_concerns(tmp_path):
