@@ -23,7 +23,15 @@ from storage.sqlite_connection import connect_sqlite
 
 # worker_pool: a worker pool problem administrators must hear about
 # (custom_agents.worker_pool_reviews.RecurringPoolProblems).
-StuckSubjectKind = Literal["schedule", "task", "worker_pool"]
+# scheduled_run: a schedule whose runs fail (custom_agents.scheduled_run_failures).
+StuckSubjectKind = Literal["schedule", "task", "worker_pool", "scheduled_run"]
+
+
+def stuck_incident_id(team_id: str, subject_kind: StuckSubjectKind, subject_id: str, incident_key: str) -> str:
+    """The id of one incident of a subject (``StuckWorkIncidentV1.incident_id``)."""
+
+    raw = "\x1f".join((team_id, subject_kind, subject_id, incident_key))
+    return "stuck_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 class StuckWorkIncidentV1(BaseModel):
@@ -45,8 +53,7 @@ class StuckWorkIncidentV1(BaseModel):
 
     @property
     def incident_id(self) -> str:
-        raw = "\x1f".join((self.team_id, self.subject_kind, self.subject_id, self.incident_key))
-        return "stuck_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+        return stuck_incident_id(self.team_id, self.subject_kind, self.subject_id, self.incident_key)
 
 
 class StuckWorkRepository:
