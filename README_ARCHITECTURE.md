@@ -434,7 +434,8 @@ How the lanes run, and what they share (`custom_agents.execution_lanes_runtime`)
   busy, the team lead still claims the schedules set up in a parallel thread,
   so their runs start on time beside other work (owner, 2026-10-29). The
   schedule row records this (`scheduled_messages.parallel_thread`, from
-  `custom_agents.schedule_store.runs_in_parallel`), and
+  `custom_agents.execution_lanes.schedule_runs_in_parallel_lane`, the same
+  rule as the lane choice for running requests), and
   `scheduled_runtime._schedule_claim_scope` limits the claim to such rows. At
   the limit of four, such a run waits in the queue like any other parallel
   request.

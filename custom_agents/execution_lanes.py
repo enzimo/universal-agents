@@ -89,6 +89,22 @@ def runs_in_parallel_lane(manager: Any, root: Any) -> bool:
     )
 
 
+def schedule_runs_in_parallel_lane(payload_meta: Any) -> bool:
+    """Whether runs of a schedule saved with ``payload_meta`` run in parallel lanes.
+
+    ``runs_in_parallel_lane`` decided when the schedule is saved: each run is
+    a root task whose metadata is a copy of ``payload_meta``
+    (``custom_agents.scheduled_runtime``), so it gets a parallel lane of its
+    own exactly when this holds and the agent that claims it opens parallel
+    lanes (only the team lead). The schedule row stores the answer
+    (``scheduled_messages.parallel_thread``) so the team lead's scheduler can
+    claim these schedules while its main lane is busy
+    (``scheduled_runtime._schedule_claim_scope``); other agents never claim on it.
+    """
+
+    return is_parallel_request(payload_meta)
+
+
 def parallel_lane(root_task_id: str) -> str:
     return f"{PARALLEL_LANE_PREFIX}{root_task_id}"
 
