@@ -18,11 +18,18 @@ from custom_messages.contracts.schedule_worker_v1 import (
 def prepare_occurrence(
     agent: Any, schedule: Any, claim_token: str
 ) -> ScheduleOccurrenceV1 | None:
-    # Every typed root task needs a durable receipt, including runtime-managed
-    # root timers that are not eligible for automatic local worker startup.
-    # Child timers keep their existing correlation. Specialized launchers use
-    # their own admission path rather than admitting the root payload.
-    if schedule.payload.parent_task_id or not schedule.claim_named_agent_type:
+    from custom_agents.local_schedule_policy import supports_local_worker
+
+    # Receipts are for runs a worker claims: a person's schedules and the
+    # system timers the table marks local_worker. Such a run proves whom it
+    # works for with the schedule's permit, checked live against the row, so
+    # the receipt keeps a finishing schedule until the run ends
+    # (custom_agents.schedule_store). The team lead's own system timers sign
+    # their runs and are never checked against the row; a receipt would only
+    # count a run as started before its Objective work session opened, so a
+    # failed opening would skip the run instead of retrying it (2026-10-30
+    # review). Child timers keep their existing correlation.
+    if not supports_local_worker(schedule) or not schedule.claim_named_agent_type:
         return None
     occurrence_id = occurrence_identity(schedule.schedule_id, schedule.next_fire_at)
     binding = agent._schedule_store.worker_records.get_binding(

@@ -28,11 +28,19 @@ reminder so that it could never finish. Now:
   (``schedule_stopped_reason``), and typed root jobs again at admission
   (``ScheduleWorkerRepository.commit_admission``). The advance after a run
   (``update_after_fire``) writes only the run time, the count and the claim.
-- A final admission sets ``remaining_count`` to zero while any durable run
-  receipt is unfinished. The row stays enabled for identity and job access,
-  but claims, wake times and enabled-work listings exclude exhausted rows.
-  ``prune_expired`` removes them after their terminal snapshot closes the
-  receipts. Every actual deletion ends the schedule's access grants.
+- A schedule whose last run was admitted is kept while that run works
+  (2026-10-30): a worker's run proves whom it works for with the schedule's
+  permit, checked live against this row, and its job access comes from the
+  schedule. Deleting the row at admission failed one-time reminders 0.3 s
+  after they started. So the advance sets ``remaining_count`` to zero (the
+  schedule is *finishing*, ``is_finishing``) while a run receipt is
+  unfinished; claims, wake times and enabled listings skip such rows. A
+  schedule ended by its end date keeps its following run time instead,
+  which the end date blocks, so moving the end date later lets it go on.
+  ``prune_expired`` removes either once the run's terminal snapshot closes
+  its receipt, or once the receipt is older than a run's identity lasts
+  (``storage.schedule_occurrences``). Every actual deletion ends the
+  schedule's access grants.
 """
 
 import logging
@@ -60,7 +68,7 @@ from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from default_values import STORAGE_DEFAULTS
 from id_generation import new_id
 from storage.config import StorageSettings, resolve_storage_settings
-from storage.schedule_repository import RowWrite, create_schedule_repository
+from storage.schedule_repository import UNFINISHED_RUNS, RowWrite, create_schedule_repository
 
 if TYPE_CHECKING:
     from custom_messages.contracts.access_v2 import SignedSchedulePermitV1
@@ -576,11 +584,16 @@ def _claim_live(row: Mapping[str, Any], now: datetime) -> bool:
 
 @dataclass(frozen=True)
 class _AfterRun:
-    """What follows a schedule's run: its next run time (None when it is finished) and count."""
+    """What follows a schedule's run: its next run time (None when it is finished) and count.
+
+    ``past_end``: for a schedule ended by its end date, the run that would
+    follow without that date (``_retain_unfinished_run`` keeps it).
+    """
 
     next_fire_at: Optional[str]
     remaining_count: Optional[int]
     reason: str
+    past_end: Optional["_AfterRun"] = None
 
 
 # A schedule with neither an interval nor a cron expression has no next run time.
@@ -595,8 +608,18 @@ def _after_run(row: Mapping[str, Any], previous_due: Optional[str], now: datetim
     """
 
     expires = _parse_utc_datetime(row.get("expires_at_utc"))
+    following = _following_run(row, previous_due, now)
     if expires and expires <= now:
-        return _AfterRun(None, None, "expired")
+        return _AfterRun(None, None, "expired", past_end=following)
+    next_dt = _parse_utc_datetime(following.next_fire_at)
+    if expires and next_dt and next_dt >= expires:
+        return _AfterRun(None, None, "next_run_after_expiry", past_end=following)
+    return following
+
+
+def _following_run(row: Mapping[str, Any], previous_due: Optional[str], now: datetime) -> _AfterRun:
+    """The run time and count after one run, leaving the schedule's end date aside."""
+
     remaining = row.get("remaining_count")
     if remaining is not None:
         remaining -= 1
@@ -612,9 +635,6 @@ def _after_run(row: Mapping[str, Any], previous_due: Optional[str], now: datetim
         cron_timezone=_stored_message(row).cron_timezone,
         previous_fire_at=previous,
     )
-    next_dt = _parse_utc_datetime(next_fire)
-    if expires and next_dt and next_dt >= expires:
-        return _AfterRun(None, None, "next_run_after_expiry")
     return _AfterRun(next_fire, remaining, "advanced")
 
 
@@ -683,21 +703,53 @@ def is_final_run(row: Mapping[str, Any]) -> bool:
     return remaining == 1 or (not recurring and remaining is None)
 
 
+def is_finishing(row: Mapping[str, Any]) -> bool:
+    """Whether the schedule's last run was admitted and the row is kept only while it works.
+
+    No further run is due: the Settings card, the "working again" notice,
+    telemetry and the agent's listing show it as finishing, never as overdue.
+    """
+
+    return row.get("remaining_count") == 0
+
+
 def _retain_unfinished_run(row: Mapping[str, Any], write: RowWrite) -> RowWrite:
-    """Natural completion keeps authority for admitted work; explicit removal does not."""
-    if not write.delete or not row["has_unfinished_runs"]:
+    """Keep a finished schedule while an admitted run still needs it (module docstring).
+
+    Removal by a person never comes here; it ends the run's access at once.
+    """
+
+    if not write.delete or not row[UNFINISHED_RUNS]():
         return write
-    return RowWrite(
-        columns={"remaining_count": 0, **_CLEARED_CLAIM},
-        result=(AdvanceOutcome.FINISHING, write.result[1]),
-    )
+    outcome, after = write.result
+    past_end = after.past_end if after is not None else None
+    if past_end is not None and past_end.next_fire_at is not None:
+        # Ended by its end date: the following run time stays, blocked by
+        # that date, so a later end date set meanwhile lets the schedule go on.
+        columns = {"next_fire_at": past_end.next_fire_at, "remaining_count": past_end.remaining_count}
+    else:
+        columns = {"remaining_count": 0}
+    return RowWrite(columns={**columns, **_CLEARED_CLAIM}, result=(AdvanceOutcome.FINISHING, after))
 
 
-def _rearm_moved_reminder(remaining: Optional[int], candidate: "ScheduledMessage", base: "ScheduledMessage") -> Optional[int]:
-    """Moving an already admitted one-time reminder requests one new future run."""
-    if remaining != 0 or candidate.interval_ms is not None or candidate.cron_expression:
+def _is_one_time(schedule: "ScheduledMessage") -> bool:
+    return schedule.interval_ms is None and not schedule.cron_expression
+
+
+def _runs_after_edit(
+    remaining: Optional[int], candidate: "ScheduledMessage", base: "ScheduledMessage"
+) -> Optional[int]:
+    """The remaining count after an edit that kept the repeat count.
+
+    A finishing one-time reminder (``is_finishing``) whose next run time was
+    changed gets its runs back: one, when it was moved, or its repeat count
+    (None: unlimited), when it was made to repeat. Any other edit adds no
+    future run, so the schedule still ends after the run under way.
+    """
+
+    if remaining != 0 or not _is_one_time(base) or not _next_run_changed(candidate, base):
         return remaining
-    return 1 if _next_run_changed(candidate, base) else remaining
+    return 1 if _is_one_time(candidate) else candidate.repeat_count
 
 
 class ScheduleStore:
@@ -786,7 +838,7 @@ class ScheduleStore:
             elif msg.repeat_count != row.get("repeat_count"):
                 remaining = msg.repeat_count
             else:
-                remaining = _rearm_moved_reminder(row.get("remaining_count"), msg, current)
+                remaining = _runs_after_edit(row.get("remaining_count"), msg, current)
             written = msg.model_copy(deep=True)
             written.timing_revision = current.timing_revision + int(_next_run_changed(msg, current))
             return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=SCHEDULE_REPLACED)
@@ -899,7 +951,7 @@ class ScheduleStore:
             elif candidate.repeat_count != base.repeat_count:
                 remaining = candidate.repeat_count
             else:
-                remaining = _rearm_moved_reminder(row.get("remaining_count"), candidate, base)
+                remaining = _runs_after_edit(row.get("remaining_count"), candidate, base)
             return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=written)
 
         write = self._repository.write_locked(schedule_id, decide)
@@ -1093,7 +1145,7 @@ class ScheduleStore:
 
         try:
             result: tuple[AdvanceOutcome, Optional[_AfterRun]] = self._repository.write_locked(
-                schedule_id, decide, include_runs=True,
+                schedule_id, decide, runs_at=now,
             ).result
         except Exception:
             self._logger.exception(
@@ -1128,8 +1180,8 @@ class ScheduleStore:
         if outcome is AdvanceOutcome.FINISHING:
             self._logger.info(
                 "A schedule admitted its final run; keeping its identity and access until its work finishes. "
-                "event=schedule_final_run_pending schedule_id=%s agent_id=%s",
-                schedule_id, agent_id,
+                "event=schedule_final_run_pending schedule_id=%s agent_id=%s reason=%s",
+                schedule_id, agent_id, after.reason if after is not None else "last_run",
             )
         elif after is not None and after.reason == RETIMED_FINAL_RUN_KEPT:
             self._logger.info(
@@ -1146,14 +1198,16 @@ class ScheduleStore:
             self._logger.info(
                 "Schedule %s updated: next fire at %s, remaining: %s", schedule_id, after.next_fire_at, remaining
             )
-        elif outcome is AdvanceOutcome.FINISHED and after is not None and after.reason == NO_REPEAT_TIMING:
-            self._logger.warning(
-                "A schedule with no interval or cron expression still had runs left; it runs only once, "
-                "so it was removed after this run. event=schedule_one_time_count_ignored schedule_id=%s",
-                schedule_id,
-            )
         elif outcome is AdvanceOutcome.FINISHED and after is not None:
             self._logger.info("Schedule %s finished after its run (%s); removed.", schedule_id, after.reason)
+        if outcome in (AdvanceOutcome.FINISHED, AdvanceOutcome.FINISHING) and (
+            after is not None and after.reason == NO_REPEAT_TIMING
+        ):
+            self._logger.warning(
+                "A schedule with no interval or cron expression still had runs left; it runs only once, "
+                "so it ends after this run. event=schedule_one_time_count_ignored schedule_id=%s",
+                schedule_id,
+            )
 
     def get_all_enabled(self) -> List[dict]:
         try:
@@ -1232,24 +1286,33 @@ class ScheduleStore:
         )
 
     def prune_expired(self, *, now: Optional[datetime] = None) -> int:
-        """Remove exhausted or expired schedules after their admitted work finishes."""
+        """Remove finished or expired schedules once no admitted run needs them; end their access.
+
+        A finished schedule is the ordinary end of a reminder or a counted
+        series (logged at INFO); one past its end date is logged as before
+        (WARNING).
+        """
         now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         try:
-            pruned = self._repository.prune_expired(now_iso=now_dt.isoformat())
+            removed = self._repository.prune_expired(now=now_dt)
         except Exception as e:
             self._logger.error(f"Failed to prune expired schedules: {e}")
             return 0
-        if pruned:
-            self._logger.warning(
-                "Removed %s finished or expired scheduled message%s at %s. schedule_ids=%s",
-                len(pruned),
-                "" if len(pruned) == 1 else "s",
-                now_dt.isoformat(),
-                ",".join(pruned),
+        finished = [entry.schedule_id for entry in removed if entry.reason == "finished"]
+        expired = [entry.schedule_id for entry in removed if entry.reason == "expired"]
+        if finished:
+            self._logger.info(
+                "Removed %s schedule%s whose last run finished. event=schedule_finished_removed schedule_ids=%s",
+                len(finished), "" if len(finished) == 1 else "s", ",".join(finished),
             )
-        for schedule_id in pruned:
-            self._end_schedule_access(schedule_id)
-        return len(pruned)
+        if expired:
+            self._logger.warning(
+                "Pruned %s expired scheduled message%s at %s. schedule_ids=%s",
+                len(expired), "" if len(expired) == 1 else "s", now_dt.isoformat(), ",".join(expired),
+            )
+        for entry in removed:
+            self._end_schedule_access(entry.schedule_id)
+        return len(removed)
 
     def build_telemetry_snapshot(
         self,

@@ -10,7 +10,9 @@ from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Mapping, Optional, Protocol
+from datetime import datetime
+from functools import partial
+from typing import Any, Callable, List, Literal, Mapping, NamedTuple, Optional, Protocol
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 
@@ -102,11 +104,22 @@ class RowWrite:
 
 RowDecision = Callable[[Optional[dict[str, Any]]], RowWrite]
 
+# The row key ``write_locked(runs_at=...)`` adds: a function that reads, under
+# the row's lock, whether an admitted run still needs the schedule.
+UNFINISHED_RUNS = "has_unfinished_runs"
+
+
+class RemovedSchedule(NamedTuple):
+    """A schedule ``prune_expired`` removed, and why (its owner's log line differs)."""
+
+    schedule_id: str
+    reason: Literal["finished", "expired"]
+
 
 class ScheduleRepository(Protocol):
     def write_locked(
         self, schedule_id: str, decide: RowDecision,
-        *, deferred_message: DeferredMessageClaim | None = None, include_runs: bool = False,
+        *, deferred_message: DeferredMessageClaim | None = None, runs_at: datetime | None = None,
     ) -> RowWrite: ...
 
     def add_schedule_row_if_absent(
@@ -163,7 +176,7 @@ class ScheduleRepository(Protocol):
         claimer_agent_id: str,
     ) -> bool: ...
 
-    def prune_expired(self, *, now_iso: str) -> list[str]: ...
+    def prune_expired(self, *, now: datetime) -> list[RemovedSchedule]: ...
 
     def get_next_wake_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]: ...
 
@@ -336,18 +349,21 @@ class _RelationalScheduleRepository:
 
     def write_locked(
         self, schedule_id: str, decide: RowDecision,
-        *, deferred_message: DeferredMessageClaim | None = None, include_runs: bool = False,
+        *, deferred_message: DeferredMessageClaim | None = None, runs_at: datetime | None = None,
     ) -> RowWrite:
         """Read one schedule row, decide what to write and write it, in one write transaction.
 
         Every change that depends on the row's current values goes through
         here, so nothing another process writes between a read and a write is
         overwritten (``custom_agents.schedule_store``). The row stays locked
-        while ``decide`` runs (``_locked_row``). With ``include_runs``, it also
-        reads durable occurrence receipts under that lock and adds the
-        transient ``has_unfinished_runs`` fact. Admission takes the same lock.
-        ``decide`` gets the row as a
-        dict, or None when there is none, and must do no I/O; an exception
+        while ``decide`` runs (``_locked_row``). ``decide`` gets the row as a
+        dict, or None when there is none, and must do no I/O of its own. With
+        ``runs_at``, the row also holds ``UNFINISHED_RUNS``: a function that
+        reads the schedule's run receipts under the same lock, judged at
+        ``runs_at`` (``storage.schedule_occurrences.has_unfinished_runs``).
+        Admission takes the same lock, so no run is admitted meanwhile.
+        ``decide`` calls it only when it would remove the row, so an ordinary
+        advance never reads the schedule's run history. An exception
         from it rolls the transaction back and propagates. A delayed retry
         checks and consumes its exact deferred reply in this same transaction,
         so a lost dispatch cannot install a retry and a failed write leaves
@@ -363,8 +379,10 @@ class _RelationalScheduleRepository:
                 )
             stored = self._locked_row(conn, schedule_id)
             row = dict(stored) if stored is not None else None
-            if row is not None and include_runs:
-                row["has_unfinished_runs"] = has_unfinished_runs(conn, self._dialect, schedule_id)
+            if row is not None and runs_at is not None:
+                row[UNFINISHED_RUNS] = partial(
+                    has_unfinished_runs, conn, self._dialect, schedule_id, now=runs_at, logger=self._logger,
+                )
             write = decide(row)
             self._apply_write(conn, schedule_id, write, existed=row is not None)
             conn.commit()
@@ -546,14 +564,21 @@ class _RelationalScheduleRepository:
             conn.commit()
             return cursor.rowcount > 0
 
-    def prune_expired(self, *, now_iso: str) -> list[str]:
-        """Remove exhausted or expired schedules only after their admitted work ends.
+    def prune_expired(self, *, now: datetime) -> list[RemovedSchedule]:
+        """Remove finished or expired schedules once no admitted run still needs them.
 
-        Zero remaining runs is durable exhaustion, not a disable: a live run
-        keeps its identity and grants, but no scheduler may claim another run.
-        Each decision locks the same row as admission and edits.
+        Zero remaining runs means the final run was admitted
+        (``ScheduleStore.update_after_fire``); an end date in the past blocks
+        claims by itself. While a run still needs the schedule's identity and
+        access, the row is left exactly as it is, with no write, so an edit
+        made meanwhile (a later end date) stands. Receipts are first read
+        without a lock, since a run still going is the common case; only a
+        removal takes the row's lock, as admission and edits do, and checks
+        again. A row that cannot be checked is logged and the rest are still
+        checked.
         """
 
+        now_iso = now.isoformat()
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
@@ -565,19 +590,30 @@ class _RelationalScheduleRepository:
             ).fetchall()
 
         def decide(row: Optional[dict[str, Any]]) -> RowWrite:
-            if row is None or not (
-                row.get("remaining_count") == 0
-                or (row.get("expires_at_utc") and row["expires_at_utc"] <= now_iso)
-            ):
-                return RowWrite(result=False)
-            if row["has_unfinished_runs"]:
-                return RowWrite(columns={"remaining_count": 0}, result=False)
-            return RowWrite(delete=True, result=True)
+            if row is None:
+                return RowWrite(result=None)
+            expired = bool(row.get("expires_at_utc") and row["expires_at_utc"] <= now_iso)
+            if not (expired or row.get("remaining_count") == 0) or row[UNFINISHED_RUNS]():
+                return RowWrite(result=None)
+            return RowWrite(delete=True, result="expired" if expired else "finished")
 
-        return [
-            str(row[0]) for row in rows
-            if self.write_locked(str(row[0]), decide, include_runs=True).result
-        ]
+        removed: list[RemovedSchedule] = []
+        for (schedule_id,) in ((str(row[0]),) for row in rows):
+            try:
+                with self._connect() as conn:
+                    if has_unfinished_runs(conn, self._dialect, schedule_id, now=now, logger=self._logger):
+                        continue
+                reason = self.write_locked(schedule_id, decide, runs_at=now).result
+            except Exception:
+                self._logger.exception(
+                    "Could not check a finished or expired schedule for removal; the others are still "
+                    "checked. event=schedule_prune_failed schedule_id=%s",
+                    schedule_id,
+                )
+                continue
+            if reason is not None:
+                removed.append(RemovedSchedule(schedule_id, reason))
+        return removed
 
     def get_next_wake_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]:
         parallel_sql, parallel_params = self._parallel_claim_sql(parallel_thread)
