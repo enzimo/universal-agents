@@ -50,7 +50,8 @@ def add(agent, task_id, owner="owner", state=None):
             task_type=MessageMetaType.REQUEST,
             problem_statement="Work " + task_id,
         ),
-        MessageHeader(),
+        # A person's request comes from the gateway, which waits for its final reply.
+        MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
         MessageMeta(gateway_context=GatewayContext(canonical_user_id=owner)),
         owner_person_id=owner,  # whom admission verified the task works for
     )
@@ -58,6 +59,16 @@ def add(agent, task_id, owner="owner", state=None):
         agent.task_manager.update_main_task_state(
             task_id, state, "2026-09-20T12:00:00+00:00"
         )
+
+
+def final_replies(agent) -> list[str]:
+    """Task ids of the final replies (Task responses) the agent sent its requesters."""
+
+    return [
+        envelope.msg_content.task_id
+        for envelope in agent.team_comms.messages
+        if isinstance(envelope.msg_content, Task) and envelope.msg_content.task_type == MessageMetaType.RESPONSE
+    ]
 
 
 async def command(agent, action="list_tasks", **kwargs):
@@ -211,6 +222,9 @@ async def test_single_removal_is_owner_scoped_and_can_stop_current_work(agent):
     assert removed.success
     assert removed.cancellation_receipts[0].confirmed
     assert agent.task_manager.get_task_info("current") is None
+    # No turn of it was running, so the removal sends the request's one final
+    # reply itself; the gateway frees the person's thread only then.
+    assert final_replies(agent) == ["current"]
 
 
 @pytest.mark.asyncio

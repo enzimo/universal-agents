@@ -615,6 +615,11 @@ async def stop_task_execution(
         graph_task_ids=graph_task_ids,
         reason=TASK_STOPPED_REASON,
     )
+    # Every stopped request gets one final reply, which ends it for its
+    # requester (the gateway frees the thread only then). A stopped turn sends
+    # it itself (handle_interrupted_turn), so the cancellation below sends one
+    # only when no turn of the graph was running, such as for a request that
+    # still waited its turn.
     if stopped is not None:
         active_task = stopped.turn_owner
         assert active_task is not None
@@ -640,7 +645,7 @@ async def stop_task_execution(
             signal_pending_subtasks=cascade_to_subtasks,
             canonical_user_id=canonical_user_id,
             command_id=command_id,
-            send_response=send_response,
+            send_response=False,
             durable_cancellation_recorded=durable_cancellation_recorded,
         )
         result["active_execution_cancelled"] = (

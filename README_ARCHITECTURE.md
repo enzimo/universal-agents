@@ -2885,7 +2885,12 @@ the request's task id at admission and keeps its running state independently
 of response waits. A timeout, gateway restart or credential form therefore
 does not make a later message new work. The later message is saved as guidance
 for that request before publication. A final reply ends the running state,
-including when quiet hours delay showing the reply. Held guidance that its
+including when quiet hours delay showing the reply. A stopped request gets one
+too: its stopped turn sends it, or, when no turn of it was running (it still
+waited its turn), the stop itself does (`custom_agents.control_runtime.stop_task_execution`).
+Before, a stop that found no running turn sent none, so its thread stayed
+busy and every later message there was held as guidance for the cancelled
+request. Held guidance that its
 request finishes before accepting is reported as unused. A publication failure
 whose outcome is uncertain leaves the request active; starting another chat
 remains an explicit action by the person.

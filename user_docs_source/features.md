@@ -479,6 +479,9 @@ anything until you choose an explicit scope:
 - `/stop all` cancels all current nonterminal work owned by you across sessions
   and conversations.
 
+Each stopped request replies in its thread that it was cancelled, also when it
+was still waiting its turn, and the thread then takes your next request.
+
 Your own stops apply at once, whatever an agent is doing. Agents cannot stop
 your other requests: while TeamLead works on one request it may pause, resume
 or stop only that request's own tasks. If you ask it about another request, it

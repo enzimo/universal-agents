@@ -1496,7 +1496,6 @@ async def _cancel_runtime_work_roots(
                 cascade_to_subtasks=True,
                 canonical_user_id=person.canonical_user_id,
                 command_id=command.command_id,
-                send_response=False,
             )
             durable_cancellation_recorded = bool(
                 result.get("durable_cancellation_recorded")
