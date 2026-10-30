@@ -116,6 +116,17 @@ class RemovedSchedule(NamedTuple):
     reason: Literal["finished", "expired"]
 
 
+def _prune_decision(now_iso: str, row: Optional[dict[str, Any]]) -> RowWrite:
+    """``prune_expired``'s decision on the locked row; the result is why it was removed, or None."""
+
+    if row is None:
+        return RowWrite(result=None)
+    expired = bool(row.get("expires_at_utc") and row["expires_at_utc"] <= now_iso)
+    if not (expired or row.get("remaining_count") == 0) or row[UNFINISHED_RUNS]():
+        return RowWrite(result=None)
+    return RowWrite(delete=True, result="expired" if expired else "finished")
+
+
 class ScheduleRepository(Protocol):
     def write_locked(
         self, schedule_id: str, decide: RowDecision,
@@ -589,21 +600,10 @@ class _RelationalScheduleRepository:
                 (now_iso,),
             ).fetchall()
 
-        def decide(row: Optional[dict[str, Any]]) -> RowWrite:
-            if row is None:
-                return RowWrite(result=None)
-            expired = bool(row.get("expires_at_utc") and row["expires_at_utc"] <= now_iso)
-            if not (expired or row.get("remaining_count") == 0) or row[UNFINISHED_RUNS]():
-                return RowWrite(result=None)
-            return RowWrite(delete=True, result="expired" if expired else "finished")
-
         removed: list[RemovedSchedule] = []
-        for (schedule_id,) in ((str(row[0]),) for row in rows):
+        for schedule_id in (str(row[0]) for row in rows):
             try:
-                with self._connect() as conn:
-                    if has_unfinished_runs(conn, self._dialect, schedule_id, now=now, logger=self._logger):
-                        continue
-                reason = self.write_locked(schedule_id, decide, runs_at=now).result
+                reason = self._remove_if_done(schedule_id, now)
             except Exception:
                 self._logger.exception(
                     "Could not check a finished or expired schedule for removal; the others are still "
@@ -614,6 +614,14 @@ class _RelationalScheduleRepository:
             if reason is not None:
                 removed.append(RemovedSchedule(schedule_id, reason))
         return removed
+
+    def _remove_if_done(self, schedule_id: str, now: datetime) -> Optional[str]:
+        """Remove one finished or expired schedule no run still needs; why it was removed, or None."""
+
+        with self._connect() as conn:
+            if has_unfinished_runs(conn, self._dialect, schedule_id, now=now, logger=self._logger):
+                return None
+        return self.write_locked(schedule_id, partial(_prune_decision, now.isoformat()), runs_at=now).result
 
     def get_next_wake_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]:
         parallel_sql, parallel_params = self._parallel_claim_sql(parallel_thread)
