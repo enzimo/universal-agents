@@ -24,6 +24,7 @@ from custom_agents.execution_lanes import (
     lane_for_message,
     lane_for_task,
     parallel_lane,
+    schedule_runs_in_parallel_lane,
 )
 from custom_agents import execution_lanes_runtime
 from custom_agents.execution_lanes_runtime import ParallelLanes
@@ -143,6 +144,7 @@ def test_each_run_of_a_schedule_made_in_a_parallel_thread_gets_a_lane_of_its_own
 
     The schedule keeps the thread's request context (``schedules._build_schedule_payload_meta``),
     so its runs count as parallel requests; a schedule made in another chat runs in the main lane.
+    The rule the schedule row records when it is saved gives the same answer as the run's lane.
     """
 
     manager = _manager(tmp_path)
@@ -160,13 +162,14 @@ def test_each_run_of_a_schedule_made_in_a_parallel_thread_gets_a_lane_of_its_own
             owner_person_id="owner",
         )
         assert lane_for_task(manager, run_id) == (parallel_lane(run_id) if parallel else MAIN_LANE)
+        assert schedule_runs_in_parallel_lane(meta) is parallel
 
 
 def test_a_schedule_set_up_in_a_parallel_thread_is_claimed_while_the_main_lane_is_busy(tmp_path):
     """Owner, 2026-10-29: such runs start independently of whatever else runs.
 
     The schedule row records that its runs are parallel requests
-    (``schedule_store.runs_in_parallel``), so a claim limited to them takes it
+    (``execution_lanes.schedule_runs_in_parallel_lane``), so a claim limited to them takes it
     and leaves an earlier ordinary one for the main lane
     (``scheduled_runtime._schedule_claim_scope``).
     """
