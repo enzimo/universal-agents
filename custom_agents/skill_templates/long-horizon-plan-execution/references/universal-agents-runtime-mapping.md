@@ -150,11 +150,14 @@ with invented owner, task, Plan, or Objective identifiers.
 
 A one-time schedule or a counted job's final admitted run keeps its identity
 and access until the work finishes, including across worker replacement.
-Zero remaining runs means no new firing is allowed while that work finishes.
-A runtime failure notice names an unconfirmed run; inspect its task history
-and any completed effects before retrying. Such notices survive immediate
-task archival and restarts. Do not recreate a reminder merely because its
-worker instance changed.
+`list_scheduled_jobs` shows it with `final_run_in_progress: true`: it will not
+fire again and is removed when the run ends. It is not overdue; do not
+recreate or re-arm it unless the person asks. A failing scheduled job is
+reported to its person once per problem, and once more when a run finishes.
+The notice names no cause and suggests asking you why the run failed, naming
+the run's task id: read that run with `get_task_history_window(task_id=...)`
+and check the effects it already had before offering a retry. Do not
+recreate a reminder merely because its worker instance changed.
 
 ## Use solution variation only when it helps
 

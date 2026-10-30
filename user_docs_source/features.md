@@ -458,7 +458,9 @@ other agents stops too.
 A request that involves several agents is reported once, as your request.
 Administrators' notices name the kind of agent and what to check, never the
 text of your request. Stuck schedules are reported the same way (see
-[Scheduled workers](scheduled-workers.md#when-a-schedule-is-stuck)).
+[Scheduled workers](scheduled-workers.md#when-a-schedule-is-stuck)), and so are
+scheduled jobs whose runs fail, once per problem (see
+[Scheduled workers](scheduled-workers.md#when-a-scheduled-jobs-run-fails)).
 
 After the host wakes from sleep, the task monitor gives workers one minute to
 refresh their status before treating old heartbeats as a stopped worker. A

@@ -128,18 +128,13 @@ old), so a role change, a disabled or removed owner, or a deleted or turned-off
 schedule takes effect on the run within 30 seconds.
 
 A one-time reminder and the last run of a repeating job keep their schedule
-and job access until the admitted work finishes. They cannot fire again while
-finishing. This also lets a replacement worker resume an interrupted final
-run. Cleanup then removes the schedule and ends its job access.
-
-If a scheduled task ends in a runtime failure, the owner receives an Inbox
-notice and a chat message when a delivery chat is available. The notice says
-the result is unconfirmed and names the run to inspect before retrying. It
-survives task archival and restarts; delivery failures are logged and retried.
-These notices also cover runs that started on time. Successful checks can
-still finish quietly, including one-time checks created from an earlier chat
-request. The schedule's `notify_on_failure` policy continues to govern its
-reported check results, rather than these runtime failures.
+and job access until that run finishes, even when a new worker takes the run
+over. While the run works, the job shows as finishing: it will not run again,
+and it is removed when the run ends. If a run never reports back, its job is
+removed 7 days after the run started, when the run's identity expires. If you
+move a job's end date later while its last run is still working, the job
+continues; if you make a running one-time reminder repeat, it keeps its new
+runs.
 
 TeamLead gives a person's schedule a permit only when the person is active and
 the schedule was saved from that person's own request (or is managed by
@@ -187,7 +182,9 @@ claim it.
 ### When a schedule is stuck
 
 An enabled, unpaused, unexpired schedule that is overdue and that no worker has
-picked up is **stuck**. You are told about it, without asking:
+picked up is **stuck**. A job whose last run is still working is not stuck: it
+is finishing and no further run is due. You are told about a stuck schedule,
+without asking:
 
 - Once it has been stuck for `agent.schedule_workers.review_interval_seconds`
   (one hour by default), its owner gets an Inbox notice and a chat message
@@ -279,6 +276,19 @@ If an earlier version failed with "The Objective session's schedule and owner
 could not be verified", install the fix and inspect the existing policy, schedule
 and checkpoint. Resume the existing Objective if it was marked blocked after that
 failure. Do not recreate a valid schedule or discard the saved checkpoint.
+
+### When a scheduled job's run fails
+
+If a scheduled job's run fails, you get one Inbox notice and one chat message
+naming the job and when the run started. The notice doesn't say why. It
+suggests a question to ask your assistant, which can read the run's history
+and tell you why it stopped and what it had already done; check that before
+asking for the job to run again. If the job keeps failing, you are not told
+again until a run finishes, and then you get one "working again" message. A
+one-time reminder that fails gets just the one notice. Failures of the team's
+and the system's own jobs go to administrators in the Inbox. These notices are
+sent whatever the job's own "notify on failure" setting says: that setting is
+about the results a run reports, such as a check that found a problem.
 
 ## See assignments in Web Chat
 
