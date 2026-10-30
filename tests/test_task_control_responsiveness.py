@@ -109,6 +109,8 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
             assert "45 of 50" in warning.envelope.msg_content.text
             await warning.ack()
 
+        cancelled: list[str] = []  # the last exchange's cancellation replies
+
         async def exchange(action, **kwargs):
             command = ManagerRuntimeWorkCommand(
                 action=action, scope="user", **kwargs,
@@ -124,17 +126,21 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
                     )),
                 ), routing_key=agent.id,
             )
-            received = await asyncio.wait_for(responses.get(), MANAGER_CONTROL_TIMEOUT_SECONDS)
-            await received.ack()
-            if isinstance(received.envelope.msg_content, Task):
-                # Stopping current work also delivers its terminal cancellation.
-                assert action in {"cancel", "remove_task"}
-                assert received.envelope.msg_content.task_id == "held"
-                assert received.envelope.msg_content.task_state[-1][0].value == "cancelled"
+            # Each stopped request also gets its final reply, its cancellation,
+            # before the command's answer (control_runtime.stop_task_execution):
+            # current work from its stopped turn, queued work from the stop.
+            cancelled.clear()
+            while True:
                 received = await asyncio.wait_for(responses.get(), MANAGER_CONTROL_TIMEOUT_SECONDS)
                 await received.ack()
-            assert received.envelope.msg_content.command_id == command.command_id
-            return received.envelope.msg_content
+                content = received.envelope.msg_content
+                if not isinstance(content, Task):
+                    break
+                assert action in {"cancel", "remove_task", "purge_tasks"}
+                assert content.task_state[-1][0].value == "cancelled"
+                cancelled.append(content.task_id)
+            assert content.command_id == command.command_id
+            return content
 
         await exchange("list_tasks")
         await asyncio.wait_for(entered.wait(), 3)
@@ -173,10 +179,13 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
         purged = await exchange("purge_tasks", inventory_digest=view.inventory_digest)
         assert purged.success and purged.task_total == 1
         assert len(purged.cancellation_receipts) == 49
+        # Each purged request's requester is told, so a waiting chat thread is freed.
+        assert sorted(cancelled) == sorted(f"queued_{index}" for index in range(49))
         assert not release.is_set()
         stopped = (await exchange("cancel") if is_team_lead else
                    await exchange("remove_task", target_task_id="held", inventory_digest=purged.inventory_digest))
         assert stopped.success
+        assert cancelled == ["held"], "one final reply, from the stopped turn"
         assert agent.task_manager.is_execution_cancelled("held")
         assert agent._conversation_store.get_turn_by_task_id("held")["task_status"] == "cancelled"
         agent._conversation_summary_generator.summarize_turn.assert_not_called()
