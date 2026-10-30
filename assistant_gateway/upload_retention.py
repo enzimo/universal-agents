@@ -39,7 +39,7 @@ from access_control.safe_open import UnsafePath
 from old_file_cleanup import (
     SECONDS_PER_DAY,
     OldFilesRemoved,
-    note_skipped,
+    remove_listed_file,
     remove_old_files,
 )
 
@@ -47,8 +47,6 @@ logger = logging.getLogger(__name__)
 
 CLEANUP_INTERVAL = timedelta(hours=6)
 RECORD_BATCH = 500
-
-SKIPPED_OUTSIDE_UPLOADS = "outside_uploads_folder"
 
 
 class UploadRecords(Protocol):
@@ -103,47 +101,9 @@ def _remove_old_records(records: UploadRecords, root: Path, cutoff: str, result:
         result.records_removed += len(paths)
         for path in paths:
             if path:
-                _remove_recorded_file(root, Path(path), result)
+                remove_listed_file(root, Path(path), result)
         if len(paths) < RECORD_BATCH:
             return
-
-
-def _remove_recorded_file(root: Path, path: Path, result: UploadPruneResult) -> None:
-    try:
-        parts = Path(os.path.abspath(path)).relative_to(root).parts
-    except ValueError:
-        note_skipped(result, path, SKIPPED_OUTSIDE_UPLOADS)
-        return
-    try:
-        info = safe_open.entry_status(root, parts)
-        if info is None:
-            return  # already gone
-        safe_open.remove_file(root, parts)
-    except UnsafePath as exc:
-        if exc.reason != safe_open.REASON_NOT_FOUND:
-            note_skipped(result, path, exc.reason)
-        return
-    result.files_removed += 1
-    result.bytes_removed += info.st_size
-    _remove_emptied_folder(root, parts[:-1], result)
-
-
-def _remove_emptied_folder(root: Path, parts: tuple[str, ...], result: UploadPruneResult) -> None:
-    """Remove a conversation folder this cleanup emptied, as the walk does; the uploads folder stays."""
-
-    if not parts:
-        return
-    try:
-        parent = safe_open.open_directory(root, parts[:-1])
-    except UnsafePath:
-        return
-    try:
-        os.rmdir(parts[-1], dir_fd=parent)  # only an empty folder, never through a link
-    except OSError:
-        return  # not empty, or no longer a folder: leave it
-    finally:
-        os.close(parent)
-    result.folders_removed += 1
 
 
 def _remove_old_files(root: Path, cutoff: float, result: UploadPruneResult) -> None:

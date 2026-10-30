@@ -70,6 +70,22 @@ async def test_inspect_pause_resume_stop_own_queue(agent, current_request):
 
 
 @pytest.mark.asyncio
+async def test_listing_marks_parallel_requests_like_settings_tasks(agent):
+    # A request sent in a thread started with Launch parallel thread runs in a
+    # lane of its own on the team lead; the agent's listing says so exactly as
+    # Settings -> Tasks does, and a worker has no parallel lanes.
+    agent.task_manager.parallel_lanes_enabled = agent.is_team_lead
+    add(agent, "parallel")
+    context = agent.task_manager.get_task_info("parallel").meta.gateway_context
+    context.parallel_thread, context.delivery_mode = True, "interactive"
+
+    listed = {row["root_task_id"]: row["is_parallel"] for row in json.loads(await list_task_queue())["tasks"]}
+    shown = {row.root_task_id: row.is_parallel for row in (await command(agent)).roots}
+
+    assert listed == shown == {"inspection": False, "parallel": agent.is_team_lead}
+
+
+@pytest.mark.asyncio
 async def test_queue_rejects_other_owner_self_and_pending_approval(agent, current_request):
     add(agent, "private", owner="someone_else")
     add(agent, "approval", state=ProgressState.WAITING)

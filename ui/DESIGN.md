@@ -800,8 +800,8 @@ that leads to it (owner's request 2026-10-12).
   every 10 seconds only while the panel is active. Retain the visible page during
   refresh and reject late responses from a closed panel or previous session.
   Accepted requests must appear even while the agent is busy or paused.
-  Append **Parallel** to the current, queued or waiting heading of a request
-  sent in a thread started with **Launch parallel thread**. The agent runs such
+  Append **Concurrent** to the current, queued or waiting heading of a request
+  sent in a thread set to **Run concurrently**. The agent runs such
   a request at the same time as its other work, up to four at once; a running
   one shows as current, not queued.
   When a task waits, show its reason as **Waiting on:** followed by the reason
@@ -855,15 +855,23 @@ that leads to it (owner's request 2026-10-12).
 - Added procedures render as a compact table with **Procedure**, **Risk**,
   **Team lead may pass it on**, **Built-in code** (**Matches the runtime** or
   **Does not match the runtime**), **Added**, and **Definition ID**.
-- Team ends with **File Retention**: how many days chat uploads and scratch
-  files are kept, where 0 keeps them forever. When the gateway says the person
-  may change them (`can_change`), show one row with **Days to keep chat
-  uploads**, **Days to keep scratch files** and **Save** (primary; **Saving…**
-  while busy). Everyone else sees the two values as a short list ("90 days",
-  "Kept forever") and "Only administrators change how long files are kept."
-  After saving, say that chat uploads follow the new number at the next
-  cleanup, within six hours, and scratch files after the next restart. A
-  failure keeps the typed numbers.
+- Team ends with **File Retention**: how many days chat uploads, scratch
+  files and saved tool outputs are kept, where 0 keeps them forever, and the
+  **Storage warnings**. When the gateway says the person may change them
+  (`can_change`), show a row with **Days to keep chat uploads**, **Days to
+  keep scratch files** and **Days to keep saved tool outputs**, a **Storage
+  warnings** label, a row with **Notice to each person every (GB)** (0 turns
+  it off), **Warn administrators at (% full)** and **Report a problem at (%
+  full)**, and **Save** (primary; **Saving…** while busy) below them.
+  Everyone else sees the six values as a short list ("90 days", "Kept
+  forever", "Every 5 GB", "Off", "At 80% full") and "Only administrators
+  change how long files are kept." Refuse a warning level at or above the
+  problem level in place, before sending. After saving, say that chat uploads
+  follow the new number at the next cleanup, within six hours, scratch files
+  and saved tool outputs after the next restart, and storage warnings from
+  their next check. The saved tool outputs field's help says that lowering the
+  number deletes the older outputs at the next maintenance run, and that nothing
+  is deleted for 7 days when it is first turned on. A failure keeps the typed numbers.
 - Browser alerts are opt-in from Settings. Ask for browser permission only on a click;
   explain HTTPS/browser requirements or a denied permission in place. Store the
   preference by signed-in user and browser. Use generic alert text without message
@@ -1832,19 +1840,28 @@ its history. Steps with linked requests cannot use this correction.
 - The brand/UA icon in the config editor returns to Web Chat.
 - The input placeholder is `Type your message here...`.
 - The send action uses an ocean-blue icon button.
-- A compact **Launch parallel thread** switch sits below Send, off by default,
-  with no helper sentence.
-  It creates a parallel thread: the browser asks for it when it creates the
-  chat (`{"parallel_thread": true}`), and every request sent in it runs at the
-  same time as the agent's other work. Admit its request without waiting for
-  the current model turn, so Settings → Tasks can show and control it
-  immediately. New Chat and `/new` start ordinary threads.
-  It applies to one ordinary message; slash commands keep their usual behavior.
-  Create the new chat before clearing the composer, then show the message,
-  files, name and replies only there. Keep the earlier chat in the sidebar.
-  Reset the switch once the message moves to its chat. While creating the chat,
-  disable composer edits and New Chat, and announce **Preparing your chat…**.
-  A failed creation keeps the draft and files. **Retry** on a send failure
+- A compact **Run concurrently** switch sits below Send (owner, 2026-10-29;
+  it replaced **Launch parallel thread**, which opened an empty chat). It is a
+  setting of the selected thread, not of one message: show that thread's saved
+  setting, and save a change at once (`PATCH /api/web-chat/sessions/{key}` with
+  `parallel_thread` and the conversation shown). On, every request admitted in
+  the thread runs at the same time as the agent's other work; off, its requests
+  wait their turn. Admit such a request without waiting for the current model
+  turn, so Settings → Tasks can show and control it immediately. New Chat and
+  `/new` start with it off. Messages never carry it, and sending never moves it.
+  Keep the message, files, name and replies in the selected chat.
+  Lock the switch while a message is on its way or a request is open in the
+  thread (`open_request_session_keys` on every event page): a message sent then
+  is guidance for that request. While locked, show the muted note
+  **Available after this chat replies.** below it; otherwise show no helper
+  sentence. A refused change puts the saved position back and says why in red
+  in the same line (`role="alert"`), starting with **Run concurrently was not
+  changed.**; the next change replaces that message.
+  When no chat is selected, create one before clearing the composer, save the
+  switch's position for it, then send. While doing so, disable composer edits,
+  the switch and New Chat, and announce **Preparing your chat…**.
+  A failed creation or save keeps the draft and files. A failed send keeps the
+  thread's setting, so the person can change it before **Retry**, which
   resends the original message and files with the same request id and destination.
   Show each send error and its **Retry** beside the failed message, using the
   shared error text and compact secondary button. Later messages and their

@@ -178,12 +178,11 @@ class _FakeGateway:
         chat_id=None,
         thread_id=None,
         canonical_user_id=None,
-        parallel_thread=False,
     ):
         return SimpleNamespace(
             session_key=f"{channel_name}:{chat_id}:{user_id}:new",
             conversation_id="conv_new",
-            parallel_thread=parallel_thread,
+            parallel_thread=False,
         )
 
     async def waiting_question_id_for_session(self, session_key: str):
@@ -1772,6 +1771,8 @@ async def test_file_retention_is_shown_to_members_and_saved_only_by_those_who_ma
     tmp_path: Path,
 ) -> None:
     from assistant_gateway.file_retention import GatewayFileRetention
+    from assistant_gateway.storage_capacity import StorageCapacity, StorageLevels
+    from assistant_gateway.storage_usage import StorageUsageNotices
     from assistant_gateway.upload_retention import UploadRetention
 
     config = _config(tmp_path)
@@ -1785,10 +1786,22 @@ async def test_file_retention_is_shown_to_members_and_saved_only_by_those_who_ma
     app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
     changes = _RetentionChanges()
     uploads = UploadRetention(records=store, uploads_dir=config.layout.uploads_dir, retention_days=90)
+    usage = StorageUsageNotices(
+        team_id="team", step_gb=5, people=list, measure=dict, store=lambda: None, send_notice_once=lambda notice: True
+    )
+    capacity = StorageCapacity(
+        disks=list, databases=list, levels=StorageLevels(tmp_path / "levels.json"),
+        nearing_limit_percent=80, nearly_full_percent=95, message_storage_kind="file",
+    )
     gateway.file_retention = GatewayFileRetention(
-        config_path=config.config_path, person_changes=changes, uploads=uploads
+        config_path=config.config_path, person_changes=changes, uploads=uploads,
+        storage_usage=usage, storage_capacity=capacity,
     )
     saved_settings = config.layout.instance_config_path
+    wanted_values = {
+        "upload_days": 30, "scratch_days": 7, "output_days": 60, "person_step_gb": 10, "nearing_limit_percent": 75,
+        "nearly_full_percent": 90,
+    }
 
     async with TestClient(TestServer(app.build_app())) as client:
         auth_response = await client.post("/api/web-chat/auth", json={"token": "ua_user_token"})
@@ -1803,38 +1816,51 @@ async def test_file_retention_is_shown_to_members_and_saved_only_by_those_who_ma
         member_view = await (await client.get("/api/web-chat/file-retention", headers=read_headers)).json()
         before = saved_settings.read_bytes()
         refused = await client.put(
-            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": 30, "scratch_days": 7}
+            "/api/web-chat/file-retention", headers=write_headers, json=wanted_values
         )
         refused_payload = await refused.json()
         after_refusal = saved_settings.read_bytes()
 
         changes.allowed.add("user_alpha")
         missing_csrf = await client.put(
-            "/api/web-chat/file-retention", headers=read_headers, json={"upload_days": 30, "scratch_days": 7}
+            "/api/web-chat/file-retention", headers=read_headers, json=wanted_values
         )
         invalid = await client.put(
-            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": -1, "scratch_days": 7}
+            "/api/web-chat/file-retention", headers=write_headers, json={**wanted_values, "upload_days": -1}
         )
         saved = await client.put(
-            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": 30, "scratch_days": 7}
+            "/api/web-chat/file-retention", headers=write_headers, json=wanted_values
         )
         saved_payload = await saved.json()
         admin_view = await (await client.get("/api/web-chat/file-retention", headers=read_headers)).json()
+        # A page from before the saved-output setting sends only the other two numbers.
+        without_outputs = await client.put(
+            "/api/web-chat/file-retention", headers=write_headers, json={"upload_days": 30, "scratch_days": 7}
+        )
+        without_outputs_payload = await without_outputs.json()
 
-    assert member_view == {"status": "ok", "upload_days": 90, "scratch_days": 21, "max_days": 3650, "can_change": False}
+    assert member_view == {
+        "status": "ok", "upload_days": 90, "scratch_days": 21, "output_days": 90, "max_days": 3650, "person_step_gb": 5,
+        "nearing_limit_percent": 80, "nearly_full_percent": 95, "max_step_gb": 10_000, "can_change": False,
+    }
     assert refused.status == 403
     assert refused_payload["error"] == "Only team administrators can change how long files are kept."
     assert after_refusal == before
     assert missing_csrf.status == 403
     assert invalid.status == 400
     assert saved.status == 200
-    assert (saved_payload["upload_days"], saved_payload["scratch_days"]) == (30, 7)
+    assert (saved_payload["upload_days"], saved_payload["scratch_days"], saved_payload["output_days"]) == (30, 7, 60)
     assert admin_view["can_change"] is True
-    assert (admin_view["upload_days"], admin_view["scratch_days"]) == (30, 7)
+    assert (admin_view["upload_days"], admin_view["scratch_days"], admin_view["output_days"]) == (30, 7, 60)
     reloaded = type(config).load_saved(config.config_path)
     assert reloaded.interactive_apps.internal_website.attachments.retention_days == 30
     assert reloaded.tool_policy.scratch_retention_days == 7
+    assert reloaded.tool_policy.output_retention_days == 60
+    assert without_outputs.status == 200 and without_outputs_payload["output_days"] == 60
     assert uploads.retention_days == 30
+    assert (saved_payload["person_step_gb"], saved_payload["nearly_full_percent"]) == (10, 90)
+    assert (reloaded.gateway.storage_warnings.person_step_gb, reloaded.gateway.storage_warnings.nearing_limit_percent) == (10, 75)
+    assert usage.step_gb == 10 and capacity.nearing_limit_percent == 75
 
 
 @pytest.mark.asyncio

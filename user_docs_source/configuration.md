@@ -140,7 +140,9 @@ including a helper agent still working on it. Changes made from a page that is
 out of date ("changed since you read it") are always refused. Memory facts,
 schedules, heartbeat items and Objectives have only that "changed since you
 read it" check. Files the agent writes with its file tools, and its shell or
-Python commands, are not checked.
+Python commands, are not checked. A file tool write replaces the whole file at
+once, so another request never reads a half-written file and two writes never
+mix, but the later write still replaces the earlier one.
 
 `agent.request_conflict_checks` (default `true`) turns the checks between
 requests on or off. With `false`, the later change is saved over the earlier
@@ -234,7 +236,8 @@ Python needs to process it. Files agents attach to messages for people are
 copied into `scratch/sent/` of the person's folder before they are sent, and
 pages agents publish for a person are written into `sites/` of that folder
 ([Generated Sites](generated-sites.md)). Old files in every `scratch/` folder
-are deleted automatically ([Scratch retention](#scratch-retention)).
+are deleted automatically ([Scratch retention](#scratch-retention)), and so
+are old saved tool outputs ([Saved tool output retention](#saved-tool-output-retention)).
 
 ### Scratch retention
 
@@ -256,6 +259,71 @@ report includes how many files it removed. Web Chat shows an attachment whose
 copy was removed as no longer available. Administrators can also change the
 number in **Settings → Team → File Retention**; the manager reads it when it
 starts, so a change there applies after the next restart.
+
+### Saved tool output retention
+
+Agents' tools save what they produce while they work, so a large result does
+not have to stay in the conversation. Each time the internal-improvement
+maintenance schedule runs (every six hours by default), the manager deletes
+those saved outputs written more than `tool_policy.output_retention_days` days
+ago (90 by default, about three months; at most 3650):
+
+- **Tool results** too large for one answer, in `state/tool_results/`, aged by
+  the date in their folder name.
+- **Long tool output saved from conversations** (conversation artifacts): the
+  full text of a tool's output that was too long to keep in the conversation,
+  in `dbs/conversation_artifacts/`, with its record in the task database, aged
+  by the record's date. These files hold tool output, not chat messages.
+- **Research results**, in `research/` of each person's folder and of `agents/`.
+  Only the result folders the research tools wrote go: they are recognized by
+  the date and time at the start of their names and aged by it. Folders and
+  files people or agents made there themselves stay, however old.
+- **Execution run folders** in `agents/execution/`: folders that an
+  interrupted run left behind, and Rust build folders not used for the period,
+  each aged by when the folder itself last changed (a build changes its
+  folder). A run or build folder is never deleted while it may still be in
+  use, and never when it is less than two days old.
+
+```yaml
+tool_policy:
+  output_retention_days: 90   # 0 keeps saved tool outputs
+```
+
+Conversations, their summaries, task links and completed tasks are kept
+whatever this number is. After a saved output is deleted, an old conversation
+still shows what the output was about, and an agent that tries to open it is
+told that it was deleted under the retention policy; the agent can run the
+tool again. Links are never followed. The maintenance run's record lists, for
+each kind, how many items, files and bytes were deleted, and the manager keeps
+the latest counts in `state/output_retention.json`. If no cleanup has
+succeeded for two days, the **Status** page warns administrators.
+Administrators can also change the number in **Settings → Team → File
+Retention**; like scratch retention it applies after the next restart.
+
+**A week's notice first.** When saved tool output retention first becomes
+active on an installation (the first maintenance run after an upgrade to
+this version, or after the number changes from 0 to a period), nothing is
+deleted for 7 days. During that week each maintenance run only counts what it
+would delete. Administrators get one Inbox notice saying on which date about
+how many items (and how much space) will be deleted, why, and what they can
+do: keep the default, change the number of days, or set it to 0 to keep
+everything. The **Status** page shows the date and the latest counts for the
+whole week and clears once deletion starts. A restart does not start the week
+again. Lowering an active period is your own choice, so it applies without a
+waiting week: the older outputs are deleted at the next maintenance run after
+the restart.
+
+**Upgrading:** the first maintenance run after the upgrade starts that week.
+Seven days later, the backlog of saved tool output older than 90 days is
+deleted, unless an administrator changed the number or set it to 0 first.
+
+Both clean-ups (scratch and saved tool outputs) run only with the
+internal-improvement maintenance schedule. They run even when the
+maintenance agent itself cannot start, but if
+`agent.schedule_maintenance.internal_improvement_review_interval_seconds` is
+0 the schedule is never set up and nothing is ever deleted: the manager says
+so in its log when it starts (`event=retention_cleanup_off`), and the Status
+page warning appears. A paused or turned-off schedule also stops them.
 
 ### Upload retention
 
@@ -283,6 +351,68 @@ older chat message says the attachment was not found.
 A person's folder is named after their user id: generated ids such as
 `usr_3f9a1b2c4d5e` are used as they are, and other ids become a readable name
 plus a short hash.
+
+### Storage notices
+
+Chat transcripts and completed tasks are kept; nothing deletes them. So that
+nobody's stored data grows unnoticed, the gateway and the manager each
+measure once a day how much they store for each active person, and the
+gateway sends the person an Inbox notice each time the total passes another
+step: at 5 GB, 10 GB, 15 GB and so on (1 GB is 1,000,000,000 bytes). The
+notice lists what takes the space: their folder, their chats, their completed
+tasks and conversation records, long texts saved with their conversations,
+and chat uploads still kept.
+
+```yaml
+gateway:
+  storage_warnings:
+    person_step_gb: 5   # 0 turns these notices off
+```
+
+Administrators can also change the step, and the levels below, in
+**Settings → Team → File Retention**; the next check uses them, without a
+restart.
+
+Each crossing is announced once, also across restarts. Someone whose data is
+first measured at 16 GB gets one notice, for 15 GB. When stored data falls
+below a step, for example after files were deleted from the person's folder,
+and later grows past it again, that is a new crossing and is announced again.
+If the manager has not measured a person's data for three days, the gateway
+sends them no notice, because the total would be incomplete. Status checks
+both processes' measurements and warns administrators when either is out of
+date, identifying the gateway or manager and which log to check. New people
+have time for the next daily check, and the first gateway check waits 15
+minutes after startup. A folder that
+cannot be fully read keeps the previous total and measurement time, so a
+permission or filesystem failure cannot make a smaller total look current.
+The sizes are
+approximate: they count the stored text and files, not the space the
+databases and the disk use to hold them. Like other notices, these appear
+only in **Settings → Inbox**, not in a chat.
+
+Administrators hear about the instance's storage on the
+[Status page](features.md#status-page): the disk holding the instance
+folder, the disk of each SQLite database when it is another one, and the
+message server's stored messages when its account has a limit. A place
+nearing its limit is a warning and one Inbox notice; nearly full is a problem
+and another notice:
+
+```yaml
+gateway:
+  storage_warnings:
+    nearing_limit_percent: 80   # warning, and administrators are told
+    nearly_full_percent: 95     # problem; must be above nearing_limit_percent
+```
+
+If a disk cannot be measured, Status reports that its free space is unknown
+and asks administrators to check the folder's availability and permissions.
+Other disks and the message server still show their results.
+
+The bundled NATS server sets no limit for stored messages, so the page notes
+how much they take instead of a percentage; they are on the instance's disk.
+When a server does set a limit for the account, the percentage counts the
+bytes stored, not the space its streams reserve, so leave room for those
+reservations (64 MB for set-aside messages).
 
 ### Upgrading from the single workspace folder
 
@@ -389,7 +519,9 @@ It owns durable non-secret settings such as:
 - Manager and gateway storage backend choices.
 - The instance root, from which every folder is derived.
 - Tool settings that are not access, such as
-  `tool_policy.scratch_retention_days`.
+  `tool_policy.scratch_retention_days` and
+  `tool_policy.output_retention_days` (see
+  [Saved tool output retention](#saved-tool-output-retention)).
 - How long chat uploads are kept (`attachments.retention_days` of the internal
   website; see [Upload retention](#upload-retention)).
 - LLM and embedding defaults.
@@ -535,6 +667,9 @@ supported public broker route split, see
 [Reverse Proxy and Docker Swarm](reverse-proxy.md).
 
 ## Storage
+
+Independent instances must use separate PostgreSQL schemas or databases.
+Separate instance folders do not isolate records kept in the same schema.
 
 Storage can be SQLite or Postgres. Postgres-backed instances should keep DSNs in
 `team.env` or process env instead of `instance_config.yaml`.
@@ -1271,6 +1406,18 @@ the operation, even with `fallback_to_files: true`. File fallback can supply
 an absent record, but cannot repair a Sealbox failure.
 
 ## Code Execution Sandbox
+
+The `python_env` tool gives each request its own default environment when the
+agent omits `env_name`. Helpers working on that request share it. Every
+scheduled run gets a separate default too. Trusted maintenance removes the
+whole default environment after 7 days without use, keeping it intact while
+a tool call is running. Save lasting results outside default environments.
+For a reusable script or a schedule that needs earlier code, give the
+environment a name explicitly. Named environments stay until deleted;
+the earlier shared environment remains available by the name `default`.
+This choice remains in effect if the original request later omits the name.
+Cleanup skips busy environments and checks them on a later maintenance run,
+so running Python code does not delay other scheduled work.
 
 Agents with `shell` or `python_env` run every command in a Linux Landlock
 sandbox unless `security_layer.mode` is `openshell` (see

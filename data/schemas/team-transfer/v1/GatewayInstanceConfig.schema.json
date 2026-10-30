@@ -3004,6 +3004,9 @@
         "storage": {
           "$ref": "#/$defs/StateStorageSettings"
         },
+        "storage_warnings": {
+          "$ref": "#/$defs/StorageWarningSettings"
+        },
         "team_id": {
           "default": "team_ua",
           "title": "Team Id",
@@ -4085,9 +4088,38 @@
       "title": "StateStorageSettings",
       "type": "object"
     },
+    "StorageWarningSettings": {
+      "description": "When people hear that the data the team stores for them has grown (``assistant_gateway.storage_usage``).",
+      "properties": {
+        "nearing_limit_percent": {
+          "default": 80,
+          "title": "Nearing Limit Percent",
+          "type": "integer"
+        },
+        "nearly_full_percent": {
+          "default": 95,
+          "title": "Nearly Full Percent",
+          "type": "integer"
+        },
+        "person_step_gb": {
+          "default": 5,
+          "title": "Person Step Gb",
+          "type": "integer"
+        }
+      },
+      "title": "StorageWarningSettings",
+      "type": "object"
+    },
     "ToolPolicySettings": {
       "description": "Tool settings that are not access (access is given with grants).",
       "properties": {
+        "output_retention_days": {
+          "default": 90,
+          "maximum": 3650,
+          "minimum": 0,
+          "title": "Output Retention Days",
+          "type": "integer"
+        },
         "scratch_retention_days": {
           "default": 21,
           "minimum": 0,

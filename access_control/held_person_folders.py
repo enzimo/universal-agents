@@ -19,14 +19,22 @@ file descriptor and removes links without following them.
 The gateway holds and restores (it applies ``/user remove`` and
 ``/user restore``); the manager and the gateway purge. Both derive every path
 from the instance layout.
+
+A held conversation's offloaded long tool output stays in its files in
+``dbs/conversation_artifacts`` while its records are held. Both purges
+delete those files with the records (``purge_held_artifact_files``) before the
+records go, so a failed purge keeps the records that name the files and the
+next purge tries again, instead of leaving files no record names.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 from access_control import safe_open
+from old_file_cleanup import OldFilesRemoved, remove_listed_file
 from runtime_settings.instance_layout import (
     HELD_PEOPLE_DIRNAME,
     STATE_DIRNAME,
@@ -109,4 +117,32 @@ def purge_folder(layout: InstanceLayout, person_id: str) -> bool:
     return True
 
 
-__all__ = ["held_folder_path", "hold_folder", "purge_folder", "restore_folder"]
+def purge_held_artifact_files(layout: InstanceLayout, person_id: str, paths: Iterable[str]) -> OldFilesRemoved:
+    """Delete the files of the person's held conversation artifacts, only inside ``dbs/conversation_artifacts``.
+
+    ``paths`` are the files the held artifact records name
+    (``PersonDepartureRepository.held_artifact_paths``). A path outside that
+    folder or through a link is left alone and logged; a file already gone
+    (the saved-output retention deletes old ones while they are held,
+    ``custom_agents.output_retention``) is not counted.
+    """
+
+    counts = OldFilesRemoved()
+    for path in paths:
+        remove_listed_file(layout.conversation_artifacts_dir, Path(path), counts)
+    if counts.failures:
+        # Keep the held rows that name these files so a later purge can retry.
+        raise OSError(f"Could not delete {counts.failures} held artifact file(s) for {person_id}")
+    if counts.files_removed or counts.skipped:
+        logger.info(
+            "Deleted a removed person's held conversation artifact files. event=person_artifact_files_purged "
+            "person_id=%s files_removed=%s bytes_removed=%s skipped=%s",
+            person_id,
+            counts.files_removed,
+            counts.bytes_removed,
+            counts.skipped,
+        )
+    return counts
+
+
+__all__ = ["held_folder_path", "hold_folder", "purge_folder", "purge_held_artifact_files", "restore_folder"]

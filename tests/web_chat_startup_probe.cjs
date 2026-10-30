@@ -87,7 +87,7 @@ async function checkSignIn(browser, earlySettings) {
     }
     assert.equal(creations, 0, "Opening Settings during sign-in must reuse saved chats");
     assert.equal(await page.locator(".thread-row.is-active .thread-button").textContent(), "Selected saved chat");
-    assert.equal(await page.getByRole("switch", { name: "Launch parallel thread" }).isChecked(), false);
+    assert.equal(await page.getByRole("switch", { name: "Run concurrently" }).isChecked(), false);
     await page.locator("#message-input").fill("Continue the existing discussion");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
     await page.getByText("Reply in the saved discussion", { exact: true }).waitFor();

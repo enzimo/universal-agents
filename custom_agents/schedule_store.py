@@ -40,7 +40,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import TYPE_CHECKING, Any, Callable, List, Mapping, Optional, TypedDict
 
 from storage.backends import STORAGE_BACKEND_SQLITE
-from custom_agents.execution_lanes import is_parallel_request
+from custom_agents.execution_lanes import schedule_runs_in_parallel_lane
 from custom_agents.schedule_fields import schedule_memory_now, trim_schedule_memory_ledger
 from storage.runtime_custody import DeferredMessageClaim
 from custom_agents.schedule_management import (
@@ -504,20 +504,8 @@ def _definition_columns(msg: "ScheduledMessage", *, remaining_count: Optional[in
         "claim_named_agent_type": msg.claim_named_agent_type,
         "claim_agent_id": msg.claim_agent_id,
         "owner_canonical_user_id": owner_canonical_user_id_for_schedule(msg),
-        "parallel_thread": 1 if runs_in_parallel(msg) else 0,
+        "parallel_thread": 1 if schedule_runs_in_parallel_lane(msg.payload_meta) else 0,
     }
-
-
-def runs_in_parallel(msg: "ScheduledMessage") -> bool:
-    """Whether the schedule's runs are parallel requests: it was set up in a parallel thread.
-
-    Its saved run metadata keeps that thread's request context, so each run
-    gets a parallel lane of its own (``custom_agents.execution_lanes``). The
-    row stores the answer so the scheduler can claim such schedules while the
-    main lane is busy (``scheduled_runtime``).
-    """
-
-    return is_parallel_request(msg.payload_meta)
 
 
 def _next_run_changed(candidate: "ScheduledMessage", base: "ScheduledMessage") -> bool:
@@ -942,7 +930,7 @@ class ScheduleStore:
                 claim_named_agent_type=getattr(msg, "claim_named_agent_type", None),
                 claim_agent_id=getattr(msg, "claim_agent_id", None),
                 owner_canonical_user_id=owner_canonical_user_id_for_schedule(msg),
-                parallel_thread=runs_in_parallel(msg),
+                parallel_thread=schedule_runs_in_parallel_lane(msg.payload_meta),
             )
             if created:
                 self._logger.info(

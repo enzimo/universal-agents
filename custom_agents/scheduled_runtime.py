@@ -48,6 +48,7 @@ from custom_agents.stuck_schedules import report_stuck_schedules
 from custom_agents.stuck_tasks import report_stuck_tasks
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS, observe_liveness
 from custom_agents.dead_letter_watch import report_dead_letters
+from custom_agents.storage_usage_runtime import keep_storage_usage_measured
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
@@ -1975,6 +1976,9 @@ async def _scheduler_pass(
     await report_stuck_tasks(agent)
     # Tell administrators about messages set aside since the last pass.
     await report_dead_letters(agent)
+    # The team lead measures people's stored data in a task of its own, at start
+    # and daily, whatever the maintenance schedules are set to.
+    keep_storage_usage_measured(agent)
     # A task left holding the work slot with no turn must not block the queue
     # until new work happens to arrive.
     await release_orphaned_slot_when_idle(agent)

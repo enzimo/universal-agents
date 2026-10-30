@@ -74,8 +74,9 @@ const { chromium } = require("playwright");
     await page.goto("https://ui.test/webchat");
     await page.locator(".thread-row").waitFor();
     await emitTeam();
+    // Busy agents are named by their type, not their id (activity_mesh.mjs).
     assert.equal(await page.locator("#chat-activity canvas").getAttribute("aria-label"),
-      "Team activity: lead, worker working.", "the sidebar mesh shows the same live status");
+      "Team activity: MemReviewAgent, TeamArchitect working.", "the sidebar mesh shows the same live status");
     await page.locator("#settings-button").click();
     assert.equal(await page.evaluate(() => permissionRequests), 0, "No automatic browser permission prompt");
     await page.getByRole("switch", { name: "Chat Alerts" }).check();

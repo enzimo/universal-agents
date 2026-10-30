@@ -90,7 +90,9 @@ class SettingsSection:
     # 4: agent.knowledge (the knowledge base's limits and blocked patterns) joined it.
     # 5: agent.max_concurrent_top_level_tasks was removed; values above 1 never had an effect.
     # 6: agent.request_conflict_checks (checks between a person's separate requests) joined it.
-    schema_version: ClassVar[int] = 6
+    # 7: tool_policy.output_retention_days (how long saved tool outputs are kept) joined it.
+    # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
+    schema_version: ClassVar[int] = 8
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -672,7 +674,10 @@ __all__ = [
 ]
 
 
-# V6 adds agent.request_conflict_checks. V5 records (v0.9.4 to v0.9.6) keep the
-# same shape and carry only values that differ from the defaults, so the step
-# passes them on unchanged and the new setting keeps its default (on).
+# V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
+# and V8 gateway.storage_warnings. Their records keep the same shape and carry
+# only values that differ from defaults, so old choices pass on unchanged and
+# settings absent from an older export use the current defaults.
 SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records
+SECTION_UPGRADES[(SettingsSection.name, 6, SettingsSection.schema_version)] = lambda records: records
+SECTION_UPGRADES[(SettingsSection.name, 7, SettingsSection.schema_version)] = lambda records: records

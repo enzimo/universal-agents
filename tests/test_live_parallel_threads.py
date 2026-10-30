@@ -1,8 +1,7 @@
 """Chat threads share a lead while workers run, through real NATS and a real gateway.
 
-Ordinary threads (New Chat) take turns on the lead's main lane; a thread
-started with Launch parallel thread runs at the same time
-(custom_agents.execution_lanes).
+Ordinary threads (New Chat) take turns on the lead's main lane; a thread set
+to Run concurrently runs at the same time (custom_agents.execution_lanes).
 """
 
 import asyncio
@@ -14,6 +13,7 @@ import pytest
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from assistant_gateway.application.website_application import WebTaskListRequestV1
 from assistant_gateway.application.website_tasks import list_tasks
+from assistant_gateway.domain.sessions import ParallelSettingOutcome
 from custom_messages.enums import ProgressState
 from id_generation import new_id
 from tests.broker_access_support import use_gateway_key
@@ -125,7 +125,11 @@ async def test_a_parallel_threads_request_finishes_while_an_ordinary_turn_is_hel
                 sends.append(first)
                 await asyncio.wait_for(turns[0].started.wait(), WAIT_SECONDS)
 
-                parallel_session = team.gateway.application.start_new_session(parallel_thread=True).session_key
+                created = team.gateway.application.start_new_session()
+                assert team.gateway.session_repository.set_session_parallel(
+                    created.session_key, conversation_id=created.conversation_id, parallel_thread=True
+                ) is ParallelSettingOutcome.SAVED
+                parallel_session = created.session_key
                 parallel = team.send("PARALLEL-REQUEST", session_key=parallel_session)
                 sends.append(parallel)
                 parallel_result = await asyncio.wait_for(asyncio.shield(parallel), WAIT_SECONDS)

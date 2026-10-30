@@ -354,7 +354,23 @@ class GatewayInteractiveSubmissionService:
                 active_task_id=task.task_id,
                 run_state=RUN_STATE_RUNNING,
             )
-        response = await self._submit_new_task(thread, task=task, correlation_id=correlation_id)
+        # The request takes the thread's Run concurrently setting now that it
+        # is recorded as open: the session read above came before awaits
+        # (personal setup), and the setting cannot change from here on until
+        # the reply (``set_session_parallel`` refuses while a request is open).
+        stored = self._session_repository.get_session(thread.session.session_key)
+        if stored is None:
+            self._logger.warning(
+                "A thread's session disappeared while its request was admitted; the request "
+                "keeps the Run concurrently setting read before admission. "
+                "event=gateway_session_missing_at_admission session_key=%s correlation_id=%s",
+                thread.session.session_key,
+                correlation_id,
+            )
+        parallel_thread = (stored or thread.session).parallel_thread
+        response = await self._submit_new_task(
+            thread, task=task, correlation_id=correlation_id, parallel_thread=parallel_thread
+        )
         return self._append_response(
             session=thread.session,
             route=thread.route,
@@ -473,6 +489,7 @@ class GatewayInteractiveSubmissionService:
         *,
         task: Task,
         correlation_id: str,
+        parallel_thread: bool,
     ) -> GatewayResponse:
         request = thread.request
         session = thread.session
@@ -520,9 +537,10 @@ class GatewayInteractiveSubmissionService:
                         delivery_mode=DELIVERY_MODE_INTERACTIVE,
                         route=thread.route,
                         manager_agent_id=manager_id,
-                        # Every request of a thread launched as parallel may run
-                        # beside the lead's other work (custom_agents.execution_lanes).
-                        parallel_thread=session.parallel_thread,
+                        # A request admitted while its thread is set to Run
+                        # concurrently may run beside the lead's other work
+                        # (custom_agents.execution_lanes).
+                        parallel_thread=parallel_thread,
                     ),
                 ),
                 msg_header=MessageHeader(

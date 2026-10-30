@@ -125,7 +125,10 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     config["tool_policy"] = deep_merge_dicts(
-        {"scratch_retention_days": TOOL_POLICY_DEFAULTS.scratch_retention_days.value},
+        {
+            "scratch_retention_days": TOOL_POLICY_DEFAULTS.scratch_retention_days.value,
+            "output_retention_days": TOOL_POLICY_DEFAULTS.output_retention_days.value,
+        },
         _mapping_or_empty(config.get("tool_policy")),
     )
     config["authorization"] = deep_merge_dicts(

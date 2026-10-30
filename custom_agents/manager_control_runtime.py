@@ -34,6 +34,7 @@ from custom_agents.pinned_memory_runtime import (
     render_pinned_memory_result,
 )
 from custom_agents.control_runtime import stop_task_execution
+from custom_agents.execution_lanes import runs_in_parallel_lane
 from custom_agents.task_human_interaction_blockers import (
     blocker_request_ids,
     get_human_interaction_blocker,
@@ -926,6 +927,9 @@ async def _runtime_work_root_summary(agent: Any, root: Any) -> RuntimeWorkSummar
     return RuntimeWorkSummary(
         root_task_id=root_task_id,
         state=root.state,
+        # A request from a thread the person launched as parallel: the team
+        # lead runs it beside its other work (custom_agents.execution_lanes).
+        is_parallel=runs_in_parallel_lane(task_manager, root),
         session_key=getattr(gateway_context, "session_key", None),
         conversation_id=getattr(root.meta, "conversation_id", None),
         objective_id=await task_manager.operations_runtime.run(
@@ -1492,7 +1496,6 @@ async def _cancel_runtime_work_roots(
                 cascade_to_subtasks=True,
                 canonical_user_id=person.canonical_user_id,
                 command_id=command.command_id,
-                send_response=False,
             )
             durable_cancellation_recorded = bool(
                 result.get("durable_cancellation_recorded")

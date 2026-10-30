@@ -45,6 +45,7 @@ from assistant_gateway.domain.request_state import (
     ToolSetupRecord,
 )
 from assistant_gateway.domain.sessions import (
+    ParallelSettingOutcome,
     SessionConversationListRecord,
     SessionConversationRecord,
     SessionListRecord,
@@ -173,6 +174,10 @@ class GatewayStateRepository(
 
     def transcript_unit_of_work(self) -> TranscriptUnitOfWork: ...
 
+    def chat_text_bytes_by_owner(self) -> dict[str, int]: ...
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]: ...
+
     def get_session(self, session_key: str) -> Optional[SessionRecord]: ...
 
     def get_session_by_conversation_id(
@@ -262,7 +267,6 @@ class GatewayStateRepository(
         thread_id: Optional[str] = None,
         status: str = "active",
         owner_canonical_user_id: Optional[str] = None,
-        parallel_thread: bool = False,
     ) -> SessionRecord: ...
 
     def upsert_session(
@@ -303,6 +307,10 @@ class GatewayStateRepository(
     ) -> None: ...
 
     def set_session_status(self, session_key: str, status: str) -> bool: ...
+
+    def set_session_parallel(
+        self, session_key: str, *, conversation_id: str, parallel_thread: bool
+    ) -> ParallelSettingOutcome: ...
 
     def set_active_session_for_channel(
         self,
@@ -1011,7 +1019,7 @@ class _RelationalGatewayStateRepository:
             self._ensure_column(
                 conn, "gateway_sessions", "owner_canonical_user_id", "TEXT"
             )
-            # Web Chat's Launch parallel thread (SessionRecord.parallel_thread).
+            # Web Chat's Run concurrently setting (SessionRecord.parallel_thread).
             self._ensure_column(
                 conn, "gateway_sessions", "parallel_thread", "INTEGER NOT NULL DEFAULT 0"
             )
@@ -1763,7 +1771,10 @@ class _RelationalGatewayStateRepository:
         earliest message that is not a slash command, so later messages
         never rename it. The command prefix is bound, not written into the
         SQL, because PostgreSQL drivers read a literal percent sign as a
-        placeholder.
+        placeholder. Each row also carries the thread's Run concurrently
+        setting and whether a request is open in its current conversation
+        (the unique running-request index makes that lookup cheap); open
+        pages read both on every event page to show and lock the switch.
         """
 
         bind = self._dialect.bind
@@ -1787,7 +1798,14 @@ class _RelationalGatewayStateRepository:
                 (SELECT t.attachment_references_json {first_ordinary}) AS first_message_attachments_json,
                 EXISTS (
                     SELECT 1 FROM gateway_transcript_messages m WHERE m.session_key = s.session_key
-                ) AS has_messages
+                ) AS has_messages,
+                s.parallel_thread,
+                EXISTS (
+                    SELECT 1 FROM gateway_requests r
+                    WHERE r.session_key = s.session_key
+                      AND COALESCE(r.conversation_id, '') = COALESCE(s.conversation_id, '')
+                      AND r.run_state = {bind}
+                ) AS has_open_request
             FROM gateway_sessions s
             WHERE s.status = 'active'
               AND s.channel_name = {bind}
@@ -1797,7 +1815,7 @@ class _RelationalGatewayStateRepository:
             LIMIT {bind}
         """
         command = "/%"
-        params: list[Any] = [command, command, channel_name, chat_id]
+        params: list[Any] = [command, command, RUN_STATE_RUNNING, channel_name, chat_id]
         if owner_canonical_user_id is not None:
             params.append(owner_canonical_user_id)
         params.append(limit)
@@ -1806,7 +1824,8 @@ class _RelationalGatewayStateRepository:
         records = []
         for row in rows:
             values = dict(row)
-            values["has_messages"] = bool(values["has_messages"])
+            for flag in ("has_messages", "parallel_thread", "has_open_request"):
+                values[flag] = bool(values[flag])
             records.append(WebChatThreadRecord(**values))
         return records
 
@@ -1927,7 +1946,6 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str] = None,
         status: str = "active",
         owner_canonical_user_id: Optional[str] = None,
-        parallel_thread: bool = False,
     ) -> SessionRecord:
         with _RepositoryTransaction(self) as transaction:
             session = self._create_session(
@@ -1941,7 +1959,6 @@ class _RelationalGatewayStateRepository:
                 thread_id=thread_id,
                 status=status,
                 owner_canonical_user_id=owner_canonical_user_id,
-                parallel_thread=parallel_thread,
             )
             transaction.commit()
             return session
@@ -1959,8 +1976,9 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str],
         status: str,
         owner_canonical_user_id: Optional[str],
-        parallel_thread: bool = False,
     ) -> SessionRecord:
+        # A new or re-created session starts with Run concurrently off; the
+        # person turns it on with ``set_session_parallel``.
         now = utc_now_iso()
         with self._connect() as conn:
             conn.execute(
@@ -1971,7 +1989,7 @@ class _RelationalGatewayStateRepository:
                     channel_name, user_id, chat_id, thread_id, owner_canonical_user_id,
                     status, created_at, updated_at, parallel_thread
                 )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, 0)
                 ON CONFLICT(session_key) DO UPDATE SET
                     session_alias = excluded.session_alias,
                     conversation_id = excluded.conversation_id,
@@ -1985,7 +2003,7 @@ class _RelationalGatewayStateRepository:
                     status = excluded.status,
                     created_at = excluded.created_at,
                     updated_at = excluded.updated_at,
-                    parallel_thread = excluded.parallel_thread
+                    parallel_thread = 0
                 """,
                 (
                     session_key,
@@ -2000,7 +2018,6 @@ class _RelationalGatewayStateRepository:
                     status,
                     now,
                     now,
-                    1 if parallel_thread else 0,
                 ),
             )
             conn.commit()
@@ -2253,6 +2270,52 @@ class _RelationalGatewayStateRepository:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def set_session_parallel(
+        self, session_key: str, *, conversation_id: str, parallel_thread: bool
+    ) -> ParallelSettingOutcome:
+        """Save a thread's Run concurrently setting unless a request is open in it.
+
+        One conditional UPDATE checks the expected conversation and the open
+        request and writes only the setting, so it never overwrites a
+        conversation switch or another write's ``last_task_id``, and a request
+        admitted at the same time either sees the new value or makes this
+        change wait for its reply (``ParallelSettingOutcome``). ``updated_at``
+        stays: the sidebar orders threads by activity, and changing a setting
+        is not activity. A second read only explains a refusal.
+        """
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_sessions
+                SET parallel_thread = {bind}
+                WHERE session_key = {bind}
+                  AND conversation_id = {bind}
+                  AND status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM gateway_requests r
+                      WHERE r.session_key = gateway_sessions.session_key
+                        AND COALESCE(r.conversation_id, '') = gateway_sessions.conversation_id
+                        AND r.run_state = {bind}
+                  )
+                """,
+                (1 if parallel_thread else 0, session_key, conversation_id, RUN_STATE_RUNNING),
+            )
+            conn.commit()
+            if cursor.rowcount > 0:
+                return ParallelSettingOutcome.SAVED
+            row = conn.execute(
+                f"SELECT conversation_id, status FROM gateway_sessions WHERE session_key = {bind}",
+                (session_key,),
+            ).fetchone()
+        current = dict(row) if row else None
+        if current is None or current["status"] != "active":
+            return ParallelSettingOutcome.NOT_FOUND
+        if current["conversation_id"] != conversation_id:
+            return ParallelSettingOutcome.CONVERSATION_CHANGED
+        return ParallelSettingOutcome.REQUEST_OPEN
 
     def set_active_session_for_channel(
         self,
@@ -2858,6 +2921,58 @@ class _RelationalGatewayStateRepository:
             ).fetchall()
             conn.commit()
         return tuple(str(row[0] or "") for row in rows)
+
+    def chat_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of each person's chat text kept here, by owner: transcripts, requests and deliveries.
+
+        For people's storage notices (``assistant_gateway.storage_usage``).
+        One aggregate per table, so no row is loaded; the byte size comes from
+        the database (``SqlDialect.text_bytes``), which on SQLite reads each
+        value once. Requests and deliveries without an owner are left out.
+        """
+
+        def text_bytes(*columns: str) -> str:
+            return " + ".join(self._dialect.text_bytes(column) for column in columns)
+
+        owned = "owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> ''"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner, SUM(stored) FROM (
+                    SELECT owner_canonical_user_id AS owner, SUM({text_bytes("content")}) AS stored
+                    FROM gateway_transcript_messages GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes("request_text")})
+                    FROM gateway_requests WHERE {owned} GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes("rendered_text", "payload_json")})
+                    FROM gateway_deliveries WHERE {owned} GROUP BY owner_canonical_user_id
+                ) AS chat_text GROUP BY owner
+                """
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]:
+        """Bytes of the chat uploads each person sent that are still kept in ``uploads_dir``.
+
+        Read from the recorded sizes. The same table records copies of files
+        sent to people in their own scratch folders; those are in the person's
+        folder, which is counted on its own, so only paths under the uploads
+        folder count (matched as in ``delete_uploads_created_before``).
+        """
+
+        bind = self._dialect.bind
+        prefix = uploads_dir.rstrip("/") + "/"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner_canonical_user_id, SUM(size_bytes) FROM gateway_attachments
+                WHERE owner_canonical_user_id IS NOT NULL AND substr(local_path, 1, {bind}) = {bind}
+                GROUP BY owner_canonical_user_id
+                """,
+                (len(prefix), prefix),
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
 
     def update_attachment_nats_ref(
         self,
