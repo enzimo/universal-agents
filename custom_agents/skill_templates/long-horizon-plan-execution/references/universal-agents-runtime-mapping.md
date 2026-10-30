@@ -148,6 +148,14 @@ for an administrator changes them. Name another task (`task_id`,
 or task outside this view gives the same reply as a missing one; do not retry
 with invented owner, task, Plan, or Objective identifiers.
 
+A one-time schedule or a counted job's final admitted run keeps its identity
+and access until the work finishes, including across worker replacement.
+Zero remaining runs means no new firing is allowed while that work finishes.
+A runtime failure notice names an unconfirmed run; inspect its task history
+and any completed effects before retrying. Such notices survive immediate
+task archival and restarts. Do not recreate a reminder merely because its
+worker instance changed.
+
 ## Use solution variation only when it helps
 
 `TeamArchitect` may use `start_solution_variation` when several materially

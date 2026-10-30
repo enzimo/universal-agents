@@ -75,6 +75,15 @@ The local scheduler keeps working while the lead is busy or paused. It checks th
 local worker registry; a remote NATS responder does not satisfy a local schedule.
 Inspect actual admission and completion before reporting successful repair.
 
+For a one-time reminder or the final run of a counted job, an admitted run
+keeps the schedule and its access until the work finishes. Zero remaining
+runs means it cannot fire again while finishing, not that its active run
+lost authority. Do not move reminders to a permanently running agent to avoid
+worker replacement. Inspect the run's history and outcome instead. A failed
+top-level scheduled task sends its owner a runtime failure notice, including
+when it started on time. That notice survives archival and restarts; check
+what effects occurred before offering a retry.
+
 ## Select and enable the intended specialist
 
 1. Call `get_available_agent_types` and choose an exact registered type that can

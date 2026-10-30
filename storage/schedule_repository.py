@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from storage.read_only import repositories_are_read_only
+from storage.schedule_occurrences import ensure_occurrence_schema, has_unfinished_runs
 
 from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 
@@ -105,7 +106,7 @@ RowDecision = Callable[[Optional[dict[str, Any]]], RowWrite]
 class ScheduleRepository(Protocol):
     def write_locked(
         self, schedule_id: str, decide: RowDecision,
-        *, deferred_message: DeferredMessageClaim | None = None,
+        *, deferred_message: DeferredMessageClaim | None = None, include_runs: bool = False,
     ) -> RowWrite: ...
 
     def add_schedule_row_if_absent(
@@ -254,6 +255,7 @@ class _RelationalScheduleRepository:
                     """
                 )
                 self._ensure_schedule_columns(conn, backend_name)
+                ensure_occurrence_schema(conn)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_scheduled_messages_objective_id ON scheduled_messages(objective_id)"
                 )
@@ -334,14 +336,17 @@ class _RelationalScheduleRepository:
 
     def write_locked(
         self, schedule_id: str, decide: RowDecision,
-        *, deferred_message: DeferredMessageClaim | None = None,
+        *, deferred_message: DeferredMessageClaim | None = None, include_runs: bool = False,
     ) -> RowWrite:
         """Read one schedule row, decide what to write and write it, in one write transaction.
 
         Every change that depends on the row's current values goes through
         here, so nothing another process writes between a read and a write is
         overwritten (``custom_agents.schedule_store``). The row stays locked
-        while ``decide`` runs (``_locked_row``). ``decide`` gets the row as a
+        while ``decide`` runs (``_locked_row``). With ``include_runs``, it also
+        reads durable occurrence receipts under that lock and adds the
+        transient ``has_unfinished_runs`` fact. Admission takes the same lock.
+        ``decide`` gets the row as a
         dict, or None when there is none, and must do no I/O; an exception
         from it rolls the transaction back and propagates. A delayed retry
         checks and consumes its exact deferred reply in this same transaction,
@@ -356,8 +361,11 @@ class _RelationalScheduleRepository:
                 check_deferred_message(
                     conn, self._dialect, deferred_message, consume=True, logger=self._logger,
                 )
-            row = self._locked_row(conn, schedule_id)
-            write = decide(dict(row) if row is not None else None)
+            stored = self._locked_row(conn, schedule_id)
+            row = dict(stored) if stored is not None else None
+            if row is not None and include_runs:
+                row["has_unfinished_runs"] = has_unfinished_runs(conn, self._dialect, schedule_id)
+            write = decide(row)
             self._apply_write(conn, schedule_id, write, existed=row is not None)
             conn.commit()
         return write
@@ -410,6 +418,7 @@ class _RelationalScheduleRepository:
                 """
                 SELECT * FROM scheduled_messages
                  WHERE enabled = 1
+                   AND (remaining_count IS NULL OR remaining_count > 0)
                  ORDER BY next_fire_at ASC
                 """
             ).fetchall()
@@ -435,6 +444,7 @@ class _RelationalScheduleRepository:
                 f"""
                 SELECT * FROM scheduled_messages
                  WHERE enabled = 1
+                   AND (remaining_count IS NULL OR remaining_count > 0)
                    AND (paused_until IS NULL OR paused_until <= {self._dialect.bind})
                    AND next_fire_at <= {self._dialect.bind}
                    AND (expires_at_utc IS NULL OR expires_at_utc > {self._dialect.bind})
@@ -464,6 +474,7 @@ class _RelationalScheduleRepository:
     def _claim_eligibility_sql(self) -> str:
         return f"""
             enabled = 1
+            AND (remaining_count IS NULL OR remaining_count > 0)
             AND (paused_until IS NULL OR paused_until <= {self._dialect.bind})
             AND next_fire_at <= {self._dialect.bind}
             AND (expires_at_utc IS NULL OR expires_at_utc > {self._dialect.bind})
@@ -536,20 +547,37 @@ class _RelationalScheduleRepository:
             return cursor.rowcount > 0
 
     def prune_expired(self, *, now_iso: str) -> list[str]:
-        """Delete schedules past their end; returns their ids (the store ends their access)."""
+        """Remove exhausted or expired schedules only after their admitted work ends.
+
+        Zero remaining runs is durable exhaustion, not a disable: a live run
+        keeps its identity and grants, but no scheduler may claim another run.
+        Each decision locks the same row as admission and edits.
+        """
 
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                DELETE FROM scheduled_messages
-                 WHERE expires_at_utc IS NOT NULL
-                   AND expires_at_utc <= {self._dialect.bind}
-                RETURNING schedule_id
+                SELECT schedule_id FROM scheduled_messages
+                 WHERE remaining_count = 0
+                    OR (expires_at_utc IS NOT NULL AND expires_at_utc <= {self._dialect.bind})
                 """,
                 (now_iso,),
             ).fetchall()
-            conn.commit()
-        return [str(row[0]) for row in rows]
+
+        def decide(row: Optional[dict[str, Any]]) -> RowWrite:
+            if row is None or not (
+                row.get("remaining_count") == 0
+                or (row.get("expires_at_utc") and row["expires_at_utc"] <= now_iso)
+            ):
+                return RowWrite(result=False)
+            if row["has_unfinished_runs"]:
+                return RowWrite(columns={"remaining_count": 0}, result=False)
+            return RowWrite(delete=True, result=True)
+
+        return [
+            str(row[0]) for row in rows
+            if self.write_locked(str(row[0]), decide, include_runs=True).result
+        ]
 
     def get_next_wake_time(self, *, parallel_thread: Optional[bool] = None) -> Optional[str]:
         parallel_sql, parallel_params = self._parallel_claim_sql(parallel_thread)
@@ -570,6 +598,7 @@ class _RelationalScheduleRepository:
                     )
                 FROM scheduled_messages
                 WHERE enabled = 1
+                  AND (remaining_count IS NULL OR remaining_count > 0)
                 {parallel_sql}
                 """,
                 parallel_params,
@@ -579,7 +608,8 @@ class _RelationalScheduleRepository:
     def count_enabled(self) -> int:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) FROM scheduled_messages WHERE enabled = 1"
+                "SELECT COUNT(*) FROM scheduled_messages WHERE enabled = 1 "
+                "AND (remaining_count IS NULL OR remaining_count > 0)"
             ).fetchone()
         return row[0] if row else 0
 

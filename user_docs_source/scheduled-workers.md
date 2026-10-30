@@ -127,6 +127,20 @@ checked, the owner's current roles and standing are read (at most 30 seconds
 old), so a role change, a disabled or removed owner, or a deleted or turned-off
 schedule takes effect on the run within 30 seconds.
 
+A one-time reminder and the last run of a repeating job keep their schedule
+and job access until the admitted work finishes. They cannot fire again while
+finishing. This also lets a replacement worker resume an interrupted final
+run. Cleanup then removes the schedule and ends its job access.
+
+If a scheduled task ends in a runtime failure, the owner receives an Inbox
+notice and a chat message when a delivery chat is available. The notice says
+the result is unconfirmed and names the run to inspect before retrying. It
+survives task archival and restarts; delivery failures are logged and retried.
+These notices also cover runs that started on time. Successful checks can
+still finish quietly, including one-time checks created from an earlier chat
+request. The schedule's `notify_on_failure` policy continues to govern its
+reported check results, rather than these runtime failures.
+
 TeamLead gives a person's schedule a permit only when the person is active and
 the schedule was saved from that person's own request (or is managed by
 Universal Agents itself). A schedule without a permit still runs: the worker

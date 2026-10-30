@@ -279,6 +279,9 @@ def _rerun_blocker(
         return HANDBACK_STATUS_CLOSED_SCHEDULE_INACTIVE, "schedule_disabled"
     if paused_until is not None and paused_until > now:
         return HANDBACK_STATUS_CLOSED_SCHEDULE_INACTIVE, "schedule_paused"
+    if row.get("remaining_count") == 0:
+        # This is the admitted final run, not another fire due in the past.
+        return None
     next_run = _as_time(row.get("next_fire_at"))
     binding = records.get_binding(occurrence.schedule_id, team_id=agent.team_id)
     rules = effective_worker_rules(

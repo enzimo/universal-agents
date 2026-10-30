@@ -18,14 +18,11 @@ from custom_messages.contracts.schedule_worker_v1 import (
 def prepare_occurrence(
     agent: Any, schedule: Any, claim_token: str
 ) -> ScheduleOccurrenceV1 | None:
-    from custom_agents.local_schedule_policy import supports_local_worker
-
-    # Child timers and unscoped runtime maintenance retain their existing
-    # correlation semantics. Autonomous workers only accept typed root jobs.
-    if (
-        not supports_local_worker(schedule)
-        or not schedule.claim_named_agent_type
-    ):
+    # Every typed root task needs a durable receipt, including runtime-managed
+    # root timers that are not eligible for automatic local worker startup.
+    # Child timers keep their existing correlation. Specialized launchers use
+    # their own admission path rather than admitting the root payload.
+    if schedule.payload.parent_task_id or not schedule.claim_named_agent_type:
         return None
     occurrence_id = occurrence_identity(schedule.schedule_id, schedule.next_fire_at)
     binding = agent._schedule_store.worker_records.get_binding(

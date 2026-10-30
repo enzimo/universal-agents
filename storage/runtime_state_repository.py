@@ -11,6 +11,8 @@ from typing import Any
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord, decode_runtime_snapshot
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.schedule_worker_repository import ScheduleWorkerRepository
+from storage.schedule_occurrences import ensure_occurrence_schema
+from storage.scheduled_run_failure_repository import ScheduledRunFailureRepository
 from storage.change_ledger import ensure_ledger_tables, record_task_request_state, require_same_request_identity
 from storage import task_custody_repository as custody
 from storage.task_custody_repository import (
@@ -301,7 +303,8 @@ class _RelationalRuntimeStateRepository:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
                 ensure_ledger_tables(conn, self._dialect)
-                ScheduleWorkerRepository.ensure_occurrence_schema(conn)
+                ensure_occurrence_schema(conn)
+                ScheduledRunFailureRepository.ensure_schema(conn)
                 custody.ensure_schema(conn)
                 conn.execute(
                     """
@@ -629,6 +632,7 @@ class _RelationalRuntimeStateRepository:
         from custom_messages.enums import ProgressState
 
         record_task_request_state(conn, self._dialect, team_id=team_id, task=task, now=datetime.now(timezone.utc))
+        ScheduledRunFailureRepository.record(conn, self._dialect, task, team_id, owner_agent_id)
         if task.state in {ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED}:
             ScheduleWorkerRepository.record_terminal_task(
                 conn, self._dialect, agent_id=owner_agent_id, task_id=task.task_id, outcome=task.state.value,

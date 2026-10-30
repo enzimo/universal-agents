@@ -28,8 +28,11 @@ reminder so that it could never finish. Now:
   (``schedule_stopped_reason``), and typed root jobs again at admission
   (``ScheduleWorkerRepository.commit_admission``). The advance after a run
   (``update_after_fire``) writes only the run time, the count and the claim.
-- Every deletion (``remove``, the advance that finishes a schedule,
-  ``prune_expired``) ends the schedule's access grants.
+- A final admission sets ``remaining_count`` to zero while any durable run
+  receipt is unfinished. The row stays enabled for identity and job access,
+  but claims, wake times and enabled-work listings exclude exhausted rows.
+  ``prune_expired`` removes them after their terminal snapshot closes the
+  receipts. Every actual deletion ends the schedule's access grants.
 """
 
 import logging
@@ -87,6 +90,7 @@ class AdvanceOutcome(StrEnum):
 
     ADVANCED = "advanced"  # the next run time and remaining count moved on
     FINISHED = "finished"  # that was the schedule's last run; it was removed
+    FINISHING = "finishing"  # no further fires; admitted work still needs its identity and access
     NOT_FOUND = "not_found"  # the schedule was removed during the run
     CLAIM_LOST = "claim_lost"  # another agent holds the schedule's claim now
     DUE_CHANGED = "due_changed"  # its next run time changed during the run; that change stands
@@ -94,7 +98,7 @@ class AdvanceOutcome(StrEnum):
 
     @property
     def applied(self) -> bool:
-        return self in (AdvanceOutcome.ADVANCED, AdvanceOutcome.FINISHED)
+        return self in (AdvanceOutcome.ADVANCED, AdvanceOutcome.FINISHED, AdvanceOutcome.FINISHING)
 
 
 @dataclass(frozen=True)
@@ -679,6 +683,23 @@ def is_final_run(row: Mapping[str, Any]) -> bool:
     return remaining == 1 or (not recurring and remaining is None)
 
 
+def _retain_unfinished_run(row: Mapping[str, Any], write: RowWrite) -> RowWrite:
+    """Natural completion keeps authority for admitted work; explicit removal does not."""
+    if not write.delete or not row["has_unfinished_runs"]:
+        return write
+    return RowWrite(
+        columns={"remaining_count": 0, **_CLEARED_CLAIM},
+        result=(AdvanceOutcome.FINISHING, write.result[1]),
+    )
+
+
+def _rearm_moved_reminder(remaining: Optional[int], candidate: "ScheduledMessage", base: "ScheduledMessage") -> Optional[int]:
+    """Moving an already admitted one-time reminder requests one new future run."""
+    if remaining != 0 or candidate.interval_ms is not None or candidate.cron_expression:
+        return remaining
+    return 1 if _next_run_changed(candidate, base) else remaining
+
+
 class ScheduleStore:
     """Runtime-facing scheduled-message store backed by the selected repository."""
 
@@ -765,7 +786,7 @@ class ScheduleStore:
             elif msg.repeat_count != row.get("repeat_count"):
                 remaining = msg.repeat_count
             else:
-                remaining = row.get("remaining_count")
+                remaining = _rearm_moved_reminder(row.get("remaining_count"), msg, current)
             written = msg.model_copy(deep=True)
             written.timing_revision = current.timing_revision + int(_next_run_changed(msg, current))
             return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=SCHEDULE_REPLACED)
@@ -878,7 +899,7 @@ class ScheduleStore:
             elif candidate.repeat_count != base.repeat_count:
                 remaining = candidate.repeat_count
             else:
-                remaining = row.get("remaining_count")
+                remaining = _rearm_moved_reminder(row.get("remaining_count"), candidate, base)
             return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=written)
 
         write = self._repository.write_locked(schedule_id, decide)
@@ -1038,7 +1059,7 @@ class ScheduleStore:
         claimer_agent_id: Optional[str] = None,
         due_at: Optional[str] = None,
     ) -> AdvanceOutcome:
-        """Move a schedule on after a run was admitted: its next run time and count, or remove it.
+        """Advance a schedule, retaining an exhausted row while admitted work is unfinished.
 
         In one write transaction, and only while this agent still holds the
         claim (when given) and the next run time is still ``due_at``, the run
@@ -1048,7 +1069,9 @@ class ScheduleStore:
         the new time (``_after_retimed_run``). Writes only the run time, the
         remaining count and the claim, so a pause or turn-off made during the
         run stays. The next run is computed from the later of now and
-        ``due_at``. The caller logs an outcome that is not ``applied``.
+        ``due_at``. A final run keeps the row and its grants until all its
+        durable receipts finish, including a run merged into earlier work.
+        The caller logs an outcome that is not ``applied``.
         """
 
         now = datetime.now(timezone.utc)
@@ -1061,15 +1084,17 @@ class ScheduleStore:
             ):
                 return RowWrite(result=(AdvanceOutcome.CLAIM_LOST, None))
             if due_at is not None and row.get("next_fire_at") != due_at:
-                return _after_retimed_run(row, release_claim=bool(claim_token))
+                return _retain_unfinished_run(row, _after_retimed_run(row, release_claim=bool(claim_token)))
             after = _after_run(row, due_at or row.get("next_fire_at"), now)
             if after.next_fire_at is None:
-                return RowWrite(delete=True, result=(AdvanceOutcome.FINISHED, after))
+                return _retain_unfinished_run(row, RowWrite(delete=True, result=(AdvanceOutcome.FINISHED, after)))
             columns = {"next_fire_at": after.next_fire_at, "remaining_count": after.remaining_count, **_CLEARED_CLAIM}
             return RowWrite(columns=columns, result=(AdvanceOutcome.ADVANCED, after))
 
         try:
-            result: tuple[AdvanceOutcome, Optional[_AfterRun]] = self._repository.write_locked(schedule_id, decide).result
+            result: tuple[AdvanceOutcome, Optional[_AfterRun]] = self._repository.write_locked(
+                schedule_id, decide, include_runs=True,
+            ).result
         except Exception:
             self._logger.exception(
                 "Could not move a schedule on after its run. event=schedule_advance_failed "
@@ -1100,7 +1125,13 @@ class ScheduleStore:
         (``scheduled_runtime``).
         """
 
-        if after is not None and after.reason == RETIMED_FINAL_RUN_KEPT:
+        if outcome is AdvanceOutcome.FINISHING:
+            self._logger.info(
+                "A schedule admitted its final run; keeping its identity and access until its work finishes. "
+                "event=schedule_final_run_pending schedule_id=%s agent_id=%s",
+                schedule_id, agent_id,
+            )
+        elif after is not None and after.reason == RETIMED_FINAL_RUN_KEPT:
             self._logger.info(
                 "A one-time schedule's run time was changed while its run was under way; it stays at the new "
                 "time. event=schedule_retimed_during_final_run_kept schedule_id=%s due_at=%s next_fire_at=%s "
@@ -1201,7 +1232,7 @@ class ScheduleStore:
         )
 
     def prune_expired(self, *, now: Optional[datetime] = None) -> int:
-        """Remove schedules whose explicit expiration timestamp has passed."""
+        """Remove exhausted or expired schedules after their admitted work finishes."""
         now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         try:
             pruned = self._repository.prune_expired(now_iso=now_dt.isoformat())
@@ -1210,7 +1241,7 @@ class ScheduleStore:
             return 0
         if pruned:
             self._logger.warning(
-                "Pruned %s expired scheduled message%s at %s. schedule_ids=%s",
+                "Removed %s finished or expired scheduled message%s at %s. schedule_ids=%s",
                 len(pruned),
                 "" if len(pruned) == 1 else "s",
                 now_dt.isoformat(),

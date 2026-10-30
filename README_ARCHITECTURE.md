@@ -515,6 +515,28 @@ move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
 A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Final job admission does not remove the schedule's identity or access. While
+its durable occurrence receipts are unfinished, `remaining_count = 0` means
+that no more fires may be claimed; the enabled row remains available to the
+access hook and broker. The scheduler's pruning pass removes exhausted and
+expired rows only after their admitted work reaches a terminal snapshot.
+This keeps final runs authorized across worker replacement without accepting
+a deliberately deleted or disabled schedule. Run notes and job access remain
+available until that cleanup. Internal timers that admit no work can finish
+immediately. A one-time schedule explicitly moved to a new time during its run
+keeps one future run.
+
+Failed top-level timer tasks save a pending notice in `scheduled_run_failures`
+inside the terminal snapshot transaction, before immediate task archival.
+`custom_agents.scheduled_run_failures` delivers these records from the lead's
+scheduler pass, verifying the original scheduler signature for attribution.
+It sends an owner Inbox notice and a chat notification, or an administrators'
+Inbox notice for system work. Failed sends retry with stable notice and
+gateway delivery ids; delivered rows discard identity and routing but retain
+their deduplication key. These operational records are not team-transfer data.
+This reports terminal task failures even when their runs started on time;
+the schedule memory policy still governs model-reported observations.
+
 Every write that depends on a schedule's current values reads, decides and
 writes in one write transaction (`ScheduleRepository.write_locked`: SQLite's
 write lock, or PostgreSQL's schedule-id and row locks). A run changes only its

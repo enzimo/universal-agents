@@ -13,6 +13,7 @@ from custom_agents.access_runtime import resolve_meta_identity, verified_meta_pe
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run
 from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run
+from custom_agents.scheduled_run_failures import report_scheduled_run_failures
 from custom_agents.task_context_runtime import inactive_owner, run_owner, scheduled_owner_roles
 from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
@@ -1340,7 +1341,7 @@ def _fired_header_and_meta(
     internal_meta.objective_id = scheduled_message.objective_id or getattr(
         internal_meta, "objective_id", None
     )
-    if _is_recurring(scheduled_message) and task.parent_task_id is None:
+    if task.parent_task_id is None:
         internal_meta.followup_to_task_id = None
     internal_meta = agent._ensure_request_timezone(
         internal_meta,
@@ -1972,6 +1973,7 @@ async def _scheduler_pass(
         )
     # Tell people about stuck schedules and tasks, and when they work again.
     await report_stuck_schedules(agent)
+    await report_scheduled_run_failures(agent)
     observe_liveness(agent)
     await report_stuck_tasks(agent)
     # Tell administrators about messages set aside since the last pass.
