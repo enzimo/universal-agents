@@ -382,3 +382,29 @@ def test_finishing_and_removal_are_logged_at_their_levels(world, caplog):
     removal = [record for record in caplog.records if "event=schedule_finished_removed" in record.getMessage()]
     assert [record.levelname for record in removal] == ["INFO"]
 
+
+def test_a_finishing_schedule_shows_as_its_last_run_not_as_overdue(world):
+    """The Settings card, the "working again" notice, telemetry and the agent's listing agree."""
+
+    from types import SimpleNamespace
+
+    from custom_agents.stuck_schedules import StuckSchedules, not_running
+    from custom_tools.schedule_inspection import ScheduleView, list_schedule_payloads
+    from storage.stuck_work_repository import StuckWorkIncidentV1
+
+    start_final_run(world)
+    later = datetime.now(timezone.utc) + timedelta(hours=1)  # its due time is well past
+    schedule = world.store.get_scheduled_message(SCHEDULE_ID)
+    assert not_running(world.store, schedule, now=later) is None
+    telemetry = world.store.build_telemetry_snapshot(now=later)
+    assert telemetry["summary"]["due"] == 0 and telemetry["summary"]["next_fire_at"] is None
+    assert telemetry["schedules"][0]["final_run_in_progress"] is True
+    [listed] = list_schedule_payloads(world.store, view=ScheduleView(owner=ANN))
+    assert (listed["final_run_in_progress"], listed["remaining_runs"]) == (True, 0)
+    lead = SimpleNamespace(id="manager_1", team_id=TEAM, _schedule_store=world.store, instance_config_path=None)
+    recovery = StuckSchedules(lead).recovery(StuckWorkIncidentV1(
+        team_id=TEAM, subject_kind="schedule", subject_id=SCHEDULE_ID, incident_key=schedule.next_fire_at,
+        reason="schedule_overdue_unclaimed", person_id=ANN, first_seen_at_utc=later,
+    ))
+    assert recovery.message.title == 'Schedule "Starship launch check" ran'
+    assert "next run" not in recovery.message.text

@@ -727,6 +727,9 @@ def list_scheduled_jobs(
     available only through these exact-schedule detail pages.
     Each schedule has a `record_digest`, the version you read: pass it as
     `expected_record_digest` to update, pause, resume, disable or remove it.
+    `final_run_in_progress: true` means its last run started and is still
+    working: it will not run again and is removed when that run ends. It is
+    not overdue or broken; do not recreate or re-arm it unless asked.
     """
     agent = get_agent_ref()
     if agent is None:

@@ -1344,7 +1344,9 @@ class ScheduleStore:
             next_fire_dt = _parse_utc_datetime(row.get("next_fire_at"))
             paused_until_dt = _parse_utc_datetime(row.get("paused_until"))
             is_paused = bool(paused_until_dt and paused_until_dt > now_dt)
-            is_due = bool(enabled and not is_paused and next_fire_dt and next_fire_dt <= now_dt)
+            # A finishing schedule's past run time is its running last run's.
+            runs_again = enabled and not is_paused and not is_finishing(row)
+            is_due = bool(runs_again and next_fire_dt and next_fire_dt <= now_dt)
             interval_ms = row.get("interval_ms")
             cron_expression = row.get("cron_expression")
             repeat_count = row.get("repeat_count")
@@ -1362,7 +1364,7 @@ class ScheduleStore:
                 summary["recurring"] += 1
             else:
                 summary["one_shot"] += 1
-            if enabled and not is_paused and next_fire_dt:
+            if runs_again and next_fire_dt:
                 if summary["next_fire_at"] is None or next_fire_dt.isoformat() < summary["next_fire_at"]:
                     summary["next_fire_at"] = next_fire_dt.isoformat()
 
@@ -1399,6 +1401,7 @@ class ScheduleStore:
                     "enabled": scheduled_message.enabled,
                     "paused": is_paused,
                     "due": is_due,
+                    "final_run_in_progress": is_finishing(row),
                     "created_at": scheduled_message.created_at,
                     "next_fire_at": scheduled_message.next_fire_at,
                     "paused_until": scheduled_message.paused_until,
