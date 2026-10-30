@@ -92,14 +92,17 @@ from knowledge_base.vocabulary import (
 from custom_messages.enums import ChangeRecordKind
 from runtime_settings.knowledge import KnowledgeWriteLimits
 from storage.change_ledger import (
+    ALL_FIELDS,
     ChangeRefused,
     ChangeType,
     ChangeWriter,
     ChangeWriterKind,
+    PlannedChange,
     RecordRef,
     check_change,
     ensure_ledger_tables,
     record_change,
+    save_review,
 )
 from storage.read_only import repositories_are_read_only
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
@@ -831,6 +834,7 @@ class _RelationalKnowledgeRepository:
                     )
                 return page
         except KnowledgeError as error:
+            self._save_ledger_review(error)
             self.record_refusal(
                 change.actor,
                 action=action,
@@ -863,8 +867,8 @@ class _RelationalKnowledgeRepository:
         current = self._page_for_update(conn, change.key)
         # Before the version check: a change another request made while this
         # one ran is refused even when this request read the new version.
-        change_type = ChangeType.CREATE if current is None else ChangeType.CHANGE
-        self._check_ledger(conn, change.key, change.actor, current, change_type=change_type, now=now)
+        planned = _planned_page_change(change, current)
+        self._check_ledger(conn, change.key, change.actor, planned, now=now)
         if change.base_revision == 0:
             if current is not None:
                 raise KnowledgeError(
@@ -901,41 +905,29 @@ class _RelationalKnowledgeRepository:
             contribution_id=change.contribution_id,
             now=now,
         )
-        self._record_ledger(conn, page, change.actor, change_type=change_type, now=now)
+        self._record_ledger(conn, page, change.actor, planned, now=now)
         return page
 
     # -- the change ledger (storage.change_ledger) ---------------------------------------
 
     def _check_ledger(
-        self,
-        conn: Any,
-        key: PageKey,
-        actor: KnowledgeActor,
-        page: Optional[KnowledgePage],
-        *,
-        change_type: ChangeType,
-        now: datetime,
+        self, conn: Any, key: PageKey, actor: KnowledgeActor, planned: PlannedChange, *, now: datetime
     ) -> None:
         """Refuse a personal page change the person's request may not make now (team pages are reviewed instead)."""
 
         if key.space is not KnowledgeSpace.PERSONAL:
             return
-        page_id = page.page_id if page is not None else ""
+        page_id = "" if planned.change_type is ChangeType.CREATE else planned.record.key
         try:
-            check_change(
-                conn,
-                self._dialect,
-                team_id=key.team_id,
-                writer=_change_writer(actor),
-                record=RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, page_id or key.reference()),
-                change_type=change_type,
-                now=now,
-            )
+            check_change(conn, self._dialect, team_id=key.team_id, writer=_change_writer(actor), change=planned, now=now)
         except ChangeRefused as refused:
-            raise KnowledgeError(refused.reason.value, refused.message, {"page_id": page_id, **refused.details}) from None
+            raise KnowledgeError(
+                refused.reason.value, refused.message, {"page_id": page_id, **refused.details},
+                ledger_review=refused.review,
+            ) from None
 
     def _record_ledger(
-        self, conn: Any, page: KnowledgePage, actor: KnowledgeActor, *, change_type: ChangeType, now: datetime
+        self, conn: Any, page: KnowledgePage, actor: KnowledgeActor, planned: PlannedChange, *, now: datetime
     ) -> None:
         if page.space is not KnowledgeSpace.PERSONAL:
             return
@@ -944,11 +936,27 @@ class _RelationalKnowledgeRepository:
             self._dialect,
             team_id=page.team_id,
             writer=_change_writer(actor),
-            record=RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, page.page_id),
-            change_type=change_type,
+            change=replace(planned, record=RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, page.page_id)),
             version=str(page.revision),
             now=now,
         )
+
+    def _save_ledger_review(self, error: KnowledgeError) -> None:
+        """Save what a refused request was shown, after its transaction rolled back (storage.change_ledger)."""
+
+        if error.ledger_review is None or repositories_are_read_only():
+            return
+        try:
+            with self._write() as conn:
+                save_review(conn, self._dialect, error.ledger_review)
+        except Exception:
+            # The refusal still stands; without the saved review the request is shown the same change again.
+            self._logger.exception(
+                "Could not save what a refused request was shown. event=knowledge_ledger_review_failed "
+                "request_id=%s case_id=%s",
+                error.ledger_review.request_id,
+                error.ledger_review.case_id,
+            )
 
     def _check_agent_limits(
         self,
@@ -1170,6 +1178,7 @@ class _RelationalKnowledgeRepository:
             with self._write() as conn:
                 return self._merge_pages(conn, merge, now=now)
         except KnowledgeError as error:
+            self._save_ledger_review(error)
             self.record_refusal(
                 merge.target.actor,
                 action=WriteAction.MERGE,
@@ -1283,7 +1292,8 @@ class _RelationalKnowledgeRepository:
                     note, page_id=page.page_id, team_id=page.team_id,
                     space=page.space, owner_person_id=page.owner_person_id,
                 )
-                self._check_ledger(conn, page.key, actor, page, change_type=ChangeType.APPEND, now=now)
+                noted = _noted_page(page)
+                self._check_ledger(conn, page.key, actor, noted, now=now)
                 if limits is not None:
                     self._check_hourly_writes(conn, actor, limits=limits, now=now, page_id=page.page_id)
                 conn.execute(
@@ -1324,7 +1334,7 @@ class _RelationalKnowledgeRepository:
                     contribution_id=contribution_id,
                     now=now,
                 )
-                self._record_ledger(conn, page, actor, change_type=ChangeType.APPEND, now=now)
+                self._record_ledger(conn, page, actor, noted, now=now)
         except KnowledgeError as error:
             self.record_refusal(actor, action=WriteAction.NOTE, page_id=page.page_id, reason=error.code, now=now)
             raise
@@ -2098,6 +2108,53 @@ def knowledge_row_converters() -> dict[str, Any]:
 def _require_transfer_table(table: str) -> None:
     if table not in KNOWLEDGE_TRANSFER_TABLES:
         raise ValueError(f"{table!r} is not a knowledge table the transfer carries.")
+
+
+def _page_values(
+    title: str, page_type: str, summary: str, tags: tuple[str, ...], body: str, status: PageStatus
+) -> dict[str, str]:
+    """A page's fields as the change ledger names them, as text for a brief."""
+
+    return {
+        "title": title,
+        "type": page_type,
+        "summary": summary,
+        "tags": ", ".join(tags),
+        "body": body,
+        "status": status.value,
+    }
+
+
+def _planned_page_change(change: PageChange, current: Optional[KnowledgePage]) -> PlannedChange:
+    """Describe a page change for the change ledger: which fields it sets, and their values now and planned.
+
+    Archiving removes the page from use, so it overlaps every field another
+    writer set; restoring changes only the status.
+    """
+
+    label = change.key.reference()
+    if current is None:
+        record = RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, label)
+        return PlannedChange(record, ChangeType.CREATE, label=label, fields=frozenset({ALL_FIELDS}))
+    draft = change.draft
+    now = _page_values(current.title, current.page_type, current.summary, current.tags, current.body, current.status)
+    planned = _page_values(draft.title, draft.page_type, draft.summary, draft.tags, draft.body, change.status)
+    changed = frozenset(name for name, value in planned.items() if value != now[name])
+    archiving = change.status is PageStatus.ARCHIVED and current.status is not PageStatus.ARCHIVED
+    return PlannedChange(
+        RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, current.page_id),
+        ChangeType.CHANGE,
+        label=label,
+        fields=frozenset({ALL_FIELDS}) if archiving else changed,
+        current=now,
+        planned={name: planned[name] for name in sorted(changed)},
+    )
+
+
+def _noted_page(page: KnowledgePage) -> PlannedChange:
+    return PlannedChange(
+        RecordRef(ChangeRecordKind.KNOWLEDGE_PAGE, page.page_id), ChangeType.APPEND, label=page.reference()
+    )
 
 
 def _change_writer(actor: KnowledgeActor) -> ChangeWriter:

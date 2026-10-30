@@ -324,9 +324,10 @@ that comes due while the previous one is still working is skipped.
 Each thread keeps its own conversation history and summaries. Saved team facts
 and your preferences remain available across your threads. Use it only for work
 that does not change the same things as your other running requests:
-the agent does not coordinate them. If two of your requests change the same
-page of your personal knowledge, the later change is refused, unless an
-operator turned these checks off with `agent.request_conflict_checks`
+the agent does not coordinate them. If something changes a page of your
+personal knowledge while a request is working on it, that request is shown what
+changed before it saves, and leaves the choice to you when both changed the same
+part, unless an operator turned these checks off with `agent.request_conflict_checks`
 ([Separate requests changing the same record](configuration.md#separate-requests-changing-the-same-record)).
 Memory facts, schedules, heartbeat items and Objectives refuse a change only
 when it was decided from an older version of the record, so one request can

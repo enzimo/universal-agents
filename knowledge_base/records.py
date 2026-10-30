@@ -280,12 +280,17 @@ class KnowledgeError(Exception):
 
     ``code`` is stable for callers; ``message`` says what did not happen and
     what to do instead; ``details`` carries ids and numbers, never content
-    that a rule refused.
+    that a rule refused. A change another writer made while the request ran
+    adds the change ledger's brief: values the person may read, with anything
+    that looks like a credential hidden. ``ledger_review`` is what that
+    request was shown (``storage.change_ledger.PendingReview``); the store
+    saves it after the refused transaction rolls back.
     """
 
     code: str
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+    ledger_review: Any = field(default=None, repr=False)
 
     def __str__(self) -> str:
         return self.message

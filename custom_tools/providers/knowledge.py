@@ -257,7 +257,10 @@ def knowledge_write(
     its revision as base_revision; send the whole new body. Empty title and body
     keep their current values; omit summary to keep it or send "" to clear it.
     If someone saved first, you get the newer revision
-    to merge. Prefer knowledge_add_note for a small observation.
+    to merge. If someone else changed your personal page while your request ran,
+    you first get a brief of what changed (change_conflict); then save only
+    fields that change left alone, and leave the ones it set to the person
+    (needs_person_decision). Prefer knowledge_add_note for a small observation.
 
     In work for a person, changes to team pages are proposed for review and
     published later. Never include passwords, keys, tokens or identity
