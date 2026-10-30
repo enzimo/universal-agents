@@ -241,8 +241,9 @@ def test_transfer_keeps_zero_remaining_runs_so_an_exhausted_job_cannot_replay(tm
     _plan, config = _transfer(tmp_path, config_path)
     destination = ScheduleStore(storage_settings=config.manager_storage_settings)
     row = destination.get_row("sched_once_future")
-    assert row is None or row["remaining_count"] == 0
-    destination.prune_expired()
+    assert row is not None and row["remaining_count"] == 0, "it arrives as it left: finishing"
+    # Its run did not move, so nothing keeps it: cleanup removes it instead of running it again.
+    assert destination.prune_expired() == 1
     assert destination.get_scheduled_message("sched_once_future") is None
 
 
