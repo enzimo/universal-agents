@@ -234,6 +234,19 @@ def _outcome(outcomes: dict[str, Any], key: str) -> RecordOutcome:
     return outcomes[key].outcome
 
 
+def test_transfer_keeps_zero_remaining_runs_so_an_exhausted_job_cannot_replay(tmp_path: Path) -> None:
+    config_path, source = _old_instance(tmp_path)
+    schedule = source.get_scheduled_message("sched_once_future")
+    source.add(schedule, remaining_count_override=0)
+    _plan, config = _transfer(tmp_path, config_path)
+    destination = ScheduleStore(storage_settings=config.manager_storage_settings)
+    row = destination.get_row("sched_once_future")
+    assert row is not None and row["remaining_count"] == 0, "it arrives as it left: finishing"
+    # Its run did not move, so nothing keeps it: cleanup removes it instead of running it again.
+    assert destination.prune_expired() == 1
+    assert destination.get_scheduled_message("sched_once_future") is None
+
+
 def test_a_persons_recurring_schedule_arrives_signed_by_the_new_gateway(moved: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     from custom_agents.task_context_runtime import gateway_vouches
 

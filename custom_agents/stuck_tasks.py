@@ -83,6 +83,26 @@ EXECUTING_STATES = frozenset({ProgressState.IN_PROGRESS, ProgressState.RETRYING}
 _LABEL_LENGTH = 80
 
 
+def request_chat_route(
+    agent: Any, header: Any, meta: Any, person_id: str | None, agent_ids: set[str]
+) -> ChatRoute | None:
+    """The person's chat for a request: its reply route, else the configured user's chat.
+
+    ``agent_ids`` are agents' own routes (the manager, the agents that held
+    the work), never a chat.
+    """
+    context = getattr(meta, "gateway_context", None)
+    route = getattr(header, "response_routing_key", None)
+    if context is not None and route and route not in agent_ids:
+        return ChatRoute(route, context)
+    configured = (
+        configured_owner_route(getattr(agent, "instance_config_path", None), person_id)
+        if person_id
+        else None
+    )
+    return ChatRoute(*configured) if configured else None
+
+
 def stuck_task_settings(agent: Any) -> StuckTaskSettings:
     return StuckTaskSettings.from_schedule_maintenance(getattr(agent, "schedule_maintenance", None))
 
@@ -211,17 +231,7 @@ class StuckTasks:
         return identity.person_id if identity is not None else None
 
     def chat_route(self, header: Any, meta: Any, person_id: str | None, agent_ids: set[str]) -> ChatRoute | None:
-        """The person's chat: the request's reply route, else the configured user's chat."""
-        context = getattr(meta, "gateway_context", None)
-        route = getattr(header, "response_routing_key", None)
-        if context is not None and route and route not in agent_ids:
-            return ChatRoute(route, context)
-        configured = (
-            configured_owner_route(getattr(self.agent, "instance_config_path", None), person_id)
-            if person_id
-            else None
-        )
-        return ChatRoute(*configured) if configured else None
+        return request_chat_route(self.agent, header, meta, person_id, agent_ids)
 
     def _when(self, meta: Any, value: Any) -> str:
         zone = getattr(meta, "request_timezone", None) or getattr(

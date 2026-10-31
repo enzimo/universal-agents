@@ -269,6 +269,8 @@ class _Export:
             from team_transfer.schedule_markdown import render_schedule
 
             entry = CarriedScheduleV2(
+                # Zero is exhausted, even if its last run was still active.
+                # Work does not move; never restore an extra fire on import.
                 remaining_count=row.get("remaining_count"),
                 owner_vouched=_vouched(verifier, schedule, owner),
                 markdown=render_schedule(
