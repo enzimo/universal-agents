@@ -1163,9 +1163,16 @@ its own (coordination plan 7.10, accepted 2026-10-30).
   `lock_timeout` in PostgreSQL.
 - **Retention.** Entries, reviews, cases and closed request rows older than
   seven days are pruned when a request closes. They are deleted with a
-  removed person's task records and never travel in a team transfer. The
-  tables are created with the instance; an upgrade moves the team into a
-  fresh instance, so there is no migration of older ledger tables.
+  removed person's task records and never travel in a team transfer.
+- **Upgrading in place from 0.9.** `CREATE TABLE IF NOT EXISTS` leaves a
+  0.9 ledger table without the `changed_fields` column, and every knowledge
+  page save would then fail. Opening the ledger adds the column (an
+  information-schema or `PRAGMA table_info` read on later opens; the
+  PostgreSQL schema lock or `ensure_sqlite_column` covers processes starting
+  together). 0.9 entries did not record their fields, so they default to
+  every field (`*`): a request that saw one leaves an overlapping change to
+  the person rather than overwriting it. The new review and case tables are
+  created as usual.
 - **Refusal names.** The names are shared, in
   `custom_messages.enums.ChangeRefusal`. A stale revision is
   `changed_since_read`; the message contract's replies use the same

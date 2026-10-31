@@ -26,6 +26,25 @@ BACKENDS = [
 TEAM = "team_kb"
 NOW = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
 
+# The change ledger table as 0.9 created it, before entries named the fields
+# they set. An instance upgraded in place from 0.9 still has it.
+LEDGER_TABLE_0_9 = """
+    CREATE TABLE change_ledger (
+        team_id TEXT NOT NULL,
+        position {integer} NOT NULL,
+        record_kind TEXT NOT NULL,
+        record_key TEXT NOT NULL,
+        change_type TEXT NOT NULL,
+        writer_kind TEXT NOT NULL,
+        request_id TEXT NOT NULL DEFAULT '',
+        person_id TEXT NOT NULL DEFAULT '',
+        version TEXT NOT NULL DEFAULT '',
+        checked INTEGER NOT NULL DEFAULT 1,
+        changed_at_utc TEXT NOT NULL,
+        PRIMARY KEY (team_id, position)
+    )
+"""
+
 
 @contextmanager
 def knowledge_storage(backend: str, tmp_path: Path) -> Iterator[StorageSettings]:

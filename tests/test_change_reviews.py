@@ -8,6 +8,8 @@ brief, and removals and creations against field changes.
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -25,12 +27,14 @@ from storage.change_ledger import (
     RecordRef,
     check_change,
     ensure_ledger_tables,
+    ledger_table_statements,
     open_request,
     record_change,
     save_review,
 )
 from storage.sql_dialect import SQLITE
 from storage.sqlite_connection import connect_sqlite
+from tests.knowledge_support import LEDGER_TABLE_0_9
 
 TEAM = "team_reviews"
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
@@ -158,6 +162,44 @@ def test_a_review_only_moves_forward(db):
         cases = conn.execute("SELECT case_id, state FROM change_cases").fetchall()
     assert [int(row[0]) for row in rows] == [5]
     assert {tuple(row) for row in cases} == {("case_5", "open"), ("case_3", "open")}
+
+
+def test_an_entry_from_0_9_counts_as_changing_every_field_after_the_upgrade(tmp_path, caplog):
+    """A request open across an in-place upgrade from 0.9 leaves overlapping changes to the person."""
+
+    path = str(tmp_path / "upgraded.db")
+    with connect_sqlite(path) as conn:
+        conn.begin_write()
+        conn.execute(LEDGER_TABLE_0_9.format(integer="INTEGER"))
+        for statement in ledger_table_statements(SQLITE):  # 0.9's other tables; its ledger table stays as it was
+            conn.execute(statement)
+        open_request(conn, SQLITE, team_id=TEAM, request_id=ALICE_REQUEST.request_id, person_id=ALICE, now=NOW)
+        # Alice changed the fact in the app under 0.9, after the request started.
+        conn.execute(
+            "INSERT INTO change_ledger (team_id, position, record_kind, record_key, change_type, writer_kind, "
+            "person_id, changed_at_utc) VALUES (?, 1, ?, ?, 'change', 'person', ?, ?)",
+            (TEAM, FACT.kind.value, FACT.key, ALICE, NOW.isoformat()),
+        )
+        conn.execute("INSERT INTO change_ledger_positions (team_id, position) VALUES (?, 1)", (TEAM,))
+        conn.commit()
+
+    with caplog.at_level(logging.INFO, logger="storage.change_ledger"):
+        for _ in range(2):  # The second open finds the column.
+            with connect_sqlite(path) as conn:
+                conn.begin_write()
+                ensure_ledger_tables(conn, SQLITE)
+                conn.commit()
+    assert caplog.text.count("event=change_ledger_column_added") == 1
+    with connect_sqlite(path) as conn:
+        assert json.loads(conn.execute("SELECT changed_fields FROM change_ledger").fetchone()[0]) == [ALL_FIELDS]
+
+    assert refused(path, {"tags"}).reason is ChangeRefusal.CHANGE_CONFLICT
+    assert refused(path, {"tags"}).reason is ChangeRefusal.NEEDS_PERSON_DECISION
+    write(path, ChangeWriter(ChangeWriterKind.PERSON, person_id=ALICE), {"text"})  # New entries name their fields.
+    with connect_sqlite(path) as conn:
+        assert json.loads(conn.execute("SELECT changed_fields FROM change_ledger WHERE position = 2").fetchone()[0]) == [
+            "text"
+        ]
 
 
 def test_two_unsaved_retries_share_one_case(db):
