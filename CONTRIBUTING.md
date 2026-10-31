@@ -134,18 +134,19 @@ system or Node trust.
 
 Generation retains existing versions where constraints permit. Pass `--upgrade`
 for an intentional dependency refresh. Do not hand-edit generated lockfiles.
-LiteLLM stays at 1.105.0 during the 2026-10-28 refresh at the owner's request.
-Its `filelock<4` dependency prevents installing the patched 4.x line. Pin
-filelock to 3.20.3: it includes the earlier
-[SoftFileLock fix](https://github.com/advisories/GHSA-qmgc-5h2g-mvrw) and predates
-the affected implementations in
-[GHSA-v4x8-3wr5-3wq8](https://github.com/advisories/GHSA-v4x8-3wr5-3wq8),
-[GHSA-9vhv-jxww-xfm5](https://github.com/advisories/GHSA-9vhv-jxww-xfm5), and
-[GHSA-567q-5qvw-pf92](https://github.com/advisories/GHSA-567q-5qvw-pf92).
-This is a deliberate downgrade from 3.32.7, within both LiteLLM's and Hugging
-Face's requirements, not an audit exception. Revisit it when LiteLLM supports
-the patched 4.x line. The model-provider major-version limits remain
-until their adapter contracts are deliberately updated and verified.
+LiteLLM is pinned to the audited 1.103.10 maintenance release so the runtime
+can install filelock 4.2.6. LiteLLM 1.104 through the current 1.106 releases
+cap filelock below 4; the older filelock 3.20.3 pin is affected by
+[Windows lock-file permissions](https://github.com/advisories/GHSA-8mx5-7m5m-r77g)
+and [Unix lock-path substitution](https://github.com/advisories/GHSA-69hj-f68j-2879)
+vulnerabilities fixed in 4.2.1. The 1.103.10 maintenance release has the
+security fixes missing from 1.103.0 and no filelock cap. This uses published,
+hash-locked packages without modifying package metadata or ignoring advisories.
+Revisit the LiteLLM pin when a newer audited release permits patched filelock.
+Before changing this pair, run the installed Strands/LiteLLM HTTP round-trip,
+startup and reasoning tests, the runtime-install check and the Python audits.
+The model-provider major-version limits remain until their adapter contracts
+are deliberately updated and verified.
 
 Strands 1.62 makes model-call middleware public. Context-debug capture uses
 `agent.add_middleware` with `strands.middleware.InvokeModelStage.Wrap`, not the
@@ -155,6 +156,12 @@ so diagnostic capture cannot silently disappear after an SDK change.
 scanner graph does not alter the agent runtime. Removing a development dependency
 from an existing environment requires recreating that environment; installing the
 runtime lock alone does not uninstall packages already present.
+The scanner environment requires langgraph-api 0.15.0 or newer to include the
+[custom-authentication Store access fix](https://github.com/advisories/GHSA-4hm6-w6qq-w73v).
+Its lock pins 0.17.0 and the required in-memory runtime without changing the
+scanner source release or the agent runtime. Verify `skillspector --version`
+and a local `skillspector scan --no-llm` after updating this isolated graph.
+
 SkillSpector itself is pinned by its source archive and SHA-256. `pip-audit`
 checks its registry dependencies, but skips the SkillSpector package because
 that source release is not on PyPI; a successful audit does not cover it.

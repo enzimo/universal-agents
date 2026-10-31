@@ -30,11 +30,12 @@ pysqlite3==0.6.1; sys_platform == "darwin"
 anthropic>=0.40.0,<1.0.0
 # GenAI v3 changes automatic function calling; keep the current adapter contract.
 google-genai>=2.33.0,<3
-# Keep LiteLLM unchanged during this refresh (owner, 2026-10-28).
-litellm==1.105.0
-# LiteLLM requires filelock<4. Version 3.20.3 includes the earlier soft-lock
-# fix and predates the vulnerable reader/writer and lease implementations.
-filelock==3.20.3
+# The patched 1.103 maintenance line permits filelock 4.x; 1.104+ caps it below 4.
+# Keep this pair until an audited newer LiteLLM release lifts that cap.
+litellm==1.103.10
+# 4.2.1 fixes the Windows permissions and Unix lock-path vulnerabilities;
+# use the current patched maintenance release, with exact lockfile hashes.
+filelock==4.2.6
 # Strands constrains its OpenAI provider to v2; OpenAI v3 changes the HTTP client contract.
 openai>=2.54.0,<3
 tiktoken>=0.13.0
