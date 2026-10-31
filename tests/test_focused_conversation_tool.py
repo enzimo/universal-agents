@@ -9,7 +9,7 @@ import pytest
 from custom_agents.conversation_store import ConversationStore
 from custom_messages.contracts.routing_v1 import GatewayContext
 from custom_tools.providers.context_memory import create_focused_conversation
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -65,6 +65,8 @@ class _FakeAgent:
     named_agent_type = "TeamArchitect"
     # The per-call access hook is not part of these tests.
     authorization_config = {"enabled": False}
+    # The tool calls are the person's request's own turn.
+    test_task_id = _FakeTaskManager.current_task_id
 
     def __init__(
         self, conversation_store: ConversationStore, canonical_user_id: str = OWNER_A

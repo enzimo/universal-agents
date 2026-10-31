@@ -27,13 +27,13 @@
       "type": "person",
       "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
     },
-    "text": "Your scheduled run waited too long and stopped.",
+    "text": "Scheduled job \"Launch check\" stopped before finishing.",
     "urgency": "urgent",
     "reason": {
       "source": "code",
-      "code": "task_wait_limit_reached"
+      "code": "work_stuck"
     }
   },
-  "body_digest": "xjLfuTUO8HyAa-xAWG6brLKSiiRMhLL73SN4K2b2Pgw",
-  "signature": "Mgl3zP6dprBU0wg4WjPNFJVXbmwxFywVMwPaQc6fvExlvnI_h5hovX-xBNVXGsIKj_ZhUAzQcpxg42CWC-PZAQ"
+  "body_digest": "hHBWZ-z31K-FU_ejWHnzg5r3sSnXKr1HbVjPLHbM_tE",
+  "signature": "_WQe8uwoX7y8l0PfIQch3cVCaedUlfgfhyEzePwL6pi6xteWyB1gbCPTYawtkZj5Ctdy0m_t904BvvwVRbfiCw"
 }

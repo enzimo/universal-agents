@@ -141,11 +141,37 @@ def verify_managed_skill_catalog_integrity(agent: Any) -> None:
         verify_managed_skill_attestation(agent, entry)
 
 
+def _live_strands_agents(agent: Any) -> list[Any]:
+    """Every Strands agent the agent's turns may call now: the main one, each
+    parallel lane's and each running turn's (``custom_agents.execution_lanes_runtime``)."""
+
+    candidates = [getattr(agent, "_strands_agent", None)]
+    lanes = getattr(agent, "_parallel_lanes", None)
+    if lanes is not None:
+        candidates.extend(parts.agent for parts in lanes.parts.values())
+    for work in list(getattr(agent, "_running_turns", {}).values()):
+        if work.strands is not None:
+            candidates.append(work.strands.agent)
+    unique: dict[int, Any] = {}
+    for sdk_agent in candidates:
+        if sdk_agent is not None:
+            unique.setdefault(id(sdk_agent), sdk_agent)
+    return list(unique.values())
+
+
 async def _hydrate_skill_plugins(
     agent: Any,
     *,
     changed: bool,
 ) -> tuple[int, set[str]]:
+    """Reload changed skills into every live Strands agent; the main agent's names report them.
+
+    A refresh clears the shared plugin's skills of every Strands agent, so
+    each one running a turn now loads them again at once, not only the main
+    one: a turn in a parallel lane otherwise lacked them until its next model
+    call.
+    """
+
     sdk_agent = getattr(agent, "_strands_agent", None)
     plugins = getattr(agent, "plugins", None) or []
     reloaded_plugin_count = 0
@@ -153,9 +179,11 @@ async def _hydrate_skill_plugins(
     for plugin in plugins:
         if not is_agent_skills_plugin(plugin):
             continue
-        if changed and sdk_agent is not None:
-            await plugin.init_agent(sdk_agent)
-            reloaded_plugin_count += 1
+        if changed:
+            live = _live_strands_agents(agent)
+            for live_agent in live:
+                await plugin.init_agent(live_agent)
+            reloaded_plugin_count += 1 if live else 0
         if sdk_agent is not None:
             available_skill_names.update(list_agent_skill_names(plugin, sdk_agent))
     return reloaded_plugin_count, available_skill_names

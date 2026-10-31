@@ -37,7 +37,12 @@ What travels, and why:
   sessions carried schedules and delivery targets use, and each imported
   person's current session per chat, with their names and chat routes but no
   conversation: the session's conversation and last task are history and stay
-  behind. Whether a session is its chat's current one travels too
+  behind, and so does a Web Chat thread's Run concurrently setting
+  (``SessionRecord.parallel_thread``), which belongs to the conversation the
+  person set it for: a carried session starts with it off. A schedule made in
+  a thread set to Run concurrently keeps its own copy in its payload and still
+  runs in parallel. Whether a session is its chat's
+  current one travels too
   (``channel_current``), because that is where the person's next message
   goes. Sessions are written in key order and an older session a schedule
   uses can sort after the current one, so the writer saves every session
@@ -264,6 +269,8 @@ class _Export:
             from team_transfer.schedule_markdown import render_schedule
 
             entry = CarriedScheduleV2(
+                # Zero is exhausted, even if its last run was still active.
+                # Work does not move; never restore an extra fire on import.
                 remaining_count=row.get("remaining_count"),
                 owner_vouched=_vouched(verifier, schedule, owner),
                 markdown=render_schedule(
@@ -865,7 +872,11 @@ class SchedulesSection:
     # 4: the payload Task and TaskSteering can carry the chat message a person
     #    replied to (Task.replied_message).
     # 5: ScheduledMessage carries its store-owned timing_revision.
-    schema_version: ClassVar[int] = 5
+    # 6: the payload's GatewayContext can mark a request from a parallel thread
+    #    (GatewayContext.parallel_thread). A schedule created in a parallel
+    #    thread keeps the mark, so its runs get parallel lanes of their own
+    #    (custom_agents.execution_lanes).
+    schema_version: ClassVar[int] = 6
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = ScheduleTransferRecordV2
@@ -914,7 +925,7 @@ class SchedulesSection:
 __all__ = ["SchedulesSection"]
 
 
-# V4 added optional Task.replied_message and V5 adds timing_revision, whose
+# V4 added optional Task.replied_message and V5 added timing_revision, whose
 # initial value is zero. Already-supported V3 payloads carry neither field;
 # their records are otherwise unchanged and the current model fills both.
 SECTION_UPGRADES[(SchedulesSection.name, 3, SchedulesSection.schema_version)] = lambda records: records
@@ -923,3 +934,7 @@ SECTION_UPGRADES[(SchedulesSection.name, 3, SchedulesSection.schema_version)] = 
 # revision zero; the first explicit timing edit increments it. Keep the V3
 # conversion above for the already-supported frozen transfer fixture too.
 SECTION_UPGRADES[(SchedulesSection.name, 4, SchedulesSection.schema_version)] = lambda records: records
+
+# V6 adds the optional GatewayContext.parallel_thread, false when missing.
+# V5 records are otherwise unchanged.
+SECTION_UPGRADES[(SchedulesSection.name, 5, SchedulesSection.schema_version)] = lambda records: records

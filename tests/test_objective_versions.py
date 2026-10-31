@@ -46,7 +46,7 @@ from custom_messages.records.objectives import (
     objective_version,
 )
 from custom_tools.providers.objectives import objectives, start_objective_task
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from storage.change_ledger import ChangeRefused
 from storage.config import resolve_storage_settings
 from storage.durable_owner_scope_repository import create_durable_owner_scope_repository
@@ -439,6 +439,7 @@ def lead(settings):
     manager = _manager(settings, "manager_agent")
     task = _add_person_task(manager, "task_root", "objective-user", conversation_id="conversation_1")
     manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     agent = _FakeAgent(manager)
     set_agent_ref(agent)
     created = manager.create_objective(

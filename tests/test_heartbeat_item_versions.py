@@ -31,7 +31,7 @@ from custom_tools.providers.heartbeat import (
     remove_heartbeat_item,
     update_heartbeat_item,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from storage.change_ledger import ChangeRefused
 from storage.config import resolve_storage_settings
 from storage.heartbeat_repository import (

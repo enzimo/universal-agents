@@ -5,7 +5,9 @@ Replaced the self-addressed TeamLead review task (removed 2026-10-04; see
 scheduler loop (``scheduled_runtime._scheduler_pass``).
 
 A schedule is stuck when it is enabled, overdue by more than the claim window,
-not paused or expired, and nobody holds a live claim on it. Its reason is the
+not paused, expired or finishing, and nobody holds a live claim on it. A
+finishing schedule (``schedule_store.is_finishing``) keeps its last run's past
+due time while that run works; it is not waiting for anything. Its reason is the
 block the scheduled-worker controller recorded, or
 ``schedule_overdue_unclaimed`` when nothing was recorded (no worker policy, or
 no worker picked it up). The incident is that due time: once the schedule
@@ -41,6 +43,7 @@ from custom_agents.schedule_repair_guidance import (
 from custom_agents.schedule_store import (
     DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
     is_final_run,
+    is_finishing,
     owner_canonical_user_id_for_schedule,
 )
 from custom_agents.stuck_work import (
@@ -67,8 +70,8 @@ def _utc(value: str | None) -> datetime | None:
 
 
 def overdue_unclaimed(row: dict[str, Any], *, team_id: str, now: datetime) -> bool:
-    """Enabled, past due beyond the claim window, not paused or expired, unclaimed."""
-    if row.get("claim_team_id") != team_id or not row.get("enabled"):
+    """Enabled, past due beyond the claim window, not paused, expired or finishing, unclaimed."""
+    if row.get("claim_team_id") != team_id or not row.get("enabled") or is_finishing(row):
         return False
     due = _utc(row.get("next_fire_at"))
     if due is None or due > now - timedelta(seconds=DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS):
@@ -196,6 +199,18 @@ class StuckSchedules:
                 StuckMessage(
                     title=f'Schedule "{_label(schedule)}" is no longer waiting',
                     text="It was turned off, so it will not run until it is turned on again.",
+                ),
+                self.chat_route(schedule),
+            )
+        row = self.store.get_row(schedule.schedule_id)
+        if row is not None and is_finishing(row):
+            return Recovery(
+                StuckMessage(
+                    title=f'Schedule "{_label(schedule)}" ran',
+                    text=(
+                        "The problem reported earlier is resolved: the schedule started its last run, "
+                        "so it will not run again."
+                    ),
                 ),
                 self.chat_route(schedule),
             )

@@ -20,12 +20,16 @@ def prepare_occurrence(
 ) -> ScheduleOccurrenceV1 | None:
     from custom_agents.local_schedule_policy import supports_local_worker
 
-    # Child timers and unscoped runtime maintenance retain their existing
-    # correlation semantics. Autonomous workers only accept typed root jobs.
-    if (
-        not supports_local_worker(schedule)
-        or not schedule.claim_named_agent_type
-    ):
+    # Receipts are for runs a worker claims: a person's schedules and the
+    # system timers the table marks local_worker. Such a run proves whom it
+    # works for with the schedule's permit, checked live against the row, so
+    # the receipt keeps a finishing schedule until the run ends
+    # (custom_agents.schedule_store). The team lead's own system timers sign
+    # their runs and are never checked against the row; a receipt would only
+    # count a run as started before its Objective work session opened, so a
+    # failed opening would skip the run instead of retrying it (2026-10-30
+    # review). Child timers keep their existing correlation.
+    if not supports_local_worker(schedule) or not schedule.claim_named_agent_type:
         return None
     occurrence_id = occurrence_identity(schedule.schedule_id, schedule.next_fire_at)
     binding = agent._schedule_store.worker_records.get_binding(

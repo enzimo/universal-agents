@@ -12,6 +12,7 @@ import pytest
 
 import custom_agents.lease_loss_wind_down as wind_down
 import tests.test_access_request_tools as access_tests
+from tests.task_work_support import TurnHost, register_turn
 from custom_agents import access_runtime
 from custom_agents.control_runtime import (
     handle_interrupted_turn,
@@ -32,7 +33,7 @@ from custom_messages.contracts.worker_handback_v1 import (
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_messages.contracts.access_v2 import AccessRequestStatus
 from custom_tools.providers import access as access_tools
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_settings.schedule_workers import ScheduleWorkersConfig
 from strands.interrupt import InterruptException
 from storage.config import resolve_storage_settings
@@ -80,7 +81,7 @@ def fast_wind_down(monkeypatch):
 
 
 def _worker(manager, *, inbox=None, wait_seconds=1800.0, monkeypatch=None):
-    agent = SimpleNamespace(
+    agent = TurnHost(
         id="worker_1",
         name="Worker",
         team_id="team",
@@ -94,9 +95,6 @@ def _worker(manager, *, inbox=None, wait_seconds=1800.0, monkeypatch=None):
         _lease_loss_wind_down=None,
         _should_exit=asyncio.Event(),
         _owned_tasks=set(),
-        _active_execution_task=None,
-        _active_execution_task_id=None,
-        _active_tool_stop=None,
         _strands_agent=None,
         _worker_launch=SimpleNamespace(
             launch_id="launch_1",
@@ -219,13 +217,14 @@ async def test_a_running_command_ends_before_its_task_is_handed_back(
 
     monkeypatch.setattr(wind_down, "_publish_handback", recording_publish)
 
+    turn_stop = ToolStop(agent_id=agent.id, task_id="running")
+
     async def running_turn():
-        agent._active_tool_stop = ToolStop(agent_id=agent.id, task_id="running")
         try:
             await invoke_with_tool_stop(
                 sdk,
                 "go",
-                tool_stop=agent._active_tool_stop,
+                tool_stop=turn_stop,
                 invoke_kwargs=turn_invoke_kwargs("running"),
                 callback_handler=lambda **_: None,
                 logger=agent._logger,
@@ -234,11 +233,9 @@ async def test_a_running_command_ends_before_its_task_is_handed_back(
             await handle_interrupted_turn(agent, task_id="running", task_info=manager.get_task_info("running"))
             raise
 
-    agent._active_execution_task = asyncio.create_task(running_turn())
-    agent._active_execution_task_id = "running"
+    register_turn(agent, "running", asyncio.create_task(running_turn()), turn_stop)
     try:
         pid = await wait_for_pid(pid_file)
-        turn_stop = agent._active_tool_stop
 
         wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease", recent_scheduler_errors=[])
         await _wait_for_exit(agent, timeout=15)
@@ -280,8 +277,7 @@ async def test_wind_down_hands_back_running_and_unstarted_work_then_exits(
             turn_cancelled.set()
             raise
 
-    agent._active_execution_task = asyncio.create_task(running_turn())
-    agent._active_execution_task_id = "running"
+    register_turn(agent, "running", asyncio.create_task(running_turn()))
     await asyncio.sleep(0)
 
     wind_down.start_lease_loss_wind_down(
@@ -401,8 +397,7 @@ async def test_a_running_task_whose_answer_was_held_back_is_handed_back(manager,
             await handle_interrupted_turn(agent, task_id="reviewing", task_info=manager.get_task_info("reviewing"))
             raise
 
-    agent._active_execution_task = asyncio.create_task(review_turn())
-    agent._active_execution_task_id = "reviewing"
+    register_turn(agent, "reviewing", asyncio.create_task(review_turn()))
     await asyncio.sleep(0)
     wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
     await _wait_for_exit(agent)
@@ -449,8 +444,7 @@ async def test_a_running_task_whose_answer_was_sent_is_finished_not_handed_back(
             turn_cancelled.set()
             raise
 
-    agent._active_execution_task = asyncio.create_task(finishing_turn())
-    agent._active_execution_task_id = "answered"
+    register_turn(agent, "answered", asyncio.create_task(finishing_turn()))
     await asyncio.sleep(0)
 
     wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
@@ -591,7 +585,7 @@ async def test_failing_a_waiting_task_at_the_deadline_withdraws_its_access_reque
         access_tools.request_access(tool_id="fn:schedules", level="write", reason="Track", tool_context=context)
     request_id = context.raised[0]["access_request_id"]
     manager = requester.task_manager
-    manager.update_main_task_state(requester._active_execution_task_id, ProgressState.WAITING, NOW())
+    manager.update_main_task_state(requester.test_task_id, ProgressState.WAITING, NOW())
     agent = _worker(manager, wait_seconds=0.05, monkeypatch=monkeypatch)
 
     wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
@@ -654,8 +648,7 @@ async def test_shutdown_during_a_handback_keeps_the_tasks_not_yet_handed_back(ma
             await handle_interrupted_turn(agent, task_id="running", task_info=manager.get_task_info("running"))
             raise
 
-    agent._active_execution_task = asyncio.create_task(running_turn())
-    agent._active_execution_task_id = "running"
+    register_turn(agent, "running", asyncio.create_task(running_turn()))
     await asyncio.sleep(0)
     state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease", recent_scheduler_errors=[])
     await asyncio.wait_for(publishing.wait(), 5)

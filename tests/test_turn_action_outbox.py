@@ -13,6 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from assistant_gateway.config import _migrate_instance_config_dict
 from config_loader import _migrate_config_dict
+from tests.task_work_support import bind_task
+from tests.task_work_support import strands_parts
 from custom_agents.structured_llm_messages import (
     DelegateTaskAction,
     ModelAgentTurnDecision,
@@ -105,6 +107,8 @@ def _add_active_parent_task(
     assert manager.add_task(task, header, meta, owner_person_id=None)
     assert manager.get_next_task_to_process() == task_id
     assert manager.update_main_task_state(task_id, ProgressState.IN_PROGRESS, _now())
+    # The outbox runs inside the task's handling (runtime_context.task_work).
+    bind_task(task_id)
     return task
 
 
@@ -2597,7 +2601,7 @@ def test_an_approval_pause_keeps_the_note_until_the_resumed_turns_decision(tmp_p
     )
     session = task_steering_runtime.StrandsInterruptedTurnSession(
         task_id=parent.task_id,
-        strands_agent=resumed_strands_agent,
+        strands=strands_parts(resumed_strands_agent),
         invoke_kwargs={},
         callback_handler=lambda **_: None,
         full_prompt="",
@@ -2642,7 +2646,7 @@ def test_a_resumed_approval_turn_cancelled_at_shutdown_ends_its_tool_work_and_ke
 
         session = task_steering_runtime.StrandsInterruptedTurnSession(
             task_id=parent.task_id,
-            strands_agent=SimpleNamespace(invoke_async=resumed_model_call),
+            strands=strands_parts(SimpleNamespace(invoke_async=resumed_model_call)),
             invoke_kwargs={},
             callback_handler=lambda **_: None,
             full_prompt="",

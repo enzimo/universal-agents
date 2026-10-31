@@ -39,6 +39,8 @@ class GatewaySession:
     owner_canonical_user_id: str | None = None
     latest_request_text: str | None = None
     updated_at: str | None = None
+    # The thread's Run concurrently setting (SessionRecord.parallel_thread).
+    parallel_thread: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,7 +205,7 @@ class GatewayApplication(Protocol):
         thread_id: str | None = None,
         canonical_user_id: str | None = None,
     ) -> GatewaySession:
-        """Create and activate a fresh gateway session."""
+        """Create and activate a fresh gateway session, with Run concurrently off."""
 
     async def reply_to_pending_query(
         self,

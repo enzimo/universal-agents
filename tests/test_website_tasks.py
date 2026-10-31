@@ -67,6 +67,7 @@ async def test_task_service_projects_manager_state_and_forwards_exact_removal():
                 state=ProgressState.IN_PROGRESS,
                 problem_statement="Current task",
                 is_current=True,
+                is_parallel=True,
             )
         ],
     )
@@ -81,6 +82,7 @@ async def test_task_service_projects_manager_state_and_forwards_exact_removal():
         controls, WebTaskListRequestV1(context=context, agent_id="worker", offset=20)
     )
     assert result.tasks[0].is_current
+    assert result.tasks[0].is_parallel
     assert result.current_count == 1
     sent = controls.stop.call_args.args[0]
     assert sent.action == "list_tasks"

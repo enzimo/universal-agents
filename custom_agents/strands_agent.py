@@ -16,7 +16,7 @@ from custom_agents.task_admission_runtime import handle_busy_delivery
 from custom_agents.delegated_work_runtime import send_rejection_claim
 from custom_agents import task_steering_runtime
 from runtime_hosting.blocking_io import BlockingIOLane
-from runtime_hosting.agent_execution import AgentExecutionGate
+from runtime_hosting.agent_execution import MAIN_LANE, AgentExecutionLanes
 from custom_agents.sdk.strands.turn_ports import (
     TurnRuntimeSettings,
     TurnRuntimeEffects,
@@ -26,7 +26,6 @@ from custom_agents.task_runtime_ports import RuntimeMailboxDispatch
 import asyncio
 import contextlib
 import copy
-import inspect
 import json
 import logging
 import os
@@ -96,9 +95,8 @@ from custom_agents.embedding_service import (
 )
 from custom_agents.model_keys import embedding_endpoint_key
 from custom_agents.person_model_runtime import (
-    PersonModelHook,
-    clear_turn_model,
     select_turn_model,
+    turn_context_window,
     turn_settings_with_person_model,
 )
 from custom_agents.status_findings import agent_status_findings
@@ -108,6 +106,7 @@ from custom_agents.memory_graph_embedding_profile_runtime import (
 )
 from custom_agents.memory_review_runtime import memory_review_notification_instruction
 from custom_agents.memory_plugins.manager import MemoryPluginManager
+from runtime_settings.governance import MAX_RETENTION_DAYS
 from runtime_settings.memory import MemoryConfig
 from custom_agents.automation_runtime import handle_automation_message
 from custom_agents.agent_instructions import MESSAGE_FILL_NAME
@@ -124,6 +123,7 @@ from custom_agents.conversation_summary import (
     build_conversation_summary_generator,
 )
 from custom_agents.memory_review_store import MemoryReviewStore
+from custom_agents.output_retention import SavedOutputRetention
 from custom_agents.internal_improvement_runtime import (
     publish_internal_improvement_schedule_ensure,
 )
@@ -134,9 +134,7 @@ from custom_agents.manager_control_runtime import (
     handle_manager_topic_command,
     handle_task_progress_status,
 )
-from custom_agents.manager_bootstrap_runtime import run_manager_bootstrap
-from custom_agents.default_tools import builtin_tool_catalog
-from custom_agents.sdk.strands.changes_first import ChangesFirstToolExecutor
+from custom_agents.manager_bootstrap_runtime import resume_manager_data_cleanups, run_manager_bootstrap
 from custom_agents.sdk.strands.skills import (
     is_agent_skills_plugin,
     list_agent_skill_names,
@@ -161,7 +159,6 @@ from custom_agents.request_prompt_context import (
 )
 from custom_agents.otel_runtime import configure_strands_otel, current_trace_context
 from custom_agents.runtime_model_switch import probe_strands_model
-from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
 from custom_agents.tool_call_limits import (
     ToolCallLimitExceeded,
     collect_recent_strands_tool_transcript,
@@ -228,7 +225,6 @@ from custom_agents.context_engine.default import context_engine_kwargs_from_conf
 from custom_agents.context_debug_dump import (
     ContextDebugDumpPlugin,
     merge_context_debug_dump_config,
-    register_context_debug_model_observer,
 )
 from custom_agents.filtered_tool_result_context import (
     merge_inner_loop_context_config,
@@ -241,7 +237,14 @@ from custom_agents.pending_work_runtime import (
     close_pending_work,
     schedule_pending_work,
     start_owned_task,
-    wake_after_slot_release,
+)
+from custom_agents.execution_lanes import lane_for_message
+from custom_agents.execution_lanes_runtime import (
+    ParallelLanes,
+    continue_main_lane,
+    lane_of,
+    release_lane,
+    start_parallel_lanes,
 )
 from custom_agents.objective_work_completion import prepare_objective_work_completion
 from custom_agents.sdk.strands import turn as llm_turn_runtime
@@ -252,7 +255,6 @@ from custom_agents import turn_action_outbox_runtime
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_agents.task_wait_limit import MAX_WAITS_PER_TASK
 from custom_agents.task_steering_runtime import (
-    RuntimeSteeringPlugin,
     StrandsInterruptedTurnSession,
     handle_task_steering_message,
     resume_interrupted_task_turn,
@@ -354,6 +356,17 @@ from custom_agents.access_request_runtime import handle_access_request_resolved
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from custom_tools.comms_tools import TeamComms
 from custom_tools.tool_stop import ToolStop
+from custom_tools.runtime_context import TaskWork, current_task_work, task_work
+from custom_agents.strands_parts import StrandsParts, task_strands_messages, turn_strands_agent
+from custom_agents.tool_loading import LoadedTools
+from custom_agents.strands_agent_builder import build_strands_parts
+from custom_agents.turn_registry import (
+    end_turn,
+    executing_task_ids,
+    pin_turn_strands,
+    running_turn_task_ids,
+    start_turn,
+)
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from storage.knowledge_repository import create_knowledge_repository
@@ -718,6 +731,16 @@ class UniversalAgent(BaseModel):
         description=(
             "``tool_policy.scratch_retention_days``: the manager deletes older files from scratch/ folders "
             "when the internal-improvement maintenance schedule fires (custom_agents.scratch_retention); 0 keeps them."
+        ),
+    )
+    output_retention_days: int = Field(
+        default=TOOL_POLICY_DEFAULTS.output_retention_days.value,
+        ge=0,
+        le=MAX_RETENTION_DAYS,
+        description=(
+            "``tool_policy.output_retention_days``: the manager deletes saved tool outputs written longer ago "
+            "when the internal-improvement maintenance schedule fires, and the tools that read them say an "
+            "output was deleted under this period (custom_agents.output_retention); 0 keeps them."
         ),
     )
     llm_override_path: Optional[str] = Field(
@@ -1145,12 +1168,12 @@ class UniversalAgent(BaseModel):
     _strands_model: Optional[Any] = PrivateAttr(default=None)
     # A person's own model for the current turn (custom_agents.person_model_runtime).
     _person_models: Any = PrivateAttr(default=None)
-    _runtime_guardrails_plugin: Optional[RuntimeGuardrailsPlugin] = PrivateAttr(
-        default=None
-    )
-    _tool_result_budget_monitor: Optional[TaskAwareToolResultOffloader] = PrivateAttr(
-        default=None
-    )
+    # The main Strands agent with its tool state (custom_agents.strands_parts);
+    # _strands_agent is its agent. Turns that run beside the main one build
+    # their own. The generation counts model rebuilds: a turn whose parts are
+    # older rebuilds them before its next model call.
+    _strands_parts: Optional[StrandsParts] = PrivateAttr(default=None)
+    _strands_generation: int = PrivateAttr(default=0)
     _conversation_history: List[Dict[str, str]] = PrivateAttr(default_factory=list)
     _deferred_inbox: DeferredMessageInbox | None = PrivateAttr(default=None)
     _agent_result_transformer: Optional[Callable[[Any, Any, Any], Any]] = PrivateAttr(
@@ -1187,8 +1210,16 @@ class UniversalAgent(BaseModel):
     )
     _configured_model_provider: Optional[str] = PrivateAttr(default=None)
     _configured_model_id: Optional[str] = PrivateAttr(default=None)
-    _execution_gate: AgentExecutionGate = PrivateAttr(default_factory=AgentExecutionGate)
-    _active_execution_task: Optional[asyncio.Task] = PrivateAttr(default=None)
+    # One model turn at a time per lane: the main lane, and one lane per
+    # parallel request (runtime_hosting.agent_execution, custom_agents.execution_lanes).
+    _execution_lanes: AgentExecutionLanes = PrivateAttr(default_factory=AgentExecutionLanes)
+    # The parallel lanes' Strands agents, workers and retries (custom_agents.execution_lanes_runtime).
+    _parallel_lanes: ParallelLanes = PrivateAttr(default_factory=ParallelLanes)
+    # MCP servers that failed to load, shared by all its Strands agents (mcp_server_tools.ServerFailures).
+    _mcp_server_failures: Any = PrivateAttr(default=None)
+    # The model turns running now, by the asyncio task that runs each one; each
+    # value is that task's work record (custom_tools.runtime_context.TaskWork).
+    _running_turns: Dict[asyncio.Task, TaskWork] = PrivateAttr(default_factory=dict)
     _pending_work_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     # A wake-up arrived that the drain has not yet answered with a pass.
     _pending_work_requested: bool = PrivateAttr(default=False)
@@ -1215,9 +1246,6 @@ class UniversalAgent(BaseModel):
     # is logged once, and senders whose clocks run ahead (agent_liveness).
     _liveness_decisions: Dict[Any, Any] = PrivateAttr(default_factory=dict)
     _status_clock_ahead: set[str] = PrivateAttr(default_factory=set)
-    _active_execution_task_id: Optional[str] = PrivateAttr(default=None)
-    # The running turn's stop for its tool commands (custom_tools.tool_stop).
-    _active_tool_stop: Optional[ToolStop] = PrivateAttr(default=None)
     _stop_reasons_by_task_id: Dict[str, str] = PrivateAttr(default_factory=dict)
     # Set once this worker loses its launch lease; see lease_loss_wind_down.
     _lease_loss_wind_down: Any = PrivateAttr(default=None)
@@ -1250,9 +1278,6 @@ class UniversalAgent(BaseModel):
     _task_runtime_coordinator: Optional[TaskRuntimeCoordinator] = PrivateAttr(
         default=None
     )
-    _runtime_steering_plugin: Optional[RuntimeSteeringPlugin] = PrivateAttr(
-        default=None
-    )
     _pending_proactive_task_steering: Dict[str, List[TaskSteering]] = PrivateAttr(
         default_factory=dict
     )
@@ -1273,21 +1298,27 @@ class UniversalAgent(BaseModel):
 
     @property
     def is_executing(self) -> bool:
-        """Execution availability is derived from the current owner's lifetime."""
-        return self._execution_gate.busy
+        """Whether any execution lane runs work now (presence and status)."""
+        return self._execution_lanes.busy
+
+    @property
+    def main_lane_busy(self) -> bool:
+        """Whether the main lane, which serves all work but parallel requests, is held."""
+        return self._execution_lanes.main_busy
 
     @contextlib.asynccontextmanager
-    async def _execution_scope(self) -> AsyncIterator[None]:
-        nested = self._execution_gate.owned_by_current_task
-        if self.is_executing and not nested:
+    async def _execution_scope(self, lane: str = MAIN_LANE) -> AsyncIterator[None]:
+        nested = self._execution_lanes.owned_by_current_task(lane)
+        if self._execution_lanes.lane_busy(lane) and not nested:
             self._logger.info(
-                "Waiting for the active agent execution to finish. "
-                "event=agent_execution_waiting agent_id=%s active_task_id=%s",
+                "Waiting for the lane's active execution to finish. "
+                "event=agent_execution_waiting agent_id=%s lane=%s running_task_ids=%s",
                 self.id,
-                self._active_execution_task_id,
+                lane,
+                ",".join(running_turn_task_ids(self)) or "-",
             )
         try:
-            async with self._execution_gate.hold():
+            async with self._execution_lanes.hold(lane):
                 if not nested:
                     await self._announce_execution_state()
                 yield
@@ -1331,7 +1362,10 @@ class UniversalAgent(BaseModel):
         self._local_team_runtime = local_team_runtime
         # Work saved or freed while another holder had the slot gets a drain
         # pass when that holder lets go (pending_work_runtime).
-        self._execution_gate.on_release = partial(wake_after_slot_release, self)
+        self._execution_lanes.on_release = partial(release_lane, self)
+        # The team lead receives people's requests: those sent in a parallel
+        # thread get lanes of their own (custom_agents.execution_lanes).
+        self.task_manager.parallel_lanes_enabled = bool(self.is_team_lead)
 
         self._configured_model_provider = self.model_provider
         self._configured_model_id = self.model_id
@@ -1450,6 +1484,7 @@ class UniversalAgent(BaseModel):
                 openai_codex=self.openai_codex,
                 xai_oauth=self.xai_oauth,
                 instance_root=infer_instance_root(self),
+                saved_outputs=SavedOutputRetention.for_agent(self),
             ),
             logger=self._logger,
         )
@@ -1576,6 +1611,7 @@ class UniversalAgent(BaseModel):
             else None,
             system_prompt=self.system_prompt,
             context_window_tokens=self._resolved_context_window_tokens(),
+            turn_context_window=lambda: turn_context_window(self),
             model=self._strands_model,
             **context_engine_kwargs_from_config(context_engine_config),
             plugins=context_plugins,
@@ -1585,6 +1621,7 @@ class UniversalAgent(BaseModel):
             is_team_lead=self.is_team_lead,
             instance_config_path=self.instance_config_path,
             memory_plugin_manager=memory_plugin_manager,
+            saved_outputs=SavedOutputRetention.for_agent(self),
             adapters=ContextEngineAdapters(
                 build_request_time_context=lambda meta: build_request_time_context(
                     meta,
@@ -1836,9 +1873,10 @@ class UniversalAgent(BaseModel):
         return parsed
 
     def _has_execution_capacity(self) -> bool:
+        """Whether the main lane could start a task now (parallel requests have lanes of their own)."""
         return (
             not self.paused
-            and not self.is_executing
+            and not self.main_lane_busy
             and self.task_manager.can_start_new_task()
         )
 
@@ -1898,7 +1936,9 @@ class UniversalAgent(BaseModel):
                 agent_id=self.id,
                 logger=self._logger,
                 configuration=lambda: dict(self.runtime_coordinator or {}),
-                available=lambda: not self.paused and not self.is_executing,
+                # Each drain runs in the execution lane of its root task, and
+                # the handlers take that lane themselves (custom_agents.execution_lanes).
+                available=lambda: not (self.paused or self._should_exit.is_set()),
                 runtime=self.task_manager.runtime_operations_coordinator,
                 operations_runtime=self.task_manager.operations_runtime,
                 get_task_info=self.task_manager.get_task_info,
@@ -2211,9 +2251,8 @@ class UniversalAgent(BaseModel):
     def _collect_recent_strands_tool_transcript(
         self, *, max_blocks: int = 8
     ) -> List[Dict[str, Any]]:
-        strands_agent = getattr(self, "_strands_agent", None)
         return collect_recent_strands_tool_transcript(
-            strands_agent, max_blocks=max_blocks
+            turn_strands_agent(self), max_blocks=max_blocks
         )
 
     async def _record_tool_call_limit_exceeded(
@@ -2280,22 +2319,11 @@ class UniversalAgent(BaseModel):
         )
 
     def _set_active_execution_context(self, task_id: Optional[str]) -> ToolStop:
-        """Mark the current task as the running turn; returns the turn's new ToolStop."""
-
-        self._active_execution_task = asyncio.current_task()
-        self._active_execution_task_id = task_id
-        self._active_tool_stop = ToolStop(agent_id=self.id, task_id=task_id)
-        return self._active_tool_stop
+        """Start the model turn of the bound task's work (custom_agents.turn_registry)."""
+        return start_turn(self, task_id)
 
     def _clear_active_execution_context(self) -> None:
-        current_task = asyncio.current_task()
-        if self._active_execution_task is current_task or self._active_execution_task is None:
-            # The turn's person model goes with it (custom_agents.person_model_runtime).
-            clear_turn_model(self)
-        if self._active_execution_task is current_task:
-            self._active_execution_task = None
-            self._active_execution_task_id = None
-            self._active_tool_stop = None
+        end_turn(self)
 
     def _consume_stop_reason(self, task_id: str) -> Optional[str]:
         return self._stop_reasons_by_task_id.pop(task_id, None)
@@ -2565,10 +2593,10 @@ class UniversalAgent(BaseModel):
                 f"[{self.id}] Failed to refresh self AgentState row: {exc}"
             )
 
-    async def _resume_parent_task_if_ready(self, *args, **kwargs):
-        async with self._execution_scope():
+    async def _resume_parent_task_if_ready(self, parent_task_id: str, *args, **kwargs):
+        async with self._execution_scope(await lane_of(self, parent_task_id)):
             return await subtask_watchdog_runtime._resume_parent_task_if_ready(
-                self, *args, **kwargs
+                self, parent_task_id, *args, **kwargs
             )
 
     async def _fail_subtask_and_reconcile_parent(self, *args, **kwargs):
@@ -3290,113 +3318,21 @@ class UniversalAgent(BaseModel):
         # user_queue_key = f'{self.team_id}_{self.user_name_postfix}'
         # self.named_agent_type_queue_map[user_queue_key] = user_queue_key
 
-    def _create_strands_agent(self):
-        """Creates the internal Strands Agent with configured model and tools."""
+    def _create_strands_agent(self, *, keep_loaded_tools: bool = False):
+        """Create the main Strands agent (``_strands_agent``) with its tool state.
+
+        ``keep_loaded_tools`` carries the groups loaded for the current task
+        over to the new agent, for a model rebuild in the middle of a task.
+        """
         try:
-            model = self._strands_model or self._configure_model()
-            self._strands_model = model
-            self._refresh_skills_plugins(force=True)
-
-            # Prepare the full system prompt with agent status placeholder
-            full_system_prompt = self.system_prompt
-            self._runtime_guardrails_plugin = RuntimeGuardrailsPlugin(
-                structured_output_failure_threshold=self.structured_output_failure_threshold,
-                max_tool_calls=self.max_tool_calls_per_task,
-                logger_=self._logger,
-            )
-            self._runtime_steering_plugin = RuntimeSteeringPlugin(self)
-            from custom_agents.access_runtime import AccessDecisionHook
-
-            # Always installed: it decides every function tool call, and with
-            # authorization off it allows every catalog tool (access_runtime).
-            # It also withdraws access requests of tasks that end first.
-            self._access_decision_hook = AccessDecisionHook(self)
-            from custom_agents.tool_sync import install_tool_sync, startup_tools
-
-            # With authorization on the model sees its role's standard tools at
-            # first; the rest follow the grants valid for each task's person
-            # (access Phase 7). In both modes installed MCP servers load before
-            # model calls, not at startup (custom_agents.tool_sync).
-            model_tools = startup_tools(self, list(self.tools))
-            tool_sync = install_tool_sync(self, model_tools)
-            from custom_agents.access_runtime import runtime_access
-            from custom_agents.tool_loading import OnRequestToolHook, ToolLimitHook, loadable_tools_text
-
-            # The groups that load on request, listed by name and purpose, cost
-            # far less than their definitions in every call (custom_agents.tool_loading).
-            loadable_text = loadable_tools_text(self, runtime_access(self).catalog)
-            if loadable_text:
-                full_system_prompt = f"{full_system_prompt}\n\n{loadable_text}"
-            tool_result_offloader = TaskAwareToolResultOffloader(
-                max_tokens_per_call=self.max_tool_result_tokens_per_call,
-                model=model,
-                artifact_root=agent_layout(self).tool_results_dir,
-                task_manager=self.task_manager,
-                team_id=self.team_id,
-                agent_id=self.id,
-                named_agent_type=self.named_agent_type,
-                logger_=self._logger,
-            )
-            self._tool_result_budget_monitor = tool_result_offloader
-            conversation_manager = (
-                self._context_engine.build_inner_loop_conversation_manager(
-                    tool_result_offloader.storage
-                )
-                if self._context_engine is not None
-                else None
-            )
-            agent_signature = inspect.signature(Agent)
-            retry_strategy_config = self._model_failover_retry_strategy_config()
-            agent_kwargs: Dict[str, Any] = {}
-            if (
-                retry_strategy_config is not None
-                and "retry_strategy" in agent_signature.parameters
-            ):
-                from strands.event_loop._retry import ModelRetryStrategy
-
-                agent_kwargs["retry_strategy"] = ModelRetryStrategy(
-                    **retry_strategy_config
-                )
-
-            agent_hooks = [
-                self._tool_result_budget_monitor,
-                self._runtime_guardrails_plugin,
-                self._runtime_steering_plugin,
-                self._access_decision_hook,
-                tool_sync,
-                PersonModelHook(self),
-                ToolLimitHook(self),
-                OnRequestToolHook(self),
-            ]
-            if "plugins" in agent_signature.parameters:
-                agent_kwargs["plugins"] = list(self.plugins or [])
-            elif self.plugins:
-                agent_hooks.extend(self.plugins)
-
-            # Create Strands Agent. Record changes run first in each model
-            # step, and a failed one skips the step's later calls
-            # (custom_agents.sdk.strands.changes_first).
-            self._strands_agent = Agent(
-                system_prompt=full_system_prompt,
-                tools=model_tools,
-                model=model,
-                conversation_manager=conversation_manager,
-                callback_handler=None,
-                hooks=agent_hooks,
-                tool_executor=ChangesFirstToolExecutor(builtin_tool_catalog().record_kind),
-                **agent_kwargs,
-            )
-            if self._context_debug_dump_plugin is not None:
-                register_context_debug_model_observer(
-                    self._strands_agent,
-                    self._context_debug_dump_plugin,
-                    logger=self._logger,
-                )
-
+            previous = self._strands_parts
+            loaded = previous.loaded if keep_loaded_tools and previous is not None else None
+            parts = build_strands_parts(self, agent_class=Agent, loaded=loaded)
+            self._strands_parts = parts
+            self._strands_agent = parts.agent
             self._logger.info(
                 f"[{self.id}] Strands Agent created with {len(self.tools)} tools and {len(self.plugins)} plugins"
             )
-
         except Exception as e:
             self._logger.error(f"[{self.id}] Failed to create Strands Agent: {e}")
             raise
@@ -3493,6 +3429,7 @@ class UniversalAgent(BaseModel):
                 openai_codex=self.openai_codex,
                 xai_oauth=self.xai_oauth,
                 instance_root=infer_instance_root(self),
+                saved_outputs=SavedOutputRetention.for_agent(self),
             ),
             logger=self._logger,
         )
@@ -3502,7 +3439,10 @@ class UniversalAgent(BaseModel):
             logger=self._logger,
         )
         self._create_context_engine()
-        self._create_strands_agent()
+        # Running turns keep the Strands agent they started with until their
+        # next model call, when they take a new one (custom_agents.turn_registry.pin_turn_strands).
+        self._strands_generation += 1
+        self._create_strands_agent(keep_loaded_tools=True)
 
     def apply_runtime_llm_profile(
         self,
@@ -3773,7 +3713,7 @@ class UniversalAgent(BaseModel):
             team_id=self.team_id,
             named_agent_type=self.named_agent_type,
             summary_generator=self._conversation_summary_generator,
-            strands_messages=list(getattr(self._strands_agent, "messages", []) or []),
+            strands_messages=task_strands_messages(task_info.task.task_id),
             task_info=task_info,
             task_status=task_status,
         )
@@ -3792,9 +3732,7 @@ class UniversalAgent(BaseModel):
                 TurnFinalizationRequest(
                     task_info=task_info,
                     task_status=task_status,
-                    strands_messages=list(
-                        getattr(self._strands_agent, "messages", []) or []
-                    ),
+                    strands_messages=task_strands_messages(task_info.task.task_id),
                 ),
             )
         except Exception as exc:
@@ -4009,13 +3947,18 @@ class UniversalAgent(BaseModel):
         results and can poison later turns with oversized context. Clear any
         transient provider metadata at the same boundary so a future adapter
         cannot accidentally carry request state into an unrelated task.
+
+        It acts on the bound turn's Strands agent; this is also where a turn
+        takes a new one after a model rebuild (``turn_registry.pin_turn_strands``).
         """
-        if not self._strands_agent:
+        parts = pin_turn_strands(self)
+        strands_agent = parts.agent if parts is not None else self._strands_agent
+        if not strands_agent:
             return
-        messages = getattr(self._strands_agent, "messages", None)
+        messages = getattr(strands_agent, "messages", None)
         if hasattr(messages, "clear"):
             messages.clear()
-        model_state = getattr(self._strands_agent, "_model_state", None)
+        model_state = getattr(strands_agent, "_model_state", None)
         if isinstance(model_state, dict):
             model_state.clear()
 
@@ -4379,7 +4322,7 @@ class UniversalAgent(BaseModel):
             is_known_task=task_info is not None,
             is_current_task=(
                 task_info is not None
-                and task_status.task_id == self.task_manager.current_task_id
+                and task_status.task_id in executing_task_ids(self)
             ),
             task_state=task_info.state if task_info is not None else None,
             last_task_update_at=last_task_update_at,
@@ -4481,7 +4424,14 @@ class UniversalAgent(BaseModel):
         )
         return True
 
-    async def _drain_due_turn_action_outbox(self) -> bool:
+    async def _drain_due_turn_action_outbox(self, lane: str = MAIN_LANE) -> bool:
+        """Retry the lane's saved turn actions that are due; whether a batch was retried.
+
+        A batch is retried in its request's lane, as that request's work
+        (``runtime_context.task_work``): a delegation it retries names the
+        request as its parent (``delegation_runtime``), never whichever task
+        the drain's context held (PR #57 review).
+        """
         await self.task_manager.operations_runtime.run(
             self.task_manager.mark_stale_dispatching_turn_actions,
             stale_after_seconds=self._turn_action_outbox_float(
@@ -4491,121 +4441,127 @@ class UniversalAgent(BaseModel):
         due_records = await self.task_manager.operations_runtime.run(
             self.task_manager.due_turn_action_retry_records,
         )
-        if not due_records:
-            return False
-
         for due_record in due_records:
-            batch = await self.task_manager.operations_runtime.run(
-                self.task_manager.get_turn_action_batch, due_record.batch_id
-            )
-            if batch is None:
+            if await lane_of(self, due_record.source_task_id) != lane:
                 continue
-            source_info = await self.task_manager.operations_runtime.run(
-                self.task_manager.get_task_info, due_record.source_task_id
+            with task_work(due_record.source_task_id):
+                if await self._retry_due_turn_action_batch(due_record):
+                    return True
+        return False
+
+    async def _retry_due_turn_action_batch(self, due_record: Any) -> bool:
+        """Retry one due batch from ``due_record`` on; False when there was nothing to retry."""
+        batch = await self.task_manager.operations_runtime.run(
+            self.task_manager.get_turn_action_batch, due_record.batch_id
+        )
+        if batch is None:
+            return False
+        source_info = await self.task_manager.operations_runtime.run(
+            self.task_manager.get_task_info, due_record.source_task_id
+        )
+        if source_info is None:
+            await self.task_manager.operations_runtime.run(
+                self.task_manager.mark_turn_action_record,
+                due_record.action_id,
+                status="failed_terminal",
+                recoverability="terminal",
+                last_error="Source task is no longer active.",
             )
-            if source_info is None:
-                await self.task_manager.operations_runtime.run(
-                    self.task_manager.mark_turn_action_record,
-                    due_record.action_id,
-                    status="failed_terminal",
-                    recoverability="terminal",
-                    last_error="Source task is no longer active.",
+            return False
+        await self.task_manager.operations_runtime.run(
+            self.task_manager.mark_turn_action_batch_status,
+            batch.batch_id,
+            "retrying",
+            current_action_index=due_record.action_index,
+        )
+        records = await self.task_manager.operations_runtime.run(
+            self.task_manager.list_turn_action_records, batch.batch_id
+        )
+        root_task_id = (
+            await self.task_manager.operations_runtime.run(
+                self.task_manager.resolve_root_task_id, due_record.source_task_id
+            )
+            or due_record.source_task_id
+        )
+        coordinator = self._runtime_coordinator()
+        lease = None
+        try:
+            lease = await self.task_manager.operations_runtime.run(
+                coordinator.begin_batch,
+                root_task_id=root_task_id,
+                source_task_id=due_record.source_task_id,
+                batch_id=batch.batch_id,
+            )
+            for record in records:
+                if record.action_index < due_record.action_index:
+                    continue
+                if record.status in TURN_ACTION_DONE_STATUSES:
+                    continue
+                if record.status == "blocked":
+                    await self.task_manager.operations_runtime.run(
+                        self.task_manager.mark_turn_action_record,
+                        record.action_id,
+                        status="pending",
+                    )
+                action = self._turn_action_from_outbox_record(record)
+                await self._execute_turn_action_with_recovery(
+                    batch_id=batch.batch_id,
+                    record_id=record.action_id,
+                    action=action,
+                    incoming_content=source_info.task,
+                    incoming_header=source_info.header,
+                    incoming_meta=source_info.meta,
                 )
-                continue
+                await self.task_manager.operations_runtime.run(
+                    coordinator.interrupt_if_requested,
+                    lease.lease_id if lease is not None else None,
+                    batch.batch_id,
+                    record.action_index,
+                )
             await self.task_manager.operations_runtime.run(
                 self.task_manager.mark_turn_action_batch_status,
                 batch.batch_id,
-                "retrying",
-                current_action_index=due_record.action_index,
+                "completed",
             )
-            records = await self.task_manager.operations_runtime.run(
-                self.task_manager.list_turn_action_records, batch.batch_id
+            await self.task_manager.operations_runtime.run(
+                coordinator.complete_batch,
+                lease_id=lease.lease_id if lease is not None else None,
+                root_task_id=root_task_id,
+                batch_id=batch.batch_id,
+                status="completed",
             )
-            root_task_id = (
-                await self.task_manager.operations_runtime.run(
-                    self.task_manager.resolve_root_task_id, due_record.source_task_id
-                )
-                or due_record.source_task_id
-            )
-            coordinator = self._runtime_coordinator()
-            lease = None
-            try:
-                lease = await self.task_manager.operations_runtime.run(
-                    coordinator.begin_batch,
-                    root_task_id=root_task_id,
-                    source_task_id=due_record.source_task_id,
-                    batch_id=batch.batch_id,
-                )
-                for record in records:
-                    if record.action_index < due_record.action_index:
-                        continue
-                    if record.status in TURN_ACTION_DONE_STATUSES:
-                        continue
-                    if record.status == "blocked":
-                        await self.task_manager.operations_runtime.run(
-                            self.task_manager.mark_turn_action_record,
-                            record.action_id,
-                            status="pending",
-                        )
-                    action = self._turn_action_from_outbox_record(record)
-                    await self._execute_turn_action_with_recovery(
-                        batch_id=batch.batch_id,
-                        record_id=record.action_id,
-                        action=action,
-                        incoming_content=source_info.task,
-                        incoming_header=source_info.header,
-                        incoming_meta=source_info.meta,
-                    )
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.interrupt_if_requested,
-                        lease.lease_id if lease is not None else None,
-                        batch.batch_id,
-                        record.action_index,
-                    )
-                await self.task_manager.operations_runtime.run(
-                    self.task_manager.mark_turn_action_batch_status,
-                    batch.batch_id,
-                    "completed",
-                )
+            return True
+        except TurnActionRecoveryScheduled:
+            if lease is not None:
                 await self.task_manager.operations_runtime.run(
                     coordinator.complete_batch,
-                    lease_id=lease.lease_id if lease is not None else None,
+                    lease_id=lease.lease_id,
                     root_task_id=root_task_id,
                     batch_id=batch.batch_id,
-                    status="completed",
+                    # This attempt failed; the outbox owns the pending retry.
+                    status="failed",
                 )
-                return True
-            except TurnActionRecoveryScheduled:
-                if lease is not None:
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.complete_batch,
-                        lease_id=lease.lease_id,
-                        root_task_id=root_task_id,
-                        batch_id=batch.batch_id,
-                        # This attempt failed; the outbox owns the pending retry.
-                        status="failed",
-                    )
-                return True
-            except RuntimeBatchInterrupted:
-                if lease is not None:
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.complete_batch,
-                        lease_id=lease.lease_id,
-                        root_task_id=root_task_id,
-                        batch_id=batch.batch_id,
-                        status="interrupted",
-                    )
-                return True
-            except Exception:
-                if lease is not None:
-                    await self.task_manager.operations_runtime.run(
-                        coordinator.complete_batch,
-                        lease_id=lease.lease_id,
-                        root_task_id=root_task_id,
-                        batch_id=batch.batch_id,
-                        status="failed",
-                    )
-                raise
+            return True
+        except RuntimeBatchInterrupted:
+            if lease is not None:
+                await self.task_manager.operations_runtime.run(
+                    coordinator.complete_batch,
+                    lease_id=lease.lease_id,
+                    root_task_id=root_task_id,
+                    batch_id=batch.batch_id,
+                    status="interrupted",
+                )
+            return True
+        except Exception:
+            if lease is not None:
+                await self.task_manager.operations_runtime.run(
+                    coordinator.complete_batch,
+                    lease_id=lease.lease_id,
+                    root_task_id=root_task_id,
+                    batch_id=batch.batch_id,
+                    status="failed",
+                )
+            raise
         return False
 
     @property
@@ -4628,7 +4584,11 @@ class UniversalAgent(BaseModel):
         return self._deferred_inbox
 
     async def _dispatch_deferred_envelope(self, envelope: MessageEnvelope) -> None:
-        async with self._execution_scope():
+        """Handle a waiting message in the execution lane of the task it concerns."""
+        lane = await self.task_manager.operations_runtime.run(
+            partial(lane_for_message, self.task_manager), envelope.msg_content
+        )
+        async with self._execution_scope(lane):
             await self._dispatch_message(
                 msg_header=envelope.msg_header,
                 msg_content=envelope.msg_content,
@@ -4638,42 +4598,28 @@ class UniversalAgent(BaseModel):
             )
 
     def _can_continue_pending_work(self) -> bool:
-        return not (self.paused or self.is_executing or self._should_exit.is_set())
+        """Whether the main drain may take its next step (parallel lanes run on their own)."""
+        return not (self.paused or self.main_lane_busy or self._should_exit.is_set())
 
     async def _continue_pending_work(self) -> bool:
-        """Run one drain pass. Only the retained drain calls this.
+        """Run one drain pass of the main lane. Only the retained drain calls this.
 
         ``pending_work_runtime`` keeps that drain in one task, so passes never
-        overlap. Nothing new starts once the agent is stopping. Returns False
-        when a waiting message failed and was kept, so the drain stops instead
-        of retrying it at once.
+        overlap; parallel requests run in lanes of their own
+        (``custom_agents.execution_lanes_runtime``).
         """
-        while self._can_continue_pending_work():
-            if self._pending_interrupt_responses:
-                interrupted_task_id = next(iter(self._pending_interrupt_responses))
-                await self._resume_interrupted_task_turn(interrupted_task_id)
-                continue
-            if self.deferred_inbox:
-                drained = await self.deferred_inbox.drain(
-                    dispatch=self._dispatch_deferred_envelope,
-                    available=self._can_continue_pending_work,
-                )
-                if not drained:
-                    return False
-                continue
-            retried_outbox = await self._drain_due_turn_action_outbox()
-            if retried_outbox:
-                continue
-            drained_runtime_mailbox = (
-                await self._runtime_coordinator().drain_all_deferred_events()
-            )
-            if drained_runtime_mailbox:
-                continue
-            started = await self._check_and_process_next_task()
-            if started:
-                continue
-            break
-        return True
+        return await continue_main_lane(self)
+
+    async def _start_parallel_lanes(self) -> None:
+        await start_parallel_lanes(self)
+
+    def _new_strands_parts(self, loaded: Optional[LoadedTools] = None) -> StrandsParts:
+        """A Strands agent of its own for a parallel lane (custom_agents.execution_lanes_runtime).
+
+        ``loaded`` carries the groups the lane's request loaded over to a
+        rebuilt agent, as ``_create_strands_agent`` does for the main one.
+        """
+        return build_strands_parts(self, agent_class=Agent, loaded=loaded)
 
     async def _apply_runtime_content_defaults(
         self,
@@ -5077,11 +5023,7 @@ class UniversalAgent(BaseModel):
             # from a worker that is gone: tell each requester who holds them.
             await report_held_delegated_tasks(self)
             if self.is_team_lead:
-                # Safety net: end the work of anyone disabled or removed while
-                # this manager was stopped (custom_agents.person_departure_runtime).
-                from custom_agents.person_departure_runtime import settle_departed_people_safely
-
-                await settle_departed_people_safely(self, when="manager_start")
+                await resume_manager_data_cleanups(self)
             from custom_agents.agent_instantiation_service import update_runtime_launch
             from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 
@@ -5299,21 +5241,13 @@ class UniversalAgent(BaseModel):
             return
 
         requires_execution_slot = self._requires_execution_slot(msg_envelope)
-        keepalive_task: Optional[asyncio.Task] = None
         try:
+            # A message that may resume a model turn is saved for its task's
+            # execution lane and acknowledged; it never runs a turn here, where
+            # the mailbox would wait for it (task_admission_runtime).
             if await handle_busy_delivery(self, delivery, requires_execution_slot):
                 return
-            if requires_execution_slot:
-                keepalive_task = asyncio.create_task(
-                    self._ensure_nats_transport_adapter().keepalive_while(
-                        delivery, asyncio.current_task()
-                    )
-                )
-            scope = (
-                self._execution_scope()
-                if requires_execution_slot
-                else contextlib.nullcontext()
-            )
+            scope = self._execution_scope() if requires_execution_slot else contextlib.nullcontext()
             async with scope:
                 await self._dispatch_message(
                     msg_header=msg_header,
@@ -5339,11 +5273,6 @@ class UniversalAgent(BaseModel):
             else:
                 await delivery.nak()
         finally:
-            if keepalive_task is not None:
-                keepalive_task.cancel()
-                # Consume child cancellation without swallowing cancellation of
-                # this delivery owner during transport shutdown.
-                await asyncio.gather(keepalive_task, return_exceptions=True)
             await self._refresh_self_agent_state(is_exiting=self._should_exit.is_set())
             schedule_pending_work(self)
 
@@ -5445,7 +5374,9 @@ class UniversalAgent(BaseModel):
             )
 
             if self.task_manager.current_task_id:
-                pressure_snapshot = build_runtime_pressure_snapshot(self)
+                pressure_snapshot = build_runtime_pressure_snapshot(
+                    self, self.task_manager.current_task_id
+                )
                 diagnostic_dict["runtime_pressure"] = pressure_snapshot
         except Exception as exc:
             diagnostic_dict["runtime_pressure_error"] = str(exc)
@@ -5506,6 +5437,9 @@ class UniversalAgent(BaseModel):
 
         if info_type == ControlType.STATUS_REQUEST_FULL:
             diagnostic_dict["current_task_id"] = self.task_manager.current_task_id
+            # Several turns may run at once (custom_agents.execution_lanes).
+            diagnostic_dict["running_task_ids"] = running_turn_task_ids(self)
+            diagnostic_dict["execution_lanes"] = self._execution_lanes.held_lanes()
             if self.task_manager.current_task_id:
                 diagnostic_dict["current_task_status"] = self.task_manager.get_task(
                     task_id=diagnostic_dict["current_task_id"]
@@ -5551,7 +5485,10 @@ class UniversalAgent(BaseModel):
             self, *args, **kwargs
         )
 
-    async def _check_and_process_next_task(self, *args, **kwargs):
+    async def _check_and_process_next_task(self, lane: str = MAIN_LANE):
+        """Start the lane's next queued task; a parallel lane's worker already holds its lane."""
+        if lane != MAIN_LANE:
+            return await task_message_runtime._check_and_process_next_task(self, lane)
         if not self._can_continue_pending_work():
             return False
         refresh_state = True
@@ -5559,9 +5496,9 @@ class UniversalAgent(BaseModel):
             # Admission must be exclusive before its first storage await. An
             # empty probe must not publish busy/idle transitions: receiving
             # those presence messages would trigger another empty probe.
-            async with self._execution_gate.hold():
+            async with self._execution_lanes.hold(MAIN_LANE):
                 started = await task_message_runtime._check_and_process_next_task(
-                    self, *args, **kwargs
+                    self, MAIN_LANE
                 )
                 refresh_state = started
                 return started
@@ -5575,9 +5512,10 @@ class UniversalAgent(BaseModel):
         )
 
     async def _resume_interrupted_task_turn(self, task_id: str):
-        if self.is_executing and not self._execution_gate.owned_by_current_task:
+        lane = await lane_of(self, task_id)
+        if self._execution_lanes.lane_busy(lane) and not self._execution_lanes.owned_by_current_task(lane):
             return None
-        async with self._execution_scope():
+        async with self._execution_scope(lane):
             return await resume_interrupted_task_turn(self, task_id)
 
     async def _handle_task_response(self, *args, **kwargs):
@@ -6052,7 +5990,7 @@ class UniversalAgent(BaseModel):
         if self._llm_turn_executor is None:
             self._llm_turn_executor = llm_turn_runtime.LLMTurnExecutor(
                 settings=self._turn_runtime_settings,
-                model=lambda: self._strands_agent,
+                model=partial(turn_strands_agent, self),
                 context=lambda: self._context_engine,
                 debug_dump=lambda: self._context_debug_dump_plugin,
                 logger=self._logger,
@@ -6172,16 +6110,27 @@ class UniversalAgent(BaseModel):
     async def process_llm_interaction(
         self, msg_content: ContentType, msg_header: MessageHeader, msg_meta: MessageMeta
     ) -> ContentType:
-        async with self._execution_scope():
+        """Run one model turn for ``msg_content`` inside its task's handling.
+
+        The caller binds the task's work record (``runtime_context.task_work``)
+        around the turn and the saving of its result; the turn, its tool calls
+        and the caller's later steps all read their task from it.
+        """
+        task_id = self._history_task_id_for_content(msg_content)
+        work = current_task_work()
+        if work is None or work.task_id != task_id:
+            raise RuntimeError(
+                f"A model turn for task {task_id} was started outside its task's work record "
+                f"(bound: {getattr(work, 'task_id', None)}); wrap its handling in runtime_context.task_work."
+            )
+        # The turn runs in its task's execution lane; its runner usually holds
+        # it already (custom_agents.execution_lanes).
+        async with self._execution_scope(await lane_of(self, task_id)):
             # A fresh turn must reread guidance whose previous turn ended
             # without a durable decision, including failover in this process.
-            task_id = (
-                msg_content.task_id if isinstance(msg_content, Task)
-                else getattr(msg_content, "parent_task_id", None)
-            )
             getattr(self, "_consumed_task_steering_ids", {}).pop(task_id, None)
             # Stop cancels this child turn, never the transport/runtime owner.
-            # Keep the execution gate held until the SDK finishes unwinding.
+            # Keep the execution lane held until the SDK finishes unwinding.
             return await asyncio.create_task(
                 self.turn_executor.process_llm_interaction(msg_content, msg_header, msg_meta)
             )

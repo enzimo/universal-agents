@@ -714,3 +714,57 @@ def test_delegation_words_say_how_access_can_be_handed_on(harness: Harness) -> N
     assert grant["hand_on_words"] == (
         "Can hand it on to other agents only after a person approves each time; they can hand it on once more."
     )
+
+
+def test_the_history_cleanup_switch_gives_and_removes_only_the_persons_own_grant(harness: Harness) -> None:
+    """Settings > Access: TeamLead may clean up the person's own history without asking (never handed on)."""
+
+    before = harness.view("member-1")["history_cleanup"]
+    assert before["available"] is True and before["on"] is False and before["grant_id"] is None
+    assert "Remembered facts are kept" in before["description"]
+
+    turned_on = asyncio.run(harness.map.set_history_cleanup("member-1", True))
+    assert turned_on["history_cleanup"]["on"] is True
+    grant = harness.agents.service.store.get(turned_on["history_cleanup"]["grant_id"])
+    assert grant is not None and grant.target.id == "fn:history_cleanup"
+    assert grant.for_person_id == "member-1" and grant.delegation_depth == 0
+    assert grant.subject == SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, LEAD))
+    assert harness.view("member-2")["history_cleanup"]["on"] is False, "it serves only the person who gave it"
+    rows = holder(harness.view("member-1"), f"agent_type:{LEAD}")["grants"]
+    assert any(row["target"] == "fn:history_cleanup" for row in rows), "listed with TeamLead access, with Remove"
+    assert asyncio.run(harness.map.set_history_cleanup("member-1", True))["history_cleanup"]["grant_id"] == grant.grant_id
+
+    turned_off = asyncio.run(harness.map.set_history_cleanup("member-1", False))
+    assert turned_off["history_cleanup"]["on"] is False
+    assert harness.agents.service.store.get(grant.grant_id).status is GrantStatus.REVOKED
+
+
+@pytest.mark.parametrize("level", [AccessLevel.READ, AccessLevel.WRITE])
+def test_cleanup_switch_upgrades_narrower_grants_and_can_remove_them(harness: Harness, level: AccessLevel) -> None:
+    person = PersonPrincipal("member-1", TEAM, ("member",))
+    lead = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, LEAD))
+    target = TargetRefV1(kind=TargetKind.TOOL, id="fn:history_cleanup")
+    narrow = person_grant(harness, by=person, to=lead, target=target, level=level, for_person_id=person.person_id)
+    assert harness.view(person.person_id)["history_cleanup"]["on"] is False
+
+    enabled = asyncio.run(harness.map.set_history_cleanup(person.person_id, True))["history_cleanup"]
+
+    full = harness.agents.service.store.get(enabled["grant_id"])
+    assert enabled["on"] is True and full is not None and full.level is AccessLevel.FULL
+    assert harness.agents.service.store.get(narrow.grant_id).status is GrantStatus.REVOKED
+    asyncio.run(harness.map.set_history_cleanup(person.person_id, False))
+    narrow = person_grant(harness, by=person, to=lead, target=target, level=level, for_person_id=person.person_id)
+    asyncio.run(harness.map.set_history_cleanup(person.person_id, False))
+    assert harness.agents.service.store.get(narrow.grant_id).status is GrantStatus.REVOKED
+
+
+def test_other_people_cannot_remove_a_persons_history_cleanup_permission(harness: Harness) -> None:
+    turned_on = asyncio.run(harness.map.set_history_cleanup("member-1", True))
+    grant_id = turned_on["history_cleanup"]["grant_id"]
+    for person_id in ("member-2", "admin-1", "owner-1"):
+        rows = holder(harness.view(person_id), f"agent_type:{LEAD}")["grants"]
+        assert all(not row["can_revoke"] for row in rows if row["grant_id"] == grant_id)
+        with pytest.raises(HandDownRefused):
+            asyncio.run(harness.inbox.revoke_grant(person_id, grant_id))
+    assert harness.agents.service.store.get(grant_id).status is GrantStatus.ACTIVE
+    assert asyncio.run(harness.inbox.revoke_grant("member-1", grant_id)) == [grant_id]

@@ -497,6 +497,7 @@ class WebsiteApplicationDouble(CoreApplicationDouble):
             thread_id=session.thread_id,
             owner_canonical_user_id=session.owner_canonical_user_id,
             updated_at=session.updated_at,
+            parallel_thread=session.parallel_thread,
         )
 
     async def emit_delivery_event(self, event) -> bool:

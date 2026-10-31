@@ -73,15 +73,16 @@ OBJECTIVES_TOOL_ID = "fn:objectives"
 TOOL_LIMIT_HOOK_ORDER = -40.0
 # Before the access hook (order inf), so the call it gives a tool is still decided.
 ON_REQUEST_TOOL_HOOK_ORDER = -10.0
+# Where an agent without Strands parts (one built without a model) keeps its record.
 _STATE_ATTRIBUTE = "_loaded_tools"
-# Where custom_agents.tool_sync.install_tool_sync keeps the agent's tool-list sync,
-# the one writer of the registry's catalog functions.
-SYNC_ATTRIBUTE = "_tool_list_sync"
 
 
 @dataclass
 class LoadedTools:
-    """One agent's loaded on-request groups for its current task, with when each was last used.
+    """One Strands agent's loaded on-request groups for its current task, with when each was last used.
+
+    Each Strands agent has its own (``custom_agents.strands_parts``): two turns
+    running at once load and unload groups only in their own tool lists.
 
     ``last_used`` holds the model call (``model_calls``) at which a group was
     loaded or last called. ``version`` changes whenever the set changes, so the
@@ -158,6 +159,13 @@ class LoadedTools:
 
 
 def loaded_tools(agent: Any) -> LoadedTools:
+    """The loaded groups of the Strands agent the current turn calls, else of the agent's main one."""
+
+    from custom_agents.strands_parts import current_parts
+
+    parts = current_parts(agent)
+    if parts is not None:
+        return parts.loaded
     state = getattr(agent, _STATE_ATTRIBUTE, None)
     if state is None:
         state = LoadedTools()
@@ -232,8 +240,13 @@ def work_key(agent: Any) -> str | None:
     return active_task_context(agent)[0]
 
 
-def hidden_tool_ids(agent: Any, catalog: Any, *, at_start: bool = False) -> set[str]:
-    """On-request groups not shown to this agent right now, or before anything is loaded (``at_start``)."""
+def hidden_tool_ids(
+    agent: Any, catalog: Any, *, at_start: bool = False, loaded: LoadedTools | None = None
+) -> set[str]:
+    """On-request groups not shown to this agent right now, or before anything is loaded (``at_start``).
+
+    ``loaded`` is the Strands agent's record (default: the current turn's, ``loaded_tools``).
+    """
 
     on_request = set(getattr(catalog, "on_request", {}) or {})
     if not on_request:
@@ -241,7 +254,7 @@ def hidden_tool_ids(agent: Any, catalog: Any, *, at_start: bool = False) -> set[
     hidden = on_request - definition_tool_ids(agent, catalog)
     if at_start:
         return hidden
-    return hidden - loaded_tools(agent).loaded() - work_preloaded(agent)
+    return hidden - (loaded or loaded_tools(agent)).loaded() - work_preloaded(agent)
 
 
 def is_hidden(name: str, catalog: Any, hidden: set[str]) -> bool:
@@ -253,10 +266,12 @@ def is_hidden(name: str, catalog: Any, hidden: set[str]) -> bool:
     return name not in catalog.on_request.get(binding.tool_id, frozenset())
 
 
-def shown_names(agent: Any, catalog: Any, names: Iterable[str], *, at_start: bool = False) -> set[str]:
+def shown_names(
+    agent: Any, catalog: Any, names: Iterable[str], *, at_start: bool = False, loaded: LoadedTools | None = None
+) -> set[str]:
     """The function names, without those of groups hidden from this agent now (or at start)."""
 
-    hidden = hidden_tool_ids(agent, catalog, at_start=at_start)
+    hidden = hidden_tool_ids(agent, catalog, at_start=at_start, loaded=loaded)
     return {name for name in names if not is_hidden(name, catalog, hidden)}
 
 
@@ -384,12 +399,16 @@ def projected_names(agent: Any, catalog: Any, registry: Any) -> set[str]:
 
 
 class ToolLimitHook(HookProvider):
-    """Before every model call, keep the request within the model's tool cap (module docstring)."""
+    """Before every model call, keep the request within the model's tool cap (module docstring).
+
+    ``parts`` are the Strands agent's own tool state (``custom_agents.strands_parts``).
+    """
 
     name = "tool_limit"
 
-    def __init__(self, agent: Any) -> None:
+    def __init__(self, agent: Any, parts: Any) -> None:
         self.agent = agent
+        self.parts = parts
 
     def register_hooks(self, registry: HookRegistry, **_: Any) -> None:
         registry.add_callback(BeforeModelCallEvent, self.before_model_call, order=TOOL_LIMIT_HOOK_ORDER)
@@ -411,14 +430,14 @@ class ToolLimitHook(HookProvider):
         if count <= limit:
             return
         catalog = runtime_access(self.agent).catalog
-        state = loaded_tools(self.agent)
-        sync = getattr(self.agent, SYNC_ATTRIBUTE, None)
+        state = self.parts.loaded
+        sync = self.parts.sync
         while count > limit:
             tool_id = state.least_recently_used(excluding=work_preloaded(self.agent) | definition_tool_ids(self.agent, catalog))
             if tool_id is None or sync is None:
                 break
             state.unload(tool_id)
-            if tool_id in hidden_tool_ids(self.agent, catalog):
+            if tool_id in hidden_tool_ids(self.agent, catalog, loaded=state):
                 # Through the sync, so its record of what it shows stays true.
                 sync.functions.withdraw(registry, loadable_functions(self.agent, catalog, tool_id))
             logger.info(
@@ -470,8 +489,9 @@ class OnRequestToolHook(HookProvider):
 
     name = "on_request_tools"
 
-    def __init__(self, agent: Any) -> None:
+    def __init__(self, agent: Any, parts: Any) -> None:
         self.agent = agent
+        self.parts = parts
 
     def _may_load(self, name: str) -> bool:
         """With authorization on the access hook decides the call; with it off only the definition's tools load.
@@ -497,11 +517,11 @@ class OnRequestToolHook(HookProvider):
         tool_id = group_of(name, catalog)
         if tool_id is None:
             return
-        state = loaded_tools(self.agent)
+        state = self.parts.loaded
         if event.selected_tool is not None:
             state.used(tool_id)
             return
-        if tool_id not in hidden_tool_ids(self.agent, catalog):
+        if tool_id not in hidden_tool_ids(self.agent, catalog, loaded=state):
             return
         # The agent's own tools: its definition's, which hold every group it may load.
         tool = next((item for item in getattr(self.agent, "tools", ()) or () if tool_name(item) == name), None)
@@ -534,7 +554,6 @@ __all__ = [
     "loaded_tools",
     "offered",
     "offered_names",
-    "SYNC_ATTRIBUTE",
     "loadable_functions",
     "projected_names",
     "registry_names",

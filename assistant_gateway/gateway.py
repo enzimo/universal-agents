@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
@@ -13,7 +14,10 @@ from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
 from assistant_gateway.file_retention import GatewayFileRetention
 from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cache_dir
+from assistant_gateway.storage_capacity import StorageCapacity, build_storage_capacity
+from assistant_gateway.storage_usage import StorageUsageNotices, build_storage_usage_notices
 from assistant_gateway.upload_retention import UploadRetention
+from assistant_gateway.history_cleanup import GatewayHistoryCleanup
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
 from assistant_gateway.access_inbox import (
     GatewayAccessInbox,
@@ -468,23 +472,75 @@ def _access_maintenance_tasks(
     return tasks
 
 
-def _file_retention(
-    config: GatewayInstanceConfig, *, records: DeliveryRepository, person_changes: PersonChangeCheck
-) -> tuple[UploadRetention, GatewayFileRetention]:
-    """The chat upload cleanup and the Settings > Team > File Retention service it follows.
+def _history_cleanup(
+    config: GatewayInstanceConfig, state_store: GatewayStateStore, access_inbox: GatewayAccessInbox
+) -> GatewayHistoryCleanup:
+    """The gateway's part of people's history clean-ups, in both authorization modes.
+
+    Composed here so the host stays a composition root
+    (``assistant_gateway.history_cleanup`` owns the behavior).
+    """
+
+    return GatewayHistoryCleanup(
+        team_id=config.manager.team_id,
+        storage=config.manager_storage_settings,
+        state_store=state_store,
+        uploads_dir=config.layout.uploads_dir,
+        proactive_session_key=config.heartbeat.session_key,
+        send_notice_once=access_inbox.send_notice_once,
+    )
+
+
+@dataclass(frozen=True)
+class _StoredData:
+    """The gateway's work on stored data: cleanup, warnings and their Settings page."""
+
+    uploads: UploadRetention
+    usage: StorageUsageNotices
+    capacity: StorageCapacity
+    settings: GatewayFileRetention
+
+
+def _stored_data(
+    config: GatewayInstanceConfig,
+    *,
+    state_store: GatewayStateStore,
+    access_inbox: GatewayAccessInbox,
+    person_changes: PersonChangeCheck,
+) -> _StoredData:
+    """The chat upload cleanup, the storage warnings and the Settings > Team > File Retention service.
 
     Uploads older than their retention are deleted at start and every few hours
-    (``upload_retention``); administrators change the days, and scratch
-    retention, in Settings (``file_retention``).
+    (``upload_retention``). People hear as their stored data grows
+    (``storage_usage``, a daily check) and administrators before storage fills
+    (``storage_capacity``, on the Status page). Administrators change the days,
+    scratch retention and the storage warnings in Settings (``file_retention``),
+    and the running cleanup and checks follow at once.
     """
 
     uploads = UploadRetention(
-        records=records,
+        records=state_store.delivery_repository,
         uploads_dir=resolve_inbound_attachment_cache_dir(config),
         retention_days=config.interactive_apps.internal_website.attachments.retention_days,
     )
-    return uploads, GatewayFileRetention(
-        config_path=config.config_path, person_changes=person_changes, uploads=uploads
+    usage = build_storage_usage_notices(
+        config,
+        chat=state_store,
+        access_store=access_inbox.access_store,
+        send_notice_once=access_inbox.send_notice_once,
+    )
+    capacity = build_storage_capacity(config)
+    return _StoredData(
+        uploads=uploads,
+        usage=usage,
+        capacity=capacity,
+        settings=GatewayFileRetention(
+            config_path=config.config_path,
+            person_changes=person_changes,
+            uploads=uploads,
+            storage_usage=usage,
+            storage_capacity=capacity,
+        ),
     )
 
 
@@ -922,9 +978,6 @@ class UserGateway:
             access_requests=lambda: self.access_inbox.requests(),
         )
         self.procedures = GatewayInstalledProcedures(config, person_changes=person_changes, signed_in=signed_in)
-        self.upload_retention, self.file_retention = _file_retention(
-            config, records=self.delivery_repository, person_changes=person_changes
-        )
         # Access reviews and notices (Phase 4 access model); its loop runs
         # with authorization on (_access_maintenance_tasks).
         self.access_inbox = build_gateway_access_inbox(
@@ -935,6 +988,11 @@ class UserGateway:
             proactive_sessions=self.proactive_delivery,
             event_output=self._event_output,
             logger=logger,
+        )
+        # Upload cleanup, people's storage notices, storage on the Status page
+        # and their Settings page (_stored_data).
+        self.stored_data = _stored_data(
+            config, state_store=self.state_store, access_inbox=self.access_inbox, person_changes=person_changes
         )
         self._task_progress_service = GatewayTaskProgressService(
             settings=GatewayTaskProgressSettings(
@@ -1269,6 +1327,9 @@ class UserGateway:
                 agent_statuses=self.team_presence.current_statuses,
                 send_notice_once=self.access_inbox.send_notice_once,
                 stopped_receivers=resolved_manager_runtime.stopped_receivers,
+                storage=self.stored_data.capacity,
+                person_storage_totals=self.stored_data.usage.stale_finding,
+                jetstream_usage=resolved_manager_runtime.jetstream_usage,
             ),
             # People's Knowledge page; the knowledge base is in the manager's database.
             knowledge=GatewayKnowledgePages(
@@ -1277,7 +1338,7 @@ class UserGateway:
                 enabled=config.agent.knowledge.enabled,
             ),
             accounts=self.account_sharing,
-            file_retention=self.file_retention,
+            file_retention=self.stored_data.settings,
         )
         self._activity_source = (
             activity_source or HttpGatewayActivitySource.from_gateway_config(config)
@@ -1337,8 +1398,16 @@ class UserGateway:
                     name="gateway_manager_liveness_loop",
                 ),
                 asyncio.create_task(
-                    self.upload_retention.run(self._stop_event),
+                    self.stored_data.uploads.run(self._stop_event),
                     name="gateway_upload_retention_loop",
+                ),
+                asyncio.create_task(
+                    _history_cleanup(self.config, self.state_store, self.access_inbox).run(self._stop_event),
+                    name="gateway_history_cleanup_loop",
+                ),
+                asyncio.create_task(
+                    self.stored_data.usage.run(self._stop_event),
+                    name="gateway_storage_usage_loop",
                 ),
             ]
             self._background_tasks.extend(

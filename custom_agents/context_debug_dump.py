@@ -17,6 +17,9 @@ from typing import Any, Callable, Optional
 from custom_agents.context_engine.base import AssembledContext, ContextAssemblyRequest
 
 
+MODEL_CALL_OBSERVER_API = "strands.middleware.InvokeModelStage.Wrap"
+
+
 DEFAULT_CONTEXT_DUMP_CONFIG: dict[str, Any] = {
     "enabled": False,
     "mode": "on_error",
@@ -802,7 +805,7 @@ class ContextDebugDumpPlugin:
         self._model_calls: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self.model_call_observer_status: dict[str, Any] = {
             "registered": False,
-            "api": "strands._middleware.InvokeModelStage.Wrap",
+            "api": MODEL_CALL_OBSERVER_API,
             "reason": "not_registered",
         }
 
@@ -965,26 +968,25 @@ def register_context_debug_model_observer(
     *,
     logger: logging.Logger | None = None,
 ) -> bool:
-    """Register opt-in model-call observation against Strands' private middleware API."""
+    """Register opt-in model-call observation through Strands' public middleware API."""
     logger = logger or logging.getLogger(__name__)
     if not plugin.model_call_capture_configured:
         plugin.model_call_observer_status = {
             "registered": False,
-            "api": "strands._middleware.InvokeModelStage.Wrap",
+            "api": MODEL_CALL_OBSERVER_API,
             "reason": "capture_model_calls_disabled",
         }
         return False
     if getattr(agent, "_universal_agents_context_debug_observer_registered", False):
         return True
     try:
-        from strands._middleware.stages import InvokeModelStage
+        from strands.middleware import InvokeModelStage
 
-        registry = getattr(agent, "_middleware_registry")
-        add_middleware = getattr(registry, "add_middleware")
+        add_middleware = agent.add_middleware
     except (AttributeError, ImportError) as exc:
         plugin.model_call_observer_status = {
             "registered": False,
-            "api": "strands._middleware.InvokeModelStage.Wrap",
+            "api": MODEL_CALL_OBSERVER_API,
             "reason": f"unavailable: {type(exc).__name__}: {exc}",
         }
         logger.warning(
@@ -1027,7 +1029,7 @@ def register_context_debug_model_observer(
     except Exception as exc:
         plugin.model_call_observer_status = {
             "registered": False,
-            "api": "strands._middleware.InvokeModelStage.Wrap",
+            "api": MODEL_CALL_OBSERVER_API,
             "reason": f"registration_failed: {type(exc).__name__}: {exc}",
         }
         logger.warning(
@@ -1038,8 +1040,7 @@ def register_context_debug_model_observer(
 
     plugin.model_call_observer_status = {
         "registered": True,
-        "api": "strands._middleware.InvokeModelStage.Wrap",
+        "api": MODEL_CALL_OBSERVER_API,
         "reason": None,
-        "private_api": True,
     }
     return True

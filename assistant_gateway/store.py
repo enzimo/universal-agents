@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Sequence, cast
+from typing import Callable, Optional, Sequence, cast
 
 from assistant_gateway.domain.delivery import (
     AttachmentRecord,
     DeliveryRecord,
     ScheduledTargetRecord,
 )
+from assistant_gateway.domain.history import GatewayHistoryDeleted, GatewayHistoryScope
 from assistant_gateway.domain.identity import (
     GatewayTeamPersonRecord,
     GatewayUserChannelBindingRecord,
@@ -180,6 +181,16 @@ class GatewayStateStore:
 
     def transcript_unit_of_work(self) -> TranscriptUnitOfWork:
         return self._repository.transcript_unit_of_work()
+
+    def chat_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of each person's chat text in this database (``assistant_gateway.storage_usage``)."""
+
+        return self._repository.chat_text_bytes_by_owner()
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]:
+        """Bytes of each person's chat uploads still kept in ``uploads_dir``."""
+
+        return self._repository.upload_bytes_by_owner(uploads_dir=uploads_dir)
 
     def get_session(self, session_key: str) -> Optional[SessionRecord]:
         return self._repository.get_session(session_key)
@@ -360,6 +371,7 @@ class GatewayStateStore:
         thread_id: Optional[str] = None,
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: Optional[bool] = None,
     ) -> None:
         self._repository.upsert_session(
             session_key=session_key,
@@ -373,6 +385,7 @@ class GatewayStateStore:
             thread_id=thread_id,
             status=status,
             owner_canonical_user_id=owner_canonical_user_id,
+            parallel_thread=parallel_thread,
         )
 
     def set_session_alias(self, session_key: str, session_alias: Optional[str]) -> None:
@@ -913,6 +926,17 @@ class GatewayStateStore:
 
     def forget_person_records(self, canonical_user_id: str) -> GatewayPersonRecordsDeleted:
         return self._repository.forget_person_records(canonical_user_id)
+
+    def delete_history_records(
+        self, scope: GatewayHistoryScope, *, removable_thread: Callable[[SessionRecord], bool]
+    ) -> GatewayHistoryDeleted:
+        return self._repository.delete_history_records(scope, removable_thread=removable_thread)
+
+    def history_cleanup_order_ids(self) -> tuple[str, ...]:
+        return self._repository.history_cleanup_order_ids()
+
+    def forget_history_cleanup_order(self, order_id: str) -> None:
+        self._repository.forget_history_cleanup_order(order_id)
 
     def list_team_members(self, team_id: str) -> list[GatewayUserTeamMembershipRecord]:
         return self._repository.list_team_members(team_id)

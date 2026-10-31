@@ -36,6 +36,7 @@ from access_catalog.catalog import load_catalog
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
 from access_control.entities import PersonPrincipal
+from tests.task_work_support import bind_task
 from custom_agents import access_runtime
 from custom_agents.access_runtime import AccessDecisionHook
 from custom_agents.default_tools import builtin_tool_catalog
@@ -142,6 +143,8 @@ def worker(storage: Any) -> SimpleNamespace:
         add_task_terminal_callback=lambda _callback: None,
         add_task_release_callback=lambda _callback: None,
     )
+    # The turn's calls work for this task; asyncio.run copies the binding (tests.task_work_support).
+    bind_task("task-1")
     return SimpleNamespace(
         id=WORKER_ID,
         named_agent_type=WORKER_TYPE,

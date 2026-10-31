@@ -361,6 +361,7 @@ class RuntimeWorkSummary(BaseModel):
     state: ProgressState
     problem_statement: str = ""
     is_current: bool = False
+    is_parallel: bool = False
     queue_position: Optional[int] = None
     session_key: Optional[str] = None
     conversation_id: Optional[str] = None

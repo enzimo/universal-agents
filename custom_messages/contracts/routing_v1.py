@@ -220,6 +220,11 @@ class MessageMeta(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+# ``GatewayContext.delivery_mode`` of a message a person sent in a chat and
+# waits on; other modes (scheduled, heartbeat, autonomous) run unattended.
+DELIVERY_MODE_INTERACTIVE = "interactive"
+
+
 # Identity and personal delivery fields travel together. Runtime signing,
 # schedule refresh and persistence loading use the same list when replacing
 # or removing a person's context; the contract owns it to avoid runtime cycles.
@@ -306,6 +311,18 @@ class GatewayContext(BaseModel):
             "scheduler key: the schedule's manager-signed permit and this run's own "
             "fields (access_control.task_identity). Set instead of task_context, never "
             "with it; copied unchanged onto delegated tasks and never saved on a schedule."
+        ),
+    )
+    # The description still names the switch's old label (now Run
+    # concurrently): it is part of the frozen fingerprint of the team-transfer
+    # schedules section (schedules/6), and a wording change alone is not worth
+    # a new section version and conversion step.
+    parallel_thread: bool = Field(
+        default=False,
+        description=(
+            "The request was sent in a thread the person started with Web Chat's Launch "
+            "parallel thread: the team lead may run it at the same time as its other work "
+            "(custom_agents.execution_lanes). Scheduling only; it grants nothing."
         ),
     )
 

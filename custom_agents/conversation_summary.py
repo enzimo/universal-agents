@@ -252,34 +252,22 @@ class LLMTurnSummaryGenerator:
         self,
         config: Optional[ConversationSummaryConfig] = None,
         logger: Optional[logging.Logger] = None,
-        summarization_agent: Any = None,
+        summarization_model: Any = None,
     ) -> None:
         self.config = config or ConversationSummaryConfig()
         self.logger = logger or logging.getLogger(__name__)
         self._fallback = HeuristicConversationSummaryGenerator()
-        self._summarization_agent = summarization_agent
-        from custom_agents.person_model_runtime import SummaryAgents
-
-        # A person's own model for their conversations (custom_agents.person_model_runtime).
-        self._person_agents = SummaryAgents(LLM_TURN_SUMMARY_SYSTEM_PROMPT)
-        if self._summarization_agent is not None:
+        self._summarization_model = summarization_model
+        if self._summarization_model is not None:
             return
         try:
-            from strands import Agent
-            from strands.agent.conversation_manager.null_conversation_manager import NullConversationManager
-
-            self._summarization_agent = Agent(
-                model=self._build_model(),
-                tools=[],
-                system_prompt=LLM_TURN_SUMMARY_SYSTEM_PROMPT,
-                conversation_manager=NullConversationManager(),
-            )
+            self._summarization_model = self._build_model()
         except Exception as exc:
             self.logger.warning(
                 "Failed to initialize LLM conversation summary generator; falling back to heuristic summaries: %s",
                 exc,
             )
-            self._summarization_agent = None
+            self._summarization_model = None
 
     def _build_model(self) -> Any:
         provider = self.config.summary_model_provider or self.config.default_model_provider
@@ -298,11 +286,15 @@ class LLMTurnSummaryGenerator:
         )
 
     def summarize_turn(self, request: TurnSummaryRequest) -> TurnSummaryResult:
-        if self._summarization_agent is None:
+        if self._summarization_model is None:
             return self._fallback.summarize_turn(request)
         try:
+            from custom_agents.person_model_runtime import new_summary_agent
+
             prompt = self._build_prompt(request)
-            summarizer = self._person_agents.agent_for(self._summarization_agent)
+            summarizer = new_summary_agent(
+                self._summarization_model, system_prompt=LLM_TURN_SUMMARY_SYSTEM_PROMPT
+            )
             result = summarizer(prompt, structured_output_model=StructuredTurnSummary)
             structured_output = getattr(result, "structured_output", None)
             if structured_output is None:

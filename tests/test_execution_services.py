@@ -18,7 +18,7 @@ from custom_tools.providers.execution_control import (
     plan_managed_execution_service,
     plan_managed_execution_service_state,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from mcp_control.registry import (
     MCPConnectionLifecycle,
     MCPConnectionSource,

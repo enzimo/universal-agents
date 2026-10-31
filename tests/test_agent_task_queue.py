@@ -11,7 +11,7 @@ import pytest
 
 from custom_messages.enums import ProgressState
 from custom_tools.providers.task_queue import control_task_queue, list_task_queue
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from test_runtime_task_controls import agent as runtime_agent_fixture, add, command
 from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
@@ -39,6 +39,7 @@ def current_request(agent, monkeypatch):
     use_signed_contexts(monkeypatch)
     add(agent, "inspection", state=ProgressState.IN_PROGRESS)
     request = sign(agent, "inspection")
+    agent.test_task_id = "inspection"  # the tool calls below are this task's turn
     set_agent_ref(agent)
     yield request
     set_agent_ref(None)
@@ -66,6 +67,22 @@ async def test_inspect_pause_resume_stop_own_queue(agent, current_request):
     assert stopped["durable_cancellation_recorded"]
     assert agent.task_manager.get_task_info("queued") is None
     assert agent.task_manager.get_task_from_db("queued")["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_listing_marks_parallel_requests_like_settings_tasks(agent):
+    # A request sent in a thread started with Launch parallel thread runs in a
+    # lane of its own on the team lead; the agent's listing says so exactly as
+    # Settings -> Tasks does, and a worker has no parallel lanes.
+    agent.task_manager.parallel_lanes_enabled = agent.is_team_lead
+    add(agent, "parallel")
+    context = agent.task_manager.get_task_info("parallel").meta.gateway_context
+    context.parallel_thread, context.delivery_mode = True, "interactive"
+
+    listed = {row["root_task_id"]: row["is_parallel"] for row in json.loads(await list_task_queue())["tasks"]}
+    shown = {row.root_task_id: row.is_parallel for row in (await command(agent)).roots}
+
+    assert listed == shown == {"inspection": False, "parallel": agent.is_team_lead}
 
 
 @pytest.mark.asyncio
@@ -114,6 +131,7 @@ async def test_explicit_queue_pause_survives_recovery_and_does_not_mask_a_later_
     # must be active before an agent tool has a canonical user context again.
     add(agent, "after-restart", state=ProgressState.IN_PROGRESS)
     sign(agent, "after-restart", current_request)
+    bind_task("after-restart")
     resumed = json.loads(await control_task_queue("queued", "resume", "Continue"))
     assert resumed["state"] == "accepted"
     agent.task_manager.update_main_task_state(

@@ -18,7 +18,7 @@ from typing import Any
 from strands import tool
 
 from custom_tools.provider_contract import ToolProvider
-from custom_tools.runtime_context import get_agent_ref
+from custom_tools.runtime_context import bound_task_id, get_agent_ref
 
 _EXPLANATION = {
     "tasks_waiting": "Delegated tasks in the type's queue that no worker has taken yet.",
@@ -265,7 +265,7 @@ async def _current_request(agent: Any) -> tuple[str | None, str | None]:
     """The current task's request (root task id), and an error when there is none."""
 
     manager = agent.task_manager
-    current = manager.current_task_id
+    current = bound_task_id()
     if not current:
         return None, "There is no current task."
     root = await manager.operations_runtime.run(manager.resolve_root_task_id, current) or current

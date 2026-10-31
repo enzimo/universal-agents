@@ -665,6 +665,12 @@ def create_strands_agent(config: dict):
                 TOOL_POLICY_DEFAULTS.scratch_retention_days.value,
             )
         ),
+        "output_retention_days": int(
+            config.get(
+                "output_retention_days",
+                TOOL_POLICY_DEFAULTS.output_retention_days.value,
+            )
+        ),
         "mcp_config": dict(config.get("mcp_config", config.get("mcp", {})) or {}),
         CONFIGURED_CONNECTION_IDS: list(config.get(CONFIGURED_CONNECTION_IDS) or []),
         "llm_override_path": llm_override_path,

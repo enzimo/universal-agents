@@ -13,6 +13,7 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from custom_agents import model_failover_runtime
+from tests.task_work_support import bind_turn
 from custom_messages.enums import ProgressState
 from default_values import LLM_DEFAULTS
 from runtime_settings.instance_layout import InstanceLayout
@@ -593,3 +594,45 @@ def test_retry_strategy_config_uses_same_provider_retry_values(tmp_path: Path) -
         "initial_delay": 1,
         "max_delay": 3,
     }
+
+
+@pytest.mark.asyncio
+async def test_two_turns_failing_on_one_outage_switch_the_model_once(tmp_path: Path) -> None:
+    """Regression (PR #57 review): turns run at once in parallel lanes. The second turn's
+    failure on the old model was charged to the fallback the first one switched to, which
+    could switch again, even back to the failing model."""
+
+    task_manager = FakeTaskManager()
+    agent = FakeAgent(instance_root=tmp_path, llm_failover=_failover_config(tmp_path), task_manager=task_manager)
+    agent._strands_generation = 1
+    apply = agent.apply_runtime_llm_override
+
+    def apply_and_rebuild(*args: Any, **kwargs: Any) -> None:
+        apply(*args, **kwargs)
+        agent._strands_generation += 1  # the real agent rebuilds its model
+
+    agent.apply_runtime_llm_override = apply_and_rebuild  # type: ignore[method-assign]
+    error = RuntimeError("rate limit from primary provider")
+
+    # Both turns' Strands agents were built on the primary model.
+    bind_turn("task_1").strands.generation = 1
+    first = await model_failover_runtime.handle_provider_failure(
+        agent, error=error, task_id="task_1", tool_calls_started=False
+    )
+    bind_turn("task_2").strands.generation = 1
+    second = await model_failover_runtime.handle_provider_failure(
+        agent, error=error, task_id="task_2", tool_calls_started=False
+    )
+
+    assert first is not None and first.to_candidate.key == "openai/fallback/model"
+    assert second is not None and second.retry_inline
+    assert (second.from_candidate.key, second.to_candidate.key) == ("litellm/primary/model", "openai/fallback/model")
+    assert not model_failover_runtime.is_provider_failover_outcome(second), "no second notice"
+    assert [applied[:2] for applied in agent.applied] == [("openai", "fallback/model")]
+    state = _read_state(agent)
+    assert not state["providers"].get("openai/fallback/model", {}).get("failures"), "the fallback did not fail"
+
+    # A success on the old model does not count for the fallback's lease.
+    turns_left = state["active_lease"]["turns_remaining"]
+    model_failover_runtime.record_model_success(agent, task_id="task_2")
+    assert _read_state(agent)["active_lease"]["turns_remaining"] == turns_left

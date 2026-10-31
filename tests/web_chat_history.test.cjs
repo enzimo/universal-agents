@@ -90,6 +90,56 @@ test("concurrent first-message creation shares one session request", async () =>
   assert.equal(sandbox.sharedState.threads.length, 1);
 });
 
+test("a late thread creation does not replace a newer selected conversation", async () => {
+  const { sandbox } = harness();
+  await sandbox.fetchSessions();
+  loadFunctions(sandbox, ["createServerThread", "createThread", "threadForSession"]);
+  const response = deferredResponse(sandbox);
+  const pending = sandbox.createServerThread();
+  sandbox.sharedState.activeThreadId = "session_3";
+  response.finish({ session: { session_key: "new_session", conversation_id: "new_conversation" } });
+  const created = await pending;
+  assert.equal(created.sessionKey, "new_session", "the creation keeps its own destination");
+  assert.equal(sandbox.sharedState.activeThreadId, "session_3", "the person's later selection stays active");
+});
+
+function settingsClick(sandbox) {
+  let click;
+  sandbox.lifecycle = { listen(_button, _event, handler) { click = handler; } };
+  const start = source.indexOf('lifecycle.listen(sharedState.settingsButton, "click",');
+  const end = source.indexOf('\nlifecycle.listen(sharedState.settingsAppearanceReset,', start);
+  vm.runInContext(source.slice(start, end), sandbox);
+  return click;
+}
+
+for (const scenario of ["failed", "stale"]) {
+  test(`Settings does not create or open a chat after a ${scenario} startup lookup`, async () => {
+    const { sandbox } = harness();
+    const response = deferredResponse(sandbox);
+    let creations = 0, opens = 0;
+    sandbox.createServerThread = async () => { creations++; };
+    sandbox.sharedState.settingsControls = { async open() { opens++; } };
+    const pending = settingsClick(sandbox)();
+    if (scenario === "stale") sandbox.sharedState.authSessionGeneration++;
+    response.finish({ sessions: null, event_cursor: "snapshot" });
+    await pending;
+    assert.equal(creations, 0);
+    assert.equal(opens, 0);
+  });
+}
+
+test("Settings can create its session after a successful empty startup lookup", async () => {
+  const { sandbox, sessions } = harness();
+  sessions.length = 0;
+  let creations = 0;
+  const opened = [];
+  sandbox.createServerThread = async () => { creations++; return { sessionKey: "settings_session" }; };
+  sandbox.sharedState.settingsControls = { async open(_panel, sessionKey) { opened.push(sessionKey); } };
+  await settingsClick(sandbox)();
+  assert.equal(creations, 1);
+  assert.deepEqual(opened, ["settings_session"]);
+});
+
 test("session creation finishing after sign-out cannot restore the old user's thread", async () => {
   const { sandbox } = harness();
   loadFunctions(sandbox, ["createServerThread", "createThread", "threadForSession"]);

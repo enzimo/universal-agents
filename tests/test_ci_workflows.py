@@ -3,9 +3,11 @@ from __future__ import annotations
 import ast
 from fnmatch import fnmatchcase
 from pathlib import Path
+import re
 import shlex
 import tomllib
 
+from packaging.requirements import Requirement
 import pytest
 import yaml
 
@@ -114,8 +116,9 @@ def test_cognitive_complexity_advisory_is_repository_owned() -> None:
     assert config["ignore-complexity"] is True
     assert config["check-script"] is False
     assert "tests" not in config["paths"]
-    assert "complexipy>=7.0.1" in requirements
-    assert "complexipy==8.0.1" in lock
+    requirement = Requirement(next(line for line in requirements.splitlines() if line.startswith("complexipy")))
+    locked = re.search(r"^complexipy==([^\s\\]+)", lock, re.MULTILINE)
+    assert locked and locked[1] in requirement.specifier
     assert checkout["with"]["fetch-depth"] == "0"
     assert advisory["continue-on-error"] == "true"
     assert "env" not in advisory
@@ -209,19 +212,28 @@ def test_runtime_install_job_uses_a_clean_environment_and_only_runtime_lock() ->
     assert ".ci-runtime/bin/python scripts/verify_runtime_install.py" in commands
 
 
-def test_all_jobs_require_managed_local_runners_and_bounded_execution() -> None:
+def test_jobs_require_their_documented_runners_and_bounded_execution() -> None:
     for path in WORKFLOW_ROOT.glob("*.yml"):
         for name, job in _workflow(path.name)["jobs"].items():
+            assert int(job["timeout-minutes"]) <= 90
+            for step in job["steps"]:
+                assert "cache" not in step.get("with", {}), (path, name)
+            # Public docs are the sole hosted-runner exception. Other jobs must
+            # still refuse public repositories and require the local hooks.
+            if path.name == "publish-docs.yml":
+                assert job["runs-on"] == "ubuntu-24.04", (path, name)
+                assert "repository.private" not in job.get("if", "")
+                assert not any("UA_CI_" in step.get("run", "") for step in job["steps"])
+                continue
             runners = ([job["runs-on"]] if isinstance(job["runs-on"], list) else
                        [entry["runner"] for entry in job["strategy"]["matrix"]["include"]])
             for runner in runners:
                 assert "self-hosted" in runner, (path, name)
                 assert "ua-linux" in runner or "ua-macos" in runner, (path, name)
-            assert int(job["timeout-minutes"]) <= 90
-            assert "github.event.repository.private" in job["if"]
+            assert "github.event.repository.private" not in job["if"]
+            assert "pull_request" in job["if"]
             assert "UA_CI_HOOK_VERSION" in job["steps"][0]["run"]
-            for step in job["steps"]:
-                assert "cache" not in step.get("with", {}), (path, name)
+            assert "UA_CI_PUBLIC_JOB_POLICY_VERSION" in job["steps"][0]["run"]
 
 
 def test_live_nats_uses_job_identity_and_dynamic_loopback_port() -> None:

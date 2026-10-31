@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from custom_agents.strands_parts import task_strands_messages
 from custom_messages.records.task_results import TaskResultUpdate
 
 import asyncio
@@ -11,6 +12,8 @@ from functools import partial
 from typing import Any, Awaitable, Callable, Optional, Union
 
 
+from custom_tools.runtime_context import task_work
+from runtime_hosting.agent_execution import MAIN_LANE
 from custom_agents.control_runtime import handle_interrupted_turn
 from custom_agents.lease_loss_wind_down import may_start_next_task
 from custom_agents.pending_work_runtime import schedule_pending_work
@@ -32,6 +35,7 @@ from custom_agents.conversation_runtime import (
     finalize_conversation_turn,
     record_task_conversation_history,
 )
+from custom_agents.history_cleanup import followup_conversation_deleted
 from custom_agents.message_routing import (
     build_outgoing_meta,
     construct_header,
@@ -684,9 +688,7 @@ async def _handle_secure_credential_collection_result(
                 conversation_store=self._conversation_store,
                 conversation_compactor=self._conversation_compactor,
                 conversation_artifact_offloader=self._conversation_artifact_offloader,
-                strands_messages=list(
-                    getattr(self._strands_agent, "messages", []) or []
-                ),
+                strands_messages=task_strands_messages(parent_task_info.task.task_id),
                 task_manager=self.task_manager,
                 task_info=parent_task_info,
                 task_status=ProgressState.COMPLETED.value,
@@ -712,9 +714,7 @@ async def _handle_secure_credential_collection_result(
                 conversation_store=self._conversation_store,
                 conversation_compactor=self._conversation_compactor,
                 conversation_artifact_offloader=self._conversation_artifact_offloader,
-                strands_messages=list(
-                    getattr(self._strands_agent, "messages", []) or []
-                ),
+                strands_messages=task_strands_messages(parent_task_info.task.task_id),
                 task_manager=self.task_manager,
                 task_info=parent_task_info,
                 task_status=ProgressState.FAILED.value,
@@ -746,6 +746,26 @@ async def _handle_secure_credential_collection_result(
 
 
 async def _handle_task_query_message(
+    self: Any,
+    task_query_msg: TaskQuery,
+    incoming_msg_header: MessageHeader,
+    incoming_msg_meta: MessageMeta,
+    *,
+    from_runtime_mailbox: bool = False,
+) -> None:
+    """Handle a TaskQuery as the handling of its parent task (``runtime_context.task_work``)."""
+
+    with task_work(task_query_msg.parent_task_id):
+        await _handle_task_query_for_parent(
+            self,
+            task_query_msg,
+            incoming_msg_header,
+            incoming_msg_meta,
+            from_runtime_mailbox=from_runtime_mailbox,
+        )
+
+
+async def _handle_task_query_for_parent(
     self,
     task_query_msg: TaskQuery,
     incoming_msg_header: MessageHeader,
@@ -1328,6 +1348,7 @@ async def _handle_task_request(
                 msg_meta=normalized_meta,
                 owner_person_id=owner_person_id,
                 owner_named_agent_type=self.named_agent_type,
+                deleted_by_cleanup=partial(followup_conversation_deleted, self),
             )
         except ValueError as exc:
             self._logger.warning(
@@ -1401,19 +1422,24 @@ async def _handle_delivery_receipt(
 
 
 @staticmethod
-async def _check_and_process_next_task(self) -> bool:
+async def _check_and_process_next_task(self, lane: str = MAIN_LANE) -> bool:
+    """Start the next queued task of ``lane`` and run its turn; the caller holds that lane.
+
+    The main lane takes ordinary work while its slot is free; a parallel
+    request's lane takes only that request's tasks (custom_agents.execution_lanes).
     """
-    Checks if a new task can be started from the task manager's queue
-    and initiates its processing if the agent is not currently executing.
-    """
-    if not self.paused:
-        # The caller holds the execution gate, so no turn runs now: a task still
-        # IN_PROGRESS lost its turn and must not block the queue (turn_failure_runtime).
+    if lane == MAIN_LANE and not self.paused:
+        # The caller holds the main lane, so no main turn runs now: a task still
+        # holding the main slot lost its turn and must not block the queue
+        # (turn_failure_runtime).
         await release_orphaned_execution_slot(self)
     if (
         self.paused
-        or not await self.task_manager.operations_runtime.run(
-            self.task_manager.can_start_new_task,
+        or (
+            lane == MAIN_LANE
+            and not await self.task_manager.operations_runtime.run(
+                self.task_manager.can_start_new_task,
+            )
         )
         # A winding-down worker only resumes tasks that already started here.
         or not await may_start_next_task(self)
@@ -1421,7 +1447,7 @@ async def _check_and_process_next_task(self) -> bool:
         return False
 
     next_task_id = await self.task_manager.operations_runtime.run(
-        self.task_manager.get_next_task_to_process,
+        self.task_manager.get_next_task_to_process, lane
     )
     if not next_task_id:
         return False
@@ -1432,55 +1458,57 @@ async def _check_and_process_next_task(self) -> bool:
     if not task_info:
         return False
 
-    self._logger.info(f"Starting processing for task {next_task_id}")
-    now_ts = datetime.now(timezone.utc).isoformat()
-    if not await self.task_manager.operations_runtime.run(
-        self.task_manager.update_main_task_state,
-        next_task_id,
-        ProgressState.IN_PROGRESS,
-        now_ts,
-    ):
-        return False
+    # The task's handling: its turn and the saving of its result (runtime_context.task_work).
+    with task_work(next_task_id):
+        self._logger.info(f"Starting processing for task {next_task_id}")
+        now_ts = datetime.now(timezone.utc).isoformat()
+        if not await self.task_manager.operations_runtime.run(
+            self.task_manager.update_main_task_state,
+            next_task_id,
+            ProgressState.IN_PROGRESS,
+            now_ts,
+        ):
+            return False
 
-    try:
-        await self._announce_execution_state()
-        task_result: Union[
-            Task,
-            TaskQuery,
-            TaskSteering,
-            SecureCredentialCollectionRequest,
-            SignupAutomationRequest,
-        ] = await self.process_llm_interaction(
-            msg_content=task_info.task,
-            msg_header=task_info.header,
-            msg_meta=task_info.meta,
-        )
-        await _apply_task_processing_result(self, next_task_id, task_info, task_result)
-    except asyncio.CancelledError:
-        # Runtime shutdown cancels this owner; a user stop cancels its child turn.
-        if (owner := asyncio.current_task()) is not None and owner.cancelling():
-            raise
-        await handle_interrupted_turn(
-            self, task_id=next_task_id, task_info=task_info
-        )
-    except TurnActionRecoveryScheduled as e:
-        self._logger.warning(
-            "[%s] Paused task %s for runtime action outbox recovery: %s",
-            self.id,
-            next_task_id,
-            e,
-        )
-    except ProviderFailoverRequeued as e:
-        self._logger.warning(
-            "[%s] Requeued task %s after model-provider failover: %s",
-            self.id,
-            next_task_id,
-            e,
-        )
-    except Exception as e:
-        await fail_task_after_turn_error(self, next_task_id, task_info, e)
-    finally:
-        await self._refresh_self_agent_state()
+        try:
+            await self._announce_execution_state()
+            task_result: Union[
+                Task,
+                TaskQuery,
+                TaskSteering,
+                SecureCredentialCollectionRequest,
+                SignupAutomationRequest,
+            ] = await self.process_llm_interaction(
+                msg_content=task_info.task,
+                msg_header=task_info.header,
+                msg_meta=task_info.meta,
+            )
+            await _apply_task_processing_result(self, next_task_id, task_info, task_result)
+        except asyncio.CancelledError:
+            # Runtime shutdown cancels this owner; a user stop cancels its child turn.
+            if (owner := asyncio.current_task()) is not None and owner.cancelling():
+                raise
+            await handle_interrupted_turn(
+                self, task_id=next_task_id, task_info=task_info
+            )
+        except TurnActionRecoveryScheduled as e:
+            self._logger.warning(
+                "[%s] Paused task %s for runtime action outbox recovery: %s",
+                self.id,
+                next_task_id,
+                e,
+            )
+        except ProviderFailoverRequeued as e:
+            self._logger.warning(
+                "[%s] Requeued task %s after model-provider failover: %s",
+                self.id,
+                next_task_id,
+                e,
+            )
+        except Exception as e:
+            await fail_task_after_turn_error(self, next_task_id, task_info, e)
+        finally:
+            await self._refresh_self_agent_state()
 
     return True
 
@@ -1563,9 +1591,7 @@ async def _apply_task_processing_result(
                     conversation_store=self._conversation_store,
                     conversation_compactor=self._conversation_compactor,
                     conversation_artifact_offloader=self._conversation_artifact_offloader,
-                    strands_messages=list(
-                        getattr(self._strands_agent, "messages", []) or []
-                    ),
+                    strands_messages=task_strands_messages(task_info.task.task_id),
                     task_manager=self.task_manager,
                     task_info=task_info,
                     task_status=ProgressState.COMPLETED.value,

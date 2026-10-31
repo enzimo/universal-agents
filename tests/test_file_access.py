@@ -94,6 +94,22 @@ def test_a_hard_linked_file_is_refused(layout: InstanceLayout) -> None:
     assert (layout.person_dir("bob") / "notes.txt").read_text(encoding="utf-8") == "bob"
 
 
+def test_a_write_that_fails_part_way_leaves_the_persons_file_as_it_was(layout: InstanceLayout) -> None:
+    # An attachment copy streams into file_access.writable; a source that
+    # fails part way must not leave the person's file cut short.
+    as_person(layout, "alice")
+    notes = layout.person_dir("alice") / "notes.txt"
+
+    with pytest.raises(OSError):
+        with file_access.writable("notes.txt") as (_location, writer):
+            writer.write(b"the first part of a copy")
+            writer.flush()
+            raise OSError("the source could not be read")
+
+    assert notes.read_text(encoding="utf-8") == "alice"
+    assert not [path.name for path in notes.parent.iterdir() if path.name.endswith(".tmp")]
+
+
 def _swap_after_check(monkeypatch, folder: Path, target: Path) -> None:
     """Replace ``folder`` with a link to ``target`` right after the path check passes."""
 
@@ -182,7 +198,7 @@ def test_with_authorization_on_file_tools_ask_for_each_folder(layout: InstanceLa
         TargetRefV1,
     )
     from custom_tools.non_interactive_file_tools import file_read, file_write
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from tests.test_workspace_scope_policy import TEAM, task_agent
 
     agent = task_agent(layout, "alice")
@@ -238,7 +254,7 @@ def test_a_blocked_folder_cannot_be_sent_as_an_attachment(layout: InstanceLayout
         TargetRefV1,
     )
     from custom_tools.providers.communication import _attachment_access_errors
-    from custom_tools.runtime_context import set_agent_ref
+    from tests.task_work_support import set_agent_ref
     from tests.test_workspace_scope_policy import TEAM, task_agent
 
     agent = task_agent(layout, "alice")

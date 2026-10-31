@@ -1257,10 +1257,14 @@ current names and values, including nulls inside this JSON text:
 `schedule_id`, `record_digest`, `schedule_name`, `management_class`,
 `system_schedule_kind`, `assigned_agent_type`, `enabled`, `paused_until`,
 `expires_at_utc`, `next_fire_at`, `interval_ms`, `cron_expression`, `cron_timezone`,
-`repeat_count`, `objective_id`, `owner_canonical_user_id`, `problem_statement` and
-`schedule_memory`. The last two retain the full instruction and all saved policy,
-state, schema hints, timestamps and ledger entries, including saved results and
-notification history. These flexible JSON records have no fixed total size limit in
+`repeat_count`, `remaining_runs`, `final_run_in_progress`, `objective_id`,
+`owner_canonical_user_id`, `problem_statement` and `schedule_memory`.
+`remaining_runs` is null when the schedule has no run limit. `final_run_in_progress`
+is true while the last run of a one-time or counted schedule still works; such a
+schedule will not run again, and its past `next_fire_at` is that run's, not a missed
+one. `problem_statement` and `schedule_memory` retain the full instruction and all
+saved policy, state, schema hints, timestamps and ledger entries, including saved
+results and notification history. These flexible JSON records have no fixed total size limit in
 the runtime, so detail paging avoids imposing the 16,384-character bound of a single
 JSON field or silently shortening history. The projection is an explicit allowlist;
 new runtime fields need review before they can leave this read.

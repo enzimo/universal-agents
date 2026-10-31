@@ -49,17 +49,26 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
     sections = {section.name: section for section in TRANSFER_SECTIONS}
     fixtures = json.loads(FIXTURES.read_text())
     for name, version, target in SECTION_UPGRADES:
-        # The schedule section changed twice while retaining the frozen
-        # source fixture and the version exported by the last stable release.
+        # The schedule section changed three times while retaining the frozen
+        # source fixture; versions 4 and 5 were exported by stable releases
+        # (v0.9.6, and v0.9.7 to v0.9.8).
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
-            allowed.add(4)
-        assert version in allowed, f"the conversion step from {name} version {version} has no supported release fixture"
+            allowed.update({4, 5})
+        # Settings versions 6 and 7 are exercised by real export/import
+        # cases in test_team_transfer_settings, including keep-forever output retention.
+        if name == "settings":
+            allowed.update((6, 7))
+        assert version in allowed, f"the conversion step from {name} version {version} has no supported export case"
         assert target == sections[name].schema_version
     for name, raw in fixtures.items():
         section = sections[name]
         document = SectionDocumentV1.model_validate(raw)
         converted = upgrade_records(document, section.schema_version)
+        if name == "settings":
+            # The last stable release's version 6 reads through its own step too.
+            as_six = SectionDocumentV1.model_validate({**raw, "schema_version": 6})
+            assert upgrade_records(as_six, section.schema_version) == converted
         if name == "broker_credentials":
             section.record_model.model_validate({"records": converted})
         else:
@@ -163,7 +172,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
     source_sections, expected_problem = {
         "0.8.5": (
             (SettingsAsV085(), PeopleSection(), AccessAsV085()),
-            "This file's settings section is version 3, but this version of Universal Agents reads versions 5 and 6.",
+            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7 and 8.",
         ),
         "0.9.0": (
             (SettingsSection(), PeopleSection(), AccessSection(), KnowledgeAsV090()),

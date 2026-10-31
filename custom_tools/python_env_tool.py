@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import shlex
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
@@ -24,7 +25,11 @@ from custom_tools.path_policy import (
     ensure_allowed_path,
     is_protected_runtime_control_path,
 )
-from custom_tools.workspace_scope import current_workspace_scope
+from custom_tools.runtime_context import get_agent_ref
+from custom_tools.workspace_scope import current_instance_layout, current_workspace_scope
+from python_env_lifecycle import (
+    LAST_USED_FIELD, REQUEST_DEFAULT_FIELD, environment_lock, request_environment_name,
+)
 from runtime_settings.instance_layout import PERSON_PYTHON_ENVS_DIRNAME
 
 
@@ -37,7 +42,6 @@ PYTHON_ENV_TOOL_NAME = "python_env"
 CODE_PYTHON_TOOL_ID = "code:python"
 
 MANIFEST_SCHEMA_VERSION = 1
-DEFAULT_ENV_NAME = "default"
 DEFAULT_CODE_PATH = "src/main.py"
 DEFAULT_CREATE_TIMEOUT_SECONDS = 120
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 900
@@ -113,10 +117,18 @@ def _exists(path: Path) -> bool:
 
 
 def _safe_env_name(env_name: str | None) -> str:
-    raw = str(env_name or DEFAULT_ENV_NAME).strip() or DEFAULT_ENV_NAME
+    raw = str(env_name or "").strip()
+    if not raw:
+        from custom_agents.access_runtime import verified_context_id
+
+        agent = get_agent_ref()
+        context_id = verified_context_id(agent) if agent is not None else None
+        if context_id is None:
+            raise ValueError("A default Python environment needs a verified request. Provide env_name for deliberate reuse.")
+        return request_environment_name(context_id)
     slug = SAFE_NAME_RE.sub("-", raw).strip(".-")
     if not slug:
-        slug = DEFAULT_ENV_NAME
+        raise ValueError("env_name must contain a letter or number")
     return slug[:80]
 
 
@@ -248,7 +260,9 @@ def _write_manifest(env_dir: Path, manifest: Mapping[str, Any]) -> None:
     file_access.write_text(env_dir / "manifest.json", json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _base_manifest(env_name: str, env_dir: Path, *, python_executable: str | None = None) -> dict[str, Any]:
+def _base_manifest(
+    env_name: str, env_dir: Path, *, request_default: bool, python_executable: str | None = None,
+) -> dict[str, Any]:
     existing = _load_manifest(env_dir)
     now = _utc_now()
     return {
@@ -260,6 +274,8 @@ def _base_manifest(env_name: str, env_dir: Path, *, python_executable: str | Non
         "created_at": existing.get("created_at") or now,
         "updated_at": now,
         "last_action": existing.get("last_action"),
+        REQUEST_DEFAULT_FIELD: request_default,
+        LAST_USED_FIELD: now,
     }
 
 
@@ -409,6 +425,7 @@ def _create_env(
     env_name: str,
     env_dir: Path,
     *,
+    request_default: bool,
     python_executable: str | None,
     recreate: bool,
     tool_stop: ToolStop | None,
@@ -416,8 +433,16 @@ def _create_env(
     if recreate:
         file_access.remove_tree(env_dir)
     _ensure_env_dirs(env_dir)
-    manifest = _base_manifest(env_name, env_dir, python_executable=_default_python_executable(python_executable))
+    manifest = _base_manifest(
+        env_name, env_dir, request_default=request_default,
+        python_executable=_default_python_executable(python_executable),
+    )
+    manifest["last_action"] = "create"
     if not _exists(env_dir / ".venv"):
+        # Save the captured retention before a long venv command, including
+        # after recreation removed the previous manifest. Every subsequent
+        # manifest write carries it even if final activity bookkeeping fails.
+        _write_manifest(env_dir, manifest)
         create_command = f"{shlex.quote(manifest['python_executable'])} -m venv --copies .venv"
         result = execute_non_interactive_command(
             {"command": create_command, "timeout": DEFAULT_CREATE_TIMEOUT_SECONDS},
@@ -431,7 +456,6 @@ def _create_env(
         if result.get("status") != "success":
             _write_manifest(env_dir, {**manifest, "last_action": "create_failed"})
             return {"manifest": manifest, "command_result": _command_result_payload(result)}
-    manifest["last_action"] = "create"
     _write_manifest(env_dir, manifest)
     return {"manifest": manifest, "command_result": manifest.get("last_create_result")}
 
@@ -553,6 +577,8 @@ def _list_envs() -> dict[str, Any]:
                 "env_dir": str(child),
                 "created_at": manifest.get("created_at"),
                 "updated_at": manifest.get("updated_at"),
+                REQUEST_DEFAULT_FIELD: manifest.get(REQUEST_DEFAULT_FIELD, False),
+                LAST_USED_FIELD: manifest.get(LAST_USED_FIELD),
                 "last_action": manifest.get("last_action"),
                 "venv_exists": _exists(child / ".venv"),
             }
@@ -564,7 +590,7 @@ def _list_envs() -> dict[str, Any]:
 def python_env(
     action: str,
     tool_context: ToolContext,
-    env_name: str = DEFAULT_ENV_NAME,
+    env_name: Optional[str] = None,
     path: Optional[str] = None,
     content: Optional[str] = None,
     code: Optional[str] = None,
@@ -580,6 +606,12 @@ def python_env(
 ) -> dict[str, Any]:
     """
     Create and use managed Python virtual environments for generated code.
+
+    Omit env_name to use this request's default environment, shared with its
+    helpers. Each request and each scheduled run gets its own default. Trusted
+    maintenance deletes a default environment as a whole after 7 days without
+    use. Give env_name explicitly to reuse an environment across requests and
+    keep it until you delete it. Save lasting results outside default envs.
 
     Actions:
     - `create`: create `python_envs/<env_name>/.venv` plus `src/` and `artifacts/` in
@@ -631,7 +663,7 @@ def python_env(
 def _python_env_action(
     action: str,
     *,
-    env_name: str,
+    env_name: Optional[str],
     path: Optional[str],
     content: Optional[str],
     code: Optional[str],
@@ -659,85 +691,126 @@ def _python_env_action(
 
         safe_name = _safe_env_name(env_name)
         env_dir = _env_dir(safe_name)
-
-        if normalized_action == "delete":
-            file_access.remove_tree(env_dir)
-            logger.info("Managed Python env deleted. event=python_env_deleted env_name=%s reason=%s", safe_name, reason)
-            return _tool_result("success", f"Deleted Python env `{safe_name}`.", payload={"env_name": safe_name})
-
-        if normalized_action == "create":
-            payload = _create_env(
-                safe_name, env_dir, python_executable=python_executable, recreate=recreate, tool_stop=tool_stop
+        layout = current_instance_layout()
+        # Embedded callers with an explicit name have no instance maintenance.
+        # Runtime environments share one lock with whole-environment cleanup.
+        lock = environment_lock(
+            layout, env_dir, cancelled=tool_stop.is_requested if tool_stop is not None else None,
+        ) if layout is not None else nullcontext()
+        with lock:
+            if tool_stop is not None and tool_stop.is_requested():
+                return _tool_result("error", "python_env did not run because the task was stopped.")
+            # Explicit reuse keeps this directory until deletion. Capture that
+            # decision before an action replaces the manifest or recreates it.
+            request_default = (
+                not bool(str(env_name or "").strip())
+                and _load_manifest(env_dir).get(REQUEST_DEFAULT_FIELD) is not False
             )
-            command_result = payload.get("command_result") or {}
-            status = "success" if not command_result or command_result.get("status") == "success" else "error"
-            logger.info("Managed Python env create completed. event=python_env_create env_name=%s status=%s", safe_name, status)
-            return _tool_result(status, f"Python env `{safe_name}` create status: {status}.", payload=payload)
-
-        if not _exists(env_dir / ".venv"):
-            create_payload = _create_env(
-                safe_name, env_dir, python_executable=python_executable, recreate=False, tool_stop=tool_stop
-            )
-            command_result = create_payload.get("command_result") or {}
-            if command_result and command_result.get("status") != "success":
-                return _tool_result("error", f"Failed to create Python env `{safe_name}`.", payload=create_payload)
-
-        manifest = _base_manifest(safe_name, env_dir, python_executable=python_executable)
-        if normalized_action == "install":
-            payload = _install_packages(
-                env_dir, packages, timeout=timeout, unconfined=bool(unconfined), tool_stop=tool_stop
-            )
-        elif normalized_action == "write_file":
-            file_content = content if content is not None else code
-            if file_content is None:
-                raise ValueError("write_file action requires content or code")
-            payload = _write_file(env_dir, raw_path=path, content=str(file_content))
-        elif normalized_action == "inspect":
-            if code is not None:
-                payload = {
-                    "inspection": inspect_python_source(
-                        str(code), path=path, base_dir=env_dir
-                    )
-                }
-            else:
-                target = _resolve_env_path(env_dir, path, default=DEFAULT_CODE_PATH, for_write=False)
-                payload = {"inspection": _inspect_file_if_python(target, env_dir)}
-                if payload["inspection"] is None:
-                    raise ValueError("inspect action requires Python code or a .py path")
-        else:
-            payload = _run(
-                env_dir,
-                raw_path=path,
-                command=command,
-                args=args,
-                work_dir=work_dir,
-                timeout=timeout,
-                unconfined=bool(unconfined),
-                tool_stop=tool_stop,
-            )
-
-        manifest["last_action"] = normalized_action
-        _write_manifest(env_dir, manifest)
-        status = "success"
-        command_result = payload.get("command_result") if isinstance(payload, dict) else None
-        inspection = payload.get("inspection") if isinstance(payload, dict) else None
-        if command_result and command_result.get("status") != "success":
-            status = "error"
-        if inspection and inspection.get("errors"):
-            status = "error"
-        logger.info(
-            "Managed Python env action completed. event=python_env_action env_name=%s action=%s status=%s reason=%s",
-            safe_name,
-            normalized_action,
-            status,
-            reason,
-        )
-        return _tool_result(status, f"Python env `{safe_name}` action `{normalized_action}` completed with status {status}.", payload=payload)
+            try:
+                return _python_env_in_directory(
+                    normalized_action, safe_name, env_dir, request_default=request_default,
+                    path=path, content=content, code=code,
+                    command=command, packages=packages, args=args, work_dir=work_dir, timeout=timeout,
+                    python_executable=python_executable, recreate=recreate, reason=reason,
+                    unconfined=unconfined, tool_stop=tool_stop,
+                )
+            finally:
+                if normalized_action != "delete" and _exists(env_dir):
+                    manifest = _load_manifest(env_dir)
+                    manifest[REQUEST_DEFAULT_FIELD] = request_default
+                    manifest[LAST_USED_FIELD] = _utc_now()
+                    _write_manifest(env_dir, manifest)
     except Exception as exc:
         logger.warning(
             "Managed Python env action failed. event=python_env_action_failed action=%s env_name=%s error=%s",
-            normalized_action,
-            env_name,
-            exc,
+            normalized_action, env_name, exc,
         )
         return _tool_result("error", f"python_env {normalized_action or '<empty>'} failed: {exc}")
+
+
+def _python_env_in_directory(
+    normalized_action: str, safe_name: str, env_dir: Path, *, request_default: bool, path: Optional[str],
+    content: Optional[str], code: Optional[str], command: Optional[str],
+    packages: Optional[list[str] | str], args: Optional[list[str] | str], work_dir: Optional[str],
+    timeout: Optional[int], python_executable: Optional[str], recreate: bool, reason: Optional[str],
+    unconfined: bool, tool_stop: ToolStop | None,
+) -> dict[str, Any]:
+    """One action while the environment's use/cleanup lock is held."""
+
+    if normalized_action == "delete":
+        file_access.remove_tree(env_dir)
+        logger.info("Managed Python env deleted. event=python_env_deleted env_name=%s reason=%s", safe_name, reason)
+        return _tool_result("success", f"Deleted Python env `{safe_name}`.", payload={"env_name": safe_name})
+
+    if normalized_action == "create":
+        payload = _create_env(
+            safe_name, env_dir, request_default=request_default,
+            python_executable=python_executable, recreate=recreate, tool_stop=tool_stop,
+        )
+        command_result = payload.get("command_result") or {}
+        status = "success" if not command_result or command_result.get("status") == "success" else "error"
+        logger.info("Managed Python env create completed. event=python_env_create env_name=%s status=%s", safe_name, status)
+        return _tool_result(status, f"Python env `{safe_name}` create status: {status}.", payload=payload)
+
+    if not _exists(env_dir / ".venv"):
+        create_payload = _create_env(
+            safe_name, env_dir, request_default=request_default,
+            python_executable=python_executable, recreate=False, tool_stop=tool_stop,
+        )
+        command_result = create_payload.get("command_result") or {}
+        if command_result and command_result.get("status") != "success":
+            return _tool_result("error", f"Failed to create Python env `{safe_name}`.", payload=create_payload)
+
+    manifest = _base_manifest(
+        safe_name, env_dir, request_default=request_default, python_executable=python_executable,
+    )
+    if normalized_action == "install":
+        payload = _install_packages(
+            env_dir, packages, timeout=timeout, unconfined=bool(unconfined), tool_stop=tool_stop
+        )
+    elif normalized_action == "write_file":
+        file_content = content if content is not None else code
+        if file_content is None:
+            raise ValueError("write_file action requires content or code")
+        payload = _write_file(env_dir, raw_path=path, content=str(file_content))
+    elif normalized_action == "inspect":
+        if code is not None:
+            payload = {
+                "inspection": inspect_python_source(
+                    str(code), path=path, base_dir=env_dir
+                )
+            }
+        else:
+            target = _resolve_env_path(env_dir, path, default=DEFAULT_CODE_PATH, for_write=False)
+            payload = {"inspection": _inspect_file_if_python(target, env_dir)}
+            if payload["inspection"] is None:
+                raise ValueError("inspect action requires Python code or a .py path")
+    else:
+        payload = _run(
+            env_dir,
+            raw_path=path,
+            command=command,
+            args=args,
+            work_dir=work_dir,
+            timeout=timeout,
+            unconfined=bool(unconfined),
+            tool_stop=tool_stop,
+        )
+
+    manifest["last_action"] = normalized_action
+    _write_manifest(env_dir, manifest)
+    status = "success"
+    command_result = payload.get("command_result") if isinstance(payload, dict) else None
+    inspection = payload.get("inspection") if isinstance(payload, dict) else None
+    if command_result and command_result.get("status") != "success":
+        status = "error"
+    if inspection and inspection.get("errors"):
+        status = "error"
+    logger.info(
+        "Managed Python env action completed. event=python_env_action env_name=%s action=%s status=%s reason=%s",
+        safe_name,
+        normalized_action,
+        status,
+        reason,
+    )
+    return _tool_result(status, f"Python env `{safe_name}` action `{normalized_action}` completed with status {status}.", payload=payload)

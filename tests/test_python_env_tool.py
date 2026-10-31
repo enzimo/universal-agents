@@ -12,7 +12,7 @@ import pytest
 
 from custom_tools.python_env_tool import inspect_python_source, python_env
 from tests.tool_stop_support import tool_context
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 
 

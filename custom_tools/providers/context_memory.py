@@ -13,6 +13,7 @@ from custom_agents.after_action_report_knowledge import (
     lesson_problem,
     save_review_lesson,
 )
+from custom_agents.output_retention import SavedOutputRetention, with_deleted_outputs_marked
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import AfterActionReportReviewStatus
 from custom_tools.provider_contract import ToolProvider
@@ -25,8 +26,11 @@ from custom_tools.providers._user_scope import (
     _private_user_scope,
 )
 from custom_tools.runtime_context import (
+    current_task_work,
+    bound_task_id,
     get_agent_ref,
 )
+from custom_tools.tool_results import failed
 from id_generation import (
     new_id,
 )
@@ -172,7 +176,65 @@ def get_conversation_turns(
         return json.dumps({"error": str(exc)})
 
 
-def _conversation_turn_summary_payload(turn: dict[str, Any]) -> dict[str, Any]:
+@tool
+def get_history_overview(limit: int = 20) -> str:
+    """
+    See how much chat history and how many finished tasks the person you work for has stored.
+
+    Lists their conversations (newest first, with ids, the start of the first
+    request as a title, turns, dates and size) and how much is older than 30,
+    90, 180 and 365 days. Use it before `plan_history_cleanup` and to tell the
+    person what they have. It only reads, and only this person's history.
+    """
+    from access_control.identity import IdentityRejected
+    from custom_agents.history_cleanup import HistoryCleanupRefused, history_overview
+
+    agent = get_agent_ref()
+    if agent is None:
+        return json.dumps({"error": "Agent reference not set"})
+    try:
+        return json.dumps(history_overview(agent, limit=limit), default=str)
+    except (HistoryCleanupRefused, IdentityRejected) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@tool
+def plan_history_cleanup(what: str, older_than: str = "", conversation_ids: list[str] | None = None) -> str | dict[str, Any]:
+    """
+    Stage a clean-up of the person's own chat history; it deletes nothing yet.
+
+    Only when the person asks you to delete their history. `what` is
+    `conversations` (their chats everywhere, with summaries and saved tool
+    outputs), `tasks` (finished tasks) or `both`. Give `older_than` (a date,
+    YYYY-MM-DD: everything from before it) and/or `conversation_ids` (from
+    `get_history_overview`); with both, only those conversations' older part.
+    It always works on the history of the person this task is for. The
+    conversation you are answering in and conversations with work still
+    running are kept. Then show the person the result's `effect` and call
+    `apply_change(change_id, reason)`: it applies at once if they let you
+    clean up their history without asking (Settings > Access), otherwise they
+    approve this exact clean-up in the Inbox. Remembered facts are kept.
+    """
+    from access_control.identity import IdentityRejected
+    from custom_agents.history_cleanup import HistoryCleanupRefused, stage_history_cleanup
+
+    agent = get_agent_ref()
+    if agent is None:
+        return failed({"error": "Agent reference not set"})
+    try:
+        return json.dumps(
+            stage_history_cleanup(
+                agent, what=what, older_than=older_than, conversation_ids=list(conversation_ids or ())
+            ),
+            default=str,
+        )
+    except (HistoryCleanupRefused, IdentityRejected) as exc:
+        return failed({"status": "refused", "reason": str(exc)})
+
+
+def _conversation_turn_summary_payload(
+    turn: dict[str, Any], saved_outputs: Optional[SavedOutputRetention] = None
+) -> dict[str, Any]:
     user_text = str(turn.get("problem_text") or "")
     user_summary = str(turn.get("user_request_summary") or user_text[:600])
     assistant_summary = str(
@@ -196,7 +258,8 @@ def _conversation_turn_summary_payload(turn: dict[str, Any]) -> dict[str, Any]:
         )[:1600],
         "summary_generator": turn.get("summary_generator") or "",
         "summary_generated_at": turn.get("summary_generated_at"),
-        "artifact_summary": artifact_summary[:10]
+        # A saved output deleted under the retention policy says so instead of naming its file.
+        "artifact_summary": with_deleted_outputs_marked(artifact_summary[:10], saved_outputs)
         if isinstance(artifact_summary, list)
         else [],
         "has_full_user_text": bool(user_text),
@@ -285,9 +348,7 @@ def create_focused_conversation(
     if not getattr(agent, "_conversation_store", None):
         return json.dumps({"error": "ConversationStore not initialized"})
 
-    current_task_id = (
-        agent.task_manager.current_task_id if agent.task_manager is not None else None
-    )
+    current_task_id = bound_task_id()
     current_task_info = (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_info, current_task_id
@@ -470,7 +531,10 @@ def get_conversation_context_slice(
         if has_more and visible_rows:
             next_start_turn = int(visible_rows[-1].get("turn_index") or safe_start) + 1
         payload_turns = (
-            [_conversation_turn_summary_payload(turn) for turn in visible_rows]
+            [
+                _conversation_turn_summary_payload(turn, SavedOutputRetention.for_agent(agent))
+                for turn in visible_rows
+            ]
             if normalized_mode == "summary"
             else visible_rows
         )
@@ -499,10 +563,9 @@ def get_context_status() -> str:
     agent = get_agent_ref()
     if agent is None:
         return json.dumps({"error": "Agent reference not set"})
-    assembly = agent.turn_executor.last_context_assembly
-    current_task_id = (
-        agent.task_manager.current_task_id if agent.task_manager is not None else None
-    )
+    work = current_task_work()
+    assembly = work.context_assembly if work is not None else None
+    current_task_id = bound_task_id()
     task_info = (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_info, current_task_id
@@ -552,9 +615,7 @@ def compact_conversation_context(
         return json.dumps(
             {"error": "Conversation context components are not initialized"}
         )
-    current_task_id = (
-        agent.task_manager.current_task_id if agent.task_manager is not None else None
-    )
+    current_task_id = bound_task_id()
     task_info = (
         agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.get_task_info, current_task_id
@@ -991,5 +1052,7 @@ CONVERSATIONS_PROVIDER = ToolProvider(
         get_conversation_context_slice,
         list_pending_after_action_reports,
         resolve_after_action_report_review,
+        get_history_overview,
+        plan_history_cleanup,
     ),
 )

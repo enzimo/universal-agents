@@ -91,9 +91,8 @@ def test_apply_runtime_llm_override_restores_all_model_dependent_state_on_failur
         "_context_engine": object(),
         "_context_debug_dump_plugin": object(),
         "_strands_agent": object(),
-        "_runtime_guardrails_plugin": object(),
-        "_runtime_steering_plugin": object(),
-        "_tool_result_budget_monitor": object(),
+        "_strands_parts": object(),
+        "_strands_generation": 3,
         "_skills_fingerprint": (("skill", 1, 1),),
     }
     agent = SimpleNamespace(

@@ -125,6 +125,17 @@ class WebsiteAccessMapHandlers(SignedInAccessHandlers):
 
         return await self._change(request, "starter_profile", call)
 
+    async def set_history_cleanup(self, request: web.Request) -> web.Response:
+        """Whether TeamLead may clean up the signed-in person's own history without asking each time."""
+
+        async def call(person_id: str, payload: dict) -> dict:
+            on = payload.get("on")
+            if not isinstance(on, bool):
+                raise ValueError("Send on as true or false.")
+            return await self._map.set_history_cleanup(person_id, on)
+
+        return await self._change(request, "history_cleanup", call)
+
     async def stop_sharing(self, request: web.Request) -> web.Response:
         share_id = str(request.match_info.get("share_id") or "").strip()
         return await self._change(request, "stop_sharing", lambda person_id, _payload: self._map.stop_sharing(person_id, share_id))

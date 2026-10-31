@@ -1268,6 +1268,20 @@ class _RelationalMemoryGraphRepository:
             conn.commit()
         self._logger.info("Purged memory-graph embedding profiles at %s.", now)
 
+    def forget_case_memory_vectors(self, case_memory_ids: Sequence[str]) -> None:
+        """Delete the vectors of case memories a person's history clean-up deleted.
+
+        The case memories' rows go in the clean-up's own transaction
+        (``storage.history_cleanup_repository``); their vectors live in the
+        sqlite-vec table, which only this repository's connection can open.
+        """
+
+        if not case_memory_ids:
+            return
+        with self._connect() as conn:
+            self._delete_memory_graph_vector(conn, record_kind="case_memory", record_ids=list(case_memory_ids))
+            conn.commit()
+
     def purge_graph_embeddings(self) -> Dict[str, int]:
         counts = self.count_graph_embedding_rows()
         with self._connect() as conn:

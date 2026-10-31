@@ -373,6 +373,80 @@ def test_confirmation_requires_the_login_in_the_private_file(tmp_path: Path) -> 
     assert _confirm(docker_config).returncode != 0
 
 
+ATTESTATION_HOME_STEP = "Point the attestation at this job's registry login"
+
+
+def _point_attestation(cache: Path, docker_config: Path, output: Path):
+    script = next(
+        step for step in _steps("publish-manifest") if step.get("name") == ATTESTATION_HOME_STEP
+    )["run"]
+    environment = {
+        "PATH": os.environ["PATH"],
+        "UA_CI_CACHE": str(cache),
+        "DOCKER_CONFIG": str(docker_config),
+        "GITHUB_OUTPUT": str(output),
+    }
+    return subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_the_attestation_uses_this_jobs_private_registry_login() -> None:
+    # v0.9.9 published its images but failed to attest them: actions/attest
+    # reads logins only from $HOME/.docker/config.json, and the login lives in
+    # the job's private DOCKER_CONFIG folder.
+    steps = _steps("publish-manifest")
+    names = [step.get("name") for step in steps]
+    attestation = steps[names.index("Attest published image")]
+    pointer = steps[names.index("Attest published image") - 1]
+
+    assert pointer["name"] == ATTESTATION_HOME_STEP
+    assert pointer["id"] == "attestation-home"
+    assert pointer["if"] == attestation["if"] == ATTESTED
+    assert attestation["env"] == {"HOME": "${{ steps.attestation-home.outputs.home }}"}
+    assert attestation["with"]["push-to-registry"] == "true"
+
+
+def test_the_attestation_home_holds_the_logged_in_settings_file(tmp_path: Path) -> None:
+    cache, docker_config = _job_folders(tmp_path)
+    assert _run_pin(cache, docker_config).returncode == 0
+    output = tmp_path / "github_output"
+
+    result = _point_attestation(cache, docker_config, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    home = Path(output.read_text().strip().removeprefix("home="))
+    # The file the attestation reads is the job's own settings file, not a copy,
+    # in a folder only this account can open, inside the job's own cache.
+    assert home.parent == cache
+    assert stat.S_IMODE(home.stat().st_mode) == 0o700
+    assert (home / ".docker" / "config.json").resolve() == (docker_config / "config.json").resolve()
+    # A second run in the same job is refused rather than reusing the folder.
+    assert _point_attestation(cache, docker_config, output).returncode != 0
+
+
+def test_the_attestation_home_refuses_settings_the_hooks_did_not_prepare(
+    tmp_path: Path,
+) -> None:
+    cache, docker_config = _job_folders(tmp_path)
+    output = tmp_path / "github_output"
+
+    # No login settings written yet.
+    assert _point_attestation(cache, docker_config, output).returncode != 0
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "config.json").write_text("{}")
+    assert _point_attestation(cache, elsewhere, output).returncode != 0
+
+    (docker_config / "config.json").symlink_to(elsewhere / "config.json")
+    assert _point_attestation(cache, docker_config, output).returncode != 0
+    assert not output.exists()
+
+
 def _steps(job: str) -> list[dict]:
     return _workflow()["jobs"][job]["steps"]
 

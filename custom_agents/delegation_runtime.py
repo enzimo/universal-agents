@@ -7,6 +7,7 @@ tracks them after publication.
 
 from __future__ import annotations
 
+from custom_tools.runtime_context import bound_task_id
 import asyncio
 from datetime import datetime, timezone
 from typing import Optional
@@ -396,7 +397,7 @@ async def _create_subtask_request(
     Returns:
         Optional[TaskInfo]: The created TaskInfo object for the subtask, or None on failure.
     """
-    parent_task_id = self.task_manager.current_task_id
+    parent_task_id = bound_task_id()
     if not parent_task_id:
         self._logger.error(
             f"[{self.id}] Cannot create subtask: No current parent task in progress."

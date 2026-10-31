@@ -8,6 +8,7 @@ only that commit can establish executable custody.
 from __future__ import annotations
 
 from storage.read_only import repositories_are_read_only
+from storage.schedule_occurrences import ensure_occurrence_schema
 
 import json
 import logging
@@ -160,7 +161,7 @@ class ScheduleWorkerRepository:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS schedule_worker_team ON schedule_worker_bindings(team_id,owner_id)"
             )
-            self.ensure_occurrence_schema(conn)
+            ensure_occurrence_schema(conn)
             conn.execute("""CREATE TABLE IF NOT EXISTS schedule_worker_attempts (
                 occurrence_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL,
                 team_id TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
@@ -229,18 +230,6 @@ class ScheduleWorkerRepository:
         conn.execute(
             f"INSERT INTO schedule_worker_definition_records(schedule_id,team_id,payload_json) VALUES ({p},{p},{p}) ON CONFLICT(schedule_id) DO UPDATE SET team_id=excluded.team_id,payload_json=excluded.payload_json",
             (record.schedule_id, record.team_id, record.model_dump_json()),
-        )
-
-    @staticmethod
-    def ensure_occurrence_schema(conn: Any) -> None:
-        conn.execute("""CREATE TABLE IF NOT EXISTS schedule_occurrences (
-            occurrence_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL,
-            task_id TEXT NOT NULL UNIQUE, team_id TEXT NOT NULL,
-            owner_id TEXT NOT NULL, agent_id TEXT NOT NULL,
-            payload_json TEXT NOT NULL
-        )""")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS schedule_occurrence_schedule ON schedule_occurrences(schedule_id)"
         )
 
     @staticmethod

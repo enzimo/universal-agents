@@ -92,9 +92,9 @@ def _invocation_keywords(invoke_kwargs: Mapping[str, Any], tool_stop: ToolStop) 
 def _turn_callback_handler(model: Any, callback_handler: Callable[..., Any]) -> Iterator[None]:
     """Make ``callback_handler`` the Strands agent's own handler for one call.
 
-    A turn owns its Strands agent for the whole call (AgentExecutionGate), and
-    Strands refuses a second concurrent call on one agent, so no other call
-    sees the turn's handler.
+    A turn owns its Strands agent for the whole call (each turn calls its own,
+    custom_agents.strands_parts), and Strands refuses a second concurrent call
+    on one agent, so no other call sees the turn's handler.
     """
 
     previous = getattr(model, "callback_handler", None)

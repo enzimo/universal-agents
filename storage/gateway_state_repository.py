@@ -12,13 +12,14 @@ import sqlite3
 from contextvars import ContextVar, Token
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any, Optional, Protocol, Sequence, cast
+from typing import Any, Callable, Optional, Protocol, Sequence, cast
 
 from assistant_gateway.domain.delivery import (
     AttachmentRecord,
     DeliveryRecord,
     ScheduledTargetRecord,
 )
+from assistant_gateway.domain.history import ConversationCut, GatewayHistoryDeleted, GatewayHistoryScope
 from assistant_gateway.domain.identity import (
     GatewayPersonRecordsDeleted,
     GatewayTeamPersonRecord,
@@ -45,6 +46,7 @@ from assistant_gateway.domain.request_state import (
     ToolSetupRecord,
 )
 from assistant_gateway.domain.sessions import (
+    ParallelSettingOutcome,
     SessionConversationListRecord,
     SessionConversationRecord,
     SessionListRecord,
@@ -88,6 +90,15 @@ from .sqlite_connection import connect_sqlite, ensure_sqlite_column
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Ids per IN (...) list when deleting a person's history (delete_history_records).
+_HISTORY_BATCH = 400
+
+
+def _history_batches(values: Sequence[str]) -> list[list[str]]:
+    items = list(values)
+    return [items[start : start + _HISTORY_BATCH] for start in range(0, len(items), _HISTORY_BATCH)]
 
 
 def _holder_required(
@@ -172,6 +183,10 @@ class GatewayStateRepository(
     def delivery_unit_of_work(self) -> DeliveryUnitOfWork: ...
 
     def transcript_unit_of_work(self) -> TranscriptUnitOfWork: ...
+
+    def chat_text_bytes_by_owner(self) -> dict[str, int]: ...
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]: ...
 
     def get_session(self, session_key: str) -> Optional[SessionRecord]: ...
 
@@ -278,6 +293,7 @@ class GatewayStateRepository(
         thread_id: Optional[str] = None,
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: Optional[bool] = None,
     ) -> None: ...
 
     def upsert_session_without_switching_chat(
@@ -301,6 +317,10 @@ class GatewayStateRepository(
     ) -> None: ...
 
     def set_session_status(self, session_key: str, status: str) -> bool: ...
+
+    def set_session_parallel(
+        self, session_key: str, *, conversation_id: str, parallel_thread: bool
+    ) -> ParallelSettingOutcome: ...
 
     def set_active_session_for_channel(
         self,
@@ -644,6 +664,14 @@ class GatewayStateRepository(
     ) -> GatewayUserSignInRevocation: ...
 
     def forget_person_records(self, canonical_user_id: str) -> GatewayPersonRecordsDeleted: ...
+
+    def delete_history_records(
+        self, scope: GatewayHistoryScope, *, removable_thread: Callable[[SessionRecord], bool]
+    ) -> GatewayHistoryDeleted: ...
+
+    def history_cleanup_order_ids(self) -> tuple[str, ...]: ...
+
+    def forget_history_cleanup_order(self, order_id: str) -> None: ...
 
     def list_team_members(
         self,
@@ -1001,12 +1029,17 @@ class _RelationalGatewayStateRepository:
                     owner_canonical_user_id TEXT,
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    parallel_thread INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
             self._ensure_column(
                 conn, "gateway_sessions", "owner_canonical_user_id", "TEXT"
+            )
+            # Web Chat's Run concurrently setting (SessionRecord.parallel_thread).
+            self._ensure_column(
+                conn, "gateway_sessions", "parallel_thread", "INTEGER NOT NULL DEFAULT 0"
             )
             conn.execute(
                 """
@@ -1044,6 +1077,11 @@ class _RelationalGatewayStateRepository:
             )
             self._ensure_column(conn, "gateway_requests", "active_task_id", "TEXT")
             self._ensure_column(conn, "gateway_requests", "run_state", "TEXT")
+            # Pending upload removals and original counts survive the same
+            # commit that removes their attachment/transcript records.
+            conn.execute("""CREATE TABLE IF NOT EXISTS gateway_history_cleanups (
+                order_id TEXT PRIMARY KEY, person_id TEXT NOT NULL, result_json TEXT NOT NULL
+            )""")
             # One running request per thread (session conversation). The
             # store enforces it so two messages arriving together, or two
             # gateway processes, cannot both start a request in one thread.
@@ -1493,6 +1531,14 @@ class _RelationalGatewayStateRepository:
                 ON gateway_deliveries(status, available_after ASC, created_at ASC)
                 """
             )
+            # A session's deliveries, for deleting a person's history
+            # (delete_history_records, forget_person_records).
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_gateway_deliveries_session
+                ON gateway_deliveries(session_key, created_at)
+                """
+            )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_gateway_scheduled_targets_conversation
@@ -1507,7 +1553,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                        channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id
+                       owner_canonical_user_id, parallel_thread
                 FROM gateway_sessions
                 WHERE session_key = {self._dialect.bind}
                 """,
@@ -1535,7 +1581,7 @@ class _RelationalGatewayStateRepository:
                     f"""
                     SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                            channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                           owner_canonical_user_id
+                           owner_canonical_user_id, parallel_thread
                     FROM gateway_sessions
                     WHERE session_key = {self._dialect.bind}
                     LIMIT 1
@@ -1548,7 +1594,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                        channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id
+                       owner_canonical_user_id, parallel_thread
                 FROM gateway_sessions
                 WHERE conversation_id = {self._dialect.bind}
                 ORDER BY updated_at DESC
@@ -1652,7 +1698,7 @@ class _RelationalGatewayStateRepository:
         query = """
             SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                    channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                   owner_canonical_user_id
+                   owner_canonical_user_id, parallel_thread
             FROM gateway_sessions
         """
         params: list[Any] = []
@@ -1756,7 +1802,10 @@ class _RelationalGatewayStateRepository:
         earliest message that is not a slash command, so later messages
         never rename it. The command prefix is bound, not written into the
         SQL, because PostgreSQL drivers read a literal percent sign as a
-        placeholder.
+        placeholder. Each row also carries the thread's Run concurrently
+        setting and whether a request is open in its current conversation
+        (the unique running-request index makes that lookup cheap); open
+        pages read both on every event page to show and lock the switch.
         """
 
         bind = self._dialect.bind
@@ -1780,7 +1829,14 @@ class _RelationalGatewayStateRepository:
                 (SELECT t.attachment_references_json {first_ordinary}) AS first_message_attachments_json,
                 EXISTS (
                     SELECT 1 FROM gateway_transcript_messages m WHERE m.session_key = s.session_key
-                ) AS has_messages
+                ) AS has_messages,
+                s.parallel_thread,
+                EXISTS (
+                    SELECT 1 FROM gateway_requests r
+                    WHERE r.session_key = s.session_key
+                      AND COALESCE(r.conversation_id, '') = COALESCE(s.conversation_id, '')
+                      AND r.run_state = {bind}
+                ) AS has_open_request
             FROM gateway_sessions s
             WHERE s.status = 'active'
               AND s.channel_name = {bind}
@@ -1790,7 +1846,7 @@ class _RelationalGatewayStateRepository:
             LIMIT {bind}
         """
         command = "/%"
-        params: list[Any] = [command, command, channel_name, chat_id]
+        params: list[Any] = [command, command, RUN_STATE_RUNNING, channel_name, chat_id]
         if owner_canonical_user_id is not None:
             params.append(owner_canonical_user_id)
         params.append(limit)
@@ -1799,7 +1855,8 @@ class _RelationalGatewayStateRepository:
         records = []
         for row in rows:
             values = dict(row)
-            values["has_messages"] = bool(values["has_messages"])
+            for flag in ("has_messages", "parallel_thread", "has_open_request"):
+                values[flag] = bool(values[flag])
             records.append(WebChatThreadRecord(**values))
         return records
 
@@ -1880,7 +1937,7 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                        channel_name, user_id, chat_id, thread_id, status, created_at, updated_at,
-                       owner_canonical_user_id
+                       owner_canonical_user_id, parallel_thread
                 FROM gateway_sessions
                 WHERE lower(session_alias) = lower({self._dialect.bind})
                 LIMIT 1
@@ -1951,6 +2008,8 @@ class _RelationalGatewayStateRepository:
         status: str,
         owner_canonical_user_id: Optional[str],
     ) -> SessionRecord:
+        # A new or re-created session starts with Run concurrently off; the
+        # person turns it on with ``set_session_parallel``.
         now = utc_now_iso()
         with self._connect() as conn:
             conn.execute(
@@ -1959,9 +2018,9 @@ class _RelationalGatewayStateRepository:
                 (
                     session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                     channel_name, user_id, chat_id, thread_id, owner_canonical_user_id,
-                    status, created_at, updated_at
+                    status, created_at, updated_at, parallel_thread
                 )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, 0)
                 ON CONFLICT(session_key) DO UPDATE SET
                     session_alias = excluded.session_alias,
                     conversation_id = excluded.conversation_id,
@@ -1974,7 +2033,8 @@ class _RelationalGatewayStateRepository:
                     owner_canonical_user_id = excluded.owner_canonical_user_id,
                     status = excluded.status,
                     created_at = excluded.created_at,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    parallel_thread = 0
                 """,
                 (
                     session_key,
@@ -2022,6 +2082,7 @@ class _RelationalGatewayStateRepository:
         thread_id: Optional[str] = None,
         status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        parallel_thread: Optional[bool] = None,
     ) -> None:
         """Save a session and make it its chat's current one: for the person's own chat traffic.
 
@@ -2045,6 +2106,7 @@ class _RelationalGatewayStateRepository:
                 thread_id=thread_id,
                 status=status,
                 owner_canonical_user_id=owner_canonical_user_id,
+                parallel_thread=parallel_thread,
                 switch_chat=True,
             )
             transaction.commit()
@@ -2104,6 +2166,7 @@ class _RelationalGatewayStateRepository:
         status: Optional[str],
         owner_canonical_user_id: Optional[str],
         switch_chat: bool,
+        parallel_thread: Optional[bool] = None,
     ) -> None:
         existing = self.get_session(session_key)
         updated_at = utc_now_iso()
@@ -2120,9 +2183,9 @@ class _RelationalGatewayStateRepository:
                 (
                     session_key, session_alias, conversation_id, last_task_id, manager_agent_id,
                     channel_name, user_id, chat_id, thread_id, owner_canonical_user_id,
-                    status, created_at, updated_at
+                    status, created_at, updated_at, parallel_thread
                 )
-                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
                 ON CONFLICT(session_key) DO UPDATE SET
                     session_alias = excluded.session_alias,
                     conversation_id = excluded.conversation_id,
@@ -2134,7 +2197,8 @@ class _RelationalGatewayStateRepository:
                     thread_id = excluded.thread_id,
                     owner_canonical_user_id = excluded.owner_canonical_user_id,
                     status = excluded.status,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    parallel_thread = excluded.parallel_thread
                 """,
                 (
                     session_key,
@@ -2168,6 +2232,9 @@ class _RelationalGatewayStateRepository:
                     else (existing.status if existing else "active"),
                     created_at,
                     updated_at,
+                    1
+                    if (parallel_thread if parallel_thread is not None else bool(existing and existing.parallel_thread))
+                    else 0,
                 ),
             )
             conn.commit()
@@ -2234,6 +2301,52 @@ class _RelationalGatewayStateRepository:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def set_session_parallel(
+        self, session_key: str, *, conversation_id: str, parallel_thread: bool
+    ) -> ParallelSettingOutcome:
+        """Save a thread's Run concurrently setting unless a request is open in it.
+
+        One conditional UPDATE checks the expected conversation and the open
+        request and writes only the setting, so it never overwrites a
+        conversation switch or another write's ``last_task_id``, and a request
+        admitted at the same time either sees the new value or makes this
+        change wait for its reply (``ParallelSettingOutcome``). ``updated_at``
+        stays: the sidebar orders threads by activity, and changing a setting
+        is not activity. A second read only explains a refusal.
+        """
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE gateway_sessions
+                SET parallel_thread = {bind}
+                WHERE session_key = {bind}
+                  AND conversation_id = {bind}
+                  AND status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM gateway_requests r
+                      WHERE r.session_key = gateway_sessions.session_key
+                        AND COALESCE(r.conversation_id, '') = gateway_sessions.conversation_id
+                        AND r.run_state = {bind}
+                  )
+                """,
+                (1 if parallel_thread else 0, session_key, conversation_id, RUN_STATE_RUNNING),
+            )
+            conn.commit()
+            if cursor.rowcount > 0:
+                return ParallelSettingOutcome.SAVED
+            row = conn.execute(
+                f"SELECT conversation_id, status FROM gateway_sessions WHERE session_key = {bind}",
+                (session_key,),
+            ).fetchone()
+        current = dict(row) if row else None
+        if current is None or current["status"] != "active":
+            return ParallelSettingOutcome.NOT_FOUND
+        if current["conversation_id"] != conversation_id:
+            return ParallelSettingOutcome.CONVERSATION_CHANGED
+        return ParallelSettingOutcome.REQUEST_OPEN
 
     def set_active_session_for_channel(
         self,
@@ -2839,6 +2952,58 @@ class _RelationalGatewayStateRepository:
             ).fetchall()
             conn.commit()
         return tuple(str(row[0] or "") for row in rows)
+
+    def chat_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of each person's chat text kept here, by owner: transcripts, requests and deliveries.
+
+        For people's storage notices (``assistant_gateway.storage_usage``).
+        One aggregate per table, so no row is loaded; the byte size comes from
+        the database (``SqlDialect.text_bytes``), which on SQLite reads each
+        value once. Requests and deliveries without an owner are left out.
+        """
+
+        def text_bytes(*columns: str) -> str:
+            return " + ".join(self._dialect.text_bytes(column) for column in columns)
+
+        owned = "owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> ''"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner, SUM(stored) FROM (
+                    SELECT owner_canonical_user_id AS owner, SUM({text_bytes("content")}) AS stored
+                    FROM gateway_transcript_messages GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes("request_text")})
+                    FROM gateway_requests WHERE {owned} GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes("rendered_text", "payload_json")})
+                    FROM gateway_deliveries WHERE {owned} GROUP BY owner_canonical_user_id
+                ) AS chat_text GROUP BY owner
+                """
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
+
+    def upload_bytes_by_owner(self, *, uploads_dir: str) -> dict[str, int]:
+        """Bytes of the chat uploads each person sent that are still kept in ``uploads_dir``.
+
+        Read from the recorded sizes. The same table records copies of files
+        sent to people in their own scratch folders; those are in the person's
+        folder, which is counted on its own, so only paths under the uploads
+        folder count (matched as in ``delete_uploads_created_before``).
+        """
+
+        bind = self._dialect.bind
+        prefix = uploads_dir.rstrip("/") + "/"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner_canonical_user_id, SUM(size_bytes) FROM gateway_attachments
+                WHERE owner_canonical_user_id IS NOT NULL AND substr(local_path, 1, {bind}) = {bind}
+                GROUP BY owner_canonical_user_id
+                """,
+                (len(prefix), prefix),
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
 
     def update_attachment_nats_ref(
         self,
@@ -4493,6 +4658,14 @@ class _RelationalGatewayStateRepository:
                 ).fetchall()
                 if row[0]
             )
+            paths += tuple(
+                path
+                for row in conn.execute(
+                    f"SELECT result_json FROM gateway_history_cleanups WHERE person_id = {bind}", (canonical_user_id,)
+                ).fetchall()
+                for path in json.loads(row[0]).get("attachment_paths", [])
+            )
+            conn.execute(f"DELETE FROM gateway_history_cleanups WHERE person_id = {bind}", (canonical_user_id,))
             transcript = conn.execute(
                 f"DELETE FROM gateway_transcript_messages WHERE owner_canonical_user_id = {bind}",
                 (canonical_user_id,),
@@ -4514,6 +4687,295 @@ class _RelationalGatewayStateRepository:
             sign_ins=sign_ins,
             attachment_paths=paths,
         )
+
+    # -- a person's history clean-up (assistant_gateway.history_cleanup) ----------------
+
+    def delete_history_records(
+        self, scope: GatewayHistoryScope, *, removable_thread: Callable[[SessionRecord], bool]
+    ) -> GatewayHistoryDeleted:
+        """Delete the chat records of one person a clean-up covers, in one transaction.
+
+        Transcript messages, finished requests (never one still running),
+        closed questions, attachments, and delivered messages of those
+        requests; with ``scope.older_than`` also every other record of the
+        person from before it, except in ``scope.kept_conversation_ids``.
+        Nothing from after ``scope.selected_at`` is touched. With an order id,
+        deletion counts and upload paths are journaled in this transaction;
+        retries return that same result without deleting again. A session pointing at the last task of a
+        whole deleted conversation stops pointing at it (its next message
+        starts the conversation afresh), and a Web Chat thread left empty
+        is removed when ``removable_thread`` allows it. Rows are found by
+        their owner or their session's owner, as ``forget_person_records`` does.
+        """
+
+        deleted = GatewayHistoryDeleted()
+        with self._connect() as conn:
+            if not isinstance(conn, _BorrowedConnection):
+                conn.begin_write()  # reads then writes: take the write lock first
+            if scope.order_id:
+                bind = self._dialect.bind
+                # The insert also serializes concurrent PostgreSQL callers
+                # when this order has no journal row yet.
+                conn.execute(
+                    f"INSERT INTO gateway_history_cleanups (order_id, person_id, result_json) VALUES ({bind}, {bind}, '{{}}') "
+                    "ON CONFLICT(order_id) DO NOTHING", (scope.order_id, scope.person_id),
+                )
+                lock = " FOR UPDATE" if self._dialect is POSTGRES else ""
+                saved = conn.execute(
+                    f"SELECT person_id, result_json FROM gateway_history_cleanups WHERE order_id={bind}{lock}",
+                    (scope.order_id,),
+                ).fetchone()
+                if saved["person_id"] != scope.person_id:
+                    raise PermissionError("The clean-up journal belongs to another person.")
+                result = json.loads(saved["result_json"])
+                if result:
+                    result["attachment_paths"] = tuple(result.get("attachment_paths", ()))
+                    return GatewayHistoryDeleted(**result)
+            request_ids: set[str] = set()
+            paths: list[str] = []
+            for cut in scope.conversations:
+                where, params = self._history_cut_where(scope, cut, self._history_cut_end(conn, scope, cut))
+                request_ids |= self._delete_history_rows(conn, scope, where, params, deleted, paths)
+            if scope.older_than:
+                where, params = self._history_age_where(scope)
+                request_ids |= self._delete_history_rows(conn, scope, where, params, deleted, paths)
+            self._delete_history_deliveries(conn, scope, request_ids, deleted)
+            self._restart_history_sessions(conn, scope, deleted)
+            self._remove_emptied_threads(conn, scope, removable_thread, deleted, paths)
+            deleted.attachment_paths = tuple(path for path in paths if path)
+            if scope.order_id:
+                conn.execute(
+                    f"UPDATE gateway_history_cleanups SET result_json={self._dialect.bind} "
+                    f"WHERE order_id={self._dialect.bind}", (json.dumps(asdict(deleted)), scope.order_id),
+                )
+            conn.commit()
+        return deleted
+
+    def history_cleanup_order_ids(self) -> tuple[str, ...]:
+        """Journal entries whose completed manager orders can be forgotten."""
+
+        with self._connect() as conn:
+            return tuple(str(row[0]) for row in conn.execute("SELECT order_id FROM gateway_history_cleanups").fetchall())
+
+    def forget_history_cleanup_order(self, order_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(f"DELETE FROM gateway_history_cleanups WHERE order_id={self._dialect.bind}", (order_id,))
+            conn.commit()
+
+    def _history_person_clause(self) -> str:
+        bind = self._dialect.bind
+        return (
+            f"(owner_canonical_user_id = {bind} OR session_key IN "
+            f"(SELECT session_key FROM gateway_sessions WHERE owner_canonical_user_id = {bind}))"
+        )
+
+    def _history_cut_end(self, conn: Any, scope: GatewayHistoryScope, cut: ConversationCut) -> str:
+        """Where a conversation's cut ends: before the first kept turn's earliest record, if any.
+
+        The gateway writes a person's message (and its request) a moment
+        before the manager starts the turn, so ``cut.until`` alone would
+        take the first kept question with it.
+        """
+
+        if not cut.keep_correlation_id:
+            return cut.until
+        bind = self._dialect.bind
+        message = conn.execute(
+            f"SELECT MIN(created_at_utc) FROM gateway_transcript_messages "
+            f"WHERE owner_canonical_user_id = {bind} AND correlation_id = {bind}",
+            (scope.person_id, cut.keep_correlation_id),
+        ).fetchone()
+        request = conn.execute(
+            f"SELECT MIN(created_at) FROM gateway_requests WHERE {self._history_person_clause()} "
+            f"AND correlation_id = {bind}",
+            (scope.person_id, scope.person_id, cut.keep_correlation_id),
+        ).fetchone()
+        found = [str(row[0]) for row in (message, request) if row is not None and row[0]]
+        return min([cut.until, *found])
+
+    def _history_cut_where(
+        self, scope: GatewayHistoryScope, cut: ConversationCut, until: str
+    ) -> tuple[str, tuple[Any, ...]]:
+        bind = self._dialect.bind
+        return (
+            f"conversation_id = {bind} AND {{time}} < {bind} AND {{time}} < {bind}",
+            (cut.conversation_id, until, scope.selected_at),
+        )
+
+    def _history_age_where(self, scope: GatewayHistoryScope) -> tuple[str, tuple[Any, ...]]:
+        bind = self._dialect.bind
+        # Each explicit cut already applied its first-kept-turn boundary.
+        # The age sweep covers only other conversations.
+        kept = tuple(sorted(set(scope.kept_conversation_ids) | {cut.conversation_id for cut in scope.conversations}))
+        keep = (
+            f" AND (conversation_id IS NULL OR conversation_id NOT IN ({', '.join(bind for _ in kept)}))" if kept else ""
+        )
+        return f"{{time}} < {bind} AND {{time}} < {bind}{keep}", (scope.older_than, scope.selected_at, *kept)
+
+    def _delete_history_rows(
+        self,
+        conn: Any,
+        scope: GatewayHistoryScope,
+        where: str,
+        params: tuple[Any, ...],
+        deleted: GatewayHistoryDeleted,
+        paths: list[str],
+    ) -> set[str]:
+        """Delete the person's rows of each chat table matching ``where``; the deleted requests' ids."""
+
+        person = self._history_person_clause()
+        owner = (scope.person_id, scope.person_id)
+        transcript = f"owner_canonical_user_id = {self._dialect.bind} AND " + where.format(time="created_at_utc")
+        chars = conn.execute(
+            f"SELECT COALESCE(SUM(LENGTH(content)), 0) FROM gateway_transcript_messages WHERE {transcript}",
+            (scope.person_id, *params),
+        ).fetchone()
+        deleted.transcript_chars += int(chars[0] or 0)
+        deleted.transcript_messages += max(
+            conn.execute(
+                f"DELETE FROM gateway_transcript_messages WHERE {transcript}", (scope.person_id, *params)
+            ).rowcount,
+            0,
+        )
+        requests = f"{person} AND COALESCE(run_state, '') <> '{RUN_STATE_RUNNING}' AND " + where.format(time="created_at")
+        request_ids = {
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT correlation_id FROM gateway_requests WHERE {requests}", (*owner, *params)
+            ).fetchall()
+        }
+        for batch in _history_batches(sorted(request_ids)):
+            marks = ", ".join(self._dialect.bind for _ in batch)
+            deleted.requests += max(
+                conn.execute(f"DELETE FROM gateway_requests WHERE correlation_id IN ({marks})", tuple(batch)).rowcount,
+                0,
+            )
+            conn.execute(f"DELETE FROM gateway_held_guidance WHERE target_correlation_id IN ({marks})", tuple(batch))
+        questions = f"{person} AND status <> {self._dialect.bind} AND " + where.format(time="created_at")
+        deleted.questions += max(
+            conn.execute(
+                f"DELETE FROM gateway_questions WHERE {questions}", (*owner, PendingQueryStatus.OPEN.value, *params)
+            ).rowcount,
+            0,
+        )
+        attachments = f"{person} AND " + where.format(time="created_at")
+        paths += [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT local_path FROM gateway_attachments WHERE {attachments}", (*owner, *params)
+            ).fetchall()
+        ]
+        deleted.attachments += max(
+            conn.execute(f"DELETE FROM gateway_attachments WHERE {attachments}", (*owner, *params)).rowcount, 0
+        )
+        return request_ids
+
+    def _delete_history_deliveries(
+        self, conn: Any, scope: GatewayHistoryScope, request_ids: set[str], deleted: GatewayHistoryDeleted
+    ) -> None:
+        """Delivered messages of the deleted requests, and with an age, the person's other delivered ones."""
+
+        bind = self._dialect.bind
+        for batch in _history_batches(sorted(request_ids)):
+            marks = ", ".join(bind for _ in batch)
+            deleted.deliveries += max(
+                conn.execute(
+                    f"DELETE FROM gateway_deliveries WHERE status <> 'pending' AND correlation_id IN ({marks})",
+                    tuple(batch),
+                ).rowcount,
+                0,
+            )
+        if not scope.older_than:
+            return
+        kept = tuple(sorted(set(scope.kept_conversation_ids) | {cut.conversation_id for cut in scope.conversations}))
+        keep = (
+            " AND (correlation_id IS NULL OR correlation_id NOT IN (SELECT correlation_id FROM gateway_requests "
+            f"WHERE conversation_id IN ({', '.join(bind for _ in kept)})))"
+            if kept
+            else ""
+        )
+        deleted.deliveries += max(
+            conn.execute(
+                f"DELETE FROM gateway_deliveries WHERE {self._history_person_clause()} AND status <> 'pending' "
+                f"AND created_at < {bind} AND created_at < {bind}{keep}",
+                (scope.person_id, scope.person_id, scope.older_than, scope.selected_at, *kept),
+            ).rowcount,
+            0,
+        )
+
+    def _restart_history_sessions(self, conn: Any, scope: GatewayHistoryScope, deleted: GatewayHistoryDeleted) -> None:
+        """Sessions stop following up the last task of a deleted conversation; their next message starts afresh."""
+
+        bind = self._dialect.bind
+        now = utc_now_iso()
+        for cut in scope.conversations:
+            if not cut.whole or not cut.latest_task_id:
+                continue
+            deleted.sessions_restarted += max(
+                conn.execute(
+                    f"UPDATE gateway_sessions SET last_task_id = NULL, updated_at = {bind} "
+                    f"WHERE owner_canonical_user_id = {bind} AND conversation_id = {bind} AND last_task_id = {bind}",
+                    (now, scope.person_id, cut.conversation_id, cut.latest_task_id),
+                ).rowcount,
+                0,
+            )
+            conn.execute(
+                f"UPDATE gateway_session_conversations SET last_task_id = NULL, updated_at = {bind} "
+                f"WHERE conversation_id = {bind} AND last_task_id = {bind}",
+                (now, cut.conversation_id, cut.latest_task_id),
+            )
+
+    def _remove_emptied_threads(
+        self,
+        conn: Any,
+        scope: GatewayHistoryScope,
+        removable_thread: Callable[[SessionRecord], bool],
+        deleted: GatewayHistoryDeleted,
+        paths: list[str],
+    ) -> None:
+        """Remove the person's threads a whole deleted conversation left empty, when the caller allows it.
+
+        Kept: a thread with any message left, a request still running, or a
+        schedule that delivers into it.
+        """
+
+        bind = self._dialect.bind
+        whole = [cut.conversation_id for cut in scope.conversations if cut.whole]
+        for batch in _history_batches(whole):
+            marks = ", ".join(bind for _ in batch)
+            rows = conn.execute(
+                f"SELECT * FROM gateway_sessions WHERE owner_canonical_user_id = {bind} AND conversation_id IN ({marks})",
+                (scope.person_id, *batch),
+            ).fetchall()
+            for row in rows:
+                session = SessionRecord(**dict(row))
+                if removable_thread(session) and not self._thread_in_use(conn, session.session_key):
+                    paths += self._remove_thread(conn, session.session_key)
+                    deleted.sessions_removed += 1
+
+    def _remove_thread(self, conn: Any, session_key: str) -> list[str]:
+        """Delete one emptied thread's session rows (as ``forget_person_records`` does); its upload paths."""
+
+        bind = self._dialect.bind
+        key = (session_key,)
+        paths = [
+            str(item[0])
+            for item in conn.execute(f"SELECT local_path FROM gateway_attachments WHERE session_key = {bind}", key).fetchall()
+        ]
+        for table in self._PERSON_SESSION_TABLES:
+            conn.execute(f"DELETE FROM {table} WHERE session_key = {bind}", key)
+        conn.execute(f"DELETE FROM gateway_sessions WHERE session_key = {bind}", key)
+        return paths
+
+    def _thread_in_use(self, conn: Any, session_key: str) -> bool:
+        bind = self._dialect.bind
+        checks = (
+            f"SELECT 1 FROM gateway_transcript_messages WHERE session_key = {bind} LIMIT 1",
+            f"SELECT 1 FROM gateway_requests WHERE session_key = {bind} AND run_state = '{RUN_STATE_RUNNING}' LIMIT 1",
+            f"SELECT 1 FROM gateway_scheduled_targets WHERE session_key = {bind} LIMIT 1",
+            f"SELECT 1 FROM gateway_deliveries WHERE session_key = {bind} AND status = 'pending' LIMIT 1",
+        )
+        return any(conn.execute(sql, (session_key,)).fetchone() is not None for sql in checks)
 
     def list_team_members(
         self,

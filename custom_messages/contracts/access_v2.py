@@ -102,6 +102,15 @@ class OwnerScope(StrEnum):
     # hold or hand them on at any level (Cedar guard:admin-only-tools), and an
     # agent may hold them for an administrator's work.
     ADMINISTRATORS = "administrators"
+    # Each person's own records (clean-up of their chat history,
+    # fn:history_cleanup): the tool belongs to the person whose work or
+    # request it is, never to whoever acts. Only that person holds it (Cedar
+    # std:owner) and opens it to the team lead for their own work, never
+    # handed on; administrators neither hold it for others (std:admin skips
+    # owned targets) nor give it for everyone (AccessService.grant_refusal),
+    # and only the owner decides its reviews (AccessRequests.may_decide). It
+    # is in no tool set and no starter profile.
+    PERSON = "person"
 
 
 def contract_digest(payload: Any) -> str:
@@ -545,6 +554,12 @@ class AccessEventV1(AccessContractModel):
         "account_sharing_changed",
         "data_folder_registered",
         "data_folder_removed",
+        # Part of a person's chat history clean-up was carried out
+        # (custom_agents.history_cleanup, assistant_gateway.history_cleanup):
+        # one event per side, with the order id, how it was approved and the
+        # counts, never the deleted content. detail: order_id, person_id,
+        # side, approval, counts.
+        "history_cleanup",
     ]
     # The grant; the account link for link events; the folder id (data/<name>)
     # for data folder events.
@@ -940,13 +955,27 @@ class ChangeProposalV1(AccessContractModel):
     # Rows for the review card (proposals, deliveries); ``effect`` stays the
     # plain summary for chat and older views.
     items: tuple[ReviewItemV1, ...] = Field(default=(), max_length=80)
+    # The effect lines the stored request keeps once it is decided (granted,
+    # denied or withdrawn) when ``effect`` names what the change deletes: a
+    # history clean-up shows the person their conversation titles while they
+    # review it, and afterwards keeps only ids, dates and counts, so a deleted
+    # conversation's title does not outlive it (owner's decision 2026-10-27).
+    # Empty: ``effect`` stays as it is.
+    effect_after_decision: tuple[str, ...] = Field(default=(), max_length=40)
 
-    @field_validator("effect")
+    @field_validator("effect", "effect_after_decision")
     @classmethod
     def _bounded_lines(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if any(not line.strip() or len(line) > CHANGE_EFFECT_MAX_CHARS for line in value):
             raise ValueError(f"Each effect line is between 1 and {CHANGE_EFFECT_MAX_CHARS} characters.")
         return value
+
+    def as_decided(self) -> "ChangeProposalV1":
+        """The proposal as its request keeps it once decided (``effect_after_decision``)."""
+
+        if not self.effect_after_decision:
+            return self
+        return self.model_copy(update={"effect": self.effect_after_decision, "effect_after_decision": ()})
 
     @field_validator("summary")
     @classmethod
@@ -1248,6 +1277,9 @@ class AccessNoticeKind(StrEnum):
     TOOL_LIMIT_REACHED = "tool_limit_reached"  # an agent's always-shown tools are more than its model takes in one request (custom_agents.tool_loading)
     BLOCK_WIDENED = "block_widened"  # a block named an operation an update removed, so it blocks the whole tool (access_control.stale_blocks)
     KNOWLEDGE_NEEDS_ATTENTION = "knowledge_needs_attention"  # pages frozen or agents refused many knowledge writes (custom_agents.knowledge_curation_runtime)
+    HISTORY_CLEANED_UP = "history_cleaned_up"  # TeamLead deleted some of your chat history or finished tasks (assistant_gateway.history_cleanup)
+    SAVED_OUTPUT_RETENTION = "saved_output_retention"  # saved tool outputs will start being deleted after the grace period (custom_agents.output_retention)
+    STORAGE_USAGE = "storage_usage"  # the data the team stores for you passed another step (assistant_gateway.storage_usage)
 
 
 class AccessNoticeV1(AccessContractModel):

@@ -51,7 +51,7 @@ from custom_agents.conversation_store import ConversationStore
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
 from custom_messages.enums import RequesterType
 from custom_tools.providers.memory import resolve_memory_review_job
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from live_storage_utils import (
     reset_postgres_storage,
     resolve_live_storage_settings,

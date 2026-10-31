@@ -36,6 +36,7 @@ def _stopping_agent(**extra):
         team_id=None,
         paused=False,
         is_executing=False,
+        main_lane_busy=False,  # the main lane (runtime_hosting.agent_execution)
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _pending_work_timers=set(),
@@ -130,6 +131,7 @@ def test_a_fired_schedule_wakes_the_retained_drain(scheduled_world):
     runs.save_schedule(world)
     renew_schedule_permits(world.manager, signer=world.signer)
     world.worker.is_executing = False  # no turn holds the slot, so the drain runs a pass
+    world.worker.main_lane_busy = False
 
     async def fire_and_wait():
         await runs.subscribe(world)
@@ -368,7 +370,7 @@ def test_the_agent_runs_a_drain_pass_when_another_holder_releases_the_slot(tmp_p
 
     async def scenario():
         async def other_holder(wake_up: bool):
-            async with agent._execution_gate.hold():
+            async with agent._execution_lanes.hold():
                 if wake_up:
                     schedule_pending_work(agent)  # work saved while the slot is held
                 await asyncio.sleep(0)

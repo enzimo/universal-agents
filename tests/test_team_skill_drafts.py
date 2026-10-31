@@ -20,7 +20,7 @@ from custom_agents.skill_installation import (
 )
 from custom_agents import access_runtime
 from custom_tools.path_policy import PathPolicyError
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
 from tests.change_approval_support import agreement, run_apply_change, use_signed_contexts
 from tests.test_skill_installation import _agent, _safe_scan_result, _write_config, record_skill_refresh

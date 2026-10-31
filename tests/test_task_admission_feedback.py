@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -37,6 +39,51 @@ def _request(task_id):
             ),
         ),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("paused", [False, True], ids=["busy", "paused"])
+async def test_new_thread_is_visible_and_durable_before_the_active_turn_finishes(
+    tmp_path, monkeypatch, paused,
+):
+    from custom_agents.manager_control_runtime import _runtime_work_roots
+    from custom_agents.pending_work_runtime import close_pending_work
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+    from tests.broker_access_support import context_signer
+    from tests.change_approval_support import use_signed_contexts
+
+    use_signed_contexts(monkeypatch)
+    agent = _make_agent(tmp_path)
+    agent.paused = paused
+    monkeypatch.setattr(agent, "_refresh_self_agent_state", AsyncMock())
+    task, header, meta = _request("new-thread")
+    meta.gateway_context.task_context = context_signer().issue(
+        team_id=agent.team_id, person_id="alice", person_roles=("member",),
+    )
+    header.to_routing_path = agent.id
+    envelope = MessageEnvelope(msg_content=task, msg_header=header, msg_meta=meta)
+    delivery = SimpleNamespace(
+        envelope=envelope, logical_route=agent.id, source_queue_name=agent.id,
+        transport_subject="test.requests", redelivery_count=0, max_deliver=5,
+        ack=AsyncMock(), nak=AsyncMock(),
+    )
+    try:
+        async with agent._execution_lanes.hold():
+            await asyncio.wait_for(agent.on_nats_delivery(delivery), 5)
+            roots = await _runtime_work_roots(agent, "alice")
+            assert [root.task.task_id for root in roots] == [task.task_id]
+            assert not await _runtime_work_roots(agent, "someone_else")
+            assert not agent.deferred_inbox.messages
+            assert agent.task_manager.current_task_id is None
+            assert list(agent.task_manager.task_state.task_queue) == [task.task_id]
+            assert agent.task_manager.runtime_state_store.load_task_runtime_by_owner(agent.id)
+            # Redelivery must not create another queue entry while execution waits.
+            await asyncio.wait_for(agent.on_nats_delivery(delivery), 5)
+            assert list(agent.task_manager.task_state.task_queue) == [task.task_id]
+            delivery.nak.assert_not_awaited()
+            assert delivery.ack.await_count == 2
+    finally:
+        await close_pending_work(agent)
 
 
 @pytest.mark.asyncio

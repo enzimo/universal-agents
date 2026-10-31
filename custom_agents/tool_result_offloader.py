@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from custom_tools.runtime_context import bound_task_id
 import hashlib
 import json
 import logging
@@ -196,7 +197,7 @@ class TaskAwareWorkspaceStorage:
         """Who a saved result belongs to: the agent, its team and its current task."""
 
         task_manager = getattr(agent, "task_manager", None) or self.task_manager
-        task_id = task_manager.current_task_id if task_manager is not None else None
+        task_id = bound_task_id()
         task_info = None
         if task_manager is not None and task_id:
             try:

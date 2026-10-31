@@ -19,9 +19,9 @@ from custom_agents import access_runtime
 from custom_agents.conversation_store import ConversationStore
 from custom_messages.contracts.access_v2 import SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
 from custom_tools.providers.memory import memory, topic_tags
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_tools.tool_results import result_text
-from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
+from tests.test_access_request_tools import BINARY, OWNER, TEAM, decide, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
 from tests.test_strands_user_scope_tools import _FakeAgent, _signed_task_contexts  # noqa: F401 - signing keys
 
@@ -233,10 +233,10 @@ def test_access_is_decided_per_action_so_a_block_stops_exactly_one(storage, tmp_
     service = owner_service(storage)
     try:
         for action in ("list", "create", "replace", "delete", "undo"):
-            decision = access_runtime.decide_call(lead, "memory", {"action": action, "bank": "coremem"})
+            decision = decide(lead, "memory", {"action": action, "bank": "coremem"})
             assert decision.allowed, (action, decision.reason)
             assert decision.operation == f"memory.{action}"
-        assert not access_runtime.decide_call(worker, "memory", {"action": "list", "bank": "coremem"}).allowed
+        assert not decide(worker, "memory", {"action": "list", "bank": "coremem"}).allowed
 
         from access_control.requests import AccessRequests
 
@@ -247,9 +247,9 @@ def test_access_is_decided_per_action_so_a_block_stops_exactly_one(storage, tmp_
             reason="No deleting facts this week",
         )
 
-        assert not access_runtime.decide_call(lead, "memory", {"action": "delete", "bank": "usermem"}).allowed
-        assert access_runtime.decide_call(lead, "memory", {"action": "create", "bank": "usermem"}).allowed
-        assert access_runtime.decide_call(lead, "topic_tags", {"action": "tag_thread"}).allowed
+        assert not decide(lead, "memory", {"action": "delete", "bank": "usermem"}).allowed
+        assert decide(lead, "memory", {"action": "create", "bank": "usermem"}).allowed
+        assert decide(lead, "topic_tags", {"action": "tag_thread"}).allowed
     finally:
         service.cedar.close()
         access_runtime._runtime_access.cache_clear()
