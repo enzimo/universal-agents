@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.schedules.remove",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -49,5 +49,5 @@
     "seen_version": "82927ec65f3db64a7297b2aa92c9c2dfe20c6340c73c143350ae8c01804ebccc"
   },
   "body_digest": "XzhdzY9gZbOkJjc9gB5WcxptXXNbnnxHCgPvUUxOVD8",
-  "signature": "qo_czyBImwOL211_BiNYVe0NFVF4DwWoGfOMTupq0tGng6JHTwUV42eEAvdSsL_B5HsP5BzhQ1OmPIE_vdQkCQ"
+  "signature": "5IKwQxJiPGJ16Be_DpZpdOVPB2dQlpr3vcc4jYjWFPlyPCqs_f-GZhDG3v19Bg5r1MNiZuWHcLeQ_ZQcJLEsAg"
 }

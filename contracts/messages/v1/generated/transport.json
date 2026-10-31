@@ -38,7 +38,9 @@
       "between_installations": false,
       "description": "set-aside copies and notices, under the receiving runtime's id",
       "max_expiry_seconds": 2592000,
-      "stream": "UA1_DLQ"
+      "streams": [
+        "UA1_DLQ"
+      ]
     },
     "durable": {
       "addresses": [
@@ -50,7 +52,10 @@
       "between_installations": true,
       "description": "at least once; the sender records before publishing, the receiver admits durably before acknowledging",
       "max_expiry_seconds": 604800,
-      "stream": "UA1_WORK"
+      "streams": [
+        "UA1_AGENT_WORK_{team}",
+        "UA1_WORK"
+      ]
     },
     "event": {
       "addresses": [
@@ -62,13 +67,14 @@
     },
     "request_reply": {
       "addresses": [
-        "svc.team.{operation}",
-        "ctl.agent.{agent}.{operation}"
+        "svc.team",
+        "svc.scheduler",
+        "ctl.agent.{agent}"
       ],
       "between_installations": false,
       "description": "answered at once or \"no responders\"; changes carry an idempotency key, and the receiver stores the final outcome with the change before replying, except outcomes that ask for a retry (README, \"Stored outcomes\")",
       "installation_addresses": [
-        "_install.{sender}.svc.{operation}"
+        "_install.{sender}.svc"
       ],
       "max_expiry_seconds": 30
     }
@@ -82,7 +88,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "agent~{team}~{agent}",
-      "stream": "UA1_WORK"
+      "stream": "UA1_AGENT_WORK_{team}"
     },
     "edge": {
       "ack": "explicit",
@@ -100,7 +106,7 @@
       "max_deliveries": 20,
       "mode": "pull",
       "name": "pool~{team}~{pool}",
-      "stream": "UA1_WORK"
+      "stream": "UA1_AGENT_WORK_{team}"
     },
     "team_services": {
       "ack": "explicit",
@@ -154,6 +160,18 @@
     "minimum_version": "2.15.1"
   },
   "streams": {
+    "UA1_AGENT_WORK_{team}": {
+      "duplicate_window_seconds": 120,
+      "max_age_seconds": 604860,
+      "max_consumers": 4096,
+      "max_message_bytes": 262144,
+      "retention": "workqueue",
+      "storage": "file",
+      "subjects": [
+        "ua.v1.{team}.*.work.agent.*",
+        "ua.v1.{team}.*.work.pool.*"
+      ]
+    },
     "UA1_DLQ": {
       "max_age_seconds": 2592060,
       "max_message_bytes": 262144,
@@ -171,9 +189,14 @@
       "retention": "workqueue",
       "storage": "file",
       "subjects": [
-        "ua.v1.*.*.work.>"
+        "ua.v1.*.*.work.edge.*",
+        "ua.v1.*.*.work.team"
       ]
     }
   },
-  "subject_prefix": "ua.v1.{team}.{sender}"
+  "subject_prefix": "ua.v1.{team}.{sender}",
+  "team_grants": [
+    "agent",
+    "pool"
+  ]
 }

@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.archive",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -53,5 +53,5 @@
     "reason": "The release guide replaces this page."
   },
   "body_digest": "g3FRCvC9VTgBJFNsAfx9rl_JAjOeDS-mnLYVJcdKngA",
-  "signature": "qid8dqZLJHBDu8Hp7AzKdUFEm3jexa_mSDRFVs8t6EofhNhLFPxYEyWCtRC6Y9iBsO5Y0EPnPZrO3TIZ4VGzAQ"
+  "signature": "--hyyV1WBhZrdUHGTnejR-mBeIbtS_YxDOv4T0ybN5ibSzN4Cq0bz6oVBO1f80kmZbBKc1-tuNk2SX5TWHY3DA"
 }

@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.memory.create",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -61,5 +61,5 @@
     "metadata_json": "{\"resume_section\":\"deployment\"}"
   },
   "body_digest": "tuyTJQxNVbHY1bgycsl7Nb2Jh91-VO0w9-GuwZGq9PQ",
-  "signature": "yvAIPwtXdX7bQTxZLFg8EJzH51u6CIATcbz4Sb3GBNSXtAufcbzNZ06BbMreyWdoM5SO04CfAKYcSFloBAAdBg"
+  "signature": "VoiIgIt0CXcSr3SW1fZvULAQvoDruvdBdWBOCaTQFgfcM0xNWh5KjENCu4PWPGbrMTuJ8tp1Pm6NuDAUTCm2Cg"
 }

@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.reject_contribution",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
     "reason": "The proposal repeats the existing release checklist."
   },
   "body_digest": "NeDv-lfmpx6C9mFmo3aWc6KefKC8dLx-5zy3MxdKDKU",
-  "signature": "CV8UgDxA1MX7dYTtHD7B6_ywBx4A4SEZISDYT7-0vX2AOx2M7yE5JEngZ3rWtMlMAPeIJiHgGfLrtuHowBWjBQ"
+  "signature": "IF3iJjqX-VfhUwMYxSMr8q41GmbjOv10ApBUYSRBu7m6E0WgyGtZ1QLHS2DFsWLDN2VcM3Sa_AtIq0AmhaBGCg"
 }

@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.objectives.pause",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -50,5 +50,5 @@
     "reason": "dependency_watch"
   },
   "body_digest": "BePjy9UQaCj-B2cWCh2AP29C6_PuFnY0A8EX3gDQwZQ",
-  "signature": "9baGeYzHQX_89DEF1MrBBf4UJcREtSufwR7F45ooQOlsnIYdylGH2UD6d_Rck5GWGGCyAnoLARDKHPGZiSyFCQ"
+  "signature": "3N41vFYNZfXR1am8sMBYXiB7uRjVog6PozVdr189o-G5k7GFiKxXGSqIdhqPiboCPkKX3wM0tcUxpRNb6Fv2Cg"
 }

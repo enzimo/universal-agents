@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.objectives.record_checkpoint",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -142,5 +142,5 @@
     ]
   },
   "body_digest": "qyLlpEf02zoUg_sx8x1NVi4y71ha7bH2Rgfkag2hqyg",
-  "signature": "VJ7JRc9KlJnflZnHxX8mbeoccGlTUQO6ML2bONyEJPG_AUaVEXy9aHqEM70X_0dUFYKPKPIe1KZEIcaS8KAYBg"
+  "signature": "THwgqLLcwbuYcdRDJMQeZEuDgbEQ6Yd4Jat15ZQhuWMgK8gEyqnmXM-puPXeHcyxLcWRxUNHPvalzIA5ox8VDQ"
 }

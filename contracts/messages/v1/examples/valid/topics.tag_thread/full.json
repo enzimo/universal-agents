@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.topics.tag_thread",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -52,5 +52,5 @@
     "private": true
   },
   "body_digest": "s7weNZ89fjVLWcYEVLn6xNrqKzayXKlp2MqfFUBpYcQ",
-  "signature": "xkPBQaOt8vp5Nqob4hySKj6cU_XD_kQSi68AoQ5G7MiCpnQleztu68tntU6_jYLbDYOWqmy1gx3tu5vebHfCCQ"
+  "signature": "m8iYA2zfOqUg9nB4MQAU4741L2jdGV_ZlDzbZ6PJRBZaTEQtZcaMu-_gJ9_rsB-NMMl59K3mabSWUBEH8LuZDg"
 }

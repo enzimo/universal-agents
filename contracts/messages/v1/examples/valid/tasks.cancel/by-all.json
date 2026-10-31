@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.tasks.cancel",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
     }
   },
   "body_digest": "kFMttcMYLaDtGc1AAhsUIyd_HQ41pv7Vqk0G3s-mOF8",
-  "signature": "U1_L4A9SasoRq9khLAk_vHhabjdTmpDuvSdcqghgA5ONRWPWXrQey9d1-CtmH68TwlUDBwdcyPX_V1QY8JLzAQ"
+  "signature": "lWe3CtgxfSnp7QCOdrhc0traPz5ciD-KxVZND4B1epRxpdQj41Tehqy4XT4004r5RZ1Guu3AycKq4y5P1MYEDA"
 }

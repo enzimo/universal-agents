@@ -1,0 +1,29 @@
+{
+  "record": "agent_session",
+  "protocol": "1.0-pre",
+  "key": "session.install_peer.team_peer.s-peer-analyst-1",
+  "writer": {
+    "type": "host",
+    "installation": "install_peer",
+    "runtime": "peer-lead-host-1",
+    "membership_epoch": 1,
+    "key_id": "test-peer-lead-key-1"
+  },
+  "sequence": 1,
+  "issued_at": "2026-10-22T04:00:00.000Z",
+  "body": {
+    "session": "s-peer-analyst-1",
+    "installation": "install_peer",
+    "team": "team_peer",
+    "agent": "analyst",
+    "agent_type": "researcher",
+    "agent_role": "worker",
+    "runtime": "peer-lead-host-1",
+    "placement_revision": 4,
+    "started_at": "2026-10-22T04:00:00.000Z",
+    "ends_at": "2026-10-23T04:00:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "gF2BWc_t3mh4AXIwQMu7Xpf70oD5NPDdkp-_a_WvQHI",
+  "signature": "Z6UEj83b5FnLgmsnE3h0Xhym7dEDhMdssdI_6uKJ0M-UM938204iFR6eq1_vxpvVDVC4qMH02DFVm4yydEqABg"
+}

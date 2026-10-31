@@ -29,7 +29,8 @@
     },
     "nats_public_key": "UPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
     "agent_types": [
-      "team_lead"
+      "team_lead",
+      "researcher"
     ],
     "session_limit": 4,
     "protocol": "1.0-pre",
@@ -43,6 +44,6 @@
     "expires_at": "2026-11-21T00:00:00.000Z"
   },
   "algorithm": "ed25519",
-  "body_digest": "HBFyCv9dqLbwAtTo96pLMi2FcJB3YuEwpq8mi03Y6Mc",
-  "signature": "EKCP0bDVan7QLw3UE-yzs9_7bZNu3LFWcJxJBSAfXY3k4cj9bLeTBlR9tR1WekkAN_RJQ7zdQddZ9mWMvi14AQ"
+  "body_digest": "Ouvt1DyX26aAiCk6aMCnh5KXutiMm5kMlUppa5U2v-g",
+  "signature": "J-8NKCaggDVo6kvHeRfhH9zK80vceHzRuG6fnz_bqpcAK7dZw7pBhVVN-AdJoNWqpx423Q4pAOLpQ5b6UFLlAw"
 }

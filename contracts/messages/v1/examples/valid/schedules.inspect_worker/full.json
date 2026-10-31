@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.schedules.inspect_worker",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -50,5 +50,5 @@
     "request_id": "req_schedules_inspect_worker_full"
   },
   "body_digest": "-5RLQDsIVU_JqRFTvPEsBPVO9f05A--bQrlWpe4pjTc",
-  "signature": "o7iC1gfcJTHwLEqcSh6QTDwa7IFwod6mHCqI9zupgUTm0EN83gu27W21mrHvpYPySMii3qbMJFaZ7iM4nFfKDw"
+  "signature": "-3GQtzzJXqohzC_1gH2O-tFjxBMGTLze0LRsPnRFRt9f61b8HX70Tq_i95XUoM-WzpKuDzU95AqMEXGQg1RYBA"
 }

@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.knowledge.archive",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
     "reason": "Archived on the Web Chat Knowledge page"
   },
   "body_digest": "nTNO3HAJj2t8wnxQSQ4rdT0iJnVfQ7kEovfUHvAW8fg",
-  "signature": "OhnCKgNNWYBGiqotb4KyyEJkJ7Ps6iseXAXNCw_aL3UWsrpe1TQrYU_PK88fpZdVbYB1xu55_UYdWZ6PTMBqDQ"
+  "signature": "owCt_iID60bdyfhPVXq6r1dzb26OWeaeR65x2a1gSAWHF1zCU7p6gnVo2_onToPFj53FkI5jin-9aqrW_jjoDQ"
 }

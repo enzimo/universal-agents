@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.objectives.resume",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -50,5 +50,5 @@
     "reason": "dependency_watch"
   },
   "body_digest": "Kz_LSWkiPfxF0n-wgfuYl6IUyUzSiWUhdT6Jq3hj7dI",
-  "signature": "zIdA3c_GhwO7z-DY1l4YR9ZVOpVg8AFQ_X2xHAC8Fz1kdI3AbAI2O4mhhX44eRRCZ2fJd2uSuSlGCHh1APWnDg"
+  "signature": "dsgECcLov6NLWYTIj3lAPSmUOlAoPTks8vX2d0ijCUhzynxQfRV7Lwg6wlV0o3JPVN-JHvswlsj5SSYQZz8OAQ"
 }

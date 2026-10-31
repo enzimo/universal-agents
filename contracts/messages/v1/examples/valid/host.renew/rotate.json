@@ -17,7 +17,7 @@
     "target": "installation_service",
     "id": "authority"
   },
-  "subject": "ua.v1._install.lead-host-1.svc.host.renew",
+  "subject": "ua.v1._install.lead-host-1.svc",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -35,9 +35,9 @@
         "key_id": "test-lead-key-2",
         "public_key": "bI0UsEdZPXEX3ERZV9i91ncsMD0GQpf9yOMpkn03C9o"
       },
-      "proof": "-3Loh_IizY9oZ68Sdgp1G3etcgLCeiT88-9KDqkbJC15bOqZslJaKcw8OPO_1cNDJ4SduIfiDyJuj6WdTx9zDA"
+      "proof": "4mElHpSXWEpf7tnii_pCOjcuAOQ3jBKqV-Tr798O6CAxx1LDumRIJ-IZ7zcK4Xv9fK9maumOPx08FRCPJ2uECw"
     }
   },
-  "body_digest": "hbdIokuQHaUWbtZmeXHQsK4IRFgg6RGwAOpOEqG2oNA",
-  "signature": "cG12i5TpELNnNMaRkrBx3Fjf4keSlodT236gKhekKsenFoELPlPbRdibnrpQaaVfHPNf6sCuMsMwKgTdRQ7CBA"
+  "body_digest": "X8mZkl_sGSa10oi2ndr9Y1VUStXP6x4Hqn8oAZrC5ng",
+  "signature": "dftmEexAo64zzdo0y1VR3TTZaPCPJmMNLth5xqj8YK7hwDuOkSrFR7e_6lhXzhN3RmLLQIqmVY-fcgGVB55QBw"
 }

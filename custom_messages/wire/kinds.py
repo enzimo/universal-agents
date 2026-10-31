@@ -149,7 +149,7 @@ KINDS: dict[str, KindSpec] = {
     'access.withdraw': KindSpec(
         name='access.withdraw',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.access.withdraw'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.AccessWithdrawBodyAdapter,
@@ -177,7 +177,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.exit': KindSpec(
         name='agent.exit',
         delivery_class='request_reply',
-        addresses={'agent': 'ctl.agent.{agent}.exit'},
+        addresses={'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentExitBodyAdapter,
@@ -205,7 +205,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.pause': KindSpec(
         name='agent.pause',
         delivery_class='request_reply',
-        addresses={'agent': 'ctl.agent.{agent}.pause'},
+        addresses={'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentPauseBodyAdapter,
@@ -233,7 +233,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.resume': KindSpec(
         name='agent.resume',
         delivery_class='request_reply',
-        addresses={'agent': 'ctl.agent.{agent}.resume'},
+        addresses={'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentResumeBodyAdapter,
@@ -261,7 +261,7 @@ KINDS: dict[str, KindSpec] = {
     'agent.status': KindSpec(
         name='agent.status',
         delivery_class='request_reply',
-        addresses={'agent': 'ctl.agent.{agent}.status'},
+        addresses={'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.AgentStatusBodyAdapter,
@@ -289,7 +289,7 @@ KINDS: dict[str, KindSpec] = {
     'conflicts.cancel': KindSpec(
         name='conflicts.cancel',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.conflicts.cancel'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ConflictsCancelBodyAdapter,
@@ -317,7 +317,7 @@ KINDS: dict[str, KindSpec] = {
     'conflicts.decide': KindSpec(
         name='conflicts.decide',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.conflicts.decide'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ConflictsDecideBodyAdapter,
@@ -345,7 +345,7 @@ KINDS: dict[str, KindSpec] = {
     'conflicts.list': KindSpec(
         name='conflicts.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.conflicts.list'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.ConflictsListBodyAdapter,
@@ -429,7 +429,7 @@ KINDS: dict[str, KindSpec] = {
     'custody.decide': KindSpec(
         name='custody.decide',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.custody.decide'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.CustodyDecideBodyAdapter,
@@ -485,7 +485,7 @@ KINDS: dict[str, KindSpec] = {
     'debug.dump': KindSpec(
         name='debug.dump',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.debug.dump', 'agent': 'ctl.agent.{agent}.debug.dump'},
+        addresses={'team_services': 'svc.team', 'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.DebugDumpBodyAdapter,
@@ -597,7 +597,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.add': KindSpec(
         name='heartbeat_items.add',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.heartbeat_items.add'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.HeartbeatItemsAddBodyAdapter,
@@ -625,7 +625,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.disable': KindSpec(
         name='heartbeat_items.disable',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.heartbeat_items.disable'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.HeartbeatItemsDisableBodyAdapter,
@@ -653,7 +653,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.enable': KindSpec(
         name='heartbeat_items.enable',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.heartbeat_items.enable'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.HeartbeatItemsEnableBodyAdapter,
@@ -681,7 +681,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.list': KindSpec(
         name='heartbeat_items.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.heartbeat_items.list'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.HeartbeatItemsListBodyAdapter,
@@ -709,7 +709,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.remove': KindSpec(
         name='heartbeat_items.remove',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.heartbeat_items.remove'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.HeartbeatItemsRemoveBodyAdapter,
@@ -737,7 +737,7 @@ KINDS: dict[str, KindSpec] = {
     'heartbeat_items.update': KindSpec(
         name='heartbeat_items.update',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.heartbeat_items.update'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.HeartbeatItemsUpdateBodyAdapter,
@@ -765,7 +765,7 @@ KINDS: dict[str, KindSpec] = {
     'host.join': KindSpec(
         name='host.join',
         delivery_class='request_reply',
-        addresses={'installation_service': '_install.{sender}.svc.host.join'},
+        addresses={'installation_service': '_install.{sender}.svc'},
         copies=(),
         idempotency=('/issuer/runtime', '/issuer/key_id', '/body/join_id'),
         body_model=models.HostJoinBodyAdapter,
@@ -793,7 +793,7 @@ KINDS: dict[str, KindSpec] = {
     'host.renew': KindSpec(
         name='host.renew',
         delivery_class='request_reply',
-        addresses={'installation_service': '_install.{sender}.svc.host.renew'},
+        addresses={'installation_service': '_install.{sender}.svc'},
         copies=(),
         idempotency=('/issuer/runtime', '/body/renew_id'),
         body_model=models.HostRenewBodyAdapter,
@@ -821,7 +821,7 @@ KINDS: dict[str, KindSpec] = {
     'intent.set': KindSpec(
         name='intent.set',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.intent.set'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.IntentSetBodyAdapter,
@@ -849,7 +849,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.add_note': KindSpec(
         name='knowledge.add_note',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.add_note'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeAddNoteBodyAdapter,
@@ -877,7 +877,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.archive': KindSpec(
         name='knowledge.archive',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.archive'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeArchiveBodyAdapter,
@@ -905,7 +905,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.count_contributions': KindSpec(
         name='knowledge.count_contributions',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.count_contributions'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.KnowledgeCountContributionsBodyAdapter,
@@ -933,7 +933,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.freeze': KindSpec(
         name='knowledge.freeze',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.freeze'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeFreezeBodyAdapter,
@@ -961,7 +961,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.history': KindSpec(
         name='knowledge.history',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.history'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.KnowledgeHistoryBodyAdapter,
@@ -989,7 +989,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.list': KindSpec(
         name='knowledge.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.list'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.KnowledgeListBodyAdapter,
@@ -1017,7 +1017,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.list_contributions': KindSpec(
         name='knowledge.list_contributions',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.list_contributions'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.KnowledgeListContributionsBodyAdapter,
@@ -1045,7 +1045,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.merge': KindSpec(
         name='knowledge.merge',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.merge'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeMergeBodyAdapter,
@@ -1073,7 +1073,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.publish_contribution': KindSpec(
         name='knowledge.publish_contribution',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.publish_contribution'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgePublishContributionBodyAdapter,
@@ -1101,7 +1101,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.read': KindSpec(
         name='knowledge.read',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.read'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.KnowledgeReadBodyAdapter,
@@ -1129,7 +1129,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.read_contribution': KindSpec(
         name='knowledge.read_contribution',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.read_contribution'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.KnowledgeReadContributionBodyAdapter,
@@ -1157,7 +1157,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.reject_contribution': KindSpec(
         name='knowledge.reject_contribution',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.reject_contribution'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeRejectContributionBodyAdapter,
@@ -1185,7 +1185,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.resolve_note': KindSpec(
         name='knowledge.resolve_note',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.resolve_note'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeResolveNoteBodyAdapter,
@@ -1213,7 +1213,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.revert': KindSpec(
         name='knowledge.revert',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.revert'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeRevertBodyAdapter,
@@ -1241,7 +1241,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.unfreeze': KindSpec(
         name='knowledge.unfreeze',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.unfreeze'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeUnfreezeBodyAdapter,
@@ -1269,7 +1269,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.withdraw_contribution': KindSpec(
         name='knowledge.withdraw_contribution',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.withdraw_contribution'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeWithdrawContributionBodyAdapter,
@@ -1297,7 +1297,7 @@ KINDS: dict[str, KindSpec] = {
     'knowledge.write': KindSpec(
         name='knowledge.write',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.knowledge.write'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.KnowledgeWriteBodyAdapter,
@@ -1353,7 +1353,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.create': KindSpec(
         name='memory.create',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.memory.create'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.MemoryCreateBodyAdapter,
@@ -1381,7 +1381,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.delete': KindSpec(
         name='memory.delete',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.memory.delete'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.MemoryDeleteBodyAdapter,
@@ -1409,7 +1409,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.list': KindSpec(
         name='memory.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.memory.list'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.MemoryListBodyAdapter,
@@ -1437,7 +1437,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.replace': KindSpec(
         name='memory.replace',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.memory.replace'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.MemoryReplaceBodyAdapter,
@@ -1465,7 +1465,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.show': KindSpec(
         name='memory.show',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.memory.show'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.MemoryShowBodyAdapter,
@@ -1493,7 +1493,7 @@ KINDS: dict[str, KindSpec] = {
     'memory.undo': KindSpec(
         name='memory.undo',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.memory.undo'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.MemoryUndoBodyAdapter,
@@ -1521,7 +1521,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.abandon': KindSpec(
         name='objectives.abandon',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.abandon'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesAbandonBodyAdapter,
@@ -1549,7 +1549,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.activate_plan': KindSpec(
         name='objectives.activate_plan',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.activate_plan'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesActivatePlanBodyAdapter,
@@ -1577,7 +1577,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.create': KindSpec(
         name='objectives.create',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.create'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesCreateBodyAdapter,
@@ -1605,7 +1605,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.delete': KindSpec(
         name='objectives.delete',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.delete'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesDeleteBodyAdapter,
@@ -1633,7 +1633,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.get': KindSpec(
         name='objectives.get',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.get'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.ObjectivesGetBodyAdapter,
@@ -1661,7 +1661,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.list': KindSpec(
         name='objectives.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.list'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.ObjectivesListBodyAdapter,
@@ -1689,7 +1689,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.pause': KindSpec(
         name='objectives.pause',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.pause'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesPauseBodyAdapter,
@@ -1717,7 +1717,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.record_checkpoint': KindSpec(
         name='objectives.record_checkpoint',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.record_checkpoint'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesRecordCheckpointBodyAdapter,
@@ -1745,7 +1745,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.resume': KindSpec(
         name='objectives.resume',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.resume'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesResumeBodyAdapter,
@@ -1773,7 +1773,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.start_task': KindSpec(
         name='objectives.start_task',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.start_task'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesStartTaskBodyAdapter,
@@ -1801,7 +1801,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.stop': KindSpec(
         name='objectives.stop',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.stop'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesStopBodyAdapter,
@@ -1829,7 +1829,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.update_progress': KindSpec(
         name='objectives.update_progress',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.update_progress'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesUpdateProgressBodyAdapter,
@@ -1857,7 +1857,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.update_status': KindSpec(
         name='objectives.update_status',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.update_status'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesUpdateStatusBodyAdapter,
@@ -1885,7 +1885,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_profiles.apply': KindSpec(
         name='objectives.work_profiles.apply',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_profiles.apply'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesWorkProfilesApplyBodyAdapter,
@@ -1913,7 +1913,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_profiles.list': KindSpec(
         name='objectives.work_profiles.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_profiles.list'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.ObjectivesWorkProfilesListBodyAdapter,
@@ -1941,7 +1941,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_profiles.propose': KindSpec(
         name='objectives.work_profiles.propose',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_profiles.propose'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesWorkProfilesProposeBodyAdapter,
@@ -1969,7 +1969,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_profiles.remove': KindSpec(
         name='objectives.work_profiles.remove',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_profiles.remove'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesWorkProfilesRemoveBodyAdapter,
@@ -1997,7 +1997,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_sessions.disable': KindSpec(
         name='objectives.work_sessions.disable',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_sessions.disable'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesWorkSessionsDisableBodyAdapter,
@@ -2025,7 +2025,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_sessions.enable': KindSpec(
         name='objectives.work_sessions.enable',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_sessions.enable'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesWorkSessionsEnableBodyAdapter,
@@ -2053,7 +2053,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_sessions.start': KindSpec(
         name='objectives.work_sessions.start',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_sessions.start'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.ObjectivesWorkSessionsStartBodyAdapter,
@@ -2081,7 +2081,7 @@ KINDS: dict[str, KindSpec] = {
     'objectives.work_sessions.status': KindSpec(
         name='objectives.work_sessions.status',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.objectives.work_sessions.status'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.ObjectivesWorkSessionsStatusBodyAdapter,
@@ -2109,7 +2109,7 @@ KINDS: dict[str, KindSpec] = {
     'people.set_standing': KindSpec(
         name='people.set_standing',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.people.set_standing'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.PeopleSetStandingBodyAdapter,
@@ -2193,7 +2193,7 @@ KINDS: dict[str, KindSpec] = {
     'requests.pause': KindSpec(
         name='requests.pause',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.requests.pause'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.RequestsPauseBodyAdapter,
@@ -2221,7 +2221,7 @@ KINDS: dict[str, KindSpec] = {
     'requests.resume': KindSpec(
         name='requests.resume',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.requests.resume'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.RequestsResumeBodyAdapter,
@@ -2249,7 +2249,7 @@ KINDS: dict[str, KindSpec] = {
     'run_context.sign': KindSpec(
         name='run_context.sign',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.run_context.sign'},
+        addresses={'team_services': 'svc.scheduler'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.RunContextSignBodyAdapter,
@@ -2277,7 +2277,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.authorize_access': KindSpec(
         name='schedules.authorize_access',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.authorize_access'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesAuthorizeAccessBodyAdapter,
@@ -2305,7 +2305,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.disable': KindSpec(
         name='schedules.disable',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.disable'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesDisableBodyAdapter,
@@ -2333,7 +2333,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.get': KindSpec(
         name='schedules.get',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.get'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.SchedulesGetBodyAdapter,
@@ -2361,7 +2361,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.inspect_worker': KindSpec(
         name='schedules.inspect_worker',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.inspect_worker'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.SchedulesInspectWorkerBodyAdapter,
@@ -2389,7 +2389,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.install': KindSpec(
         name='schedules.install',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.install'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesInstallBodyAdapter,
@@ -2417,7 +2417,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.list': KindSpec(
         name='schedules.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.list'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.SchedulesListBodyAdapter,
@@ -2445,7 +2445,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.pause': KindSpec(
         name='schedules.pause',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.pause'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesPauseBodyAdapter,
@@ -2473,7 +2473,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.prepare_access': KindSpec(
         name='schedules.prepare_access',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.prepare_access'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.SchedulesPrepareAccessBodyAdapter,
@@ -2501,7 +2501,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.remove': KindSpec(
         name='schedules.remove',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.remove'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesRemoveBodyAdapter,
@@ -2529,7 +2529,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.resume': KindSpec(
         name='schedules.resume',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.resume'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesResumeBodyAdapter,
@@ -2557,7 +2557,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.set_worker': KindSpec(
         name='schedules.set_worker',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.set_worker'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesSetWorkerBodyAdapter,
@@ -2585,7 +2585,7 @@ KINDS: dict[str, KindSpec] = {
     'schedules.update': KindSpec(
         name='schedules.update',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.schedules.update'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SchedulesUpdateBodyAdapter,
@@ -2641,7 +2641,7 @@ KINDS: dict[str, KindSpec] = {
     'staged_changes.apply': KindSpec(
         name='staged_changes.apply',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.staged_changes.apply'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.StagedChangesApplyBodyAdapter,
@@ -2669,7 +2669,7 @@ KINDS: dict[str, KindSpec] = {
     'steering.decide': KindSpec(
         name='steering.decide',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.steering.decide'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.SteeringDecideBodyAdapter,
@@ -2809,7 +2809,7 @@ KINDS: dict[str, KindSpec] = {
     'task.probe': KindSpec(
         name='task.probe',
         delivery_class='request_reply',
-        addresses={'agent': 'ctl.agent.{agent}.task.probe'},
+        addresses={'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TaskProbeBodyAdapter,
@@ -3033,7 +3033,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.cancel': KindSpec(
         name='tasks.cancel',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.cancel'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.TasksCancelBodyAdapter,
@@ -3061,7 +3061,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.inventory': KindSpec(
         name='tasks.inventory',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.inventory'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TasksInventoryBodyAdapter,
@@ -3089,7 +3089,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.list': KindSpec(
         name='tasks.list',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.list', 'agent': 'ctl.agent.{agent}.tasks.list'},
+        addresses={'team_services': 'svc.team', 'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TasksListBodyAdapter,
@@ -3117,7 +3117,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.list_finished': KindSpec(
         name='tasks.list_finished',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.list_finished', 'agent': 'ctl.agent.{agent}.tasks.list_finished'},
+        addresses={'team_services': 'svc.team', 'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TasksListFinishedBodyAdapter,
@@ -3145,7 +3145,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.probe': KindSpec(
         name='tasks.probe',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.probe'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TasksProbeBodyAdapter,
@@ -3173,7 +3173,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.progress': KindSpec(
         name='tasks.progress',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.progress'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TasksProgressBodyAdapter,
@@ -3201,7 +3201,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.purge': KindSpec(
         name='tasks.purge',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.purge', 'agent': 'ctl.agent.{agent}.tasks.purge'},
+        addresses={'team_services': 'svc.team', 'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.TasksPurgeBodyAdapter,
@@ -3229,7 +3229,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.remove': KindSpec(
         name='tasks.remove',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.remove', 'agent': 'ctl.agent.{agent}.tasks.remove'},
+        addresses={'team_services': 'svc.team', 'agent': 'ctl.agent.{agent}'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.TasksRemoveBodyAdapter,
@@ -3257,7 +3257,7 @@ KINDS: dict[str, KindSpec] = {
     'tasks.steer': KindSpec(
         name='tasks.steer',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.tasks.steer'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/steer_id',),
         body_model=models.TasksSteerBodyAdapter,
@@ -3341,7 +3341,7 @@ KINDS: dict[str, KindSpec] = {
     'topics.find_threads': KindSpec(
         name='topics.find_threads',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.topics.find_threads'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TopicsFindThreadsBodyAdapter,
@@ -3369,7 +3369,7 @@ KINDS: dict[str, KindSpec] = {
     'topics.list_tags': KindSpec(
         name='topics.list_tags',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.topics.list_tags'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/message_id',),
         body_model=models.TopicsListTagsBodyAdapter,
@@ -3397,7 +3397,7 @@ KINDS: dict[str, KindSpec] = {
     'topics.tag_thread': KindSpec(
         name='topics.tag_thread',
         delivery_class='request_reply',
-        addresses={'team_services': 'svc.team.topics.tag_thread'},
+        addresses={'team_services': 'svc.team'},
         copies=(),
         idempotency=('/body/request_id',),
         body_model=models.TopicsTagThreadBodyAdapter,

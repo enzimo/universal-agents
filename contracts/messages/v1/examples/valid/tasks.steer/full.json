@@ -17,7 +17,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team.tasks.steer",
+  "subject": "ua.v1.team_example.gateway-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -70,5 +70,5 @@
     }
   },
   "body_digest": "2VUtJIeWd6Ka0motwJRBgTLEsJYtJynvj88Qn00zNyQ",
-  "signature": "G5Zn72pMKF6d7GIEnTPB62bgdO4ZUOCxzBQ1iiBbLUv_BuMuJGheY0L2xNDmfmHlbwXdElVBYXTnbL_Ih7R1CA"
+  "signature": "vCKFYuKyEDWdidOFlH3Y1FRTwD8Ut1opiN3R2CHhBehMhW2IJgRoYNrF2nuuF-8Y8leJkAodx82-39cAsq97BA"
 }

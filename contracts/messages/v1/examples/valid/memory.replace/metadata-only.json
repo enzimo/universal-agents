@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.memory.replace",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -53,5 +53,5 @@
     "request_id": "cmd_memory_replace_metadata_only"
   },
   "body_digest": "faS1ZyPHSPFVl0-kMgjnKGkKikVixgLBBeuEPa6FLFY",
-  "signature": "hNDHnMQLjsBGkH8MJo8CqPJlYYspJyShXhrGCis657NN64HttePOhDqdBOJjOxN85PGoORku6P_HTuFcEnXrAQ"
+  "signature": "bSJZlzHWffkjZKyB2859HfA67HN-vMmU1mqRP2JWtAL36QcHjf1U7OwZEDKm8_Ip-OxPlNrHqIQzOJRQmZDHAQ"
 }

@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.merge",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -63,5 +63,5 @@
     "confirm_review": false
   },
   "body_digest": "6xea-HiOhep660orDNscNw4Ikc4hXigHtvgsjyRj7qg",
-  "signature": "DXMXaHGjYv8BXpSvBXZZUJlKz3HbpoQcS8CsWkBWjFr88KuYX8Saa6h428Na7HPUWZN4Nh8Px7NhlFKCaOL7CQ"
+  "signature": "i7fC4heAnMRKkJBZd1QUfgQGueHAroS6dBynHwMJ0SdeYuRe1S7FKN6MYyOd-gNmIe97lXJVUYygDMXvFLT1Dg"
 }

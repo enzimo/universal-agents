@@ -19,7 +19,7 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.lead-host-1.svc.team.knowledge.unfreeze",
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "authority": {
@@ -51,5 +51,5 @@
     "page": "deployment-guide"
   },
   "body_digest": "PfMXVFIImW1YsnxKdGu9KW9v-4EdGTMs6LOIFBssGUA",
-  "signature": "Ewtt7EuWQVbQ86G81hswWwGRu9KQb3akmyan7yncvHj4jGGRtwpJntaZrTS1W565-bLdzjEMOLBia5KLHT68AA"
+  "signature": "i9oyGyYM9bIwsh_GxtZY2L_72EMTSsPG4zgZzeFWPwhSZEzsW5NwLqFy24eRjGfdDX2xK1D2AsluIIw6hBJKCw"
 }

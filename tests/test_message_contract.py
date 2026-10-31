@@ -328,7 +328,8 @@ def test_outcomes_that_ask_for_a_retry_are_not_stored() -> None:
         (lambda t: t["streams"]["UA1_WORK"].update(max_age_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
          "must keep messages"),
         (lambda t: t["streams"]["UA1_WORK"].pop("max_age_seconds"), "must keep messages"),
-        (lambda t: t["classes"]["durable"].update(stream="UA1_MISSING"), "unknown stream"),
+        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"].pop("max_age_seconds"), "must keep messages"),
+        (lambda t: t["classes"]["durable"].update(streams=["UA1_MISSING"]), "unknown stream"),
         (lambda t: t.update(replay_ledger_retention_seconds=t["classes"]["durable"]["max_expiry_seconds"] - 1),
          "replay records"),
     ],
@@ -338,6 +339,73 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
     change(transport)
     with pytest.raises(EXPORT.ContractError, match=problem):
         EXPORT.check_transport(transport)
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        # NATS refuses a stream whose subjects overlap another's.
+        (lambda t: t["streams"]["UA1_WORK"].update(subjects=["ua.v1.*.*.work.>"]), "overlap"),
+        # Agent work left out of every stream would never be stored.
+        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"].update(subjects=["ua.v1.{team}.*.work.pool.*"]),
+         "work.agent.{agent} is stored in exactly one"),
+        # Requests are answered at once; a stream holding them would keep every request.
+        (lambda t: t["streams"]["UA1_WORK"]["subjects"].append("ua.v1.*.*.svc.team"), "stores request_reply traffic"),
+        # A team's stream holds only that team's work.
+        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].append("ua.v1.*.*.work.agent.extra"),
+         "starts ua.v1.{team}."),
+        (lambda t: t["streams"].update({"UA1_{team}_{edge}": {"subjects": ["ua.v1.{team}.*.spare"]}}), "may name only"),
+        (lambda t: t["consumers"]["edge"].update(stream="UA1_AGENT_WORK_{team}"), "stores its filter's subjects"),
+    ],
+)
+def test_streams_store_each_queued_address_once_and_nothing_else(change, problem) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_transport(transport)
+
+
+def edges_beside_agents(transport: dict) -> None:
+    transport["streams"]["UA1_WORK"]["subjects"] = ["ua.v1.*.*.work.team"]
+    transport["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.work.edge.*")
+    transport["consumers"]["edge"]["stream"] = "UA1_AGENT_WORK_{team}"
+
+
+def agent_work_of_every_team_in_one_stream(transport: dict) -> None:
+    spec = transport["streams"].pop("UA1_AGENT_WORK_{team}")
+    spec["subjects"] = ["ua.v1.*.*.work.agent.*", "ua.v1.*.*.work.pool.*"]
+    transport["streams"]["UA1_AGENT_WORK"] = spec
+    transport["classes"]["durable"]["streams"] = ["UA1_AGENT_WORK", "UA1_WORK"]
+    for key in ("agent_inbox", "pool"):
+        transport["consumers"][key]["stream"] = "UA1_AGENT_WORK"
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        # A grant on every consumer of a stream would reach the edges' work, or other teams'.
+        (edges_beside_agents, "beside others"),
+        (agent_work_of_every_team_in_one_stream, "named with {team}"),
+        (lambda t: t.update(team_grants=["agent", "pool", "edge"]), "beside others"),
+        (lambda t: t.update(team_grants=["agent", "team"]), "team_grants lists"),
+        # Gateways and edge adapters do not run agents: a shared grant would give them agent work.
+        (lambda t: t["audience_targets"].update(pool=["lead_host", "worker_host", "gateway"]), "served by the same roles"),
+    ],
+)
+def test_whole_team_grants_reach_only_one_teams_agent_and_pool_work(change, problem) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_transport(transport)
+
+
+def test_a_team_wide_address_is_received_by_the_same_roles_for_every_kind() -> None:
+    """The scheduler answers only run_context.sign, so it listens at svc.scheduler, not svc.team."""
+
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["run_context.sign"]["address"] = "svc.team"
+    with pytest.raises(EXPORT.ContractError, match="every kind sent there has those receivers"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), CONTRACT_SCHEMAS)
 
 
 def test_a_kind_cannot_outlive_its_delivery_class() -> None:
@@ -366,22 +434,37 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
     assert kinds.VERIFICATION_REFUSALS == tuple(item["code"] for item in REGISTRY["verification_refusals"])
 
 
-def test_permissions_name_exact_identities_and_publish_only_under_the_senders_own_id() -> None:
+def consumer_grants() -> set[str]:
+    """Every JetStream subject a role may be granted: a team's agent work stream whole, other consumers by name."""
+
+    grants = set()
+    for consumer in TRANSPORT["consumers"].values():
+        stream, name = consumer["stream"], consumer["name"]
+        if "{team}" in stream:
+            grants |= {f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.*", f"$JS.ACK.{stream}.>"}
+        else:
+            grants |= {f"$JS.API.CONSUMER.INFO.{stream}.{name}", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
+                       f"$JS.ACK.{stream}.{name}.>"}
+    return grants
+
+
+def test_permissions_cover_whole_teams_only_for_agents_and_pools_and_publish_only_under_the_senders_own_id() -> None:
     folder = CONTRACT / "generated" / "permissions"
-    consumer_names = {consumer["name"] for consumer in TRANSPORT["consumers"].values()}
+    assert TRANSPORT["team_grants"] == ["agent", "pool"]
+    grants = consumer_grants()
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
         for subject in document["publish"]:
             if subject.startswith("$JS."):
-                stream_and_name = re.fullmatch(r"\$JS\.(?:API\.CONSUMER\.(?:INFO|MSG\.NEXT)\.|ACK\.)UA1_WORK\.([^.]+)(\.>)?", subject)
-                assert stream_and_name and stream_and_name.group(1) in consumer_names, (role, subject)
-                assert (stream_and_name.group(2) is not None) == subject.startswith("$JS.ACK."), (role, subject)
+                assert subject in grants, (role, subject)
             else:
                 assert subject.startswith(("ua.v1.{team}.{self}.", "ua.v1._install.{self}.")), (role, subject)
         assert document["subscribe"][0] == "_INBOX.{self}.>"
         for subject in document["subscribe"][1:]:
             prefix = "ua.v1._install.*." if subject.startswith("ua.v1._install.") else "ua.v1.{team}.*."
-            assert subject.startswith(prefix) and "*" not in subject.removeprefix(prefix), subject
+            # Only an agent's id becomes a wildcard: requests to any agent of the team.
+            rest = subject.removeprefix(prefix)
+            assert subject.startswith(prefix) and (rest == "ctl.agent.*" or "*" not in rest), subject
         receives_requests = False
         for entry in REGISTRY["kinds"].values():
             for address in EXPORT.entry_addresses(entry):
@@ -389,7 +472,8 @@ def test_permissions_name_exact_identities_and_publish_only_under_the_senders_ow
                     assert EXPORT.full_subject(EXPORT.send_pattern(address), "{self}") in document["publish"]
                 receives = role in EXPORT.receiving_roles(entry, address, TRANSPORT)
                 if entry["class"] not in {"durable", "dead_letter"}:
-                    assert (EXPORT.full_subject(address, "*") in document["subscribe"]) == receives, (role, address)
+                    granted = EXPORT.full_subject(EXPORT.receive_pattern(address, TRANSPORT), "*")
+                    assert (granted in document["subscribe"]) == receives, (role, address)
                 receives_requests |= receives and entry["class"] == "request_reply"
         expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds'] + TRANSPORT['clock_skew_seconds']}s"
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
@@ -693,22 +777,27 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
     """Plan 13A.4 and 11A.10: the gateway asks the team services, which pass the command on to the agent's host."""
 
     relayed = ("tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump")
-    to_agents = {f"ua.v1.{{team}}.{{self}}.ctl.agent.*.{operation}" for operation in relayed}
-    to_services = {f"ua.v1.{{team}}.{{self}}.svc.team.{operation}" for operation in relayed}
+    for kind in relayed:
+        assert kinds.KINDS[kind].senders_by_target == {"team_services": ("gateway",), "agent": ("team_services",)}
     gateway, services = role_permissions("gateway"), role_permissions("team_services")
-    assert to_services <= set(gateway["publish"]) and not to_agents & set(gateway["publish"])
-    assert to_agents <= set(services["publish"]) and not to_services & set(services["publish"])
+    assert "ua.v1.{team}.{self}.svc.team" in gateway["publish"]
+    assert "ua.v1.{team}.{self}.ctl.agent.*" in services["publish"]
     for host in ("lead_host", "worker_host"):
-        assert "ua.v1.{team}.*.ctl.agent.{agent}.debug.dump" in role_permissions(host)["subscribe"]
+        assert "ua.v1.{team}.*.ctl.agent.*" in role_permissions(host)["subscribe"]
+    # Operations share their address, and the gateway sends other agent controls there,
+    # so the agent's host, not NATS, refuses a relayed kind straight from the gateway.
+    case = json.loads((EXAMPLES / "invalid" / "tasks-list-from-the-gateway-to-an-agent.json").read_text(encoding="utf-8"))
+    assert (case["refusal"], case["at"]) == ("wrong_sender", "/kind")
 
 
 def test_the_scheduler_answers_only_run_context_sign_and_reads_no_copies() -> None:
-    """Only a scheduler signs a run's token (plan 13A.10); serving svc.team for it gives it nothing else."""
+    """Only a scheduler signs a run's token (plan 13A.10); it listens at its own address, never at svc.team."""
 
     scheduler = role_permissions("scheduler")
-    assert scheduler["subscribe"] == ["_INBOX.{self}.>", "ua.v1.{team}.*.svc.team.run_context.sign"]
+    assert scheduler["subscribe"] == ["_INBOX.{self}.>", "ua.v1.{team}.*.svc.scheduler"]
     assert not [subject for subject in scheduler["publish"] if subject.startswith("$JS.")]
-    assert "ua.v1.{team}.*.svc.team.run_context.sign" not in role_permissions("team_services")["subscribe"]
+    assert "ua.v1.{team}.*.svc.scheduler" not in role_permissions("team_services")["subscribe"]
+    assert [kind for kind, spec in kinds.KINDS.items() if "svc.scheduler" in spec.addresses.values()] == ["run_context.sign"]
 
 
 def carried_tokens(value, at: str):
@@ -982,9 +1071,9 @@ def test_a_reader_accepts_the_record_it_holds_and_newer_ones_only() -> None:
 def test_asyncapi_installation_subjects_match_the_authority_subscription(operation: str) -> None:
     document = json.loads((CONTRACT / "generated/asyncapi.json").read_text())
     channel_id = EXPORT.channel_name(REGISTRY["kinds"][f"host.{operation}"]["address"])
-    assert document["channels"][channel_id]["address"] == f"ua.v1._install.{{sender}}.svc.host.{operation}"
+    assert document["channels"][channel_id]["address"] == "ua.v1._install.{sender}.svc"
     authority = json.loads((CONTRACT / "generated/permissions/installation_authority.json").read_text())
-    assert f"ua.v1._install.*.svc.host.{operation}" in authority["subscribe"]
+    assert "ua.v1._install.*.svc" in authority["subscribe"]
 
 
 def test_a_notice_names_a_refusal_up_to_the_last_field_the_schema_knows() -> None:
@@ -1022,7 +1111,7 @@ def join_frame(key_id: str = "test-lead-key-1", public_key_of: str | None = None
 
     document = fixtures.example_frame("host.join", "full")
     document["issuer"].update(runtime="lead-host-1", key_id=key_id)
-    document["subject"] = "ua.v1._install.lead-host-1.svc.host.join"
+    document["subject"] = "ua.v1._install.lead-host-1.svc"
     document["body"]["runtime"] = "lead-host-1"
     document["body"]["application_key"] = {"key_id": key_id,
                                            "public_key": fixtures.KEYS[public_key_of or key_id]["public_key"]}
@@ -1136,7 +1225,7 @@ def test_rotation_proof_covers_a_newer_minors_unknown_fields() -> None:
 
 def test_a_host_that_has_not_joined_may_only_ask_to_join_and_read_its_inbox() -> None:
     joining = role_permissions(EXPORT.JOINING)
-    assert joining == {"role": EXPORT.JOINING, "publish": ["ua.v1._install.{self}.svc.host.join"],
+    assert joining == {"role": EXPORT.JOINING, "publish": ["ua.v1._install.{self}.svc"],
                        "subscribe": ["_INBOX.{self}.>"]}
     assert EXPORT.JOINING not in REGISTRY["host_roles"]
 
