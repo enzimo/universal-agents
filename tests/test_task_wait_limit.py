@@ -27,13 +27,11 @@ from custom_agents.task_manager import TaskManager
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.task_wait_limit import (
     MAX_WAITS_PER_TASK,
-    WAIT_LIMIT_NOTICE_REASON,
     TaskWaitLimitReached,
     wait_limit_message,
 )
 from custom_agents.turn_failure_runtime import fail_task_after_turn_error
 from custom_agents.turn_work_notes import ENDED_BY_OPEN, ENDED_BY_WAIT, note_details
-from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.routing_v1 import GatewayContext, ManagerEscalationContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType
@@ -179,32 +177,15 @@ def _failing_agent(manager: TaskManager) -> SimpleNamespace:
     )
 
 
-def test_a_stopped_scheduled_run_fails_and_the_person_gets_a_chat_message(tmp_path):
-    manager = _manager(tmp_path)
-    agent = _failing_agent(manager)
-    task_info = manager.get_task_info("run_1")
-    error = TaskWaitLimitReached(task_id="run_1", waits=LIMIT, limit=LIMIT)
+@pytest.mark.parametrize(("parent_task_id", "timer"), [(None, True), ("lead_task", False), (None, False)])
+def test_the_requester_is_told_through_the_failure_only(tmp_path, parent_task_id, timer):
+    """No chat message of its own, for a scheduled run either.
 
-    asyncio.run(fail_task_after_turn_error(agent, "run_1", task_info, error))
-
-    # The requester reads the plain explanation, not a "Runtime error".
-    message = wait_limit_message(waits=LIMIT, limit=LIMIT)
-    assert agent._send_task_error_response.await_args.args[3] == message
-    assert manager.get_task_info("run_1") is None or manager.get_task_info("run_1").state == ProgressState.FAILED
-    (call,) = agent.team_comms.send_message.await_args_list
-    envelope = call.kwargs["message"]
-    assert call.kwargs["routing_key"] == "gateway_route"
-    assert isinstance(envelope.msg_content, UserNotification)
-    assert envelope.msg_content.reason == WAIT_LIMIT_NOTICE_REASON
-    assert message in envelope.msg_content.text
-    # A standalone notice, not the run's result.
-    assert envelope.msg_meta.gateway_context.scheduled_job_id is None
-    assert envelope.msg_meta.gateway_context.canonical_user_id == "person_1"
-
-
-@pytest.mark.parametrize(("parent_task_id", "timer"), [("lead_task", False), (None, False)])
-def test_other_requesters_are_told_through_the_failure_only(tmp_path, parent_task_id, timer):
-    """A subtask's requester is an agent that answers its own requester; a person's request gets the failure."""
+    A subtask's requester is an agent that answers its own requester; a
+    person's request gets the failure; a scheduled run's person hears of the
+    failed run from the team lead's failing-schedule notice
+    (``tests/test_scheduled_run_failures.py``), once.
+    """
 
     manager = _manager(tmp_path, parent_task_id=parent_task_id, timer=timer)
     agent = _failing_agent(manager)
@@ -215,5 +196,7 @@ def test_other_requesters_are_told_through_the_failure_only(tmp_path, parent_tas
         )
     )
 
-    agent._send_task_error_response.assert_awaited_once()
+    # The requester reads the plain explanation, not a "Runtime error".
+    assert agent._send_task_error_response.await_args.args[3] == wait_limit_message(waits=LIMIT, limit=LIMIT)
+    assert manager.get_task_info("run_1") is None or manager.get_task_info("run_1").state == ProgressState.FAILED
     agent.team_comms.send_message.assert_not_awaited()

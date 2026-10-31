@@ -85,6 +85,7 @@ async def list_tasks(
                 state=root.state.value,
                 problem_statement=root.problem_statement,
                 is_current=root.is_current,
+                is_parallel=root.is_parallel,
                 queue_position=root.queue_position,
                 latest_activity_at=root.latest_activity_at,
                 latest_activity=root.latest_activity,

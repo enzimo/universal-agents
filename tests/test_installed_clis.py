@@ -64,7 +64,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from custom_tools import code_sandbox
 from custom_tools.providers.access_proposals import propose_access_change
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from secure_tool_broker import installed_clis as broker_clis
 from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING
 from secure_tool_broker.cli_passthrough import CommandRefused, check_installed_command_line
@@ -345,10 +345,11 @@ def _self_signed_certificate(directory: Path) -> tuple[Path, Path]:
 
 @pytest.fixture
 def https_server(tmp_path: Path, monkeypatch):
-    """Start local https servers this test trusts: ``https_server(answers)`` serves one answer per connection.
+    """Start local https servers this test trusts: ``https_server(answers)`` serves one answer per TLS connection.
 
     Each answer is called with the connection's TLS socket and the server's
-    port, after the request was read.
+    port, after the request was read. Connections that fail the TLS
+    handshake get none.
     """
 
     import socket
@@ -367,10 +368,29 @@ def https_server(tmp_path: Path, monkeypatch):
         port = listener.getsockname()[1]
 
         def serve() -> None:
-            for answer in answers:
-                conn, _address = listener.accept()
+            # Only a TLS client gets an answer. Something else may connect to
+            # a new local port, such as a desktop app probing it with plain
+            # HTTP; it fails the handshake and must not use up an answer meant
+            # for the downloader (2026-10-30: on a developer machine this made
+            # the deadline test's last download "connection refused" about
+            # half the time). The listener stops waiting after a while, so a
+            # server whose downloader gave up in a handshake does not wait forever.
+            listener.settimeout(30)
+            pending = list(answers)
+            while pending:
+                try:
+                    conn, _address = listener.accept()
+                except OSError:  # the wait ended
+                    break
+                conn.settimeout(5)
                 try:
                     tls = server_context.wrap_socket(conn, server_side=True)
+                except OSError:
+                    conn.close()
+                    continue
+                answer = pending.pop(0)
+                try:
+                    tls.settimeout(None)
                     tls.recv(4096)
                     answer(tls, port)
                     tls.close()

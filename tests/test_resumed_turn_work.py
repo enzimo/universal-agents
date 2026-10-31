@@ -11,6 +11,7 @@ import pytest
 from strands import Agent, tool
 from strands.types.tools import ToolContext
 
+from tests.task_work_support import strands_parts
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import StrandsInterruptedTurnSession, _run_resumed_turn
 from custom_agents.task_wait_limit import TaskWaitLimitReached
@@ -93,7 +94,7 @@ async def test_real_interrupt_resume_checks_waits_and_saves_work_before_dispatch
     assert paused.stop_reason == "interrupt"
     info = manager.get_task_info("run_1")
     session = StrandsInterruptedTurnSession(
-        task_id="run_1", strands_agent=sdk, invoke_kwargs={"structured_output_model": decision_model},
+        task_id="run_1", strands=strands_parts(sdk), invoke_kwargs={"structured_output_model": decision_model},
         callback_handler=lambda **_: None, full_prompt="", msg_content=info.task, msg_header=info.header, msg_meta=info.meta,
         created_at="2026-10-20T00:00:00Z", interrupts=[],
     )

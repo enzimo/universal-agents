@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from custom_tools.runtime_context import task_work
+from tests.task_work_support import bind_turn, strands_parts
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.task_runtime_state import TaskRuntimeState
 
@@ -113,7 +115,6 @@ async def test_input_interrupt_needs_an_external_requester_route(reply_route) ->
         team_id="team_1",
         task_manager=task_manager,
         _interrupted_turn_sessions={},
-        _strands_agent_replacement_required=False,
         _agent_id_by_name={},
         named_agent_type_queue_map={},
         _logger=MagicMock(),
@@ -125,6 +126,7 @@ async def test_input_interrupt_needs_an_external_requester_route(reply_route) ->
         ]
     )
 
+    bind_turn(task.task_id)
     invocation = send_interrupt_request_for_result(
         agent,
         result=result,
@@ -137,7 +139,6 @@ async def test_input_interrupt_needs_an_external_requester_route(reply_route) ->
             msg_correlation_id="corr_input",
             conversation_id="conversation_input",
         ),
-        strands_agent=object(),
         invoke_kwargs={},
         callback_handler=lambda **_: None,
         full_prompt="prompt",
@@ -162,11 +163,12 @@ async def test_input_interrupt_needs_an_external_requester_route(reply_route) ->
 
 
 def test_new_turn_rotates_away_from_live_interrupted_strands_agent() -> None:
-    interrupted_agent = object()
-    replacement_agent = object()
+    interrupted = strands_parts(object())
+    replacement = strands_parts(object())
+    interrupted.replace_before_next_turn = True  # a session holds it
     session = StrandsInterruptedTurnSession(
         task_id="task_waiting",
-        strands_agent=interrupted_agent,
+        strands=interrupted,
         invoke_kwargs={},
         callback_handler=lambda **_: None,
         full_prompt="prompt",
@@ -181,26 +183,23 @@ def test_new_turn_rotates_away_from_live_interrupted_strands_agent() -> None:
     )
     agent = SimpleNamespace(
         id="manager",
-        _strands_agent=interrupted_agent,
+        _strands_parts=interrupted,
+        _strands_agent=interrupted.agent,
         _interrupted_turn_sessions={"task_waiting": session},
-        _strands_agent_replacement_required=True,
         _logger=MagicMock(),
     )
 
     def create_replacement() -> None:
-        agent._strands_agent = replacement_agent
+        agent._strands_parts, agent._strands_agent = replacement, replacement.agent
 
     agent._create_strands_agent = create_replacement
 
-    assert ensure_fresh_strands_agent_for_new_turn(
-        agent,
-        task_id="task_new",
-    )
-    assert agent._strands_agent is replacement_agent
-    assert agent._interrupted_turn_sessions["task_waiting"].strands_agent is (
-        interrupted_agent
-    )
-    assert agent._strands_agent_replacement_required is False
+    with task_work("task_new") as work:
+        assert ensure_fresh_strands_agent_for_new_turn(agent, task_id="task_new")
+    # The new turn calls the new agent; the paused turn keeps its own.
+    assert work.strands is replacement
+    assert agent._strands_agent is replacement.agent
+    assert agent._interrupted_turn_sessions["task_waiting"].strands is interrupted
 
 
 @pytest.mark.asyncio
@@ -217,10 +216,10 @@ async def test_stop_cancellation_discards_live_interrupt_session(monkeypatch) ->
         owner_person_id=None,
     )
     task_info.update_state(ProgressState.WAITING, "2026-08-19T00:00:00+00:00")
-    interrupted_agent = object()
+    interrupted = strands_parts(object())
     session = StrandsInterruptedTurnSession(
         task_id=task_id,
-        strands_agent=interrupted_agent,
+        strands=interrupted,
         invoke_kwargs={},
         callback_handler=lambda **_: None,
         full_prompt="prompt",
@@ -252,11 +251,10 @@ async def test_stop_cancellation_discards_live_interrupt_session(monkeypatch) ->
     agent = SimpleNamespace(
         id="manager",
         task_manager=task_manager,
-        _strands_agent=interrupted_agent,
+        _strands_agent=interrupted.agent,
         _interrupted_turn_sessions={task_id: session},
         _pending_interrupt_responses={},
         _pending_proactive_task_steering={},
-        _strands_agent_replacement_required=False,
         _finalize_conversation_turn=AsyncMock(),
         _logger=MagicMock(),
     )
@@ -272,7 +270,8 @@ async def test_stop_cancellation_discards_live_interrupt_session(monkeypatch) ->
 
     assert result["cancelled_task_count"] == 1
     assert agent._interrupted_turn_sessions == {}
-    assert agent._strands_agent_replacement_required is True
+    # Its agent still holds the interrupt, so no later turn may reuse it.
+    assert interrupted.replace_before_next_turn is True
     task_manager.cancel_task.assert_called_once()
     assert task_manager.cancel_task.call_args.args[:2] == (
         task_id,
@@ -413,7 +412,7 @@ def test_interrupt_response_blocks_fill_missing_interrupt_ids_from_live_session(
     interrupt = TaskSteeringInterruptRecord(interrupt_id="intr_1", name="approval")
     session = StrandsInterruptedTurnSession(
         task_id="task_123",
-        strands_agent=object(),
+        strands=strands_parts(object()),
         invoke_kwargs={},
         callback_handler=lambda **_: None,
         full_prompt="prompt",

@@ -30,17 +30,17 @@ from custom_tools.providers.schedules import (
     update_scheduled_job,
 )
 from custom_tools.result_pages import text_page
-from custom_tools.runtime_context import set_agent_ref
 from tests.change_approval_support import use_signed_contexts
 from tests.test_message_contract import body_schema_file, validator
+from tests.task_work_support import set_agent_ref
 from tests.test_schedule_tools import _FakeAgent
 from tests.tool_result_support import sdk_tool_result, tool_json
 
 DETAIL_FIELDS = {
     "schedule_id", "record_digest", "schedule_name", "management_class", "system_schedule_kind",
     "assigned_agent_type", "enabled", "paused_until", "expires_at_utc", "next_fire_at", "interval_ms",
-    "cron_expression", "cron_timezone", "repeat_count", "objective_id", "owner_canonical_user_id",
-    "problem_statement", "schedule_memory",
+    "cron_expression", "cron_timezone", "repeat_count", "remaining_runs", "final_run_in_progress",
+    "objective_id", "owner_canonical_user_id", "problem_statement", "schedule_memory",
 }
 TOOLS = {
     "install": create_scheduled_job, "update": update_scheduled_job, "pause": pause_scheduled_job,

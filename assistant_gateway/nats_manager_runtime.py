@@ -15,7 +15,7 @@ from custom_transport.base import (
     SubscriptionDelivery,
     TransportPublishOptions,
 )
-from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
 
 
@@ -205,6 +205,13 @@ class NatsGatewayManagerRuntime:
 
     def stopped_receivers(self) -> tuple[Any, ...]:
         return self._adapter.stopped_receivers()
+
+    async def jetstream_usage(self) -> JetStreamAccountUsage | None:
+        """The account's stored messages and limits (Status page); None while not connected or without JetStream."""
+
+        if not self._connected or not self.settings.jetstream_enabled:
+            return None
+        return await self._adapter.jetstream_account_usage()
 
     @staticmethod
     def _delivery_handler(

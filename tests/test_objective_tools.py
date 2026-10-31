@@ -25,7 +25,7 @@ from custom_tools.providers.schedules import (
     create_scheduled_job,
     list_scheduled_jobs,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from custom_messages.records.objectives import objective_version
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer
@@ -129,6 +129,7 @@ def _v(manager: TaskManager, objective_id: str) -> str:
 def _add_current_task(manager: TaskManager) -> Task:
     task = _add_person_task(manager, "task_root", "objective-user", conversation_id="conversation_1")
     manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
     return task
 
 
@@ -231,6 +232,7 @@ def test_objective_tools_continue_across_task_and_plan_attempt_failures(tmp_path
         manager, "task_controller", "objective-user", conversation_id="conversation_2"
     )
     manager.task_state.current_in_progress_task_id = controller.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
 
     continued = tool_json(
         start_objective_task(
@@ -437,6 +439,7 @@ def _objective_from(manager: TaskManager, task: Task, title: str):
 
 def _act_as(manager: TaskManager, task: Task) -> None:
     manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(manager.task_state.current_in_progress_task_id)
 
 
 def _listed(**filters) -> set[str]:

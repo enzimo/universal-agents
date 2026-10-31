@@ -7,9 +7,9 @@ schedule with fixed rules, the same way it cleans scratch folders
 (``internal_improvement_runtime.prune_scratch_for_maintenance``). No model
 sees anyone's schedules; the run's instructions get counts only.
 
-Already handled elsewhere: the schedule store deletes one-time schedules after
-their last run and schedules past their end date, and a disabled or removed
-person's schedules do not run (``task_context_runtime.inactive_owner``).
+Already handled elsewhere: the schedule store deletes one-time schedules once
+their last run ends and schedules past their end date, and a disabled or
+removed person's schedules do not run (``task_context_runtime.inactive_owner``).
 
 First, ``check_schedules`` ends the work of everyone disabled or removed
 (``custom_agents.person_departure_runtime.settle_departed_people``): their

@@ -258,7 +258,7 @@ def test_agents_and_the_gateway_show_a_stopped_receiver_as_a_problem() -> None:
     agent = SimpleNamespace(
         named_agent_type="TeamArchitect", name="Nova", team_id="team_t", is_team_lead=True,
         _memory_graph_degraded_reason="", _skill_catalog_runtime_state=SimpleNamespace(last_error=""),
-        _mcp_server_tools=SimpleNamespace(failures=lambda: {}),
+        _strands_parts=SimpleNamespace(sync=SimpleNamespace(servers=SimpleNamespace(failures=lambda: {}))),
         team_comms=SimpleNamespace(nats_adapter=SimpleNamespace(stopped_receivers=lambda: (receiver,))),
     )
 

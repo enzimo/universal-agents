@@ -49,7 +49,7 @@ from custom_messages.system_schedules import (
     COREMEM_AUDIT_SCHEDULE_NAME_PREFIX,
 )
 from custom_tools.providers.agent_management import query_agent_state
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 from custom_transport.base import SubscriptionDelivery, TransportPublishOptions
 from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id, new_id_suffix

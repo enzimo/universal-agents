@@ -113,15 +113,15 @@ deadlocks rather than enforcing a cold-start speed target; thread stacks are
 captured every 20 seconds and included if the subprocess times out.
 
 After editing an input, regenerate the universal, hash-checked locks with the
-development environment's uv 0.13.4:
+development environment's uv 0.13.6:
 
 ```bash
 UV_BIN="$PWD/.venv/bin/uv" ./scripts/regenerate_python_lockfiles.sh
 ```
 
-The uv pin and the generator's required version move together. Version 0.13.4
-removes a compromised certificate root from uv's own HTTPS trust store; fixing
-certifi alone does not fix uv's separate bundle.
+The uv pin and the generator's required version move together. Version 0.13.6
+retains the compromised certificate root removal introduced in 0.13.4 in uv's
+own HTTPS trust store; fixing certifi alone does not fix uv's separate bundle.
 
 The release's distrusted-root fingerprints live in
 `data/security/distrusted_roots.json`, shared by Debian image builds and the
@@ -134,6 +134,23 @@ system or Node trust.
 
 Generation retains existing versions where constraints permit. Pass `--upgrade`
 for an intentional dependency refresh. Do not hand-edit generated lockfiles.
+LiteLLM stays at 1.105.0 during the 2026-10-28 refresh at the owner's request.
+Its `filelock<4` dependency prevents installing the patched 4.x line. Pin
+filelock to 3.20.3: it includes the earlier
+[SoftFileLock fix](https://github.com/advisories/GHSA-qmgc-5h2g-mvrw) and predates
+the affected implementations in
+[GHSA-v4x8-3wr5-3wq8](https://github.com/advisories/GHSA-v4x8-3wr5-3wq8),
+[GHSA-9vhv-jxww-xfm5](https://github.com/advisories/GHSA-9vhv-jxww-xfm5), and
+[GHSA-567q-5qvw-pf92](https://github.com/advisories/GHSA-567q-5qvw-pf92).
+This is a deliberate downgrade from 3.32.7, within both LiteLLM's and Hugging
+Face's requirements, not an audit exception. Revisit it when LiteLLM supports
+the patched 4.x line. The model-provider major-version limits remain
+until their adapter contracts are deliberately updated and verified.
+
+Strands 1.62 makes model-call middleware public. Context-debug capture uses
+`agent.add_middleware` with `strands.middleware.InvokeModelStage.Wrap`, not the
+removed private middleware package. Test upgrades with a real SDK invocation
+so diagnostic capture cannot silently disappear after an SDK change.
 `requirements.skillspector.txt` retains its separate environment and lock so the
 scanner graph does not alter the agent runtime. Removing a development dependency
 from an existing environment requires recreating that environment; installing the
@@ -155,7 +172,7 @@ tracking the upstream font-parser replacement; do not suppress the advisory.
 The yanked `chacha20 0.10.1` pin has been replaced by `0.10.2`.
 ZIP 8 is also yanked and vulnerable. Until the document-converter dependencies
 publish compatible releases, checksum-verified source patches retain their current
-versions with ZIP 9.0.5. See [the source patch record](rust/vendor/README.md) for
+versions with ZIP 9.1.3. See [the source patch record](rust/vendor/README.md) for
 the exact changes, verification command and removal criteria.
 
 Photon's contract test declares `@photon-ai/otel` as a development dependency.

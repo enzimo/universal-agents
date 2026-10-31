@@ -19,7 +19,7 @@ from custom_agents import access_runtime
 from custom_messages.contracts.access_v2 import SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
 from custom_tools.providers.objective_work import objective_work_profiles, objective_work_sessions
 from custom_tools.providers.objectives import objectives
-from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
+from tests.test_access_request_tools import BINARY, OWNER, TEAM, decide, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
 from tests.tool_result_support import tool_json
 
@@ -107,11 +107,11 @@ def test_access_is_decided_per_action_so_a_block_stops_exactly_one(storage, tmp_
     try:
         for function in ("objectives", "objective_work_sessions", "objective_work_profiles"):
             for action in catalog.functions[function].values:
-                decision = access_runtime.decide_call(lead, function, {"action": action})
+                decision = decide(lead, function, {"action": action})
                 assert decision.allowed, (function, action, decision.reason)
                 assert decision.operation == f"{function}.{action}"
         assert catalog.resolve_function("objective_work_profiles", {"action": "remove"}).level.value == "full"
-        assert not access_runtime.decide_call(worker, "objectives", {"action": "list"}).allowed
+        assert not decide(worker, "objectives", {"action": "list"}).allowed
 
         AccessRequests(service=service, inbox=SimpleNamespace(), lead_agent_type="TeamArchitect").block(
             OWNER,
@@ -120,9 +120,9 @@ def test_access_is_decided_per_action_so_a_block_stops_exactly_one(storage, tmp_
             reason="Keep the reusable profiles this week",
         )
 
-        assert not access_runtime.decide_call(lead, "objective_work_profiles", {"action": "remove"}).allowed
-        assert access_runtime.decide_call(lead, "objective_work_profiles", {"action": "list"}).allowed
-        assert access_runtime.decide_call(lead, "objectives", {"action": "update_status"}).allowed
+        assert not decide(lead, "objective_work_profiles", {"action": "remove"}).allowed
+        assert decide(lead, "objective_work_profiles", {"action": "list"}).allowed
+        assert decide(lead, "objectives", {"action": "update_status"}).allowed
     finally:
         service.cedar.close()
         access_runtime._runtime_access.cache_clear()

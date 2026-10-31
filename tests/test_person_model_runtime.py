@@ -27,6 +27,8 @@ import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from custom_tools.runtime_context import task_work
+from tests.task_work_support import bind_task, strands_parts
 from access_control.person_settings import PersonSettings
 from custom_agents import access_runtime, model_failover_runtime, person_model_runtime
 from custom_agents.model_keys import ModelKeys
@@ -134,7 +136,7 @@ def _agent(tmp_path: Path, team_url: str) -> SimpleNamespace:
         stream_idle_timeout_seconds=60.0,
         model_call_timeout_seconds=120.0,
         reasoning_trace_retention_messages=None,
-        _active_execution_task_id=None,
+        test_task_id=None,
     )
 
 
@@ -180,24 +182,33 @@ async def test_two_people_back_to_back_each_get_the_right_model(tmp_path: Path, 
 
     turn_settings = _Settings(**vars(settings))
 
-    bundle = await asyncio.to_thread(person_model_runtime.select_turn_model, agent, "t-alice")
-    await _call(agent._strands_agent.model)
-    alices_settings = person_model_runtime.turn_settings_with_person_model(agent, turn_settings)
-    assert agent._context_engine.context_window_tokens == 200_000
-    assert person_model_runtime.person_model_active(agent)
-    person_model_runtime.clear_turn_model(agent)
+    hook = person_model_runtime.PersonModelHook(agent)
 
-    await asyncio.to_thread(person_model_runtime.select_turn_model, agent, "t-bob")
-    await _call(agent._strands_agent.model)
-    person_model_runtime.clear_turn_model(agent)
-    await asyncio.to_thread(person_model_runtime.select_turn_model, agent, "t-nobody")
-    await _call(agent._strands_agent.model)
+    async def turn(task_id: str):
+        """One turn: choose its model, call the model as the hook sets it, then end the turn."""
+        with task_work(task_id) as work:
+            work.strands = strands_parts(agent._strands_agent)
+            bundle = await asyncio.to_thread(person_model_runtime.select_turn_model, agent, task_id)
+            hook._before_model_call(SimpleNamespace(agent=agent._strands_agent))
+            await _call(agent._strands_agent.model)
+            seen = (
+                person_model_runtime.turn_context_window(agent),
+                person_model_runtime.person_model_active(agent),
+                person_model_runtime.turn_settings_with_person_model(agent, turn_settings),
+            )
+            person_model_runtime.restore_team_model(agent, work)
+            return bundle, seen
+
+    bundle, (alices_window, alice_active, alices_settings) = await turn("t-alice")
+    await turn("t-bob")
+    _nobody, (nobodys_window, nobody_active, _settings) = await turn("t-nobody")
 
     assert bundle is not None and bundle.person_id == "alice"
+    assert alice_active and alices_window == 200_000
+    assert not nobody_active and nobodys_window is None, "work for nobody keeps the team's window"
     assert alices.models == [ALICE_MODEL]
     assert team.models == [TEAM_MODEL, TEAM_MODEL]
     assert agent._strands_agent.model is agent._strands_model
-    assert agent._context_engine.context_window_tokens == 64_000
     assert (alices_settings.model_id, alices_settings.litellm_api_base) == (ALICE_MODEL, alice_url)
     assert alices_settings.reasoning_summary is None and alices_settings.supports_image_input is True
     # The agent's own model fields stay the team's.
@@ -209,6 +220,7 @@ def test_failover_stays_out_of_a_persons_model(tmp_path: Path, monkeypatch: pyte
     _save_alices_model(agent, "http://127.0.0.1:8/v1")
     monkeypatch.setattr(model_failover_runtime, "is_enabled", lambda _agent: True)
     monkeypatch.setattr(model_failover_runtime, "is_failover_eligible_error", lambda _agent, _error: True)
+    bind_task("t-alice")
     person_model_runtime.select_turn_model(agent, "t-alice")
 
     outcome = asyncio.run(
@@ -225,10 +237,10 @@ def test_the_hook_puts_the_persons_model_back_on_a_rebuilt_agent(tmp_path: Path)
     hook = person_model_runtime.PersonModelHook(agent)
     rebuilt = SimpleNamespace(model=agent._strands_model)  # e.g. a fresh Strands agent after a settings change
 
-    agent._active_execution_task_id = "t-alice"
+    bind_task("t-alice")
     hook._before_model_call(SimpleNamespace(agent=rebuilt))
     alices_model = rebuilt.model
-    agent._active_execution_task_id = "t-nobody"
+    bind_task("t-nobody")
     hook._before_model_call(SimpleNamespace(agent=rebuilt))
 
     assert alices_model is not agent._strands_model
@@ -239,6 +251,7 @@ def test_only_a_verified_signed_context_selects_a_persons_model(tmp_path: Path) 
     agent = _agent(tmp_path, "http://127.0.0.1:9/v1")
     _save_alices_model(agent, "http://127.0.0.1:8/v1")
 
+    bind_task("t-forged")
     assert person_model_runtime.select_turn_model(agent, "t-forged") is None
     assert agent._strands_agent.model is agent._strands_model
 

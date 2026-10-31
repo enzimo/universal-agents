@@ -1278,6 +1278,8 @@ class AccessNoticeKind(StrEnum):
     BLOCK_WIDENED = "block_widened"  # a block named an operation an update removed, so it blocks the whole tool (access_control.stale_blocks)
     KNOWLEDGE_NEEDS_ATTENTION = "knowledge_needs_attention"  # pages frozen or agents refused many knowledge writes (custom_agents.knowledge_curation_runtime)
     HISTORY_CLEANED_UP = "history_cleaned_up"  # TeamLead deleted some of your chat history or finished tasks (assistant_gateway.history_cleanup)
+    SAVED_OUTPUT_RETENTION = "saved_output_retention"  # saved tool outputs will start being deleted after the grace period (custom_agents.output_retention)
+    STORAGE_USAGE = "storage_usage"  # the data the team stores for you passed another step (assistant_gateway.storage_usage)
 
 
 class AccessNoticeV1(AccessContractModel):

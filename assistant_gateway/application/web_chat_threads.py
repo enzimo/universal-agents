@@ -53,7 +53,12 @@ DELIVERY_THREAD_NAMES = {
 
 @dataclass(frozen=True)
 class WebChatThread:
-    """One row of the Web Chat thread list. ``title`` is ``None`` until named."""
+    """One row of the Web Chat thread list. ``title`` is ``None`` until named.
+
+    ``parallel_thread`` is the thread's Run concurrently setting, which the
+    switch below Send shows; ``has_open_request`` locks that switch while a
+    request is open in the thread's conversation.
+    """
 
     session_key: str
     session_alias: str | None
@@ -61,6 +66,8 @@ class WebChatThread:
     title: str | None
     updated_at: str
     kind: WebChatThreadKind
+    parallel_thread: bool = False
+    has_open_request: bool = False
 
 
 def thread_kind(session_key: str, *, proactive_session_key: str) -> WebChatThreadKind:
@@ -121,6 +128,8 @@ def web_chat_thread(record: WebChatThreadRecord, *, proactive_session_key: str) 
         title=title,
         updated_at=record.updated_at,
         kind=kind,
+        parallel_thread=record.parallel_thread,
+        has_open_request=record.has_open_request,
     )
 
 

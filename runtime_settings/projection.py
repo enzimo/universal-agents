@@ -183,6 +183,7 @@ def _project_agent(
     workspace_dir: str,
 ) -> dict[str, Any]:
     """Project resolved agent values without reading configuration again."""
+    tool_policy = ToolPolicySettings.model_validate(dict(raw_config.get("tool_policy") or {}))
     return {
         "compaction_model_provider": llm_cfg.get(
             "compaction_model_provider", LLM_DEFAULTS.compaction_model_provider.value
@@ -215,11 +216,12 @@ def _project_agent(
         "instance_config_path": agent_cfg.get("instance_config_path"),
         "bootstrap_config": dict(agent_cfg.get("bootstrap", {}) or {}),
         "authorization_config": authorization_cfg,
-        # The manager deletes older files from scratch/ folders when the
-        # internal-improvement maintenance schedule fires.
-        "scratch_retention_days": ToolPolicySettings.model_validate(
-            dict(raw_config.get("tool_policy") or {})
-        ).scratch_retention_days,
+        # The manager deletes older files from scratch/ folders and older saved
+        # tool outputs when the internal-improvement maintenance schedule
+        # fires; every agent's readers of saved outputs use the output period
+        # to say an output was deleted under it.
+        "scratch_retention_days": tool_policy.scratch_retention_days,
+        "output_retention_days": tool_policy.output_retention_days,
         "team_templates_path": str(resolved_team_templates_path),
         "team_composition_path": str(resolved_team_composition_path),
         "mcp_profiles": dict(raw_config.get("mcp_profiles") or {}),

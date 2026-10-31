@@ -111,8 +111,8 @@ async def test_full_inbox_naks_result_then_admits_redelivery_after_capacity_is_r
 @pytest.mark.asyncio
 @pytest.mark.live
 @pytest.mark.nats
-async def test_full_inbox_rejects_new_request_once_without_redelivery(inbox):
-    """A new request to a full inbox is answered as not queued and acknowledged."""
+async def test_full_task_queue_rejects_new_request_once_without_redelivery(inbox):
+    """Requests use task capacity even while paused and the result inbox is full."""
     inbox.capacity = 1
     await inbox.admit(_envelope("already-owned"))
     mapper = NatsSubjectMapper(team_id=new_id("capacity"))
@@ -120,6 +120,7 @@ async def test_full_inbox_rejects_new_request_once_without_redelivery(inbox):
         config=nats_transport_config_from_env(), mapper=mapper
     )
     agent = _paused_worker(inbox, mapper.team_id, [])
+    agent.task_manager.is_buffer_full = lambda: True
     handled = asyncio.Event()
     deliveries = []
 
@@ -149,7 +150,7 @@ async def test_full_inbox_rejects_new_request_once_without_redelivery(inbox):
             agent._send_task_error_response.await_args.args
         )
         assert rejected_task.task_id == "rejected-request"
-        assert "incoming message queue is full" in message
+        assert "task queue is full" in message
     finally:
         await adapter.close()
 

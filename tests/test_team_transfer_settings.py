@@ -148,25 +148,28 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-def test_a_version_5_export_keeps_its_values_and_the_new_setting_keeps_its_default(
-    tmp_path: Path,
+@pytest.mark.parametrize("exported_version", [5, 6, 7])
+def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
+    tmp_path: Path, exported_version: int
 ) -> None:
-    """Version 6 added agent.request_conflict_checks; a version 5 export (v0.9.4 to v0.9.6) imports unchanged."""
+    """Older choices survive while newly introduced storage warnings use defaults."""
 
     from assistant_gateway.config import GatewayInstanceConfig
 
-    class ExportedAsVersion5(SettingsSection):
-        schema_version = 5
+    class ExportedAsPreviousVersion(SettingsSection):
+        schema_version = exported_version
 
         def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
             records = [
                 SettingV1(path=("heartbeat", "enabled"), value=False),
                 SettingV1(path=("agent", "max_queued_top_level_tasks"), value=22),
             ]
+            if exported_version == 7:
+                records.append(SettingV1(path=("tool_policy", "output_retention_days"), value=0))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
-    out = _export(tmp_path, path, ExportedAsVersion5())
+    out = _export(tmp_path, path, ExportedAsPreviousVersion())
     target = tmp_path / "new"
 
     plan = _import(out, target, dry_run=False)
@@ -178,6 +181,12 @@ def test_a_version_5_export_keeps_its_values_and_the_new_setting_keeps_its_defau
     assert imported.heartbeat.enabled is False
     assert imported.agent.max_queued_top_level_tasks == 22
     assert imported.agent.request_conflict_checks is True
+    assert imported.tool_policy.output_retention_days == (0 if exported_version == 7 else 90)
+    assert imported.gateway.storage_warnings.model_dump() == {
+        "person_step_gb": 5,
+        "nearing_limit_percent": 80,
+        "nearly_full_percent": 95,
+    }
 
 
 def test_a_path_outside_the_instance_that_this_host_lacks_needs_attention(tmp_path: Path) -> None:

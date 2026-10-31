@@ -20,7 +20,7 @@ from access_catalog.catalog import load_catalog
 from access_control.entities import PersonPrincipal
 from custom_agents import access_runtime
 from custom_agents.tool_loading import shown_names
-from custom_agents.tool_sync import GrantToolSync, MCPServerSync, install_tool_sync, standard_functions, startup_tools
+from custom_agents.tool_sync import GrantToolSync, MCPServerSync, standard_functions, startup_tools
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     GrantKind,
@@ -35,7 +35,7 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from custom_tools.provider_contract import tool_name
 from custom_tools.registry import ALL_PROVIDER_TOOLS
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, install_test_tool_sync, set_agent_ref
 from tests.broker_access_support import context_signer
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
@@ -66,7 +66,7 @@ def model_view(agent) -> tuple[ToolRegistry, GrantToolSync]:
     tools = startup_tools(agent, list(agent.tools))
     registry = ToolRegistry()
     registry.process_tools(tools)
-    hook = install_tool_sync(agent, tools)
+    hook = install_test_tool_sync(agent, tools)
     assert isinstance(hook, GrantToolSync)
     return registry, hook
 
@@ -191,7 +191,7 @@ def test_the_same_agent_shows_each_person_what_they_authorized(lead, storage, tm
         task_context=context_signer().issue(team_id=TEAM, person_id=MEMBER.person_id, person_roles=("member",))
     )
     agent.task_manager.add_task(Task(task_id="task-member", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
-    agent._active_execution_task_id = "task-member"
+    bind_task("task-member")
     assert "create_scheduled_job" not in next_model_call(hook, registry)
 
     give(service, MEMBER, SCHEDULES)  # the member authorizes it for their own work
@@ -241,7 +241,7 @@ def test_with_authorization_off_the_definitions_tools_stay_and_only_mcp_servers_
     assert "create_objective" not in shown and "calculator" in shown
     registry = ToolRegistry()
     registry.process_tools(tools)
-    hook = install_tool_sync(agent, tools)
+    hook = install_test_tool_sync(agent, tools)
     assert isinstance(hook, MCPServerSync), "MCP servers load before model calls (tests/test_mcp_server_loading.py)"
 
     assert next_model_call(hook, registry) == {tool_name(tool) for tool in tools}

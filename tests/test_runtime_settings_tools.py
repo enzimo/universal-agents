@@ -34,7 +34,8 @@ from custom_messages.contracts.access_v2 import AccessReviewChoice, ChangeApprov
 from custom_agents.runtime_settings_service import RuntimeSettingsService
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_signer, context_verify_keys
-from custom_tools.runtime_context import _agent_ctx, set_agent_ref
+from custom_tools.runtime_context import _agent_ctx
+from tests.task_work_support import bind_task, set_agent_ref
 from custom_tools.providers.runtime_control import (
     plan_runtime_restart,
     get_runtime_restart_status,
@@ -61,6 +62,8 @@ class _FakeTaskManager:
     def __init__(self, storage_settings) -> None:
         self.storage_settings = storage_settings
         self.current_task_id = "task_settings"
+        # The agent's direct calls work for this task (tests.task_work_support).
+        bind_task(self.current_task_id)
         signed = context_signer().issue(team_id="test_team", person_id="user_1", person_roles=("owner",))
         self._meta = SimpleNamespace(gateway_context=SimpleNamespace(task_context=signed), conversation_id="conv_1")
 

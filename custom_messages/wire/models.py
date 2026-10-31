@@ -5655,7 +5655,7 @@ class PersonNotifyBodyReasonAgent(WireModel):
 
 class PersonNotifyBodyReasonCode(WireModel):
     source: Literal['code']
-    code: Literal['delegated_work_started', 'delegated_work_progress', 'scheduled_fire_coalesced', 'task_queue_near_capacity', 'task_queue_safety', 'model_provider_failover', 'task_wait_limit_reached', 'tool_setup_workflow', 'messages_set_aside', 'work_stuck', 'work_recovered', 'schedule_run_missed', 'reasoning_summary_unsupported_repaired', 'conflict_outcome', 'fixed_reminder']
+    code: Literal['delegated_work_started', 'delegated_work_progress', 'scheduled_fire_coalesced', 'task_queue_near_capacity', 'task_queue_safety', 'model_provider_failover', 'tool_setup_workflow', 'messages_set_aside', 'work_stuck', 'work_recovered', 'schedule_run_missed', 'reasoning_summary_unsupported_repaired', 'conflict_outcome', 'fixed_reminder']
 
 
 class PersonNotifyBodyAttachmentsItem(WireModel):

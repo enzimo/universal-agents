@@ -1,5 +1,6 @@
 """Owner-scoped diagnostics for leads and workers holding a scheduled task."""
 
+from custom_tools.runtime_context import bound_task_id
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -214,7 +215,7 @@ def inspect_schedule_worker(agent: Any, schedule_id: str = "") -> dict[str, Any]
     if agent.is_team_lead:
         schedule = ScheduleWorkerService(agent).owned_schedule(schedule_id, action=PRIVATE_READ)
     else:
-        task_id = agent.task_manager.current_task_id
+        task_id = bound_task_id()
         occurrence = records.for_task(task_id, agent.team_id) if task_id else None
         if (
             occurrence is None

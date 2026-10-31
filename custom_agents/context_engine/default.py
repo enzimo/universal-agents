@@ -26,6 +26,7 @@ from custom_agents.filtered_tool_result_context import (
     merge_inner_loop_context_config,
 )
 from custom_agents.instance_delivery_context import build_instance_delivery_context
+from custom_agents.output_retention import SavedOutputRetention
 from custom_agents.prompt_context_sanitization import (
     render_current_request_context,
     render_incoming_message_summary,
@@ -81,6 +82,7 @@ class DefaultContextEngine:
         memory_graph_repository: Any = None,
         system_prompt: str = "",
         context_window_tokens: Optional[int] = None,
+        turn_context_window: Optional[Callable[[], Optional[int]]] = None,
         soft_context_ratio: float = 0.85,
         reserved_output_tokens: int = 4096,
         model: Any = None,
@@ -95,6 +97,7 @@ class DefaultContextEngine:
         instance_config_path: Optional[str] = None,
         adapters: ContextEngineAdapters,
         memory_plugin_manager: Any = None,
+        saved_outputs: Optional[SavedOutputRetention] = None,
     ) -> None:
         self.agent_id = agent_id
         self.logger = logger or logging.getLogger(__name__)
@@ -104,6 +107,10 @@ class DefaultContextEngine:
         self.memory_graph_repository = memory_graph_repository
         self.system_prompt = system_prompt or ""
         self.context_window_tokens = context_window_tokens
+        # The window of the model the turn being assembled uses, when it is not
+        # the team's (a person's own model, custom_agents.person_model_runtime).
+        # Read per assembly: one engine serves turns that run at once.
+        self.turn_context_window = turn_context_window
         self.soft_context_ratio = self._bounded_ratio(soft_context_ratio, default=0.85)
         self.reserved_output_tokens = max(0, int(reserved_output_tokens or 0))
         self.model = model
@@ -118,7 +125,7 @@ class DefaultContextEngine:
         self.memory_plugin_manager = memory_plugin_manager
         self.plugins = list(plugins or [])
         self.thread_renderer = BudgetedThreadContextRenderer(
-            config=self._thread_renderer_config(thread_window),
+            config=self._thread_renderer_config(thread_window, saved_outputs),
             estimate_tokens=self.estimate_tokens,
         )
 
@@ -406,7 +413,7 @@ class DefaultContextEngine:
         )
         source_lengths = self._source_lengths(sections)
         estimated_tokens = self._estimate_prompt_tokens(prompt)
-        max_tokens = self.context_window_tokens
+        max_tokens = self._window()
         hard_limit = self._hard_limit_tokens()
         soft_limit = int(hard_limit * self.soft_context_ratio) if hard_limit else None
         fill_ratio = round(estimated_tokens / hard_limit, 4) if hard_limit else None
@@ -586,7 +593,7 @@ class DefaultContextEngine:
         incoming_message_summary: str,
         pending_pinned_texts: list[str],
     ) -> int | None:
-        max_tokens = self.context_window_tokens
+        max_tokens = self._window()
         if not max_tokens:
             return None
         hard_limit = self._hard_limit_tokens()
@@ -717,10 +724,17 @@ class DefaultContextEngine:
     def _estimate_prompt_tokens(self, prompt: str) -> int:
         return self.estimate_tokens(prompt) + self.estimate_tokens(self.system_prompt)
 
+    def _window(self) -> Optional[int]:
+        """The context window of the model the current turn uses (``turn_context_window``), else the team's."""
+
+        override = self.turn_context_window() if self.turn_context_window is not None else None
+        return override or self.context_window_tokens
+
     def _hard_limit_tokens(self) -> int | None:
-        if not self.context_window_tokens:
+        window = self._window()
+        if not window:
             return None
-        return max(1, int(self.context_window_tokens) - self.reserved_output_tokens)
+        return max(1, int(window) - self.reserved_output_tokens)
 
     def _source_lengths(self, sections: list[ContextSection]) -> list[dict[str, Any]]:
         return [
@@ -764,7 +778,9 @@ class DefaultContextEngine:
             )
         return "\n".join(lines)
 
-    def _thread_renderer_config(self, config: Optional[dict[str, Any]]) -> BudgetedThreadContextRendererConfig:
+    def _thread_renderer_config(
+        self, config: Optional[dict[str, Any]], saved_outputs: Optional[SavedOutputRetention] = None
+    ) -> BudgetedThreadContextRendererConfig:
         cfg = dict(config or {})
         defaults = BudgetedThreadContextRendererConfig()
         return BudgetedThreadContextRendererConfig(
@@ -785,6 +801,7 @@ class DefaultContextEngine:
             ),
             include_turn_ids=bool(cfg.get("include_turn_ids", defaults.include_turn_ids)),
             retrieval_tool_hint=bool(cfg.get("retrieval_tool_hint", defaults.retrieval_tool_hint)),
+            saved_outputs=saved_outputs,
         )
 
     def _notify_plugins(self, hook_name: str, *args: Any, **kwargs: Any) -> None:

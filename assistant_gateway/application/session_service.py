@@ -17,6 +17,21 @@ from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.ports.repositories import SessionRepository
 
 
+# Added to the reply of a command that moved a thread set to Run concurrently
+# to another conversation (``GatewaySessionService.switch_conversation``).
+PARALLEL_MARK_CLEARED_NOTICE = (
+    "Run concurrently is now off for this thread: its requests wait their turn with your other work."
+)
+
+
+def with_parallel_mark_notice(text: str, *, before: SessionRecord, after: SessionRecord) -> str:
+    """A switch command's reply, with ``PARALLEL_MARK_CLEARED_NOTICE`` when the switch cleared the mark."""
+
+    if before.parallel_thread and not after.parallel_thread:
+        return f"{text}\n{PARALLEL_MARK_CLEARED_NOTICE}"
+    return text
+
+
 @dataclass(frozen=True)
 class GatewaySessionRoute:
     """External route metadata persisted with a gateway session."""
@@ -138,11 +153,24 @@ class GatewaySessionService:
         conversation_id: str,
         last_task_id: str | None,
     ) -> SessionRecord | None:
-        """Atomically select a conversation while preserving session routing."""
+        """Atomically select a conversation while preserving session routing.
+
+        A thread set to Run concurrently loses the setting when it moves to
+        another conversation, so its next requests queue with ordinary work.
+        The setting is the person's word that this conversation's work does
+        not overlap their other work; an older conversation may be continued
+        elsewhere (owner, 2026-10-29). Callers tell the person
+        (``PARALLEL_MARK_CLEARED_NOTICE``). Only Web Chat changes the
+        setting, and it does not offer the switch commands; a marked thread
+        reaches them when the debug-only ``/switch_session`` moves it to
+        Telegram, Discord or the command line, where it can no longer be
+        turned off (owner kept this rule for that case, 2026-10-29).
+        """
 
         existing = self._repository.get_session(session_key)
         if existing is None:
             return None
+        clears_mark = existing.parallel_thread and conversation_id != existing.conversation_id
         self._repository.upsert_session(
             session_key=existing.session_key,
             session_alias=existing.session_alias,
@@ -155,7 +183,15 @@ class GatewaySessionService:
             thread_id=existing.thread_id,
             status=existing.status,
             owner_canonical_user_id=existing.owner_canonical_user_id,
+            parallel_thread=False if clears_mark else None,
         )
+        if clears_mark:
+            self._logger.info(
+                "A parallel thread moved to another conversation and no longer runs in parallel. "
+                "event=parallel_thread_mark_cleared session_key=%s conversation_id=%s",
+                session_key,
+                conversation_id,
+            )
         return self._repository.get_session(session_key)
 
     def _resolve_requested_session(

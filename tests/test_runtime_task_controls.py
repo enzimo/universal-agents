@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.task_work_support import TurnHost
 from custom_agents.manager_control_runtime import handle_manager_runtime_work_command
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
@@ -26,7 +27,7 @@ def agent(tmp_path, request):
         db_path=str(tmp_path / "tasks.db"), max_queued_top_level_tasks=50
     )
     manager.set_owner_identity("lead", "Lead", "team", "TeamArchitect")
-    return SimpleNamespace(
+    return TurnHost(
         id="lead",
         name="Lead",
         team_id="team",
@@ -35,8 +36,6 @@ def agent(tmp_path, request):
         team_comms=_CaptureComms(),
         _logger=logging.getLogger(__name__),
         _stop_reasons_by_task_id={},
-        _active_execution_task=None,
-        _active_execution_task_id=None,
         _strands_agent=SimpleNamespace(),
         _finalize_conversation_turn=AsyncMock(),
         named_agent_type_queue_map={},
@@ -51,7 +50,8 @@ def add(agent, task_id, owner="owner", state=None):
             task_type=MessageMetaType.REQUEST,
             problem_statement="Work " + task_id,
         ),
-        MessageHeader(),
+        # A person's request comes from the gateway, which waits for its final reply.
+        MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
         MessageMeta(gateway_context=GatewayContext(canonical_user_id=owner)),
         owner_person_id=owner,  # whom admission verified the task works for
     )
@@ -59,6 +59,16 @@ def add(agent, task_id, owner="owner", state=None):
         agent.task_manager.update_main_task_state(
             task_id, state, "2026-09-20T12:00:00+00:00"
         )
+
+
+def final_replies(agent) -> list[str]:
+    """Task ids of the final replies (Task responses) the agent sent its requesters."""
+
+    return [
+        envelope.msg_content.task_id
+        for envelope in agent.team_comms.messages
+        if isinstance(envelope.msg_content, Task) and envelope.msg_content.task_type == MessageMetaType.RESPONSE
+    ]
 
 
 async def command(agent, action="list_tasks", **kwargs):
@@ -173,6 +183,24 @@ async def test_waiting_task_shows_the_access_requests_it_waits_on(agent):
 
 
 @pytest.mark.asyncio
+async def test_parallel_marks_requests_from_parallel_threads_on_the_team_lead(agent):
+    # The team lead runs requests from threads set to Run concurrently in
+    # lanes of their own (custom_agents.execution_lanes).
+    agent.task_manager.parallel_lanes_enabled = agent.is_team_lead
+    add(agent, "ordinary", state=ProgressState.IN_PROGRESS)
+    add(agent, "other-chat")
+    agent.task_manager.get_task_info("other-chat").meta.conversation_id = "conversation-other"
+    add(agent, "parallel")
+    context = agent.task_manager.get_task_info("parallel").meta.gateway_context
+    context.parallel_thread, context.delivery_mode = True, "interactive"
+
+    labels = {row.root_task_id: row.is_parallel for row in (await command(agent)).roots}
+
+    # Another conversation alone is not parallel work; a worker has no parallel lanes.
+    assert labels == {"ordinary": False, "other-chat": False, "parallel": agent.is_team_lead}
+
+
+@pytest.mark.asyncio
 async def test_single_removal_is_owner_scoped_and_can_stop_current_work(agent):
     add(agent, "current", state=ProgressState.IN_PROGRESS)
     add(agent, "private", owner="someone_else")
@@ -194,6 +222,9 @@ async def test_single_removal_is_owner_scoped_and_can_stop_current_work(agent):
     assert removed.success
     assert removed.cancellation_receipts[0].confirmed
     assert agent.task_manager.get_task_info("current") is None
+    # No turn of it was running, so the removal sends the request's one final
+    # reply itself; the gateway frees the person's thread only then.
+    assert final_replies(agent) == ["current"]
 
 
 @pytest.mark.asyncio

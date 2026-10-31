@@ -309,6 +309,12 @@ class ConversationRepository(Protocol):
         extension: str = "txt",
     ) -> dict[str, Any]: ...
 
+    def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]: ...
+
+    def count_artifacts_created_before(self, cutoff: str) -> int: ...
+
+    def list_artifact_paths_created_before(self, cutoff: str, *, after_path: str, limit: int) -> tuple[str, ...]: ...
+
     def create_context_epoch(
         self,
         *,
@@ -431,6 +437,36 @@ class ConversationRepository(Protocol):
         review_job_id: str,
     ) -> int: ...
 
+    def stored_text_bytes_by_owner(self) -> dict[str, int]: ...
+
+    def conversation_owners(self) -> dict[str, str]: ...
+
+
+# Text a person's conversations keep, counted for their storage notices
+# (stored_text_bytes_by_owner). Ids, states and timestamps are left out.
+_TASK_LINK_TEXT_COLUMNS = (
+    "problem_text",
+    "final_answer_text",
+    "clarification_summary_text",
+    "execution_history_text",
+    "turn_summary_text",
+    "user_request_summary",
+    "assistant_response_summary",
+    "context_summary_text",
+    "artifact_summary_json",
+    "tool_artifact_manifest_json",
+    "gateway_context_json",
+)
+_THREAD_TEXT_COLUMNS = ("subject_preview", "synopsis_json", "synopsis_markdown", "compaction_state_json")
+_CONTEXT_EPOCH_TEXT_COLUMNS = (
+    "summary_json",
+    "summary_markdown",
+    "rehydration_manifest_json",
+    "source_lengths_before_json",
+    "source_lengths_after_json",
+    "error_text",
+)
+
 
 class _RelationalConversationRepository:
     """Shared record operations for durable conversation-thread persistence."""
@@ -540,6 +576,12 @@ class _RelationalConversationRepository:
                     created_at TEXT
                 )
                 """
+            )
+            # The saved-output cleanup deletes the oldest records first
+            # (delete_artifacts_created_before).
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversation_artifacts_created_at "
+                "ON conversation_artifacts(created_at)"
             )
             conn.execute(
                 """
@@ -1881,6 +1923,102 @@ class _RelationalConversationRepository:
             "summary_text": summary_text,
             "created_at": now_ts,
         }
+
+    def delete_artifacts_created_before(self, cutoff: str, *, limit: int) -> tuple[str, ...]:
+        """Delete up to ``limit`` artifact records created before ``cutoff``, oldest first.
+
+        ``cutoff`` is an ISO 8601 UTC time in the same form as ``created_at``
+        (``utc_now_iso``), so the text comparison orders them by time.
+        Returns the files the records named, for the caller to delete
+        (``custom_agents.output_retention``): the record goes first, so a file
+        that cannot be removed is left without a record, which the cleanup
+        removes by its age later, never a record without its file. The turns
+        that mention an artifact keep its summary.
+        """
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                DELETE FROM conversation_artifacts
+                WHERE artifact_id IN (
+                    SELECT artifact_id FROM conversation_artifacts
+                    WHERE created_at < {bind}
+                    ORDER BY created_at
+                    LIMIT {bind}
+                )
+                RETURNING storage_path
+                """,
+                (cutoff, int(limit)),
+            ).fetchall()
+            conn.commit()
+        return tuple(str(row[0] or "") for row in rows)
+
+    def count_artifacts_created_before(self, cutoff: str) -> int:
+        """How many artifact records ``delete_artifacts_created_before`` would delete (a dry run)."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM conversation_artifacts WHERE created_at < {self._dialect.bind}",
+                (cutoff,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def list_artifact_paths_created_before(self, cutoff: str, *, after_path: str, limit: int) -> tuple[str, ...]:
+        """One bounded page of distinct files named by expired records, for the retention dry run."""
+
+        bind = self._dialect.bind
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT storage_path FROM conversation_artifacts
+                WHERE created_at < {bind} AND storage_path > {bind}
+                ORDER BY storage_path LIMIT {bind}
+                """,
+                (cutoff, after_path, int(limit)),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def stored_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of the text each person's conversations keep here, by owner.
+
+        For people's storage notices, measured by the manager (``custom_agents.storage_usage_runtime``):
+        the turns' texts (``conversation_task_links``), the threads' summaries
+        and the compaction summaries, one aggregate per table so no row is
+        loaded. Long texts moved to files (``offload_large_text``) are counted
+        from the files, by ``conversation_owners``.
+        """
+
+        def text_bytes(columns: tuple[str, ...]) -> str:
+            return " + ".join(self._dialect.text_bytes(column) for column in columns)
+
+        owned = "owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> ''"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT owner, SUM(stored) FROM (
+                    SELECT owner_canonical_user_id AS owner, SUM({text_bytes(_TASK_LINK_TEXT_COLUMNS)}) AS stored
+                    FROM conversation_task_links WHERE {owned} GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes(_THREAD_TEXT_COLUMNS)})
+                    FROM conversation_threads WHERE {owned} GROUP BY owner_canonical_user_id
+                    UNION ALL
+                    SELECT owner_canonical_user_id, SUM({text_bytes(_CONTEXT_EPOCH_TEXT_COLUMNS)})
+                    FROM conversation_context_epochs WHERE {owned} GROUP BY owner_canonical_user_id
+                ) AS conversation_text GROUP BY owner
+                """
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
+
+    def conversation_owners(self) -> dict[str, str]:
+        """Each conversation's owner, for conversations that have one (ids only)."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT conversation_id, owner_canonical_user_id FROM conversation_threads "
+                "WHERE owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> ''"
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
 
     def create_context_epoch(
         self,

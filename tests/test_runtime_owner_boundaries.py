@@ -178,10 +178,6 @@ async def test_turn_owner_reapplies_late_steering_before_committing_output():
     assert "Use the corrected objective" in prompts[1]
     assert len(committed) == 1
     assert cleared == [True]
-    other, _ = build_turn_owner(
-        invoke=invoke, guidance=deque([""]), committed=[], cleared=[]
-    )
-    assert other.last_context_assembly is None
 
 
 @pytest.mark.asyncio

@@ -70,6 +70,7 @@ from custom_messages.contracts.model_keys_v1 import (
 from env_secrets import get_env_with_file_fallback
 from secure_tools.chat_commands import MODEL_KEY_COMMAND, OWN_MODEL_COMMAND, SETUP_COMMAND
 from model_providers.endpoints import ModelEndpoint, embedding_endpoint
+from runtime_hosting.turn_context import turn_scoped
 
 logger = logging.getLogger(__name__)
 
@@ -679,10 +680,14 @@ def tell_administrators_about_key_problem(agent: Any, error: ModelKeyError) -> N
 
 # -- Binding keys to a model's calls ------------------------------------------------
 
-_CALL_KEYS: contextvars.ContextVar[Mapping[str, ResolvedKey]] = contextvars.ContextVar("model_call_keys", default={})
+_CALL_KEYS: contextvars.ContextVar[Mapping[str, ResolvedKey]] = turn_scoped(
+    contextvars.ContextVar("model_call_keys", default={}), {}
+)
 _BINDING_MARKER = "_ua_model_key_binding"
 # The key of this task's latest model call, for decisions after it failed (failover).
-_LAST_CALL_KEY: contextvars.ContextVar[ResolvedKey | None] = contextvars.ContextVar("last_model_call_key", default=None)
+_LAST_CALL_KEY: contextvars.ContextVar[ResolvedKey | None] = turn_scoped(
+    contextvars.ContextVar("last_model_call_key", default=None), None
+)
 
 
 def last_call_used_personal_key() -> bool:

@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.task_work_support import TurnHost, register_turn
 from custom_agents.control_runtime import _interrupt_active_execution, consume_handback_interrupt
 from custom_agents.custody_loss import custody_moved, install_custody_listeners
 from custom_agents.sdk.strands.turn_tool_stop import CUSTODY_LOST_REASON
@@ -127,8 +128,8 @@ def test_a_history_write_without_a_saved_row_is_not_custody_loss(tmp_path):
     assert [info.task.task_id for info in old.list_task_infos()] == ["work"]
 
 
-def agent_for(task_manager: TaskManager, inbox: DeferredMessageInbox) -> SimpleNamespace:
-    return SimpleNamespace(
+def agent_for(task_manager: TaskManager, inbox: DeferredMessageInbox) -> TurnHost:
+    return TurnHost(
         id=OLD,
         task_manager=task_manager,
         deferred_inbox=inbox,
@@ -136,8 +137,6 @@ def agent_for(task_manager: TaskManager, inbox: DeferredMessageInbox) -> SimpleN
         _send_task_error_response=AsyncMock(),
         _logger=logging.getLogger("test.custody_loss"),
         _strands_agent=None,
-        _active_execution_task=None,
-        _active_execution_task_id=None,
         _custody_release=None,
         _lease_loss_wind_down=None,
     )
@@ -160,18 +159,18 @@ async def test_custody_loss_stops_the_running_turn_without_a_handback_or_a_failu
     await old.operations_runtime.run(partial(admit, old, "work"))
     task_info = old.get_task_info("work")
     turn = asyncio.create_task(asyncio.sleep(60))
-    agent._active_execution_task, agent._active_execution_task_id = turn, "work"
-    agent._active_tool_stop = ToolStop(agent_id=OLD, task_id="work")
+    turn_stop = ToolStop(agent_id=OLD, task_id="work")
+    register_turn(agent, "work", turn, turn_stop)
     manager(tmp_path, NEW).restore_runtime_state_for_owner_ids([OLD])
 
     with pytest.raises(RuntimeCustodyLost):
         await old.operations_runtime.run(old.update_main_task_state, "work", ProgressState.IN_PROGRESS, now())
     await asyncio.sleep(0)
-    await agent._custody_release.interrupt
+    await asyncio.gather(*agent._custody_release.interrupts.values())
     assert turn.cancelled()
     # The turn's running commands were asked to stop, with the custody reason.
-    assert agent._active_tool_stop.is_requested()
-    assert agent._active_tool_stop.reason == CUSTODY_LOST_REASON
+    assert turn_stop.is_requested()
+    assert turn_stop.reason == CUSTODY_LOST_REASON
     # The interrupted turn is a transfer: no cancellation record, consumed once.
     assert consume_handback_interrupt(agent, "work") is True
     assert consume_handback_interrupt(agent, "work") is False

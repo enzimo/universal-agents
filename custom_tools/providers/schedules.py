@@ -105,7 +105,7 @@ from custom_tools.providers.schedule_workers import (
     prepare_scheduled_job_access,
 )
 from custom_tools.result_pages import page_size, text_page
-from custom_tools.runtime_context import active_task_context as _active_task_context
+from custom_tools.runtime_context import bound_task_id, active_task_context as _active_task_context
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.schedule_inspection import ScheduleView, compact_schedule, list_schedule_payloads
 from id_generation import new_id
@@ -546,7 +546,7 @@ def create_scheduled_job(
         )
     try:
         schedule_id = new_schedule_id()
-        current_task_id = agent.task_manager.current_task_id
+        current_task_id = bound_task_id()
         task_info = _get_current_task_info(agent)
         resolved_objective_id, objective_refusal = _objective_to_link(
             agent, objective_id, current_task_id or ""
@@ -727,6 +727,9 @@ def list_scheduled_jobs(
     available only through these exact-schedule detail pages.
     Each schedule has a `record_digest`, the version you read: pass it as
     `expected_record_digest` to update, pause, resume, disable or remove it.
+    `final_run_in_progress: true` means its last run started and is still
+    working: it will not run again and is removed when that run ends. It is
+    not overdue or broken; do not recreate or re-arm it unless asked.
     """
     agent = get_agent_ref()
     if agent is None:

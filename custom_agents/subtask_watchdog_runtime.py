@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from custom_agents.execution_lanes_runtime import lane_of
+from custom_agents.strands_parts import task_strands_messages
+from custom_tools.runtime_context import task_work
 from custom_messages.records.task_results import TaskResultUpdate
 
 import asyncio
@@ -36,7 +39,14 @@ SUBTASK_TIMEOUT_PROBE_THRESHOLDS: tuple[float, ...] = (0.25, 0.50, 0.75, 0.90, 0
 SUBTASK_TIMEOUT_PROBE_ACTION = "delegated_subtask_timeout_probe"
 
 
-async def _resume_parent_task_if_ready(self, parent_task_id: str) -> None:
+async def _resume_parent_task_if_ready(self: Any, parent_task_id: str) -> None:
+    """Resume the parent once its subtasks finished, as that task's handling (``runtime_context.task_work``)."""
+
+    with task_work(parent_task_id):
+        await _resume_parent_task_when_ready(self, parent_task_id)
+
+
+async def _resume_parent_task_when_ready(self: Any, parent_task_id: str) -> None:
     parent_task_info = await self.task_manager.operations_runtime.run(
         self.task_manager.get_task_info, parent_task_id
     )
@@ -147,9 +157,7 @@ async def _resume_parent_task_if_ready(self, parent_task_id: str) -> None:
                     conversation_store=self._conversation_store,
                     conversation_compactor=self._conversation_compactor,
                     conversation_artifact_offloader=self._conversation_artifact_offloader,
-                    strands_messages=list(
-                        getattr(self._strands_agent, "messages", []) or []
-                    ),
+                    strands_messages=task_strands_messages(parent_task_info.task.task_id),
                     task_manager=self.task_manager,
                     task_info=parent_task_info,
                     task_status=ProgressState.COMPLETED.value,
@@ -323,7 +331,7 @@ async def _fail_subtask_and_reconcile_parent(
         conversation_store=self._conversation_store,
         conversation_compactor=self._conversation_compactor,
         conversation_artifact_offloader=self._conversation_artifact_offloader,
-        strands_messages=list(getattr(self._strands_agent, "messages", []) or []),
+        strands_messages=task_strands_messages(parent_task_info.task.task_id),
         task_manager=self.task_manager,
         task_info=parent_task_info,
         task_status=ProgressState.FAILED.value,
@@ -389,7 +397,7 @@ async def _prepare_local_task_finalization_before_dispatch(
         conversation_store=self._conversation_store,
         conversation_compactor=self._conversation_compactor,
         conversation_artifact_offloader=self._conversation_artifact_offloader,
-        strands_messages=list(getattr(self._strands_agent, "messages", []) or []),
+        strands_messages=task_strands_messages(task_info.task.task_id),
         task_manager=self.task_manager,
         task_info=task_info,
         task_status=ProgressState.COMPLETED.value,
@@ -866,7 +874,7 @@ async def _recover_stalled_subtasks(self) -> None:
     timeout_seconds = self.subtask_timeout_seconds
     if timeout_seconds is None or timeout_seconds <= 0:
         return
-    if self.is_executing or self.paused:
+    if self.paused:
         return
 
     now = datetime.now(timezone.utc)
@@ -880,6 +888,11 @@ async def _recover_stalled_subtasks(self) -> None:
             self.task_manager.get_parent_task_id, subtask_info.task.task_id
         )
         if not parent_task_id:
+            continue
+        # The parent's execution lane runs a turn now; a later pass looks
+        # again. Other requests' lanes are not held back by it
+        # (custom_agents.execution_lanes).
+        if self._execution_lanes.lane_busy(await lane_of(self, parent_task_id)):
             continue
         waiting_in_queue, claimed_at = await _queue_tracking(self, holders, subtask_info)
         if waiting_in_queue:
@@ -1096,7 +1109,7 @@ async def _recover_stalled_subtasks(self) -> None:
             conversation_store=self._conversation_store,
             conversation_compactor=self._conversation_compactor,
             conversation_artifact_offloader=self._conversation_artifact_offloader,
-            strands_messages=list(getattr(self._strands_agent, "messages", []) or []),
+            strands_messages=task_strands_messages(task_info.task.task_id),
             task_manager=self.task_manager,
             task_info=task_info,
             task_status=ProgressState.FAILED.value,

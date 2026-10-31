@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from custom_agents.turn_registry import running_turn_works
 from custom_agents.message_routing import (
     build_outgoing_meta,
     construct_header,
@@ -28,6 +29,7 @@ from custom_messages.enums import (
     TaskHistoryImportance,
     TaskHistoryType,
 )
+from custom_tools.runtime_context import TaskWork
 from custom_tools.tool_stop import (
     BACKGROUND_KILL_GRACE_SECONDS,
     BACKGROUND_TERM_GRACE_SECONDS,
@@ -498,59 +500,77 @@ async def _interrupt_active_execution(
     root_task_id: str,
     graph_task_ids: set[str],
     reason: str,
-) -> Optional[asyncio.Task[Any]]:
-    """Stop the running turn if it belongs to the graph; wait, bounded, until it ended.
+) -> Optional[TaskWork]:
+    """Stop the running turns that belong to the graph; wait, bounded, until they ended.
 
-    The turn's commands are asked to stop before the turn is cancelled, with
-    no await in between, so the turn cannot act on a result first and a tool
-    call that starts afterwards sees the stop. The cancelled turn waits for its
-    running commands before it ends (turn_tool_stop), so when this returns
-    they have ended or the wait was logged. ``reason`` is a short code
-    (turn_tool_stop) for the logs.
+    Several turns may run at once (``custom_agents.execution_lanes``); only
+    those working on the graph's tasks are stopped, found by their own work
+    records (``custom_agents.turn_registry.running_turn_works``), never through an
+    agent-wide current task. Each turn's commands are asked to stop before
+    the turn is cancelled, with no await in between, so the turn cannot act
+    on a result first and a tool call that starts afterwards sees the stop.
+    The cancelled turn waits for its running commands before it ends
+    (turn_tool_stop), so when this returns they have ended or the wait was
+    logged. ``reason`` is a short code (turn_tool_stop) for the logs. Returns
+    the work of the first stopped turn, or None when none was running.
     """
 
-    active_task = agent._active_execution_task
-    if (
-        active_task is None
-        or active_task.done()
-        or agent._active_execution_task_id not in graph_task_ids
-    ):
+    works = [
+        work
+        for work in running_turn_works(agent)
+        if work.task_id in graph_task_ids and work.turn_owner is not None and not work.turn_owner.done()
+    ]
+    if not works:
         return None
+    _request_tool_stops(agent, works, reason)
+    for work in works:
+        assert work.turn_owner is not None
+        work.turn_owner.cancel()
+    await _wait_for_stopped_turns(agent, works, root_task_id=root_task_id, reason=reason)
+    return works[0]
 
-    tool_stop = getattr(agent, "_active_tool_stop", None)
-    if tool_stop is not None:
-        tool_stop.request(reason)
-    else:
+
+def _request_tool_stops(agent: Any, works: list[TaskWork], reason: str) -> None:
+    """Ask each stopped turn's commands to stop, before its turn is cancelled."""
+
+    for work in works:
+        if work.tool_stop is not None:
+            work.tool_stop.request(reason)
+            continue
         agent._logger.warning(
             "The running turn has no ToolStop, so its commands cannot be stopped with it. "
             "event=active_turn_without_tool_stop agent_id=%s task_id=%s reason=%s",
             agent.id,
-            root_task_id,
+            work.task_id,
             reason,
         )
-    active_task.cancel()
+
+
+async def _wait_for_stopped_turns(agent: Any, works: list[TaskWork], *, root_task_id: str, reason: str) -> None:
+    """Wait, bounded, for cancelled turns to end; a stop cancelled at shutdown still ends them."""
+
+    owners = [work.turn_owner for work in works if work.turn_owner is not None]
     try:
         await asyncio.wait_for(
-            asyncio.shield(active_task),
+            asyncio.shield(asyncio.gather(*owners, return_exceptions=True)),
             timeout=ACTIVE_STOP_GRACE_SECONDS,
         )
     except asyncio.CancelledError:
         current = asyncio.current_task()
         if current is not None and current.cancelling():
-            # This stop was itself cancelled (shutdown); the turn still ends.
+            # This stop was itself cancelled (shutdown); the turns still end.
             raise
     except asyncio.TimeoutError:
         agent._logger.warning(
-            "The stopped turn did not finish within the grace period; continuing without it. "
+            "A stopped turn did not finish within the grace period; continuing without it. "
             "event=active_turn_stop_timeout agent_id=%s task_id=%s reason=%s grace_seconds=%s "
             "running_tool_calls=%s",
             agent.id,
             root_task_id,
             reason,
             ACTIVE_STOP_GRACE_SECONDS,
-            len(tool_stop.running()) if tool_stop is not None else "unknown",
+            sum(len(work.tool_stop.running()) for work in works if work.tool_stop is not None),
         )
-    return active_task
 
 
 async def stop_task_execution(
@@ -589,17 +609,24 @@ async def stop_task_execution(
     )
     for graph_task_id in graph_task_ids:
         agent._stop_reasons_by_task_id[graph_task_id] = reason
-    active_task = await _interrupt_active_execution(
+    stopped = await _interrupt_active_execution(
         agent,
         root_task_id=task_id,
         graph_task_ids=graph_task_ids,
         reason=TASK_STOPPED_REASON,
     )
-    if active_task is not None:
+    # Every stopped request gets one final reply, which ends it for its
+    # requester (the gateway frees the thread only then). A stopped turn sends
+    # it itself (handle_interrupted_turn), so the cancellation below sends one
+    # only when no turn of the graph was running, such as for a request that
+    # still waited its turn.
+    if stopped is not None:
+        active_task = stopped.turn_owner
+        assert active_task is not None
         current_task_info = await agent.task_manager.operations_runtime.run(
             agent.task_manager.get_task_info, task_id
         ) or await agent.task_manager.operations_runtime.run(
-            agent.task_manager.get_task_info, agent._active_execution_task_id
+            agent.task_manager.get_task_info, stopped.task_id
         )
         if current_task_info is None:
             return {
@@ -618,7 +645,7 @@ async def stop_task_execution(
             signal_pending_subtasks=cascade_to_subtasks,
             canonical_user_id=canonical_user_id,
             command_id=command_id,
-            send_response=send_response,
+            send_response=False,
             durable_cancellation_recorded=durable_cancellation_recorded,
         )
         result["active_execution_cancelled"] = (

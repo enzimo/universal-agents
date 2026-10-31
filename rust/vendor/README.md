@@ -6,7 +6,7 @@ which is yanked and affected by
 [RUSTSEC-2026-0368](https://rustsec.org/advisories/RUSTSEC-2026-0368.html) and
 [RUSTSEC-2026-0369](https://rustsec.org/advisories/RUSTSEC-2026-0369.html).
 The published AnyDoc 0.2.4 still requires ZIP 8. These local Cargo patches keep
-the existing conversion API and document formats while using ZIP 9.0.5.
+the existing conversion API and document formats while using ZIP 9.1.3.
 The dependency audit remains mandatory and has no new advisory exceptions.
 
 Both directories come from the crates.io `.crate` archives. Original archive
@@ -18,7 +18,7 @@ provenance here. These crates remain dependencies, outside our workspace members
 
 The changes are limited to:
 
-- Both normalized `Cargo.toml` files require ZIP 9.0.5.
+- Both normalized `Cargo.toml` files require ZIP 9.1.3.
 - Calamine propagates ZIP filename decoding errors in its path cache and
   picture readers. This backports the Rust changes in upstream commit
   [`c15fefe995e890da206b58542b4e45190f564f30`](https://github.com/tafia/calamine/commit/c15fefe995e890da206b58542b4e45190f564f30).

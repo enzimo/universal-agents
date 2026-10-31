@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from runtime_settings.telemetry import ActivityCollectorSettings, OTelSettings
 from runtime_settings.agents import AgentRuntimeDefaultsSettings
 from runtime_settings.governance import AuthorizationSettings
-from assistant_gateway.config import DeliverySettings, GatewayUsersSettings, LaunchSettings
+from assistant_gateway.config import DeliverySettings, GatewayUsersSettings, LaunchSettings, StorageWarningSettings
 from runtime_settings.models import InstanceEmbeddingSettings, InstanceLLMSettings
 from runtime_settings.interactive_apps import InteractiveAppsSettings
 from runtime_settings.security import SecurityLayerSettings
@@ -257,6 +257,7 @@ def test_config_models_match_example_defaults_except_approved_exceptions() -> No
         "launch": LaunchSettings(),
         "transport": TransportSettings(),
         "gateway.users": GatewayUsersSettings(),
+        "gateway.storage_warnings": StorageWarningSettings(),
         "llm": InstanceLLMSettings(),
         "embedding": InstanceEmbeddingSettings(),
         "agent": AgentRuntimeDefaultsSettings(),
@@ -274,6 +275,7 @@ def test_config_models_match_example_defaults_except_approved_exceptions() -> No
     example_sections = {
         **{name: example[name] for name in sections if "." not in name},
         "gateway.users": example["gateway"]["users"],
+        "gateway.storage_warnings": example["gateway"]["storage_warnings"],
     }
     exceptions = {
         "agent.default_team_id",

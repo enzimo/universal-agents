@@ -24,6 +24,14 @@ from runtime_hosting.execution_contracts import (
 )
 
 
+# Held while a Rust build uses its content-addressed build folder. The saved
+# output cleanup (custom_agents.output_retention) takes it too before it deletes
+# an old build folder, lock file included.
+BUILD_LOCK_FILENAME = ".build.lock"
+# Attempts to lock a build folder that a cleanup deleted while this build waited.
+BUILD_LOCK_ATTEMPTS = 3
+
+
 class BuildPolicyError(RuntimeError):
     """A source cannot be built under the selected operator profile."""
 
@@ -162,23 +170,30 @@ class OpenShellRustBuilder:
             raise BuildPolicyError("The Rust build root must be inside the shared workspace.")
         source_digest = hashlib.sha256(source).hexdigest()
         build_dir = root / source_digest
-        build_dir.mkdir(parents=True, exist_ok=True)
-        if build_dir.is_symlink():
-            raise BuildPolicyError("The content-addressed Rust build directory is a symlink.")
-        lock_path = build_dir / ".build.lock"
-        lock_descriptor = os.open(
-            lock_path,
-            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        with os.fdopen(lock_descriptor, "a+b") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            return self._build_locked(
-                source=source,
-                profile=profile,
-                workspace=workspace,
-                build_dir=build_dir,
-            )
+        for _attempt in range(BUILD_LOCK_ATTEMPTS):
+            build_dir.mkdir(parents=True, exist_ok=True)
+            if build_dir.is_symlink():
+                raise BuildPolicyError("The content-addressed Rust build directory is a symlink.")
+            lock_path = build_dir / BUILD_LOCK_FILENAME
+            try:
+                lock_descriptor = os.open(
+                    lock_path,
+                    os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+            except FileNotFoundError:
+                continue  # the cleanup deleted the folder just after it was made
+            with os.fdopen(lock_descriptor, "a+b") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                if not _still_linked(lock_file.fileno(), lock_path):
+                    continue  # the cleanup deleted the folder while this build waited
+                return self._build_locked(
+                    source=source,
+                    profile=profile,
+                    workspace=workspace,
+                    build_dir=build_dir,
+                )
+        raise BuildPolicyError("The Rust build folder kept disappearing while this build waited for it.")
 
     def _build_locked(
         self,
@@ -270,6 +285,17 @@ class OpenShellRustBuilder:
         except Exception:
             path.unlink(missing_ok=True)
             raise
+
+
+def _still_linked(descriptor: int, path: Path) -> bool:
+    """Whether the locked file is still the one at ``path`` (a cleanup may delete both meanwhile)."""
+
+    try:
+        named = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    held = os.fstat(descriptor)
+    return (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino)
 
 
 @dataclass(frozen=True)

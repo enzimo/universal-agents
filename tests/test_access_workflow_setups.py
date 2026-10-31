@@ -167,7 +167,7 @@ def _result(request: ToolSetupRequestV1, status: str, **extra: Any) -> ToolSetup
 def _ask(agent: Any, tool_id: str, **kwargs: Any) -> ToolSetupRequestV1:
     """TeamLead's outbox emitted a setup request: link it (as the outbox does)."""
 
-    request = _request(tool_id, task_id=agent._active_execution_task_id, **kwargs)
+    request = _request(tool_id, task_id=agent.test_task_id, **kwargs)
     link_setup_request(agent, request, agent.task_manager.get_task_info(request.parent_task_id).meta)
     return request
 

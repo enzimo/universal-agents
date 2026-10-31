@@ -24,13 +24,13 @@ from strands.models import Model
 from strands.types.exceptions import ContextWindowOverflowException, ModelThrottledException
 
 from custom_agents.model_choice import is_model_choice
-from custom_agents.person_model_runtime import _state as person_model_state
 from custom_agents.runtime_model_switch import RuntimeModelSwitchProbeError, probe_tool_capacity
 from custom_agents.runtime_settings_service import RuntimeSettingsService
 from custom_agents.tool_loading import tool_limit
 from custom_tools.providers.runtime_settings import plan_runtime_setting_change, plan_runtime_settings_change
 from custom_tools.providers.tool_loading import _higher_cap_hint
-from custom_tools.runtime_context import set_agent_ref
+from custom_tools.runtime_context import current_task_work
+from tests.task_work_support import set_agent_ref
 from tests.test_runtime_settings_tools import _apply_settings_change, _fake_agent, _overrides_path, _write_config
 from tests.test_runtime_settings_tools import _signed_task_contexts  # noqa: F401 - the gateway's signing keys
 
@@ -173,7 +173,10 @@ def test_it_only_raises_the_cap(lead) -> None:
 
 def test_a_persons_own_model_cannot_be_raised_this_way(lead) -> None:
     agent, config_path = lead
-    person_model_state(agent).active = SimpleNamespace(provider="openai", profile=SimpleNamespace(model_id="own/model"))
+    # The turn runs on the person's own model (its work record's person_model).
+    current_task_work().person_model = SimpleNamespace(
+        provider="openai", profile=SimpleNamespace(model_id="own/model")
+    )
 
     plan = stage(160)
 

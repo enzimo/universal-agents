@@ -4,6 +4,7 @@ Helpers for wiring Strands' official AgentSkills plugin into this runtime.
 
 from __future__ import annotations
 
+from custom_tools.runtime_context import bound_task_id
 import logging
 import json
 from collections.abc import Collection
@@ -238,7 +239,7 @@ async def _record_objective_work_skill_activation(
         return
     task_manager = getattr(runtime_agent, "task_manager", None)
     task_id = str(
-        (task_manager.current_task_id if task_manager is not None else "") or ""
+        bound_task_id() or ""
     ).strip()
     coordinator = getattr(task_manager, "objective_work_coordinator", None)
     if task_id and coordinator is not None:

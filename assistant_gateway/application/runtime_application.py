@@ -82,6 +82,7 @@ def gateway_session_view(session: SessionRecord) -> GatewaySession:
         owner_canonical_user_id=session.owner_canonical_user_id,
         latest_request_text=None,
         updated_at=session.updated_at,
+        parallel_thread=session.parallel_thread,
     )
 
 
@@ -263,6 +264,8 @@ class GatewayRuntimeApplication:
         thread_id: str | None = None,
         canonical_user_id: str | None = None,
     ) -> GatewaySession:
+        """Start a new chat thread; it starts with Run concurrently off."""
+
         route = GatewayRequestRoute(
             channel_name=channel_name,
             user_id=user_id,

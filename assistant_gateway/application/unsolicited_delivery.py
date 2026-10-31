@@ -32,6 +32,7 @@ from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.task_v1 import Task, TaskQuery
 from custom_messages.enums import MessageMetaType, RequesterType
+from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE
 
 
 class GatewayDeliveryPolicyProvider(Protocol):
@@ -142,7 +143,7 @@ class GatewayUnsolicitedDeliveryApplication:
     ) -> bool:
         """Recognize requester-bound work that resumes after its HTTP wait ends."""
 
-        if getattr(gateway_context, "delivery_mode", None) != "interactive":
+        if getattr(gateway_context, "delivery_mode", None) != DELIVERY_MODE_INTERACTIVE:
             return False
         content = envelope.msg_content
         if isinstance(content, UserNotification):

@@ -24,6 +24,7 @@ def _agent(**extra):
         id="lead",
         paused=False,
         is_executing=False,
+        main_lane_busy=False,
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
         _pending_work_timers=set(),

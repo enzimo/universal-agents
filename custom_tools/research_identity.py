@@ -28,7 +28,7 @@ from typing import Any
 
 from custom_tools.runtime_context import active_task_context, get_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
-from id_generation import new_id_suffix
+from id_generation import RANDOM_ID_SUFFIX_LENGTH, new_id_suffix
 from runtime_settings.instance_layout import PERSON_RESEARCH_DIRNAME
 
 NO_ACTIVE_TASK = "no_active_task"
@@ -37,6 +37,9 @@ SLUG_MAX_LEN = 48
 # characters of the id's SHA-256, within SLUG_MAX_LEN in total.
 TASK_FOLDER_DIGEST_LEN = 12
 TASK_FOLDER_READABLE_LEN = SLUG_MAX_LEN - 1 - TASK_FOLDER_DIGEST_LEN
+_RESULT_FOLDER_NAME = re.compile(
+    rf"\d{{8}}T\d{{6}}(?:\d{{6}})?Z_[a-z0-9._-]+_[0-9a-f]{{{RANDOM_ID_SUFFIX_LENGTH}}}"
+)
 
 
 def safe_slug(value: str, *, fallback: str = "artifact", max_len: int = SLUG_MAX_LEN) -> str:
@@ -74,6 +77,16 @@ def result_folder_name(stamp: str, *labels: str) -> str:
     """
 
     return "_".join([stamp, *(safe_slug(label) for label in labels), new_id_suffix()])
+
+
+def is_result_folder_name(name: str) -> bool:
+    """Whether a folder has the full generated name, including its random ending.
+
+    Retention must not treat a person's dated notes as disposable tool output.
+    The caller separately checks that the timestamp is a usable date.
+    """
+
+    return _RESULT_FOLDER_NAME.fullmatch(name) is not None
 
 
 @dataclass(frozen=True)
@@ -120,6 +133,7 @@ __all__ = [
     "NO_ACTIVE_TASK",
     "ResearchIdentity",
     "research_identity",
+    "is_result_folder_name",
     "result_folder_name",
     "safe_slug",
     "task_folder_name",

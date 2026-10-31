@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import requests
 
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import set_agent_ref
 
 
 class _FakeTaskManager:

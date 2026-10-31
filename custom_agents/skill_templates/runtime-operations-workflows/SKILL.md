@@ -1230,8 +1230,13 @@ escalation works for the person the maintenance schedule belongs to (the first
 user, an administrator), with that person's access, and tells them with
 `notify_user`.
 
-Before each run, trusted code cleans scratch folders and checks every schedule
-(`agent.schedule_maintenance.stale_schedules`): it deletes the own schedules of
+Before each run, trusted code cleans scratch folders, deletes saved tool
+outputs written longer ago than `tool_policy.output_retention_days` (tool
+results, long tool output saved from conversations, research results and
+execution run folders; the run records the counts and bytes per kind; for the
+first 7 days after retention becomes active it only counts them, and
+administrators get an Inbox notice and a Status page note with the date), and
+checks every schedule (`agent.schedule_maintenance.stale_schedules`): it deletes the own schedules of
 people removed from the team, and sends Inbox notices to owners about schedules
 that look unused (turned off for 30 days, paused more than 90 days ahead, for
 an agent type that no longer exists, or for a closed objective) and to
@@ -1240,6 +1245,23 @@ schedules of removed people. A disabled or removed person's schedules never
 run. Each notice is sent once per list. The run only gets the counts. When a
 person asks about such a notice, explain it; they remove a schedule with
 `/delete schedule <id>` or keep it with `/resume schedule <id>`.
+
+When `inspect_tool_result_artifact` or `web_artifact_inspect` answers
+`deleted_by_retention`, or a conversation's artifact list says an output was
+deleted under the retention policy, the output is gone and only its summary
+remains. Say so plainly and run the original tool again if the content is
+still needed; never retry the read or guess the content.
+
+An overdue saved-output cleanup means it has not completed successfully for
+two days. Permission errors and filesystem depth limits keep its previous
+success time; links and busy builds are expected skips. Report the failed kind
+and log event to TeamArchitect. Research cleanup deletes only complete
+generated result names with a 12-character hex ending, so dated personal notes
+remain in place.
+
+The seven-day period starts only after the administrator notice is stored.
+If storing it fails, cleanup reports a failure, keeps every output and retries
+with a full seven days after successful delivery.
 
 Use `inspect_memory_review_cleanup` during maintenance to review inactive expired
 memory-review jobs. Archive exact IDs with `maintain_memory_review_jobs`; purge

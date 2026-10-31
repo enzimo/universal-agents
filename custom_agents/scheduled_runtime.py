@@ -13,6 +13,7 @@ from custom_agents.access_runtime import resolve_meta_identity, verified_meta_pe
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run
 from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run
+from custom_agents.scheduled_run_failures import report_failing_scheduled_runs
 from custom_agents.task_context_runtime import inactive_owner, run_owner, scheduled_owner_roles
 from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
@@ -49,6 +50,7 @@ from custom_agents.stuck_schedules import report_stuck_schedules
 from custom_agents.stuck_tasks import report_stuck_tasks
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS, observe_liveness
 from custom_agents.dead_letter_watch import report_dead_letters
+from custom_agents.storage_usage_runtime import keep_storage_usage_measured
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
@@ -1340,7 +1342,7 @@ def _fired_header_and_meta(
     internal_meta.objective_id = scheduled_message.objective_id or getattr(
         internal_meta, "objective_id", None
     )
-    if _is_recurring(scheduled_message) and task.parent_task_id is None:
+    if task.parent_task_id is None:
         internal_meta.followup_to_task_id = None
     internal_meta = agent._ensure_request_timezone(
         internal_meta,
@@ -1971,12 +1973,17 @@ async def _scheduler_pass(
             "Could not send progress notes on delegated work. event=delegation_progress_failed agent_id=%s",
             agent.id,
         )
-    # Tell people about stuck schedules and tasks, and when they work again.
+    # Tell people about stuck schedules, failing scheduled jobs and stuck tasks,
+    # and when they work again.
     await report_stuck_schedules(agent)
+    await report_failing_scheduled_runs(agent)
     observe_liveness(agent)
     await report_stuck_tasks(agent)
     # Tell administrators about messages set aside since the last pass.
     await report_dead_letters(agent)
+    # The team lead measures people's stored data in a task of its own, at start
+    # and daily, whatever the maintenance schedules are set to.
+    keep_storage_usage_measured(agent)
     # A task left holding the work slot with no turn must not block the queue
     # until new work happens to arrive.
     await release_orphaned_slot_when_idle(agent)
@@ -1984,18 +1991,7 @@ async def _scheduler_pass(
     # permits, so workers without the key need not ask it for each run.
     await maybe_renew_schedule_permits(agent)
 
-    task_manager = getattr(agent, "task_manager", None)
-    can_claim_scheduled_work = (
-        not getattr(agent, "paused", False)
-        and not getattr(agent, "is_executing", False)
-        and (
-            task_manager is None
-            or not hasattr(task_manager, "can_start_new_task")
-            or await task_manager.operations_runtime.run(
-                task_manager.can_start_new_task,
-            )
-        )
-    )
+    can_claim_scheduled_work, parallel_only = await _schedule_claim_scope(agent)
     now = datetime.now(timezone.utc)
     # Deadlines persist across passes; drop only the expired retry holds.
     for schedule_id in [key for key, deadline in claim_retry_deadlines.items() if deadline <= now]:
@@ -2010,12 +2006,39 @@ async def _scheduler_pass(
             claim_ttl_seconds=DEFAULT_SCHEDULE_CLAIM_TTL_SECONDS,
             allow_unscoped=bool(getattr(agent, "is_team_lead", False)),
             exclude_schedule_ids=tuple(claim_retry_deadlines),
+            parallel_thread=True if parallel_only else None,
         )
 
     if claimed_schedule:
         await _fire_claimed_schedule(agent, claimed_schedule, claim_retry_deadlines, sleep_fn)
         return None
-    return await _idle_sleep_seconds(agent, can_claim_scheduled_work)
+    return await _idle_sleep_seconds(agent, can_claim_scheduled_work, parallel_only=parallel_only)
+
+
+async def _schedule_claim_scope(agent: Any) -> tuple[bool, bool]:
+    """Whether this pass may claim due schedules, and whether only those set up in a parallel thread.
+
+    Due schedules are claimed while the main lane is free, where most runs
+    execute. While it is busy, the team lead still claims schedules set up in
+    a parallel thread: each of their runs gets a parallel lane of its own
+    (custom_agents.execution_lanes) and does not wait for other work (owner,
+    2026-10-29). At the limit of parallel lanes such a run waits in the queue
+    like any other parallel request. Before, every claim waited for the main
+    lane, so these runs started late whenever ordinary work was running.
+    """
+
+    if getattr(agent, "paused", False):
+        return False, False
+    task_manager = getattr(agent, "task_manager", None)
+    main_lane_free = not getattr(agent, "main_lane_busy", False) and (
+        task_manager is None
+        or not hasattr(task_manager, "can_start_new_task")
+        or await task_manager.operations_runtime.run(task_manager.can_start_new_task)
+    )
+    if main_lane_free:
+        return True, False
+    parallel_lanes = bool(getattr(task_manager, "parallel_lanes_enabled", False))
+    return parallel_lanes, parallel_lanes
 
 
 async def _fire_claimed_schedule(
@@ -2176,10 +2199,17 @@ async def _advance_after_admission(agent: Any, claimed_schedule: dict[str, Any])
 _EXPECTED_ADVANCE_MISSES = frozenset({AdvanceOutcome.NOT_FOUND, AdvanceOutcome.DUE_CHANGED})
 
 
-async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool) -> float:
-    """Wait until the next due schedule, capped by watchdog and lease cadence."""
+async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool, *, parallel_only: bool = False) -> float:
+    """Wait until the next due schedule this pass could claim, capped by watchdog and lease cadence.
+
+    With ``parallel_only`` (``_schedule_claim_scope``) the next due schedule
+    is the next one set up in a parallel thread: an ordinary one already due
+    waits for the main lane and must not wake the loop every second.
+    """
     earliest = await agent.task_manager.operations_runtime.run(
-        agent._schedule_store.get_earliest_fire_time
+        partial(agent._schedule_store.get_earliest_fire_time, parallel_thread=True)
+        if parallel_only
+        else agent._schedule_store.get_earliest_fire_time
     )
     watchdog_sleep = max(1.0, float(agent.subtask_watchdog_interval_seconds))
     if earliest and can_claim_scheduled_work:

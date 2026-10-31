@@ -29,6 +29,7 @@ from assistant_gateway.domain.request_state import (
     ToolSetupRecord,
 )
 from assistant_gateway.domain.sessions import (
+    ParallelSettingOutcome,
     SessionConversationListRecord,
     SessionConversationRecord,
     SessionListRecord,
@@ -154,8 +155,12 @@ class SessionRepository(Protocol):
         thread_id: str | None = None,
         status: str | None = None,
         owner_canonical_user_id: str | None = None,
+        parallel_thread: bool | None = None,
     ) -> None:
-        """Save a session and make it its chat's current one (the person's own chat traffic only)."""
+        """Save a session and make it its chat's current one (the person's own chat traffic only).
+
+        Fields left ``None`` keep their saved values.
+        """
 
     def upsert_session_without_switching_chat(
         self,
@@ -181,6 +186,12 @@ class SessionRepository(Protocol):
     ) -> None: ...
 
     def set_session_status(self, session_key: str, status: str) -> bool: ...
+
+    def set_session_parallel(
+        self, session_key: str, *, conversation_id: str, parallel_thread: bool
+    ) -> ParallelSettingOutcome:
+        """Save the Run concurrently setting unless a request is open in the conversation."""
+        ...
 
     def set_active_session_for_channel(
         self,

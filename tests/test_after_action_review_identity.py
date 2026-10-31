@@ -61,7 +61,7 @@ from custom_tools.providers.context_memory import (
     list_pending_after_action_reports,
     resolve_after_action_report_review,
 )
-from custom_tools.runtime_context import set_agent_ref
+from tests.task_work_support import bind_task, set_agent_ref
 from storage.access_repository import AccessRepository
 from storage.knowledge_repository import create_knowledge_repository
 from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
@@ -100,6 +100,7 @@ def _build_world(db_path: str) -> SimpleNamespace:
         _scheduler_wake=None,
         paused=False,
         is_executing=True,  # queue the review instead of starting a model turn
+        main_lane_busy=True,  # the main lane (runtime_hosting.agent_execution)
         # The review's wake-up is recorded; with is_executing=True the drain finds the slot busy, so the review stays queued.
         _should_exit=asyncio.Event(),
         _pending_work_task=None,
@@ -236,6 +237,7 @@ def _access_agent(world, task_id: str) -> SimpleNamespace:
     """The team lead as the access hook and the tools see it while it runs ``task_id``."""
 
     access_runtime._runtime_access.cache_clear()
+    bind_task(task_id)  # the test's direct calls work for this task (tests.task_work_support)
     return SimpleNamespace(
         id=MANAGER_ID,
         name="lead",
@@ -246,7 +248,7 @@ def _access_agent(world, task_id: str) -> SimpleNamespace:
         authorization_config=world.manager.authorization_config,
         task_manager=world.tasks,
         instance_root=None,
-        _active_execution_task_id=task_id,
+        test_task_id=task_id,
     )
 
 

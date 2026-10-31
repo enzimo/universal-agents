@@ -1,12 +1,17 @@
 /**
- * Settings > Team > File Retention: how long the team keeps chat uploads and
- * scratch files (assistant_gateway.file_retention).
+ * Settings > Team > File Retention: how long the team keeps chat uploads,
+ * scratch files and saved tool outputs, and when people and administrators
+ * hear that stored data grows (assistant_gateway.file_retention).
  *
  * Every signed-in member sees the numbers. The form appears only when the
  * gateway says this person may change them (`can_change`, from their current
  * roles), never from client state. Chat uploads follow a change at the
- * gateway's next cleanup, within six hours; the manager reads scratch
- * retention when it starts, so that number applies after the next restart.
+ * gateway's next cleanup, within six hours; the manager reads scratch and
+ * saved tool output retention when it starts, so those numbers apply after
+ * the next restart. Storage warnings apply from their next check: each
+ * person's storage notice (`person_step_gb`, measured daily; 0 is off) and
+ * the Status page's warning and problem levels (`nearing_limit_percent`
+ * below `nearly_full_percent`).
  *
  * All server text is set with textContent, never as HTML.
  */
@@ -15,16 +20,23 @@ import { element, failureMessage, setStatusLine, text } from "./settings_support
 
 export const FILE_RETENTION_API = "/api/web-chat/file-retention";
 export const FILE_RETENTION_TITLE = "File Retention";
-export const FILE_RETENTION_INTRO = "How long the team keeps files people send in chat, and the temporary "
-  + "files agents leave in scratch folders (which include copies of files sent to people). "
-  + "Older files are deleted. 0 keeps them forever.";
+export const FILE_RETENTION_INTRO = "How long the team keeps files people send in chat, the temporary "
+  + "files agents leave in scratch folders (which include copies of files sent to people), and the "
+  + "tool outputs agents save while they work. Older files are deleted; conversations themselves are kept. "
+  + "0 keeps them forever. Storage warnings tell people and administrators as stored data grows.";
 export const FILE_RETENTION_ADMIN_ONLY = "Only administrators change how long files are kept.";
 export const FILE_RETENTION_SAVED = "Saved. Chat uploads follow the new number at the next cleanup, "
-  + "within six hours. Scratch files follow it after the next restart.";
+  + "within six hours. Scratch files and saved tool outputs follow it after the next restart. "
+  + "Storage warnings apply from their next check.";
+export const SAVED_OUTPUTS_HELP = "Large tool results, long tool output from conversations, research results "
+  + "and run folders. Applies after the next restart. Lowering the number deletes the older outputs at the next "
+  + "maintenance run; when it is first turned on, nothing is deleted for 7 days.";
+export const STORAGE_WARNINGS_TITLE = "Storage warnings";
 const LOAD_FAILED = "File retention could not be loaded because the gateway returned no explanation. "
   + "Select Refresh to try again.";
 const SAVE_FAILED = "File retention was not saved. Check the numbers and try again.";
 const DEFAULT_MAX_DAYS = 3650;
+const DEFAULT_MAX_STEP_GB = 10000;
 
 let idSequence = 0;
 function uniqueId(prefix) {
@@ -39,12 +51,37 @@ export function retentionText(days) {
   return `${value} ${value === 1 ? "day" : "days"}`;
 }
 
-/** A whole number of days from 0 to `max`, or null. */
-export function parsedDays(value, max) {
+/** "Every 5 GB", or "Off" for 0. */
+export function stepText(gigabytes) {
+  const value = Number(gigabytes);
+  return value === 0 ? "Off" : `Every ${value} GB`;
+}
+
+/** A whole number from `min` to `max`, or null. */
+export function parsedWhole(value, min, max) {
   const raw = text(value);
   if (!/^\d+$/.test(raw)) return null;
-  const days = Number(raw);
-  return days <= max ? days : null;
+  const number = Number(raw);
+  return number >= min && number <= max ? number : null;
+}
+
+/** A whole number of days from 0 to `max`, or null. */
+export function parsedDays(value, max) {
+  return parsedWhole(value, 0, max);
+}
+
+/** What is wrong with the storage warning numbers, or "" when they can be saved. */
+export function storageWarningsProblem(values, maxStep) {
+  if (values.person_step_gb === null) {
+    return `Enter a whole number of GB from 0 (no notices) to ${maxStep}. Nothing was saved.`;
+  }
+  if (values.nearing_limit_percent === null || values.nearly_full_percent === null) {
+    return "Enter a whole percent from 1 to 100. Nothing was saved.";
+  }
+  if (values.nearing_limit_percent >= values.nearly_full_percent) {
+    return "The warning level must be below the problem level. Nothing was saved.";
+  }
+  return "";
 }
 
 function labeledField(document, label, control, help) {
@@ -54,15 +91,23 @@ function labeledField(document, label, control, help) {
   return field;
 }
 
-function daysInput(document, value, max) {
-  const input = element(document, "input", "memory-editor-input file-retention-days");
+function numberInput(document, className, value, min, max) {
+  const input = element(document, "input", "memory-editor-input " + className);
   input.type = "number";
-  input.min = "0";
+  input.min = String(min);
   input.max = String(max);
   input.step = "1";
   input.inputMode = "numeric";
   input.value = String(value);
   return input;
+}
+
+function daysInput(document, value, max) {
+  return numberInput(document, "file-retention-days", value, 0, max);
+}
+
+function warningInput(document, value, min, max) {
+  return numberInput(document, "storage-warning-number", value, min, max);
 }
 
 /**
@@ -95,16 +140,28 @@ export function createFileRetentionControls({ container, client, browser = globa
     rows.append(
       element(document, "dt", "", "Chat uploads"), element(document, "dd", "", retentionText(payload.upload_days)),
       element(document, "dt", "", "Scratch files"), element(document, "dd", "", retentionText(payload.scratch_days)),
+      element(document, "dt", "", "Saved tool outputs"), element(document, "dd", "", retentionText(payload.output_days)),
+      element(document, "dt", "", "Storage notice to each person"),
+      element(document, "dd", "", stepText(payload.person_step_gb)),
+      element(document, "dt", "", "Warn administrators"),
+      element(document, "dd", "", `At ${Number(payload.nearing_limit_percent)}% full`),
+      element(document, "dt", "", "Report a problem"),
+      element(document, "dd", "", `At ${Number(payload.nearly_full_percent)}% full`),
     );
     return [rows, element(document, "p", "settings-subsection-copy", FILE_RETENTION_ADMIN_ONLY)];
   }
 
   function form(payload) {
     const max = Number(payload.max_days) || DEFAULT_MAX_DAYS;
+    const maxStep = Number(payload.max_step_gb) || DEFAULT_MAX_STEP_GB;
     const node = element(document, "form", "file-retention-form");
     node.setAttribute("aria-label", "File retention");
     const uploads = daysInput(document, payload.upload_days, max);
     const scratch = daysInput(document, payload.scratch_days, max);
+    const outputs = daysInput(document, payload.output_days, max);
+    const step = warningInput(document, payload.person_step_gb, 0, maxStep);
+    const nearing = warningInput(document, payload.nearing_limit_percent, 1, 100);
+    const full = warningInput(document, payload.nearly_full_percent, 1, 100);
     const group = element(document, "div", "permission-choice-row file-retention-actions");
     const submit = element(document, "button", "button primary permission-choice-button", "Save");
     submit.type = "submit";
@@ -112,16 +169,38 @@ export function createFileRetentionControls({ container, client, browser = globa
     node.append(
       labeledField(document, "Days to keep chat uploads", uploads, "Files people send in any chat app."),
       labeledField(document, "Days to keep scratch files", scratch, "Applies after the next restart."),
+      labeledField(document, "Days to keep saved tool outputs", outputs, SAVED_OUTPUTS_HELP),
+      element(document, "p", "file-retention-group-title", STORAGE_WARNINGS_TITLE),
+      labeledField(document, "Notice to each person every (GB)", step,
+        "An Inbox notice each time the data stored for them passes another step. 0 turns it off."),
+      labeledField(document, "Warn administrators at (% full)", nearing,
+        "Disks and message storage. Administrators get an Inbox notice."),
+      labeledField(document, "Report a problem at (% full)", full, "Above the warning level."),
       group,
     );
     node.addEventListener("submit", event => {
       if (event && typeof event.preventDefault === "function") event.preventDefault();
       if (submit.disabled) return;
-      const values = { upload_days: parsedDays(uploads.value, max), scratch_days: parsedDays(scratch.value, max) };
-      const wrong = values.upload_days === null ? uploads : values.scratch_days === null ? scratch : null;
-      if (wrong) {
+      const values = {
+        upload_days: parsedDays(uploads.value, max),
+        scratch_days: parsedDays(scratch.value, max),
+        output_days: parsedDays(outputs.value, max),
+        person_step_gb: parsedWhole(step.value, 0, maxStep),
+        nearing_limit_percent: parsedWhole(nearing.value, 1, 100),
+        nearly_full_percent: parsedWhole(full.value, 1, 100),
+      };
+      const wrongDays = values.upload_days === null ? uploads
+        : values.scratch_days === null ? scratch
+          : values.output_days === null ? outputs : null;
+      if (wrongDays) {
         setStatus(`Enter a whole number of days from 0 (keep forever) to ${max}. Nothing was saved.`, true);
-        wrong.focus();
+        wrongDays.focus();
+        return;
+      }
+      const problem = storageWarningsProblem(values, maxStep);
+      if (problem) {
+        setStatus(problem, true);
+        (values.person_step_gb === null ? step : values.nearing_limit_percent === null ? nearing : full).focus();
         return;
       }
       save(values, submit, group);

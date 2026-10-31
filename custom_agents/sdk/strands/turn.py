@@ -85,6 +85,7 @@ from custom_agents.structured_llm_messages import (
     ModelAgentTurnDecision,
     ModelWorkerTurnDecision,
 )
+from custom_tools.runtime_context import current_task_work
 from custom_tools.tool_stop import ToolStop
 from custom_agents.tool_call_limits import (
     ToolCallLimitExceeded,
@@ -336,6 +337,18 @@ async def _finalize_objective_work_invocation(
         ),
         errors=["objective_work_session_yield", reason],
     )
+
+
+
+def _remember_context_assembly(assembly: AssembledContext) -> None:
+    """Keep the turn's latest prompt assembly in its work record, for ``get_context_status``.
+
+    Per turn, not per executor: several turns may run at once.
+    """
+
+    work = current_task_work()
+    if work is not None:
+        work.context_assembly = assembly
 
 
 def _turn_decision_initial_guidance(tool_name: str) -> str:
@@ -659,7 +672,6 @@ class LLMTurnExecutor:
         self.logger = logger
         self.tasks = tasks
         self.effects = effects
-        self.last_context_assembly: AssembledContext | None = None
 
     @property
     def settings(self) -> TurnRuntimeSettings:
@@ -749,7 +761,7 @@ class LLMTurnExecutor:
 
         suffix = str(text or "")
         if not suffix:
-            self.last_context_assembly = assembly
+            _remember_context_assembly(assembly)
             return assembly
 
         prompt = f"{assembly.prompt}\n\n{suffix}" if assembly.prompt else suffix
@@ -818,7 +830,7 @@ class LLMTurnExecutor:
             warnings=warnings,
             context_fill_ratio=fill_ratio,
         )
-        self.last_context_assembly = updated
+        _remember_context_assembly(updated)
         return updated
 
     def _terminal_reasoning_enabled(self) -> bool:
@@ -2300,7 +2312,7 @@ class LLMTurnExecutor:
                     base_tool_call_limit=self.effects.resolved_max_tool_calls_per_task(),
                 )
             raise
-        self.last_context_assembly = turn.assembly
+        _remember_context_assembly(turn.assembly)
         turn.full_prompt = turn.assembly.prompt
         turn.context_debug_dump_dir = None
         self.logger.info(
@@ -2662,7 +2674,7 @@ class LLMTurnExecutor:
                     "degraded_sections": list(degraded_sections),
                 }
             )
-            self.last_context_assembly = turn.assembly
+            _remember_context_assembly(turn.assembly)
             turn.full_prompt = turn.assembly.prompt
             if turn.runtime_instruction_parts:
                 turn.assembly = self._append_provider_prompt_suffix(
@@ -2892,7 +2904,6 @@ class LLMTurnExecutor:
                 task=turn.msg_content,
                 msg_header=turn.msg_header,
                 msg_meta=turn.msg_meta,
-                strands_agent=self.model(),
                 invoke_kwargs=turn.invoke_kwargs,
                 callback_handler=turn.callback_handler,
                 full_prompt=turn.full_prompt,

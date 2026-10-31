@@ -611,7 +611,7 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
                     (
                         "PATCH",
                         "/api/web-chat/sessions/{session_key}",
-                        self.conversation._handle_web_chat_rename_session,
+                        self.conversation._handle_web_chat_update_session,
                     ),
                     (
                         "POST",

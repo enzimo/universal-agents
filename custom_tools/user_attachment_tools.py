@@ -23,7 +23,7 @@ from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_tools import file_access
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import PERSON_UPLOADS_DIRNAME
-from custom_tools.runtime_context import get_agent_ref
+from custom_tools.runtime_context import bound_task_id, get_agent_ref
 
 
 DEFAULT_MAX_CHARS = 6000
@@ -60,11 +60,7 @@ def _current_task_attachments() -> list[UserTaskAttachment]:
     agent = get_agent_ref()
     if agent is None:
         return []
-    task_id = getattr(agent, "_active_execution_task_id", None) or getattr(
-        getattr(agent, "task_manager", None),
-        "current_task_id",
-        None,
-    )
+    task_id = bound_task_id()
     task_info = None
     task_manager = getattr(agent, "task_manager", None)
     if task_id and task_manager is not None and hasattr(task_manager, "get_task_info"):
