@@ -4,7 +4,7 @@
 
 # 🌐 Universal Agents (beta)
 
-Current public version: **0.9.10** · Licensed under the [Apache License 2.0](LICENSE).
+Current public version: **0.9.11** · Licensed under the [Apache License 2.0](LICENSE).
 
 ## 🧱 Chapter 1: The Foundation
 
