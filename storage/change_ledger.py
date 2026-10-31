@@ -75,7 +75,10 @@ switch is turned on again rule (b) counts only later changes. The stores'
 version checks apply either way.
 
 Ledger, review and case rows never leave the instance: the team transfer
-does not carry them, and they are pruned after ``LEDGER_RETENTION``.
+does not carry them, and they are pruned after ``LEDGER_RETENTION``. An
+instance upgraded in place from 0.9 keeps its ledger table, which lacks the
+field names; ``ensure_ledger_tables`` adds that column, and the older entries
+count as having set every field.
 """
 
 from __future__ import annotations
@@ -101,7 +104,7 @@ from storage.postgres_connection import (
 )
 from storage.read_only import repositories_are_read_only
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
-from storage.sqlite_connection import connect_sqlite
+from storage.sqlite_connection import connect_sqlite, ensure_sqlite_column, sqlite_column_names
 from storage.backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 
 logger = logging.getLogger(__name__)
@@ -121,6 +124,11 @@ LEDGER_LOCK_TIMEOUT_MS = 5000
 LEDGER_RETENTION = timedelta(days=7)
 # The field name for "every field": creating or removing a record.
 ALL_FIELDS = "*"
+# The ledger column naming the fields a change set, as a JSON list. Ledger
+# tables from 0.9 lack it; it is added when a store opens them, and their
+# entries count as having set every field (``_add_changed_fields``).
+CHANGED_FIELDS_COLUMN = "changed_fields"
+OLDER_ENTRY_FIELDS = json.dumps([ALL_FIELDS])
 # Escalation: this many conflicts on one record within the window make every
 # request's change to it wait for the person until the window has passed.
 ESCALATION_CASES = 3
@@ -341,6 +349,47 @@ def ensure_ledger_tables(conn: Any, dialect: SqlDialect) -> None:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (CHANGE_LEDGER_SCHEMA_LOCK_KEY,))
     for statement in ledger_table_statements(dialect):
         conn.execute(statement)
+    _add_changed_fields(conn, dialect)
+
+
+def _add_changed_fields(conn: Any, dialect: SqlDialect) -> None:
+    """Give a 0.9 ledger table the ``changed_fields`` column, so 0.10 starts on an older instance's database.
+
+    ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it was, and
+    without the column every knowledge page save would fail. Entries from 0.9
+    did not record which fields they set, so they count as setting all of
+    them (``OLDER_ENTRY_FIELDS``): a request that saw one leaves an
+    overlapping change to the person rather than overwrite it. Note entries
+    are never read for fields. Later opens find the column with a read.
+    """
+
+    if _has_column(conn, dialect, CHANGE_LEDGER_TABLE, CHANGED_FIELDS_COLUMN):
+        return
+    column_type = f"TEXT NOT NULL DEFAULT '{OLDER_ENTRY_FIELDS}'"
+    if dialect is POSTGRES:
+        # The schema lock taken above keeps two processes from both adding it.
+        conn.execute(f"ALTER TABLE {CHANGE_LEDGER_TABLE} ADD COLUMN {CHANGED_FIELDS_COLUMN} {column_type}")
+    else:
+        # Not every caller holds the SQLite write lock here; this tolerates a
+        # process that added the column first.
+        ensure_sqlite_column(conn, CHANGE_LEDGER_TABLE, CHANGED_FIELDS_COLUMN, column_type, logger=logger)
+    logger.info(
+        "Added the changed fields column to a ledger table from an older version; its entries count as "
+        "changing every field. event=change_ledger_column_added table=%s column=%s",
+        CHANGE_LEDGER_TABLE,
+        CHANGED_FIELDS_COLUMN,
+    )
+
+
+def _has_column(conn: Any, dialect: SqlDialect, table: str, column: str) -> bool:
+    if dialect is POSTGRES:
+        row = conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+            "AND table_name = %s AND column_name = %s",
+            (table, column),
+        ).fetchone()
+        return row is not None
+    return column in sqlite_column_names(conn, table)
 
 
 def current_position(conn: Any, dialect: SqlDialect, team_id: str) -> int:

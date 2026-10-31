@@ -41,7 +41,7 @@ from storage.config import StorageSettings, resolve_storage_settings
 from storage.knowledge_repository import create_knowledge_repository
 from storage.postgres_connection import connect_postgres
 from storage.sqlite_connection import connect_sqlite
-from tests.knowledge_support import BACKENDS, NOW, TEAM, agent, knowledge_storage, person
+from tests.knowledge_support import BACKENDS, LEDGER_TABLE_0_9, NOW, TEAM, agent, knowledge_storage, person
 
 ALICE = "alice"
 PAGE = "personal/trip"
@@ -316,6 +316,25 @@ def test_the_ledger_keeps_field_names_never_values(storage, setup):
     assert [(str(row[0]), json.loads(str(row[1]))) for row in rows] == [
         ("create", ["*"]), ("change", ["body"]), ("append", []),
     ]
+
+
+def test_a_store_upgraded_in_place_from_0_9_gets_the_field_column_and_saves_pages(storage):
+    """0.10 started on a 0.9 database: the old ledger table gains the column, and saves record their fields."""
+
+    with _connect(storage) as conn:
+        conn.execute(LEDGER_TABLE_0_9.format(integer="INTEGER" if storage.backend == "sqlite" else "BIGINT"))
+        conn.commit()
+
+    # The knowledge store adds the column; the request store's open finds it.
+    svc = service(storage)
+    requests = ChangeRequestStore(storage)
+    svc.write(person(ALICE), PAGE, DraftInput(title="Trip", body="Leave Monday."))
+    requests.open(team_id=TEAM, request_id="req_a", person_id=ALICE, now=NOW)
+    assert edit(svc, request_actor("req_a"), "Leave Tuesday.", base=1) == 2
+
+    with _connect(storage) as conn:
+        rows = conn.execute("SELECT change_type, changed_fields FROM change_ledger ORDER BY position").fetchall()
+    assert [(str(row[0]), json.loads(str(row[1]))) for row in rows] == [("create", ["*"]), ("change", ["body"])]
 
 
 def test_a_review_that_cannot_be_saved_is_logged_and_the_change_shown_again(storage, setup, monkeypatch, caplog):
