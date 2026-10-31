@@ -1900,6 +1900,33 @@ that, because both members may hold the same tool. The first user is an owner
 and administrator but in normal use acts like any other user, escalating only
 when a request needs it.
 
+Each catalog tool has an owner scope (`owner_scope` in `ua_definitions/access`,
+`OwnerScope` in `custom_messages/contracts/access_v2.py`), which says who may
+hold and give it:
+
+- `team` (the default): the team's tools. Administrators hold and give them
+  (`std:admin`); members give agents, for their own work, what they hold.
+- `platform`: platform objects (settings, access, capabilities, restarts).
+  Only administrators hold `full`; agents never do and only propose
+  (`guard:agents-no-platform-full`).
+- `administrators`: settings every person shares, such as model choice. Only
+  administrators hold or give them at any level (`guard:admin-only-tools`);
+  an agent holds them only for an administrator's work.
+- `person`: a tool that acts on each person's own records, such as the clean-up
+  of their chat history (`fn:history_cleanup`). It belongs to the person whose
+  work or request it is, never to whoever acts: Cedar marks that person as its
+  owner (`AccessService.person_owner`), so `std:owner` lets that person use and
+  give it, and `std:admin`, which skips owned targets, gives administrators
+  nothing over anyone else's. Only that person opens it to agents, only to
+  TeamLead, only for their own work and never handed on: grants for everyone,
+  for someone else's work, to workers, schedules, roles or people, and with
+  delegation are refused (`AccessService.person_owned_refusal`), agents cannot
+  ask for it with `request_access`, and its reviews are decided by that person
+  alone (`AccessRequests.may_decide`). A block on it applies to the whole team,
+  so only administrators add one. It belongs to no tool set (the catalog
+  refuses one) and to no starter profile. Without the person's grant each use
+  is reviewed by that person.
+
 Access follows the work (owner's decision 2026-09-30). People only talk to
 TeamLead, workers get work only from TeamLead, scheduled runs or system jobs,
 and every tool call runs in a task with a verified identity, so workers never
@@ -2310,7 +2337,50 @@ and input settings; `custom_agents/model_choice.py`) is the `model_choice` chang
 `guard:admin-only-tools`), so it applies when TeamLead holds it for an
 administrator's work (the Trusted profile gives it) and that administrator
 gets a notice. The owner asked for it because model switches are frequent,
-bounded and easy to undo, while everything else keeps the review. Staging a
+bounded and easy to undo, while everything else keeps the review.
+
+A person's chat transcripts and finished tasks are kept until they are
+deleted; only the person, through TeamLead, deletes them (owner's decision
+2026-10-27), apart from removing the person from the team.
+`custom_agents/history_cleanup.py` gives TeamLead `get_history_overview` (the
+person's conversations, sizes and ages) and `plan_history_cleanup`, which
+stages an exact plan for the person the task verifiably works for: by age,
+by named conversations of theirs, or both, for chats, finished tasks or both.
+It leaves out the conversation the request is asked in and conversations with
+unfinished work, including tasks waiting for a person regardless of age.
+That exclusion is checked again before applying a plan. In a scheduled run only a schedule the person made
+themselves (`ScheduleManagementClass.USER`) may stage one. `apply_change`
+applies it as the `history_cleanup` change of `fn:history_cleanup`, each
+person's own tool (owner scope `person`): at once when the person gave TeamLead
+that tool at `full` (Settings > Access or `/access grant`), otherwise after the person
+approves the exact plan in the Inbox, whose card names the conversations by
+the start of their first request and keeps only ids, dates and counts once
+decided (`ChangeProposalV1.effect_after_decision`). The manager never opens the
+gateway's database, so the clean-up is an order in the manager's database
+(`storage/history_cleanup_repository.py`), which both processes already open.
+TeamLead's process deletes the manager's records in one transaction (turns,
+summaries and tags, conversation artifacts and their files, memory-review jobs,
+memory-graph rows, finished tasks and the tasks delegated from them) and leaves
+the order for the gateway; a gateway loop in both authorization modes
+(`assistant_gateway/history_cleanup.py`) deletes the chat transcripts and their
+copies, sends the person an Inbox notice with what was deleted and how it was
+approved, and closes the order. Each side logs a `history_cleanup` access
+event. The manager commits the deleted-row counts and pending vector ids with
+the deletion, so a retry only finishes file and vector removal. It never
+replays SQL against a conversation that has started afresh and reused turn
+indexes. The gateway similarly journals its original counts and upload paths
+in `gateway_history_cleanups` in the same transaction as record deletion;
+failed file removals keep the order waiting. The notice therefore reports the
+original clean-up after a retry. Journals stay with their manager order for
+30 days so concurrent retries still find the original result, then are
+removed. These are runtime records, excluded from
+team transfer. The manager finishes interrupted orders at start and in
+maintenance. An age sweep leaves explicitly cut conversations to their own
+boundary, and preserves known conversations with no selected turns, so a
+kept turn's question stays even if the gateway wrote it just before the cutoff.
+Remembered facts are not part of it. A message that follows up a deleted
+conversation before the gateway applied its part starts the conversation
+afresh (`custom_agents.conversation_runtime`). Staging a
 model-affecting plan already tries each target model once
 (`RuntimeLLMOverrideApplier.prepare_candidates` and `test_candidates`, owner's
 decision 2026-10-10: try once, then ask), including instance-baseline `llm.*`

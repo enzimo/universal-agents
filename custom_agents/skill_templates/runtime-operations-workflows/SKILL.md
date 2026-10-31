@@ -635,6 +635,32 @@ digest-protected; they last 24 hours so a person can approve later. Apply
 rejects changed source files, modified plans, a different person or agent,
 expired plans, and a second apply. Restage instead of editing a plan file.
 
+## Cleaning Up A Person's Chat History
+
+Only when the person you work for asks to delete their own chats or finished
+tasks:
+
+1. Call `get_history_overview` and tell them what they have (conversations,
+   sizes, and how much is older than 30, 90, 180 and 365 days) when that helps
+   them choose.
+2. Call `plan_history_cleanup(what, older_than, conversation_ids)`: `what` is
+   `conversations`, `tasks` or `both`; give a date (`YYYY-MM-DD`, everything
+   from before it), conversation ids from the overview, or both. It always
+   works on their own history and deletes nothing yet.
+3. Show them the plan's `effect`, including what is kept (the conversation you
+   are answering in, conversations with work still running, and remembered
+   facts), then call `apply_change(change_id, reason)` without naming
+   conversations in the reason. It applies at once when they let you clean up
+   without asking (Settings > Access); otherwise they approve the exact plan in
+   the Inbox. With authorization off, get their agreement and pass
+   `confirmed=true`.
+4. Report the result: the chat transcripts disappear within a few seconds and
+   they get an Inbox notice with what was deleted. A plan whose history changed
+   is refused; stage it again.
+
+You cannot ask for the permission to clean up without asking (`request_access`
+refuses it); only the person turns it on.
+
 ## Supervised Runtime Restart
 
 A runtime restart can interrupt active work. Never infer restart authority from

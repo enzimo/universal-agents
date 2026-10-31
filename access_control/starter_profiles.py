@@ -115,6 +115,10 @@ def _wanted_grants(
     actor = SubjectRefV1(kind=SubjectKind.USER, id=person.person_id)
     wanted: list[GrantV1] = []
     for item in profile.grants:
+        if service.person_owned(item.target.id):
+            # A person's own tool (such as their history clean-up) is opened
+            # only by an explicit choice of that person, never by a profile.
+            raise ValueError(f"Starter profile {profile.name} names {item.target.id}, which only its person opens.")
         spec = GrantV1(
             grant_id="new",
             team_id=service.team_id,

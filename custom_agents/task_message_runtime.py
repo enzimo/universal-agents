@@ -35,6 +35,7 @@ from custom_agents.conversation_runtime import (
     finalize_conversation_turn,
     record_task_conversation_history,
 )
+from custom_agents.history_cleanup import followup_conversation_deleted
 from custom_agents.message_routing import (
     build_outgoing_meta,
     construct_header,
@@ -1347,6 +1348,7 @@ async def _handle_task_request(
                 msg_meta=normalized_meta,
                 owner_person_id=owner_person_id,
                 owner_named_agent_type=self.named_agent_type,
+                deleted_by_cleanup=partial(followup_conversation_deleted, self),
             )
         except ValueError as exc:
             self._logger.warning(

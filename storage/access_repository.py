@@ -268,6 +268,14 @@ def _utc(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat() if value is not None else None
 
 
+def _as_decided(request: AccessRequestV1) -> AccessRequestV1:
+    """A decided request keeps its change's after-decision effect lines (``ChangeProposalV1.as_decided``)."""
+
+    if request.change is None or not request.change.effect_after_decision:
+        return request
+    return request.model_copy(update={"change": request.change.as_decided()})
+
+
 class AccessRepository:
     def __init__(self, settings: StorageSettings) -> None:
         self.settings = settings
@@ -2041,7 +2049,7 @@ class AccessRepository:
             conn.begin_write()
             self._finish_in(conn, updated, claim_id=claim_id)
             conn.commit()
-        return updated
+        return _as_decided(updated)
 
     def _finish_in(self, conn: Any, updated: AccessRequestV1, *, claim_id: str | None) -> None:
         """Record the outcome inside an open write transaction; a lost race raises and rolls it back.
@@ -2057,9 +2065,12 @@ class AccessRepository:
           outcome names (approved in place). The outcome of a Deny or a
           withdrawal is a copy of the waiting request, so its ``grant_ids``
           still name the hand-downs to deny.
+        - A staged change keeps only its ``effect_after_decision`` lines from
+          now on, when it has them (``ChangeProposalV1.as_decided``).
         """
 
         p = self.dialect.bind
+        updated = _as_decided(updated)
         if claim_id is not None:
             waiting = self._require_claim_in(conn, DecisionClaim(updated.request_id, claim_id))
         else:
@@ -2465,6 +2476,26 @@ class AccessRepository:
     def _read_rows(self, query: str, params: tuple[Any, ...]) -> list[Any]:
         with self._connect() as reader:
             return list(reader.execute(query, params).fetchall())
+
+    def record_history_cleanup(
+        self, team_id: str, detail: dict[str, Any], *, actor: SubjectRefV1 | None, at: datetime
+    ) -> None:
+        """Log one side of a person's history clean-up (kind ``history_cleanup``): ids, approval and counts."""
+
+        with self._connect() as conn:
+            conn.begin_write()
+            self._event(
+                conn,
+                AccessEventV1(
+                    event_id=new_id("access_event"),
+                    team_id=team_id,
+                    kind="history_cleanup",
+                    actor=actor,
+                    detail=detail,
+                    recorded_at_utc=at,
+                ),
+            )
+            conn.commit()
 
     def record_decision(self, team_id: str, detail: dict[str, Any], *, at: datetime) -> None:
         with self._connect() as conn:

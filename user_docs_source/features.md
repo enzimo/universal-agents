@@ -27,6 +27,12 @@ there, within your own authority. `/webchat?view=access` opens it directly, and
 `/webchat?view=access#agent=<type>` opens it at one agent type. See
 [The Access page](permissions.md#the-access-page).
 
+Your chats and finished tasks are kept until you ask TeamLead to delete some,
+by date or by conversation; you approve each clean-up in the Inbox, or let
+TeamLead do it without asking with a switch on the Access page, and you get a
+notice each time. See
+[Cleaning up your chat history](permissions.md#cleaning-up-your-chat-history).
+
 ### Messages while your request is running
 
 A message in a busy chat gives guidance to the request already running there.

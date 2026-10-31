@@ -28,7 +28,8 @@ def test_tool_providers_have_unique_names_and_tool_ownership() -> None:
     # Objective functions became objectives, objective_work_sessions and objective_work_profiles.
     # The knowledge base adds six operations and the curator adds twelve
     # (merging pages and lifting a freeze were added on 2026-10-11).
-    assert len(ALL_PROVIDER_TOOLS) == 170
+    # TeamLead's history overview and clean-up plan were added on 2026-10-27.
+    assert len(ALL_PROVIDER_TOOLS) == 172
 
 
 def test_agent_catalog_does_not_reexport_tool_registry_ownership() -> None:

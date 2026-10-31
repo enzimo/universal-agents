@@ -21,6 +21,14 @@
 # owner_scope: administrators marks team settings every person shares (model
 # choice): only administrators hold them at any level, and agents may hold
 # them for an administrator's work.
+# owner_scope: person marks a tool that acts on each person's own records
+# (their history clean-up): it belongs to the person whose work or request it
+# is, so only that person holds it and opens it, only to TeamLead, only for
+# their own work and never handed on; administrators neither use it for
+# others nor give it for everyone, only the person decides its reviews, and
+# only administrators block it (a block is team-wide). It is in no tool set and
+# no starter profile; the rules are in access_control.decisions
+# (person_owner, person_owned_refusal) and access_control.requests (may_decide).
 #
 # Tool sets with standard grants (access_control.standard_grants), which need no
 # grant rows: agent_runtime (every agent's own work: messages, its task queue,
@@ -235,6 +243,12 @@ tools:
       get_conversation_context_slice: read
       list_pending_after_action_reports: read
       resolve_after_action_report_review: write
+      # The person's own stored history and its size, and a staged clean-up
+      # plan (custom_agents.history_cleanup): staging deletes nothing; the
+      # plan is applied with apply_change as the history_cleanup change of
+      # fn:history_cleanup.
+      get_history_overview: read
+      plan_history_cleanup: write
 
   - tool_id: fn:memory
     provider: memory
@@ -646,6 +660,23 @@ tools:
     functions: {}
     changes:
       model_choice: write
+
+  # Cleaning up a person's own chat history and finished tasks (owner's
+  # decision 2026-10-27). TeamLead stages an exact plan with
+  # plan_history_cleanup (fn:conversations) and applies it with apply_change:
+  # at once when the person gave TeamLead full access to this tool for their
+  # own work, otherwise the person approves that exact plan in the Inbox. The
+  # person gets a notice after every clean-up. It is each person's own tool
+  # (owner_scope person, see the top of this file).
+  - tool_id: fn:history_cleanup
+    display_name: History clean-up
+    description: >-
+      Lets TeamLead delete your own old chats and finished tasks when you ask, without approving each
+      clean-up. Only you can give it, and TeamLead never hands it on.
+    owner_scope: person
+    functions: {}
+    changes:
+      history_cleanup: full
 
   # apply_change both waits for approval and applies the exact plan. In
   # particular, system schedule tools only stage their changes; this is the

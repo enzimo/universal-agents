@@ -17,6 +17,7 @@ from assistant_gateway.inbound_attachments import resolve_inbound_attachment_cac
 from assistant_gateway.storage_capacity import StorageCapacity, build_storage_capacity
 from assistant_gateway.storage_usage import StorageUsageNotices, build_storage_usage_notices
 from assistant_gateway.upload_retention import UploadRetention
+from assistant_gateway.history_cleanup import GatewayHistoryCleanup
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgePages
 from assistant_gateway.access_inbox import (
     GatewayAccessInbox,
@@ -469,6 +470,25 @@ def _access_maintenance_tasks(
             asyncio.create_task(_report_stale_blocks(access_inbox, config.manager.team_id), name="gateway_stale_blocks")
         )
     return tasks
+
+
+def _history_cleanup(
+    config: GatewayInstanceConfig, state_store: GatewayStateStore, access_inbox: GatewayAccessInbox
+) -> GatewayHistoryCleanup:
+    """The gateway's part of people's history clean-ups, in both authorization modes.
+
+    Composed here so the host stays a composition root
+    (``assistant_gateway.history_cleanup`` owns the behavior).
+    """
+
+    return GatewayHistoryCleanup(
+        team_id=config.manager.team_id,
+        storage=config.manager_storage_settings,
+        state_store=state_store,
+        uploads_dir=config.layout.uploads_dir,
+        proactive_session_key=config.heartbeat.session_key,
+        send_notice_once=access_inbox.send_notice_once,
+    )
 
 
 @dataclass(frozen=True)
@@ -1380,6 +1400,10 @@ class UserGateway:
                 asyncio.create_task(
                     self.stored_data.uploads.run(self._stop_event),
                     name="gateway_upload_retention_loop",
+                ),
+                asyncio.create_task(
+                    _history_cleanup(self.config, self.state_store, self.access_inbox).run(self._stop_event),
+                    name="gateway_history_cleanup_loop",
                 ),
                 asyncio.create_task(
                     self.stored_data.usage.run(self._stop_event),
