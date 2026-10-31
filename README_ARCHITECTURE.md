@@ -515,6 +515,12 @@ move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
 A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Exact-agent targets keep the same durable run receipts as agent-type targets:
+admission checks the configured target and the worker's actual task custody.
+Superseding a run closes its receipt and any same-worker occurrences merged
+into it in one transaction, so those occurrences cannot keep an exhausted
+schedule after its work stops. Merged occurrences retain their coalesced state
+to record that they never ran separately.
 Admitting a job's last run does not remove the schedule's identity or access
 (2026-10-30). A worker's run proves whom it works for with the schedule's
 permit, checked live against the row (`access_control.task_identity`), and its
