@@ -31,7 +31,7 @@ function harness() {
     ],
   };
   const calls = [];
-  let renders = 0;
+  let renders = 0, switchRenders = 0;
   const sandbox = {
     AbortSignal,
     Set,
@@ -44,6 +44,7 @@ function harness() {
     saveThreads() {},
     renderThreads() { renders += 1; },
     renderMessages() {},
+    renderParallelSwitch() { switchRenders += 1; },
     clearSystemError() { return false; },
     appendSystemError() {},
     ensureActiveThreadHistory: () => Promise.resolve(),
@@ -56,9 +57,10 @@ function harness() {
   };
   loadFunctions(sandbox, ["fetchSessions", "threadIsBusy", "applyThreadStates"]);
   const thread = key => sandbox.sharedState.threads.find(item => item.sessionKey === key);
-  const page = (busy = [], revision = server.revision) => ({ threads_revision: revision, busy_session_keys: busy });
+  const page = (busy = [], revision = server.revision, open = []) => ({
+    threads_revision: revision, busy_session_keys: busy, open_request_session_keys: open });
   const settle = () => sandbox.fetchSessions();
-  return { sandbox, server, calls, thread, page, settle, renders: () => renders };
+  return { sandbox, server, calls, thread, page, settle, renders: () => renders, switchRenders: () => switchRenders };
 }
 
 test("a task running for another page shows the busy dot here too", async () => {
@@ -84,6 +86,28 @@ test("the server clearing its busy state keeps this page's own reply wait", asyn
   sandbox.applyThreadStates(page(["alpha"]));
   sandbox.applyThreadStates(page([]));
   assert.equal(sandbox.threadIsBusy(thread("alpha")), true);
+});
+
+test("each thread shows its saved Run concurrently setting and is locked while a request is open", async () => {
+  const { sandbox, server, thread, page, settle, switchRenders } = harness();
+  server.sessions = [{ ...server.sessions[0], parallel_thread: true }, server.sessions[1]];
+  await sandbox.fetchSessions();
+  assert.equal(thread("alpha").parallelThread, true);
+  assert.equal(thread("beta").parallelThread, false);
+  const before = switchRenders();
+  sandbox.applyThreadStates(page([], server.revision, ["beta"]));
+  assert.equal(thread("beta").serverRequestOpen, true);
+  assert.equal(thread("alpha").serverRequestOpen, false);
+  assert.equal(switchRenders(), before + 1, "the switch is redrawn when its lock changes");
+  sandbox.applyThreadStates(page([], server.revision, ["beta"]));
+  assert.equal(switchRenders(), before + 1);
+  sandbox.applyThreadStates(page([], server.revision, []));
+  assert.equal(thread("beta").serverRequestOpen, false);
+  // A save in flight keeps its position when the list reloads meanwhile.
+  thread("beta").parallelSaving = true;
+  thread("beta").parallelThread = true;
+  await settle();
+  assert.equal(thread("beta").parallelThread, true);
 });
 
 test("a rename on another device reloads the thread list once", async () => {

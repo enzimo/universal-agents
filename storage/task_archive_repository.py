@@ -89,11 +89,28 @@ class TaskArchiveRepository(Protocol):
         owner_canonical_user_id: Optional[str] = None,
     ) -> List[ArchivedTaskListRecord]: ...
 
+    def stored_text_bytes_by_owner(self) -> dict[str, int]: ...
+
 
 class _RelationalTaskArchiveRepository:
     """Shared record operations for archived task persistence."""
 
     _dialect: SqlDialect
+
+    def stored_text_bytes_by_owner(self) -> dict[str, int]:
+        """Bytes of each person's completed tasks kept here, by owner, in one aggregate.
+
+        For people's storage notices, measured by the manager (``custom_agents.storage_usage_runtime``);
+        completed tasks are kept indefinitely, so this keeps growing.
+        """
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT owner_canonical_user_id, SUM({self._dialect.text_bytes('task_data')}) FROM completed_tasks "
+                "WHERE owner_canonical_user_id IS NOT NULL AND owner_canonical_user_id <> '' "
+                "GROUP BY owner_canonical_user_id"
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows if row[0]}
 
     def list_finished_tasks(
         self, *, team_id: str, owner_canonical_user_id: str, offset: int, limit: int,

@@ -13,6 +13,7 @@ from custom_agents.access_runtime import resolve_meta_identity, verified_meta_pe
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run
 from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run
+from custom_agents.scheduled_run_failures import report_failing_scheduled_runs
 from custom_agents.task_context_runtime import inactive_owner, run_owner, scheduled_owner_roles
 from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
@@ -48,6 +49,7 @@ from custom_agents.stuck_schedules import report_stuck_schedules
 from custom_agents.stuck_tasks import report_stuck_tasks
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS, observe_liveness
 from custom_agents.dead_letter_watch import report_dead_letters
+from custom_agents.storage_usage_runtime import keep_storage_usage_measured
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
@@ -1339,7 +1341,7 @@ def _fired_header_and_meta(
     internal_meta.objective_id = scheduled_message.objective_id or getattr(
         internal_meta, "objective_id", None
     )
-    if _is_recurring(scheduled_message) and task.parent_task_id is None:
+    if task.parent_task_id is None:
         internal_meta.followup_to_task_id = None
     internal_meta = agent._ensure_request_timezone(
         internal_meta,
@@ -1969,12 +1971,17 @@ async def _scheduler_pass(
             "Could not send progress notes on delegated work. event=delegation_progress_failed agent_id=%s",
             agent.id,
         )
-    # Tell people about stuck schedules and tasks, and when they work again.
+    # Tell people about stuck schedules, failing scheduled jobs and stuck tasks,
+    # and when they work again.
     await report_stuck_schedules(agent)
+    await report_failing_scheduled_runs(agent)
     observe_liveness(agent)
     await report_stuck_tasks(agent)
     # Tell administrators about messages set aside since the last pass.
     await report_dead_letters(agent)
+    # The team lead measures people's stored data in a task of its own, at start
+    # and daily, whatever the maintenance schedules are set to.
+    keep_storage_usage_measured(agent)
     # A task left holding the work slot with no turn must not block the queue
     # until new work happens to arrive.
     await release_orphaned_slot_when_idle(agent)

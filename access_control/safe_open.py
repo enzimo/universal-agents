@@ -10,22 +10,34 @@ or through a link planted beforehand. The rules here close both:
   path fails instead of being followed, whenever it appeared;
 - only regular files with exactly one link are read or replaced, so a hard
   link cannot expose or change a file somewhere else;
-- new files are created with ``O_EXCL`` and existing ones are replaced in
-  place through the checked descriptor; folders are created with ``mkdirat``.
+- new content is written to a new temporary file (``O_EXCL``) in the same
+  folder, which then replaces the file in one ``rename``; folders are created
+  with ``mkdirat``.
+
+Why replace by rename: a person's requests can run at the same time (parallel
+threads), and two of them may write one file. Writing into the existing file
+let a reader see it empty or half written, and two writers could mix their
+content. A rename is atomic: readers see the old content or the new, the last
+writer to finish wins with its whole content, and a write that fails part way
+leaves the file as it was. Only ``exclusive`` writes, which never replace a
+file, still create their file in place (``writable_file``).
 
 Callers decide which root and which path are allowed; this module only
 guarantees that the file opened is the one below that root. The agent file
 library (``custom_tools.file_access``), the broker's staged CLI files
 (``secure_tool_broker.task_files``), the gateway workspace browser and the
-holding of a removed person's folder (``access_control.held_person_folders``)
-and the deletion of a removed person's credentials folder
-(``secure_tool_broker.credential_state``) use it.
+holding of a removed person's folder (``access_control.held_person_folders``),
+the deletion of a removed person's credentials folder
+(``secure_tool_broker.credential_state``) and the measuring of people's
+stored data (``custom_agents.storage_usage_runtime``) use it.
 """
 
 from __future__ import annotations
 
 import errno
+import logging
 import os
+import secrets
 import shutil
 import stat
 from collections.abc import Iterator
@@ -39,17 +51,26 @@ REASON_NOT_DIRECTORY = "not_directory"
 REASON_NOT_REGULAR_FILE = "not_regular_file"
 REASON_SEVERAL_LINKS = "several_links"
 REASON_TOO_LARGE = "too_large"
+REASON_TOO_DEEP = "too_deep"
 REASON_UNSAFE_NAME = "unsafe_name"
 REASON_ROOT_UNAVAILABLE = "root_unavailable"
 REASON_OPEN_FAILED = "open_failed"
 REASON_DESTINATION_EXISTS = "destination_exists"
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
-_FILE_READ_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+# A planted pipe must not wait for a writer before fstat can reject it.
+# O_NONBLOCK leaves regular-file reads unchanged; validate the opened file,
+# rather than checking its name before opening it, which would race a rename.
+_FILE_READ_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 _FILE_WRITE_FLAGS = os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW
 _NEW_FILE_MODE = 0o644
 _NEW_DIRECTORY_MODE = 0o777  # narrowed by the process umask, as mkdir does
 _COPY_CHUNK = 1024 * 1024
+# Characters of the target's name kept in its temporary file's name, so the
+# temporary name stays far below the file system's 255-byte limit.
+_TEMPORARY_NAME_HEAD = 40
+
+logger = logging.getLogger(__name__)
 
 
 class UnsafePath(OSError):
@@ -131,7 +152,10 @@ def open_directory(root: Path, parts: tuple[str, ...], *, create: bool = False) 
 
 
 def _require_single_link_regular(descriptor: int, shown: Path) -> os.stat_result:
-    info = os.fstat(descriptor)
+    return _single_link_regular(os.fstat(descriptor), shown)
+
+
+def _single_link_regular(info: os.stat_result, shown: Path) -> os.stat_result:
     if not stat.S_ISREG(info.st_mode):
         raise UnsafePath(f"Not a regular file: {shown}", reason=REASON_NOT_REGULAR_FILE)
     if info.st_nlink != 1:
@@ -215,43 +239,127 @@ def entry_status(root: Path, parts: tuple[str, ...]) -> os.stat_result | None:
 def writable_file(
     root: Path, parts: tuple[str, ...], *, create_directories: bool = False, exclusive: bool = False
 ) -> Iterator[BinaryIO]:
-    """A binary writer for ``root/parts``: a new file, or an existing one replaced in place.
+    """A binary writer for ``root/parts``: a new file, or new content for an existing one.
 
-    An existing file must be a one-link regular file; with ``exclusive`` it
-    must not exist at all.
+    The content goes to a temporary file beside the target that replaces it
+    in one rename when the block ends (module docstring). An existing file
+    must be a one-link regular file; the new one keeps its mode and owner. A
+    block that raises leaves the file as it was and removes the temporary
+    file.
+
+    With ``exclusive`` the file must not exist at all and is created and
+    written in its place: there is no old content to mix with, a second
+    writer is refused, and callers that record the new file's identity before
+    writing it (``access_control.decision_effects.OwnedFile``) rely on the
+    name being reserved at once.
     """
 
     folder_parts, name = _split(_checked_parts(parts), root)
     shown = _display(root, parts)
     directory = open_directory(root, folder_parts, create=create_directories)
     try:
-        descriptor = _open_for_write(directory, name, shown, exclusive=exclusive)
+        if exclusive:
+            with os.fdopen(_create_new(directory, name, shown), "wb") as writer:
+                yield writer
+        else:
+            with _replacing(directory, name, shown) as writer:
+                yield writer
     finally:
         os.close(directory)
-    with os.fdopen(descriptor, "wb") as writer:
-        yield writer
 
 
-def _open_for_write(directory: int, name: str, shown: Path, *, exclusive: bool) -> int:
+def _create_new(directory: int, name: str, shown: Path) -> int:
+    """Create ``name`` in ``directory``; anything already there, a link included, is refused."""
+
     try:
         return os.open(name, _FILE_WRITE_FLAGS | os.O_CREAT | os.O_EXCL, _NEW_FILE_MODE, dir_fd=directory)
     except FileExistsError:
-        if exclusive:
-            raise UnsafePath(f"Already exists: {shown}", reason=REASON_OPEN_FAILED) from None
+        raise UnsafePath(f"Already exists: {shown}", reason=REASON_OPEN_FAILED) from None
     except OSError as exc:
         raise _open_error(exc, name, directory, shown) from exc
-    # It exists: replace it in place, but only a one-link regular file, never a link.
+
+
+def _replaceable(directory: int, name: str, shown: Path) -> os.stat_result | None:
+    """The status of the file a write replaces (None when there is none); refuses what is not replaced.
+
+    A link, a folder or a file with several links keeps its place. The rename
+    itself never follows a link: if one is swapped in after this check, the
+    rename replaces the link and leaves what it points at alone.
+    """
+
     try:
-        descriptor = os.open(name, _FILE_WRITE_FLAGS, dir_fd=directory)
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
     except OSError as exc:
         raise _open_error(exc, name, directory, shown) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise UnsafePath(f"A link on this path is not followed: {shown}", reason=REASON_LINK)
+    return _single_link_regular(info, shown)
+
+
+@contextmanager
+def _replacing(directory: int, name: str, shown: Path) -> Iterator[BinaryIO]:
+    """A writer for a temporary file beside ``name`` that replaces it in one rename at the end."""
+
+    replaced = _replaceable(directory, name, shown)
+    temporary = f".{name[:_TEMPORARY_NAME_HEAD]}.{secrets.token_hex(8)}.tmp"
     try:
-        _require_single_link_regular(descriptor, shown)
-        os.ftruncate(descriptor, 0)
+        descriptor = os.open(
+            temporary, _FILE_WRITE_FLAGS | os.O_CREAT | os.O_EXCL, _NEW_FILE_MODE, dir_fd=directory
+        )
+    except OSError as exc:
+        raise UnsafePath(
+            f"Cannot write {shown}: its folder does not allow a new file ({exc.strerror}).",
+            reason=REASON_OPEN_FAILED,
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "wb") as writer:
+            if replaced is not None:
+                _keep_owner_and_mode(writer.fileno(), replaced, shown)
+            yield writer
+            writer.flush()
+            os.fsync(writer.fileno())  # the content is on disk before the name points at it
+        try:
+            os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        except OSError as exc:
+            raise UnsafePath(f"Cannot replace {shown}: {exc.strerror}", reason=REASON_OPEN_FAILED) from exc
     except BaseException:
-        os.close(descriptor)
+        _remove_temporary(directory, temporary, shown)
         raise
-    return descriptor
+
+
+def _remove_temporary(directory: int, temporary: str, shown: Path) -> None:
+    try:
+        os.unlink(temporary, dir_fd=directory)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            "The temporary file of a failed write was left behind. event=safe_open_temporary_left "
+            "path=%s temporary=%s error=%s",
+            shown,
+            temporary,
+            exc,
+        )
+
+
+def _keep_owner_and_mode(descriptor: int, replaced: os.stat_result, shown: Path) -> None:
+    """Give the new file the replaced file's owner and mode, as a write in place kept them."""
+
+    own = os.fstat(descriptor)
+    if (own.st_uid, own.st_gid) != (replaced.st_uid, replaced.st_gid):
+        try:
+            os.fchown(descriptor, replaced.st_uid, replaced.st_gid)
+        except PermissionError:
+            logger.warning(
+                "A replaced file now belongs to this process, which may not give it its former owner. "
+                "event=safe_open_owner_not_kept path=%s former_uid=%s former_gid=%s",
+                shown,
+                replaced.st_uid,
+                replaced.st_gid,
+            )
+    os.fchmod(descriptor, stat.S_IMODE(replaced.st_mode))  # after fchown, which may clear set-id bits
 
 
 def write_bytes(root: Path, parts: tuple[str, ...], data: bytes, *, create_directories: bool = False) -> int:
@@ -386,6 +494,61 @@ def remove_directory(root: Path, parts: tuple[str, ...]) -> bool:
     finally:
         os.close(directory)
 
+# Measurement fails rather than returning a partial size beyond this depth.
+FOLDER_BYTES_MAX_DEPTH = 64
+
+
+def folder_bytes(root: Path, parts: tuple[str, ...] = ()) -> int:
+    """Total size in bytes of the regular files in ``root/parts`` and below; 0 when it does not exist.
+
+    Each folder is opened relative to the one before it with ``O_NOFOLLOW``,
+    so a link, or a folder swapped for one while the walk runs, is never
+    followed and nothing outside the folder is counted. Links, devices and
+    other entries count nothing; a file with several hard links counts in
+    full each time it is seen. Unreadable entries and folders deeper than
+    ``FOLDER_BYTES_MAX_DEPTH`` fail the measurement instead of returning a
+    partial total. For measuring, not for deciding access.
+    """
+
+    try:
+        directory = open_directory(root, parts)
+    except UnsafePath as exc:
+        if exc.reason == REASON_NOT_FOUND or (
+            exc.reason == REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError)
+        ):
+            return 0
+        raise
+    try:
+        return _folder_bytes(directory, depth=0)
+    finally:
+        os.close(directory)
+
+
+def _folder_bytes(directory: int, *, depth: int) -> int:
+    total = 0
+    for name in os.listdir(directory):
+        try:
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue  # removed while listing
+        if stat.S_ISREG(info.st_mode):
+            total += info.st_size
+        elif stat.S_ISDIR(info.st_mode):
+            if depth >= FOLDER_BYTES_MAX_DEPTH:
+                raise UnsafePath(f"Folder measurement is too deep: {name}", reason=REASON_TOO_DEEP)
+            try:
+                child = os.open(name, _DIRECTORY_FLAGS, dir_fd=directory)
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                    continue  # removed, or replaced by a link or file, since the listing
+                raise
+            try:
+                total += _folder_bytes(child, depth=depth + 1)
+            finally:
+                os.close(child)
+    return total
+
+
 def list_directory(root: Path, parts: tuple[str, ...]) -> list[tuple[str, os.stat_result]]:
     """Entries of the folder ``root/parts`` with their own status (links not followed)."""
 
@@ -403,6 +566,7 @@ def list_directory(root: Path, parts: tuple[str, ...]) -> list[tuple[str, os.sta
 
 
 __all__ = [
+    "FOLDER_BYTES_MAX_DEPTH",
     "REASON_DESTINATION_EXISTS",
     "REASON_LINK",
     "REASON_NOT_DIRECTORY",
@@ -412,10 +576,12 @@ __all__ = [
     "REASON_ROOT_UNAVAILABLE",
     "REASON_SEVERAL_LINKS",
     "REASON_TOO_LARGE",
+    "REASON_TOO_DEEP",
     "REASON_UNSAFE_NAME",
     "UnsafePath",
     "copy_file",
     "entry_status",
+    "folder_bytes",
     "list_directory",
     "move_directory",
     "open_directory",

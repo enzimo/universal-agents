@@ -117,7 +117,7 @@ class ExecutionControlService:
             builder_identity="universal-agents:python-compile-v1",
             isolated_rust_builder=OpenShellRustBuilder(
                 host_workspace_root=workspace,
-                build_root=layout.execution_runs_dir / "rust-builds",
+                build_root=layout.execution_rust_builds_dir,
             ),
         )
 

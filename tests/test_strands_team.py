@@ -268,3 +268,29 @@ def test_every_agent_gets_the_operators_switch_for_checks_between_requests(tmp_p
     expected = configured is None
     assert agent._request_conflict_checks is expected
     assert f"event=request_conflict_checks enabled={expected}" in caplog.text
+
+
+@pytest.mark.parametrize(("configured", "expected"), [(None, 90), (30, 30), (0, 0)])
+def test_every_agent_knows_how_long_saved_tool_outputs_are_kept(tmp_path, configured, expected) -> None:
+    """The manager's cleanup deletes with it; every agent's readers say when an output was deleted under it."""
+
+    config = {
+        "team_id": "team_retention",
+        "role": "Manager",
+        "goal": "Run the team.",
+        "backstory": "Coordinates work for the team.",
+        "tools": [],
+        "named_agent_type": "TeamArchitect",
+        "is_team_lead": True,
+        "authorization_config": {"enabled": False},
+        "task_history_db_path": str(tmp_path / "task_history.db"),
+        "storage_sqlite_path": str(tmp_path / "task_history.db"),
+    }
+    if configured is not None:
+        config["output_retention_days"] = configured
+    with patch("custom_agents.strands_agent.Agent"), patch(
+        "custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()
+    ):
+        agent = create_strands_agent(config)
+
+    assert agent.output_retention_days == expected

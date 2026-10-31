@@ -18,6 +18,7 @@ from assistant_gateway.application.gateway_application import (
 from assistant_gateway.application.transcript_service import TranscriptCursorError
 from assistant_gateway.application.website_application import (
     GatewaySessionAliasConflict,
+    WebChatParallelSettingResult,
     WebTranscriptMessageV1,
     WebsiteGatewayApplication,
     web_chat_threads_revision,
@@ -74,6 +75,8 @@ class WebsiteConversationHandlers:
         )
         # `title` is the thread's fixed name (web_chat_threads); null until
         # its first ordinary message, and the page shows "New Chat" then.
+        # `parallel_thread` is its Run concurrently setting; whether a request
+        # is open, which locks that switch, rides on every event page.
         sessions = [
             {
                 "session_key": thread.session_key,
@@ -81,6 +84,7 @@ class WebsiteConversationHandlers:
                 "conversation_id": thread.conversation_id,
                 "title": thread.title,
                 "updated_at": thread.updated_at,
+                "parallel_thread": thread.parallel_thread,
             }
             for thread in listed
         ]
@@ -100,14 +104,14 @@ class WebsiteConversationHandlers:
     ) -> web.Response:
         web_session = self.operations._require_web_chat_session(request)
         owner = self.operations._required_web_chat_owner(web_session)
-        parallel_thread = await self._parallel_thread_requested(request)
+        # A new thread starts with Run concurrently off; the person turns it
+        # on with the switch (``_set_web_chat_session_parallel``).
         session = self.application.start_new_session(
             channel_name=self.channel_name,
             user_id=owner,
             chat_id="web-chat",
             thread_id=None,
             canonical_user_id=owner,
-            parallel_thread=parallel_thread,
         )
         return web.json_response(
             {
@@ -302,12 +306,57 @@ class WebsiteConversationHandlers:
             raise web.HTTPNotFound(text="Thread not found.")
         return web.json_response({"status": "ok"})
 
-    async def _handle_web_chat_rename_session(
+    async def _handle_web_chat_update_session(
         self, request: web.Request
     ) -> web.Response:
+        """Change one thing about a thread: its name or its Run concurrently setting."""
+
         web_session = self.operations._require_web_chat_session(request)
         session_key = str(request.match_info.get("session_key") or "").strip()
         payload = await self.operations._json_payload(request)
+        if "parallel_thread" in payload:
+            if "session_alias" in payload or "title" in payload:
+                raise web.HTTPBadRequest(text="Change a thread's name and Run concurrently separately.")
+            return self._set_web_chat_session_parallel(web_session, session_key, payload)
+        return self._rename_web_chat_session(web_session, session_key, payload)
+
+    def _set_web_chat_session_parallel(
+        self, web_session: Any, session_key: str, payload: dict[str, Any]
+    ) -> web.Response:
+        """Save the switch below Send; refused while a request is open in the thread."""
+
+        parallel_thread = payload.get("parallel_thread")
+        if not isinstance(parallel_thread, bool):
+            raise web.HTTPBadRequest(text="parallel_thread must be true or false.")
+        conversation_id = str(payload.get("conversation_id") or "").strip()
+        if not conversation_id:
+            raise web.HTTPBadRequest(text="conversation_id is required.")
+        outcome = self.application.sessions.set_web_chat_session_parallel(
+            session_key=session_key,
+            conversation_id=conversation_id,
+            parallel_thread=parallel_thread,
+            owner_canonical_user_id=self.operations._web_session_owner_scope(web_session),
+        )
+        if outcome is WebChatParallelSettingResult.NOT_FOUND:
+            raise web.HTTPNotFound(text="Thread not found.")
+        if outcome is WebChatParallelSettingResult.REQUEST_OPEN:
+            raise web.HTTPConflict(
+                text="This chat is working on a request. You can change Run concurrently after it replies."
+            )
+        if outcome is WebChatParallelSettingResult.CONVERSATION_CHANGED:
+            raise web.HTTPConflict(text="This chat moved to another conversation. Reload it and try again.")
+        return web.json_response(
+            {
+                "status": "ok",
+                "session_key": session_key,
+                "conversation_id": conversation_id,
+                "parallel_thread": parallel_thread,
+            }
+        )
+
+    def _rename_web_chat_session(
+        self, web_session: Any, session_key: str, payload: dict[str, Any]
+    ) -> web.Response:
         session_alias = str(
             payload.get("session_alias") or payload.get("title") or ""
         ).strip()
@@ -894,21 +943,6 @@ class WebsiteConversationHandlers:
                 )
             )
         return client_request_id
-
-    async def _parallel_thread_requested(self, request: web.Request) -> bool:
-        """Whether Web Chat launches the new thread as parallel: optional body ``{"parallel_thread": true}``.
-
-        New Chat sends no body. A parallel thread's requests may run at the
-        same time as the team lead's other work (custom_agents.execution_lanes).
-        """
-
-        if not request.can_read_body:
-            return False
-        payload = await self.operations._json_payload(request)
-        value = payload.get("parallel_thread", False)
-        if not isinstance(value, bool):
-            raise web.HTTPBadRequest(text="parallel_thread must be true or false.")
-        return value
 
     async def _web_chat_payload_and_uploads(
         self,

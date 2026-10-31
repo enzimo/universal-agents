@@ -397,14 +397,58 @@ def reported_task_person(
     return verifier.verify_permit(run.permit, team_id=team_id, check_expiry=False).person_id
 
 
+@dataclass(frozen=True)
+class ReportedScheduleRun:
+    """Which schedule a finished run belonged to, whom it worked for, and when it started."""
+
+    schedule_id: str
+    person_id: str | None
+    started_at_utc: datetime
+
+
+def reported_schedule_run(
+    *,
+    verifier: ContextVerifier,
+    team_id: str,
+    task_context: SignedTaskContextV1 | Mapping[str, Any] | None,
+    schedule_run: ScheduleRunIdentityV1 | Mapping[str, Any] | None,
+) -> ReportedScheduleRun | None:
+    """The schedule and person of a finished scheduled run, from its original signature only.
+
+    Like ``reported_task_person``, historical attribution for notices, never
+    authority to execute: the run may have outlived its identity and its
+    schedule may be gone. None when the identity names no schedule (a
+    person's request signed by the gateway). Raises ``IdentityRejected`` or
+    ``ValueError`` when the signature does not check out. A permit run's
+    start time is the run's own unsigned field, read only to date notices.
+    """
+
+    if schedule_run is None:
+        context = verifier.verify(task_context, team_id=team_id, check_expiry=False)
+        if context.issuer != ISSUER_SCHEDULER or not context.schedule_id:
+            return None
+        return ReportedScheduleRun(context.schedule_id, context.person_id, context.issued_at_utc)
+    if task_context is not None:
+        raise IdentityRejected("The task carries both a signed task context and a scheduled run identity.")
+    run = (
+        schedule_run
+        if isinstance(schedule_run, ScheduleRunIdentityV1)
+        else ScheduleRunIdentityV1.model_validate(schedule_run)
+    )
+    permit = verifier.verify_permit(run.permit, team_id=team_id, check_expiry=False)
+    return ReportedScheduleRun(permit.schedule_id, permit.person_id, run.started_at_utc)
+
+
 __all__ = [
     "LIVE_CHECK_CACHE_SIZE",
     "LIVE_CHECK_SECONDS",
+    "ReportedScheduleRun",
     "ScheduleFacts",
     "ScheduleFactsSource",
     "ScheduleRunLookup",
     "StoredScheduleFacts",
     "job_schedule_id",
     "resolve_task_identity",
+    "reported_schedule_run",
     "reported_task_person",
 ]

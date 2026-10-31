@@ -21,6 +21,7 @@ from custom_messages.contracts.runtime_v1 import (
     MEM_REVIEW_AGENT_TYPE,
 )
 from default_values import (
+    MAX_STORAGE_WARNING_STEP_GB,
     ACTIVITY_COLLECTOR_DEFAULTS,
     AGENT_DEFAULTS,
     DELIVERY_DEFAULTS,
@@ -423,6 +424,10 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "gateway.users.web_user_tokens_enabled": "Enable browser user tokens for authenticated Web Chat sessions.",
     "gateway.users.web_user_token_ttl_days": "Browser user-token lifetime in days. 0 disables automatic expiration.",
     "gateway.users.removed_data_retention_days": "Days a removed person's folder, personal memory, own knowledge pages and conversations are held for /user restore before a maintenance run deletes them. 0 deletes them at the next maintenance run.",
+    "gateway.storage_warnings": "When people hear that the data the team stores for them has grown, and when administrators hear that storage is filling up. Administrators can also change these in Settings > Team.",
+    "gateway.storage_warnings.person_step_gb": "Each person gets one Inbox notice when their stored data (chats, completed tasks, their files and folder) passes each multiple of this many GB (1 GB = 1,000,000,000 bytes); the gateway and the manager measure it daily. 0 turns these notices off.",
+    "gateway.storage_warnings.nearing_limit_percent": "The Status page warns, and administrators get one Inbox notice, when a disk the instance uses or the message server's storage reaches this percent of its limit.",
+    "gateway.storage_warnings.nearly_full_percent": "At this percent of its limit the Status page reports a problem and administrators get another notice. Must be above nearing_limit_percent.",
     "state": "Manager, task-history, schedule, and heartbeat state settings.",
     "state.storage": "Manager/task-history/schedule persistence store.",
     "state.storage.backend": "Manager store backend: sqlite or postgres.",
@@ -876,6 +881,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "voice.request_timeout_seconds": "Voice HTTP request timeout in seconds.",
     "tool_policy": "Tool settings that are not access (access is given with grants).",
     "tool_policy.scratch_retention_days": "Days a file stays in a scratch/ folder (people's and agents/, including copies of files sent to people) before the internal-improvement maintenance run deletes it; 0 keeps them. Administrators can also change it in Settings > Team; it applies after a restart.",
+    "tool_policy.output_retention_days": "Days saved tool outputs are kept after they were written before the internal-improvement maintenance run deletes them: oversized tool results (state/tool_results), long tool output offloaded from conversations (dbs/conversation_artifacts and their records), research results (research/ in people's folders and agents/) and execution run folders (agents/execution). Conversations, their summaries, task links and completed tasks stay. 0 keeps them; at most 3650. Administrators can also change it in Settings > Team; it applies after a restart.",
     "authorization": "Access checks: agents and people need grants for the tools they use.",
     "authorization.enabled": "Check every agent tool call and broker request against grants; false runs every tool without requests while the sandbox, broker and protected folders still apply.",
     "authorization.cedar_binary_path": "Optional path or command name of the ua-cedar-authorizer access evaluator; null finds it.",
@@ -1666,6 +1672,51 @@ class GatewayUsersSettings(BaseModel):
         return parsed
 
 
+def _whole_number(value: Any, *, name: str) -> int:
+    """An int, or a string of digits, as a whole number; refuses true/false and fractions."""
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    raise ValueError(f"{name} must be a whole number.")
+
+
+class StorageWarningSettings(BaseModel):
+    """When people hear that the data the team stores for them has grown (``assistant_gateway.storage_usage``)."""
+
+    person_step_gb: int = GATEWAY_DEFAULTS.storage_warnings_person_step_gb.value
+    nearing_limit_percent: int = GATEWAY_DEFAULTS.storage_warnings_nearing_limit_percent.value
+    nearly_full_percent: int = GATEWAY_DEFAULTS.storage_warnings_nearly_full_percent.value
+
+    @field_validator("person_step_gb", mode="before")
+    @classmethod
+    def _step_in_range(cls, value: Any) -> int:
+        name = "gateway.storage_warnings.person_step_gb"
+        parsed = _whole_number(value, name=name)
+        if not 0 <= parsed <= MAX_STORAGE_WARNING_STEP_GB:
+            raise ValueError(f"{name} must be from 0 (no notices) to {MAX_STORAGE_WARNING_STEP_GB}.")
+        return parsed
+
+    @field_validator("nearing_limit_percent", "nearly_full_percent", mode="before")
+    @classmethod
+    def _percent_in_range(cls, value: Any, info: Any) -> int:
+        name = f"gateway.storage_warnings.{info.field_name}"
+        parsed = _whole_number(value, name=name)
+        if not 1 <= parsed <= 100:
+            raise ValueError(f"{name} must be from 1 to 100.")
+        return parsed
+
+    @model_validator(mode="after")
+    def _warning_before_problem(self) -> "StorageWarningSettings":
+        if self.nearing_limit_percent >= self.nearly_full_percent:
+            raise ValueError(
+                "gateway.storage_warnings.nearing_limit_percent must be below nearly_full_percent, "
+                "so administrators are warned before storage is nearly full."
+            )
+        return self
+
+
 class ManagerTargetSettings(BaseModel):
     team_id: str = AGENT_DEFAULTS.default_team_id.value
     named_agent_type: str = AGENT_DEFAULTS.named_agent_type.value
@@ -1679,6 +1730,7 @@ class ManagerTargetSettings(BaseModel):
     )
     storage: StateStorageSettings = Field(default_factory=StateStorageSettings)
     users: GatewayUsersSettings = Field(default_factory=GatewayUsersSettings)
+    storage_warnings: StorageWarningSettings = Field(default_factory=StorageWarningSettings)
 
     @field_validator("startup_agents")
     @classmethod

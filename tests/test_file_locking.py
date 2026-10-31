@@ -55,8 +55,33 @@ def test_lock_excludes_another_process_until_released(tmp_path: Path) -> None:
     assert not store.exists()
 
 
+def test_nonblocking_contender_skips_the_body_and_can_acquire_after_release(tmp_path: Path) -> None:
+    store = tmp_path / "store.json"
+    probe = """
+import sys
+from pathlib import Path
+from file_locking import FileLockBusy, exclusive_file_lock
+try:
+    with exclusive_file_lock(Path(sys.argv[1]), purpose="test store", blocking=False):
+        print("acquired")
+except FileLockBusy:
+    print("busy")
+"""
+
+    def attempt() -> str:
+        return subprocess.run(
+            [sys.executable, "-c", probe, str(store)],
+            capture_output=True, text=True, check=True, timeout=5,
+        ).stdout.strip()
+
+    with exclusive_file_lock(store, purpose="test store"):
+        assert attempt() == "busy"
+    assert attempt() == "acquired"
+
+
+@pytest.mark.parametrize("blocking", [True, False])
 def test_lock_failure_raises_and_never_runs_the_body(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, blocking: bool,
 ) -> None:
     def refuse(_descriptor: int, _operation: int) -> None:
         raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
@@ -67,7 +92,7 @@ def test_lock_failure_raises_and_never_runs_the_body(
 
     with caplog.at_level(logging.ERROR, logger="file_locking"):
         with pytest.raises(FileLockUnavailable) as raised:
-            with exclusive_file_lock(tmp_path / "store.json", purpose="test store"):
+            with exclusive_file_lock(tmp_path / "store.json", purpose="test store", blocking=blocking):
                 body_ran = True
 
     assert body_ran is False

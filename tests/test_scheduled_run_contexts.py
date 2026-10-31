@@ -335,7 +335,7 @@ def test_a_claim_retimed_before_admission_waits_and_counts_only_the_actual_run(w
     assert world.store.worker_records.get_occurrence(future_id, TEAM) is not None
     row = world.store.get_row(SCHEDULE_ID)
     if one_time:
-        assert row is None
+        assert row["remaining_count"] == 0, "the final task still needs its schedule and access"
     else:
         assert row["remaining_count"] == 1
         assert row["next_fire_at"] > future.isoformat()

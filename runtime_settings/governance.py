@@ -27,6 +27,10 @@ from default_values import AUTHORIZATION_DEFAULTS, TOOL_POLICY_DEFAULTS
 from runtime_settings.access_workflows import MOVED_WORKFLOW_KEYS
 from runtime_settings.common import _normalized_optional_string
 
+# Ten years; larger numbers are almost certainly typing mistakes (and a period
+# that reaches before the year 1 cannot be turned into a date). 0 keeps files.
+MAX_RETENTION_DAYS = 3650
+
 
 class ToolPolicySettings(BaseModel):
     """Tool settings that are not access (access is given with grants)."""
@@ -35,6 +39,11 @@ class ToolPolicySettings(BaseModel):
     # folder (custom_agents.scratch_retention); 0 turns the cleanup off.
     scratch_retention_days: int = Field(
         default=TOOL_POLICY_DEFAULTS.scratch_retention_days.value, ge=0
+    )
+    # Trusted maintenance deletes saved tool outputs written longer ago than
+    # this (custom_agents.output_retention); 0 turns the cleanup off.
+    output_retention_days: int = Field(
+        default=TOOL_POLICY_DEFAULTS.output_retention_days.value, ge=0, le=MAX_RETENTION_DAYS
     )
 
 

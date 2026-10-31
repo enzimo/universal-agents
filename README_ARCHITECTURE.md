@@ -343,9 +343,20 @@ acknowledged, and handled by the execution lane of the task it concerns
 (`deferred_message_runtime.may_resume_a_turn`). The mailbox waits for each
 callback, so a turn there held back every other message.
 
-**Parallel threads.** A thread a person starts with Web Chat's **Launch
-parallel thread** is stored as parallel on its gateway session, and the
-gateway marks every request sent in it (`GatewayContext.parallel_thread`). The
+**Parallel threads.** Web Chat's **Run concurrently** switch is a setting of
+each thread (owner, 2026-10-29), stored on its gateway session
+(`gateway_sessions.parallel_thread`; internally such a thread is a parallel
+thread). The person changes it through the thread update route, and
+`set_session_parallel` saves it in one conditional update that refuses while
+a request is open in the thread's conversation (the durable running-request
+record, `open_request_session_keys` on every event page). Why the lock: a
+message sent while a request is open is guidance for that request and reaches
+it in its own lane, so a change then could not apply to anything the person
+sees. The gateway gives each request the setting it has when the request is
+recorded as open (`GatewayContext.parallel_thread`), read after admission so a
+change saved during the person-setup check is not missed. Messages carry no
+setting, the thread keeps its conversation and model history either way, and
+new threads (New Chat, `/new`) start with it off. The
 team lead runs each such request in an execution lane of its own
 (`custom_agents.execution_lanes` decides the lane,
 `custom_agents.execution_lanes_runtime` runs the lanes,
@@ -356,13 +367,16 @@ schedule or Objective work created in a parallel thread copies that request's
 context, mark included (`custom_tools.providers.schedules`, the turn action
 outbox), so each of its runs gets a parallel lane of its own and counts toward
 the limit (owner, 2026-10-28: work set up from a parallel thread runs in
-parallel). Its runs may therefore overlap a new request in the same thread;
+parallel). That copy is the setting at creation: turning the thread's switch
+off later leaves such work concurrent, and work made while it was off stays
+ordinary (owner, 2026-10-29), because the scheduler claims runs from the
+schedule row without asking the gateway. Its runs may therefore overlap a new request in the same thread;
 repeated runs of one schedule do not, because the scheduler skips a fire while
 the previous run is active. All other work (ordinary chats, New Chat, `/new`,
 schedules created elsewhere, heartbeat runs, other chat apps, and every
 worker) shares the main lane, one turn at a time, as before.
-Why: by launching a parallel thread the person says the request does not
-overlap their other work (owner, 2026-10-27). Overlapping changes are checked
+Why: by turning Run concurrently on the person says the thread's requests do
+not overlap their other work (owner, 2026-10-27). Overlapping changes are checked
 only where stores check them: the change ledger refuses the later of two
 requests' changes to a personal knowledge page (`agent.request_conflict_checks`
 turns this off); memory facts, schedules, heartbeat items and Objectives refuse
@@ -420,15 +434,20 @@ How the lanes run, and what they share (`custom_agents.execution_lanes_runtime`)
   busy, the team lead still claims the schedules set up in a parallel thread,
   so their runs start on time beside other work (owner, 2026-10-29). The
   schedule row records this (`scheduled_messages.parallel_thread`, from
-  `custom_agents.schedule_store.runs_in_parallel`), and
+  `custom_agents.execution_lanes.schedule_runs_in_parallel_lane`, the same
+  rule as the lane choice for running requests), and
   `scheduled_runtime._schedule_claim_scope` limits the claim to such rows. At
   the limit of four, such a run waits in the queue like any other parallel
   request.
-- A thread loses its parallel mark when `/switch_conversation` or
-  `/switch_topic` moves it to another conversation, and the reply says so
-  (`GatewaySessionService.switch_conversation`). The mark is the person's word
-  that the thread's own conversation does not overlap their other work, and
-  an older conversation may be continued elsewhere.
+- A thread's Run concurrently setting turns off when `/switch_conversation`
+  or `/switch_topic` moves it to another conversation, and the reply says so
+  (`GatewaySessionService.switch_conversation`). The setting is the person's
+  word that the thread's own conversation does not overlap their other work,
+  and an older conversation may be continued elsewhere. Web Chat, the only
+  place a person changes the setting, does not offer these commands. A Web
+  Chat thread reaches them only after the debug-only `/switch_session` moves
+  it to Telegram, Discord or the command line, where the setting can no
+  longer be changed; the owner kept the rule for that case (2026-10-29).
 Cancellation retains history and stops attached work; resume refuses unresolved
 approvals, questions, delegation and runtime review. Pause notices identify the task and affected
 worker. Settings also pages finished task results across agents, including
@@ -496,6 +515,47 @@ move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
 A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Admitting a job's last run does not remove the schedule's identity or access
+(2026-10-30). A worker's run proves whom it works for with the schedule's
+permit, checked live against the row (`access_control.task_identity`), and its
+job access comes from the schedule, so removing the row at admission failed
+one-time reminders within a second of starting. While the run's receipt is
+unfinished the schedule is *finishing* (`remaining_count = 0`,
+`schedule_store.is_finishing`): claims, wake times and enabled listings skip
+it, and the Settings card, stuck-schedule notices, telemetry and the agent's
+`list_scheduled_jobs` (`final_run_in_progress`) show it as finishing, not
+overdue. A schedule ended by its end date keeps its following run time
+instead, blocked by that date, so a later end date set during the run lets it
+go on. The pruning pass removes the row, and ends its grants, once the run's
+terminal snapshot closes its receipt, or once the receipt is older than a
+run's identity lasts (7 days), so a receipt nothing closed cannot keep a
+schedule forever. Only runs a worker claims get receipts (a person's
+schedules and `local_worker` system timers); the team lead's own system
+timers sign their runs, are never checked against the row, and still finish
+at admission. Removing or turning off a schedule still ends a running last
+run's access at once. Moving a finishing one-time reminder, or making it
+repeat, gives it its runs back; any other edit leaves it finishing.
+
+A schedule whose runs fail is reported once per problem
+(`custom_agents.scheduled_run_failures`). A top-level scheduled run's outcome
+is saved in its terminal snapshot transaction, because the task is archived
+right after (`storage.scheduled_run_problems`: one row per schedule, holding
+the first failed run of the current problem and the run that finished after
+it, with routing and the schedule's name, never instructions or output). The
+lead's scheduler pass reports the rows through the stuck-work notices
+(`custom_agents.stuck_work`): the person the run's original signature names
+(`task_identity.reported_schedule_run`) gets one Inbox notice and one chat
+message at once, administrators an Inbox notice for team or system work.
+Further failures say nothing until a run finishes, which sends one "working
+again" notice; a schedule that ended, was removed or was turned off closes the
+problem with no message. The notice never names a cause (a failed task keeps
+only error text, and a typed cause would change a shared message contract);
+it suggests a question for the person's assistant that names the run's task
+id, which `get_task_history_window` reads. It ignores the schedule's
+`notify_on_failure`, which governs the results a run reports, and replaces the
+wait limit's own chat message for scheduled runs. These rows are operational
+state and do not move in a team transfer.
+
 Every write that depends on a schedule's current values reads, decides and
 writes in one write transaction (`ScheduleRepository.write_locked`: SQLite's
 write lock, or PostgreSQL's schedule-id and row locks). A run changes only its
@@ -585,7 +645,10 @@ recovery is reported the same way, and each incident once
 (`storage/stuck_work_repository.py`). The Schedules card shows **Not running**
 with the same explanation. A missed one-time run is turned off and its owner
 told. This replaced a self-addressed TeamLead review task that carried no person
-and no chat route, so its findings reached nobody.
+and no chat route, so its findings reached nobody. A finishing schedule (its
+last run still working) is never stuck. Scheduled jobs whose runs fail are
+reported through the same notices (`custom_agents.scheduled_run_failures`,
+above).
 
 Stuck tasks are reported the same way (`custom_agents.stuck_tasks`). The team
 lead reads every agent's saved work in its team (read-only) and reports one
@@ -1353,11 +1416,19 @@ sensitive name), asks the access service for a folder
 decision when authorization is on, and then opens that real location through
 `access_control/safe_open.py`. `safe_open` walks from a trusted root one
 component at a time with `O_NOFOLLOW`, accepts only regular files with one
-link, creates files with `O_EXCL`, and replaces existing ones in place through
-the checked descriptor, so a link planted beforehand or swapped in after the
-check makes the open fail. The broker's staged CLI files
-(`secure_tool_broker/task_files.py`) and the gateway workspace browser use
-`safe_open` too. Sensitive names (env files such as `team.env`, SSH private
+link, and creates files with `O_EXCL`, so a link planted beforehand or swapped
+in after the check makes the open fail. A write that replaces a file writes a
+new temporary file in the same folder and renames it over the old one, keeping
+its mode and owner. A person's parallel threads can write one file at the same
+time, and the rename is atomic: readers see the old content or the new, never a
+half-written file, the last writer to finish wins with its whole content, and a
+write that fails part way leaves the file unchanged. Writes that only ever
+create a file (`exclusive`: `file_move`, delivered file shares, installed
+programs) still write the new file where it will stay: there is no old content
+to mix with, a second writer is refused, and the decision journal records a
+delivered share's or program's identity before writing it. The broker's staged
+CLI files (`secure_tool_broker/task_files.py`) and the gateway workspace
+browser use `safe_open` too. Sensitive names (env files such as `team.env`, SSH private
 keys, `.pem` files, credential folders such as `.ssh`) come from one list,
 `access_control/sensitive_paths.py`, used by the file tools, the shell tool's
 path arguments, attachments in both directions and the workspace browser, so
@@ -1395,9 +1466,76 @@ internal-improvement maintenance schedule fires, trusted code in the manager
 deletes files there older than `tool_policy.scratch_retention_days` (21 by
 default, 0 turns it off) from every person's and the agents' `scratch/`,
 walking folders without following links, and gives InternalImprovementAgent
-the counts (`custom_agents/scratch_retention.py`). The maintenance run itself
-is system work for no person and cannot open people's folders, which is why
-trusted code does this part. The run may use the shared `team/` and `agents/`
+the counts (`custom_agents/scratch_retention.py`).
+
+In the same step it deletes saved tool outputs written longer ago than
+`tool_policy.output_retention_days` (90 by default, 0 turns it off;
+`custom_agents/output_retention.py`). One period covers four kinds, all
+copies of what a tool returned that the tool can produce again: oversized tool
+results in `state/tool_results/` (a folder per result, `manifest.json`
+deleted first), long tool output offloaded from conversations (each
+`conversation_artifacts` record with its file in `dbs/conversation_artifacts/`,
+the record first, then any older file no record names), research result
+folders in `research/` of every person's folder and `agents/`, and execution
+run and Rust build folders in `agents/execution/`. A tool result's age is the
+UTC time its folder name starts with, else its manifest's `created_at`, else
+its last change; a conversation artifact's is its record's `created_at`. In
+`research/`, which people also use for their own folders, only folders named
+with the complete generated name (`<stamp>_<labels>_<12 hex>`) are deleted,
+aged by that stamp. A date prefix alone cannot identify a tool result; unmatched or
+future-dated folders and loose files stay, and a task folder goes only when
+the run emptied it.
+Run and build folders are never deleted younger than two days (no run or
+build lasts more than one), and a build folder only while the cleanup holds
+its build lock, after checking the folder's age again under the lock (a build
+may have finished meanwhile). The lock file is deleted after everything else,
+so a build arriving meanwhile waits on it rather than writing into a folder
+being emptied; a build that waited finds its lock file gone and starts over
+in a new folder (`runtime_hosting/builds.py`). If an abandoned build has no
+lock, a real pass creates one and leaves the now-recent folder for a later
+pass; a dry run leaves it unchanged. No build is deleted without its lock.
+Each kind runs on
+its own, so one failure is logged (`event=output_retention_failed`) and
+reported while the others still run, and the run's instructions carry the
+items, files and bytes deleted per kind, which the run records. Both trusted
+clean-ups run before the check that a maintenance worker is available, so a
+worker that cannot start never skips them, and once per occurrence, because
+the scheduler retries such an occurrence every 30 seconds. The manager keeps a
+record of each saved-output run (`state/output_retention.json`: time, last
+success, per kind items, files, bytes and failures), started at manager start;
+from it the manager's status heartbeat reports a Status page warning
+(`output_retention_overdue`) when no run succeeded for two days. Filesystem
+permission errors and depth limits make a run incomplete and preserve its
+previous success time; expected skips such as links and busy builds do not.
+Tool-result manifest reads reject pipes before reading, so malformed outputs
+cannot block the maintenance scheduler. The record
+also keeps when retention became active (`active_since`): the first run with
+a period above 0 when it was not active (a new installation or upgrade, or a
+change from 0), after its administrator Inbox notice has been stored. If
+notice storage fails, no activation is recorded and the next successful
+attempt starts a full seven days. For 7 days after that every run is a dry run: the same walks
+with `OldFilesRemoved.dry_run` set count the items, files and bytes they
+would delete and delete nothing (conversation artifact records are counted,
+not deleted). Administrators get one Inbox notice per grace period
+(`AccessNoticeKind.SAVED_OUTPUT_RETENTION`, the first dry run's counts, the
+date, the reason and their options), and the Status page shows a note
+(`output_retention_grace_period`) with the latest counts until the first
+deleting run. A restart keeps `active_since`; a period of 0, at a run or at
+manager start, clears it, so turning retention on again starts a new grace
+period. Shortening an active period applies at once. The clean-ups
+exist only with the maintenance schedule: with its interval at 0 it is never
+installed, which the manager logs at start (`event=retention_cleanup_off`). The manager
+does this because the outputs sit in `state/`, `dbs/` and people's folders,
+which the maintenance run cannot open; it is the side that writes all four.
+Conversations (transcripts, task links, turn and context summaries) and
+completed tasks are never deleted by it. The content-addressed execution
+artifacts in `state/execution_artifacts/` are left alone: one stored object can
+serve many owners' execution records, which are kept, and deleting one a
+record still names breaks every later read of it. Deleting them needs a
+retention period for those records and a record of which objects they name.
+
+The maintenance run itself is system work for no person and cannot open
+people's folders, which is why trusted code does the clean-ups. The run may use the shared `team/` and `agents/`
 folders, sandboxed code there, the memory-review cleanup tools and model
 lookup, and it may read and record only its own schedule
 (`access_control/ownership.py`, `system_work_schedule_access`): people's
@@ -1531,6 +1669,26 @@ created on first use with copies of only their folder, `team/` and `agents/`;
 work for no person uses a shared one. The operator's OpenShell policy decides
 the network and anything else there; folder grants and the network rule above
 do not apply.
+
+Managed Python environments live under `python_envs/` in the task's default
+folder. Omitting `env_name` selects a name derived from the verified request
+context ID, shared by that request's lead and helpers. Other requests and each
+scheduled run get separate defaults, even in the same conversation. Explicit
+names allow deliberate reuse across requests and schedules. Supplying a name,
+including a default's returned name, keeps that environment until deleted.
+Later calls that omit the name, including recreation, preserve that choice.
+Trusted maintenance removes whole request-default environments after seven
+days without a `python_env` call. It takes the same per-environment lock as
+tool calls without waiting: busy environments are skipped until a later pass,
+so an install or script cannot delay scheduling. Cleanup rechecks last use
+while holding the lock before deleting anything. The locks live outside workspaces, derived from
+`InstanceLayout.python_env_locks_dir`. File access still goes through
+`file_access`, and cleanup uses the descriptor-based `safe_open` operations.
+File reads open without blocking before checking the descriptor's file type,
+so a planted named pipe is refused without waiting for a writer.
+Tool calls waiting for a lock still respect their task's stop signal.
+Keep lasting results outside default environments. The previous shared
+`python_envs/default` is retained as an explicitly named environment.
 
 Commands stop with their task. Strands runs the `shell` and `python_env` tools
 in a worker thread, and cancelling a turn does not stop that thread, so a
@@ -2073,9 +2231,14 @@ grants they gave, personal account links with their stored credentials,
 their GitHub, Google and X sign-ins and the broker's credentials folder for
 them, requests, notices and sandbox; their folder, personal memory, own knowledge pages and conversations
 are held out of every agent's reach for `gateway.users.removed_data_retention_days`
-(the folder under `state/held_people/`, the rows in `person_held_rows`) and
-then purged by a maintenance run, unless `/user restore` (or adding them back
-the usual way while held) brings them back. The gateway does its part after the
+(the folder under `state/held_people/`, the rows in `person_held_rows`, and
+the files of their conversations' offloaded long tool output in place in
+`dbs/conversation_artifacts/`) and then purged by a maintenance run, or by the
+gateway when it removes them again after an expired hold, unless
+`/user restore` (or adding them back the usual way while held) brings them
+back. Both purges, and the immediate deletion of rows held after a purge
+(work that finished late), delete those files before the held rows that name
+them (`access_control/held_person_folders.py`, `purge_held_artifact_files`). The gateway does its part after the
 identity change commits (`assistant_gateway/application/person_lifecycle.py`,
 `assistant_gateway/person_departure.py`) and sends the manager a typed
 `PersonStandingCommandV1`, which only a gateway-signed administrator context
@@ -2767,7 +2930,12 @@ the request's task id at admission and keeps its running state independently
 of response waits. A timeout, gateway restart or credential form therefore
 does not make a later message new work. The later message is saved as guidance
 for that request before publication. A final reply ends the running state,
-including when quiet hours delay showing the reply. Held guidance that its
+including when quiet hours delay showing the reply. A stopped request gets one
+too: its stopped turn sends it, or, when no turn of it was running (it still
+waited its turn), the stop itself does (`custom_agents.control_runtime.stop_task_execution`).
+Before, a stop that found no running turn sent none, so its thread stayed
+busy and every later message there was held as guidance for the cancelled
+request. Held guidance that its
 request finishes before accepting is reported as unused. A publication failure
 whose outcome is uncertain leaves the request active; starting another chat
 remains an explicit action by the person.
@@ -2938,13 +3106,79 @@ it deletes every file in `state/uploads` older than the cutoff, which also
 removes files left without a record, and the folders left empty. It shares the
 link-safe folder walk with the scratch cleanup (`old_file_cleanup.py`). The
 gateway is the only writer of `state/uploads`; agents work on their own copies.
-Administrators change both retention numbers in Settings → Team → File
-Retention (`assistant_gateway/file_retention.py`). That is a `runtime_settings`
-change in the gateway's own controls, so `PersonChangeCheck` decides who may.
-The save changes only those two fields of `instance_config.yaml`, keeps a
-backup as the configuration editor does, and is refused when the file changed
-meanwhile. Upload retention applies from the next cleanup; scratch retention
-applies after a restart, because the manager reads its settings when it starts.
+Administrators change the three retention numbers (chat uploads, scratch
+files, saved tool outputs), and the storage warnings
+(`gateway.storage_warnings`, below and in the Status page section), in
+Settings → Team → File Retention (`assistant_gateway/file_retention.py`). That
+is a `runtime_settings` change in the gateway's own controls, so
+`PersonChangeCheck` decides who may. The save changes only those fields of
+`instance_config.yaml`, keeps a backup as the configuration editor does, and
+is refused when the file changed meanwhile. Upload retention and the storage
+warnings apply from the next cleanup or check, because the gateway hands the
+new numbers to its running loops; scratch and saved output retention apply
+after a restart, because the manager reads its settings when it starts. The
+team transfer's settings section is version 7 for
+`tool_policy.output_retention_days`. The storage warnings share the page
+because both decide how the team's stored data stays in bounds: retention
+deletes what may go, and the warnings tell people and administrators about
+what stays.
+
+Chat transcripts and completed tasks are kept indefinitely (owner's decision
+of 2026-10-27), so each person's stored data only grows, and each person hears
+as it does (`assistant_gateway/storage_usage.py`). That data is split between
+the gateway and the manager, which do not read each other's records (the
+gateway imports no manager store, `test_gateway_runtime_has_no_manager_repository_imports`),
+so each side measures its own share in bytes and writes one row per active
+person to a shared table in the manager's database, beside the access store
+and the departure records both already open
+(`storage/person_storage_usage_repository.py`: person, side, bytes by kind,
+when measured):
+
+- the manager (`custom_agents/storage_usage_runtime.py`) measures
+  conversation turns, summaries and completed tasks, the long texts saved as
+  files beside conversations (`dbs/conversation_artifacts/<conversation id>/`,
+  owned through the conversation) and the person's folder, at its start and
+  once a day. It runs as its own task in the team lead's process, started and
+  restarted by the scheduler loop, which lives as long as the process; not in
+  the maintenance schedule, which can be switched off, and not on the storage
+  lane, which a long scan would hold up;
+- the gateway measures chat transcripts, requests, replies and kept uploads
+  in its own database once a day, 15 minutes after it starts, writes its
+  row, adds the manager's and sends the notices.
+
+Each repository answers for its own tables with one aggregate per table and
+no row loading; the byte size comes from the database
+(`SqlDialect.text_bytes`: `LENGTH(CAST(x AS BLOB))` on SQLite, whose `LENGTH`
+counts characters, and `octet_length` on PostgreSQL). Folders are walked
+without following links (`safe_open.folder_bytes`). Permission or I/O failures,
+and a walk exceeding its depth limit, fail the measurement and preserve the
+previous snapshot and its time; a partial total never becomes current. Missing
+folders and excluded symbolic links still count nothing. A side replaces all its
+rows at each measurement, so the table holds at most two rows per active
+person, plus one gateway row per disabled person. Disabled people's gateway
+rows retain their announcement progress and original measurement time, since
+their Inbox notices remain. Enabling them resumes that progress without
+reusing notice IDs. Removed people's rows can go because removal also deletes
+their notices. When a person's total passes the next multiple of
+`gateway.storage_warnings.person_step_gb` above the highest step announced to
+them (5 GB by default, 0 off), they get one Inbox notice (`storage_usage`) for
+the highest step reached. The announced step and a count of announcements are
+kept on the person's gateway row; when the total falls below the announced
+step it is lowered to the step reached, so passing it again is announced
+again. A notice's id is `storage_usage:<person folder>:<step in bytes>:<announcement
+number>`, and the notice is stored before the step is written, so a restart in
+between finds the same id and the crossing is announced once. When the
+manager's row for a person is missing or more than three days old, the gateway
+sends that person no notice, because a partial total could hide a step, logs
+`event=storage_usage_totals_stale` with their folder name, and the Status page
+warns that the totals are out of date; a person whose standing changed less
+than three days ago only waits for the next daily measurement. Status checks
+both processes' snapshots and identifies which one stopped measuring. A
+missing gateway snapshot waits for the initial 15-minute check before it can
+be reported; an already stale snapshot remains visible after a restart. The notices
+stay in the Inbox like all notices (decision D3); only stuck work is also sent
+to a chat, by a separate owner's decision. The team transfer's settings
+section is version 8 for `gateway.storage_warnings`.
 
 A person can answer one earlier chat message with the channel's reply feature.
 That message often belongs to another conversation than the one the chat
@@ -3131,6 +3365,20 @@ and the inner-loop context manager,
 folder with `manifest.json` naming its agent, team and task, because
 `state/tool_results` is outside every agent folder and
 `inspect_tool_result_artifact` is the only way an agent reads it back.
+Saved results, research results and offloaded conversation outputs are
+deleted after `tool_policy.output_retention_days`
+(`custom_agents/output_retention.py`). Their readers never retry or make up a
+deleted one, and call an output deleted only when the retention deleted it:
+the two inspection tools answer `deleted_by_retention` with `retryable: false`
+and a plain note when the result folder's name dates it before the period and
+the folder is gone (a file missing from a folder that still exists is an
+ordinary "not found"); the thread renderer, the compactors and the
+conversation tools show that note in place of a stored path only when the
+period is above 0, the path is absolute and inside `state/tool_results/` or
+`dbs/conversation_artifacts/`, its `created_at`, when known, is before the
+cutoff, and nothing is there any more (`SavedOutputRetention`,
+`with_deleted_outputs_marked`). Relative paths, placeholders, URLs, paths an
+LLM summary reworded and older layouts are shown as stored.
 Projected context pressure shrinks only results the model has already read; a
 result it has not read yet (a staged change id, for example) is shrunk only
 after the provider actually rejects the request, and then after older ones.
@@ -3326,7 +3574,8 @@ configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
 schedules for administrators, receive loops that stopped), whether TeamLead
-reports, and its own configuration and receive loops. A source that does not answer is listed and shown as a
+reports, its own configuration and receive loops, and storage filling up
+(`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
 gateway sends administrators one Inbox notice per new set of problems
 (`status_problems`), linking to the page. A notice records what
@@ -3339,6 +3588,40 @@ Why: conditions such as an
 environment variable silently overriding a saved setting or key, a rejected
 model key, or an MCP server that stopped answering were only in logs or only
 known to one process.
+
+Storage findings exist because nothing measured disk, database or message
+storage before, so a full disk was first noticed when saving failed, and
+administrators must hear before a limit is reached. On every check the
+gateway reads the free space (`statvfs`, counted as `df` does) of the
+filesystem holding the instance folder and of each SQLite database's folder on
+another filesystem, and the NATS account's JetStream use and limit
+(`js.account_info()`, `NatsTransportAdapter.jetstream_account_usage`). An
+unreadable disk produces a problem finding saying its free space is unknown;
+successful checks for other disks and NATS remain visible. At
+`gateway.storage_warnings.nearing_limit_percent` (80 by default) a place is
+a warning, at `nearly_full_percent` (95) a problem. The nearing level is a
+warning on the page but counts as a problem for the notice, so administrators
+are told before it fills. A finding's id names the place, the level and when
+the level was entered (`storage_nearing_limit:disk:instance:20261027T120000Z`),
+never the percentage, so the notice digest changes only when a level is
+entered, not every five minutes as the percentage moves. When each level was
+entered is kept in `state/storage_levels.json` (`StorageLevels`), so a restart
+neither repeats nor forgets a notice; a level ends only three percentage
+points below its threshold, so use moving around a threshold is not a new
+entry, while a disk that fills up again after space was freed is announced
+again. Database sizes (SQLite files with their write-ahead log,
+`pg_database_size` for PostgreSQL) have no limit of their own and appear in
+the findings' details. The bundled NATS server sets no JetStream limit
+(`docker/nats_service.py` passes no `max_file_store`), so the account reports
+none; the page then shows a note with the stored size instead of inventing a
+limit. Without `max_file_store` the server itself stops storing at three
+quarters of the disk space that was free when it started. The percentage
+counts bytes stored, not the space streams reserve, which the account
+information does not report, and the finding says so. An account limit must
+leave room for the streams' own reservations: the server refuses to create
+the dead-letter stream (64 MB) in an account allowed less. People's
+stored-data totals that the manager stopped measuring are a warning on the
+page too (`StorageUsageNotices.stale_finding`).
 
 ### Knowledge page
 

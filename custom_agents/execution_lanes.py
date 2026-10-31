@@ -1,10 +1,10 @@
 """Which execution lane runs a task's turns (``runtime_hosting.agent_execution``).
 
-A request a person sent in a thread they started with Web Chat's Launch
-parallel thread (``GatewayContext.parallel_thread``) runs in a lane of its own,
-named after its root task, so the team lead works on it at the same time as
-its other work. By starting such a thread the person says the request does
-not overlap their other work, so both may run at once (owner, 2026-10-27).
+A request a person sent in a thread set to Web Chat's Run concurrently
+(``GatewayContext.parallel_thread``) runs in a lane of its own, named after its
+root task, so the team lead works on it at the same time as its other work. By
+turning the switch on the person says the request does not overlap their other
+work, so both may run at once (owner, 2026-10-27).
 Work set up from a parallel thread runs in parallel too (owner, 2026-10-28):
 a schedule or Objective work created there copies the request's context,
 mark and delivery mode included (``custom_tools.providers.schedules``
@@ -71,6 +71,40 @@ def is_parallel_request(meta: Any) -> bool:
     )
 
 
+def runs_in_parallel_lane(manager: Any, root: Any) -> bool:
+    """Whether the root task ``root`` runs in a parallel lane of its own (module docstring).
+
+    The one rule for both the lane its turns take (``lane_for_task``) and the
+    parallel mark people and agents see on it (Settings -> Tasks and
+    ``list_task_queue``, through
+    ``custom_agents.manager_control_runtime._runtime_work_root_summary``):
+    only the team lead opens parallel lanes, and only for a request from a
+    parallel thread. Reads only ``root`` itself.
+    """
+
+    return bool(
+        getattr(manager, "parallel_lanes_enabled", False)
+        and root.task.parent_task_id is None
+        and is_parallel_request(root.meta)
+    )
+
+
+def schedule_runs_in_parallel_lane(payload_meta: Any) -> bool:
+    """Whether runs of a schedule saved with ``payload_meta`` run in parallel lanes.
+
+    ``runs_in_parallel_lane`` decided when the schedule is saved: each run is
+    a root task whose metadata is a copy of ``payload_meta``
+    (``custom_agents.scheduled_runtime``), so it gets a parallel lane of its
+    own exactly when this holds and the agent that claims it opens parallel
+    lanes (only the team lead). The schedule row stores the answer
+    (``scheduled_messages.parallel_thread``) so the team lead's scheduler can
+    claim these schedules while its main lane is busy
+    (``scheduled_runtime._schedule_claim_scope``); other agents never claim on it.
+    """
+
+    return is_parallel_request(payload_meta)
+
+
 def parallel_lane(root_task_id: str) -> str:
     return f"{PARALLEL_LANE_PREFIX}{root_task_id}"
 
@@ -96,9 +130,9 @@ def lane_for_task(manager: Any, task_id: str | None) -> str:
         return MAIN_LANE
     root_task_id = manager.resolve_root_task_id(task_id) or task_id
     root = manager.get_task_info(root_task_id)
-    if root is None or root.task.parent_task_id is not None:
+    if root is None or not runs_in_parallel_lane(manager, root):
         return MAIN_LANE
-    return parallel_lane(root_task_id) if is_parallel_request(root.meta) else MAIN_LANE
+    return parallel_lane(root_task_id)
 
 
 def executing_parallel_task_ids(manager: Any) -> list[str]:
@@ -146,5 +180,6 @@ __all__ = [
     "lanes_for_messages",
     "parallel_lane",
     "root_of_lane",
+    "runs_in_parallel_lane",
     "task_of_message",
 ]

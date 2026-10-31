@@ -26,6 +26,7 @@ from custom_agents.filtered_tool_result_context import (
     merge_inner_loop_context_config,
 )
 from custom_agents.instance_delivery_context import build_instance_delivery_context
+from custom_agents.output_retention import SavedOutputRetention
 from custom_agents.prompt_context_sanitization import (
     render_current_request_context,
     render_incoming_message_summary,
@@ -96,6 +97,7 @@ class DefaultContextEngine:
         instance_config_path: Optional[str] = None,
         adapters: ContextEngineAdapters,
         memory_plugin_manager: Any = None,
+        saved_outputs: Optional[SavedOutputRetention] = None,
     ) -> None:
         self.agent_id = agent_id
         self.logger = logger or logging.getLogger(__name__)
@@ -123,7 +125,7 @@ class DefaultContextEngine:
         self.memory_plugin_manager = memory_plugin_manager
         self.plugins = list(plugins or [])
         self.thread_renderer = BudgetedThreadContextRenderer(
-            config=self._thread_renderer_config(thread_window),
+            config=self._thread_renderer_config(thread_window, saved_outputs),
             estimate_tokens=self.estimate_tokens,
         )
 
@@ -776,7 +778,9 @@ class DefaultContextEngine:
             )
         return "\n".join(lines)
 
-    def _thread_renderer_config(self, config: Optional[dict[str, Any]]) -> BudgetedThreadContextRendererConfig:
+    def _thread_renderer_config(
+        self, config: Optional[dict[str, Any]], saved_outputs: Optional[SavedOutputRetention] = None
+    ) -> BudgetedThreadContextRendererConfig:
         cfg = dict(config or {})
         defaults = BudgetedThreadContextRendererConfig()
         return BudgetedThreadContextRendererConfig(
@@ -797,6 +801,7 @@ class DefaultContextEngine:
             ),
             include_turn_ids=bool(cfg.get("include_turn_ids", defaults.include_turn_ids)),
             retrieval_tool_hint=bool(cfg.get("retrieval_tool_hint", defaults.retrieval_tool_hint)),
+            saved_outputs=saved_outputs,
         )
 
     def _notify_plugins(self, hook_name: str, *args: Any, **kwargs: Any) -> None:

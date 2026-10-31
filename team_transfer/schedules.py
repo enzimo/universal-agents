@@ -37,11 +37,11 @@ What travels, and why:
   sessions carried schedules and delivery targets use, and each imported
   person's current session per chat, with their names and chat routes but no
   conversation: the session's conversation and last task are history and stay
-  behind, and so does a Web Chat thread's parallel mark
+  behind, and so does a Web Chat thread's Run concurrently setting
   (``SessionRecord.parallel_thread``), which belongs to the conversation the
-  person launched it for: the next message in a carried session starts an
-  ordinary thread. A schedule made in a parallel thread keeps its own mark in
-  its payload and still runs in parallel. Whether a session is its chat's
+  person set it for: a carried session starts with it off. A schedule made in
+  a thread set to Run concurrently keeps its own copy in its payload and still
+  runs in parallel. Whether a session is its chat's
   current one travels too
   (``channel_current``), because that is where the person's next message
   goes. Sessions are written in key order and an older session a schedule
@@ -269,6 +269,8 @@ class _Export:
             from team_transfer.schedule_markdown import render_schedule
 
             entry = CarriedScheduleV2(
+                # Zero is exhausted, even if its last run was still active.
+                # Work does not move; never restore an extra fire on import.
                 remaining_count=row.get("remaining_count"),
                 owner_vouched=_vouched(verifier, schedule, owner),
                 markdown=render_schedule(

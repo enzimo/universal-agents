@@ -5,6 +5,7 @@ from typing import Any, Mapping, Optional
 
 from default_values import CONVERSATION_COMPACTION_DEFAULTS, LLM_DEFAULTS
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.output_retention import SavedOutputRetention
 
 
 @dataclass
@@ -27,6 +28,9 @@ class ConversationCompactionConfig:
     xai_oauth: Optional[Mapping[str, Any]] = None
     instance_root: Optional[str] = None
     workspace_dir: Optional[str] = None
+    # Tells which offloaded outputs the retention deleted (custom_agents.output_retention);
+    # without it every artifact reference is shown as stored.
+    saved_outputs: Optional[SavedOutputRetention] = None
 
 
 @dataclass

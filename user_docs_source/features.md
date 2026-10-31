@@ -61,9 +61,9 @@ queue positions and waiting reasons. It refreshes every 10 seconds while open an
 20 tasks per agent per page. Other users' tasks remain private. If one agent cannot
 respond, its section reports that problem while the other sections remain usable.
 
-New tasks appear even when the agent is busy or paused. **Parallel** marks a
-request you sent in a thread started with **Launch parallel thread**, and each
-run of a schedule or Objective work you set up in such a thread. The team lead
+New tasks appear even when the agent is busy or paused. **Concurrent** marks a
+request you sent in a thread set to **Run concurrently**, and each run of a
+schedule or Objective work you set up in such a thread. The team lead
 works on these at the same time as its other work, up to four at once; a
 further one shows as queued until one of them finishes. Other work, such as
 ordinary chats, New Chat, schedules set up anywhere else and other chat apps,
@@ -302,18 +302,25 @@ unless you rename it. Updates the team sends you and notes from memory reviews
 appear as their own threads, **Updates** and **Memory review**, once there is
 something in them.
 
-To start an unrelated request while keeping your earlier chat, turn on
-**Launch parallel thread** below Send and send your message. Chat creates a
-new thread for that message and its files, and keeps its replies there. The
-team lead starts on it right away, even while it is busy with your other work,
-and every later request you send in that thread runs the same way.
-A schedule or Objective work you set up in that thread also runs this way:
-each run starts when it is due and works beside your other work. Its runs
-count toward the limit of four, so a frequent schedule or long
-Objective work set up there can make a new parallel thread wait, and a run can
-happen while you send a new request in the same thread. Runs of one schedule
-still never overlap: a run that comes due while the previous one is still
-working is skipped.
+**Run concurrently**, the switch below Send, is a setting of the selected
+thread. With it on, each request you send in that thread runs alongside your
+other work: the team lead starts on it even while it is busy with your other
+requests. With it off, the thread's requests wait their turn. The switch shows
+each thread's own setting, and the thread keeps its conversation, history,
+files and replies either way. **New Chat** and `/new` start with it off. With
+no chat yet, the chat your first message creates takes the switch's position.
+While a request in the thread is still open, the switch is locked and shows
+**Available after this chat replies.** A message you send then goes to that
+request as extra instructions, where it already runs. So turn the switch on
+before you send; if you forget, it unlocks when the chat replies.
+A schedule or Objective work you set up in a thread while it is on also runs
+this way: each run starts when it is due and works beside your other work. It
+keeps that setting even if you later turn the thread's switch off, and work you
+set up while it was off stays ordinary. Its runs count toward the limit of
+four, so a frequent schedule or long Objective work set up there can make
+another concurrent request wait, and a run can happen while you send a new
+request in the same thread. Runs of one schedule still never overlap: a run
+that comes due while the previous one is still working is skipped.
 Each thread keeps its own conversation history and summaries. Saved team facts
 and your preferences remain available across your threads. Use it only for work
 that does not change the same things as your other running requests:
@@ -323,15 +330,18 @@ operator turned these checks off with `agent.request_conflict_checks`
 ([Separate requests changing the same record](configuration.md#separate-requests-changing-the-same-record)).
 Memory facts, schedules, heartbeat items and Objectives refuse a change only
 when it was decided from an older version of the record, so one request can
-still change what another just changed. Commands the agent runs in its shell or
+still change what another just changed. File tool writes replace the whole
+file at once, so the later of two writes wins whole, never mixed with the
+other. Commands the agent runs in its shell or
 Python, and files it writes with its file tools, are not checked. The switch
-turns off after the message moves to the new chat. Leave it off to continue
-the selected thread. Slash commands keep their usual behavior.
-If the new chat cannot be created, your text and files stay in the composer.
+never moves when you send, and slash commands keep their usual behavior.
+If the new chat cannot be created, or its Run concurrently setting cannot be
+saved, your text and files stay in the composer.
 Selecting an existing conversation while a new chat is being created keeps
 your selection. Any message already submitted keeps its intended conversation.
-If sending fails, use **Retry** beside the failed message to resend the same
-request without creating another one. You can send other messages first;
+If sending fails, the thread keeps its Run concurrently setting; change it
+first if you want, then use **Retry** beside the failed message to resend the
+same request without creating another one. You can send other messages first;
 each failed message keeps its own Retry. Retry retains the original files and
 destination until that message is accepted, you sign out, archive its chat,
 or close the page.
@@ -448,7 +458,9 @@ other agents stops too.
 A request that involves several agents is reported once, as your request.
 Administrators' notices name the kind of agent and what to check, never the
 text of your request. Stuck schedules are reported the same way (see
-[Scheduled workers](scheduled-workers.md#when-a-schedule-is-stuck)).
+[Scheduled workers](scheduled-workers.md#when-a-schedule-is-stuck)), and so are
+scheduled jobs whose runs fail, once per problem (see
+[Scheduled workers](scheduled-workers.md#when-a-scheduled-jobs-run-fails)).
 
 After the host wakes from sleep, the task monitor gives workers one minute to
 refresh their status before treating old heartbeats as a stopped worker. A
@@ -468,6 +480,9 @@ anything until you choose an explicit scope:
   work in its other conversation lanes.
 - `/stop all` cancels all current nonterminal work owned by you across sessions
   and conversations.
+
+Each stopped request replies in its thread that it was cancelled, also when it
+was still waiting its turn, and the thread then takes your next request.
 
 Your own stops apply at once, whatever an agent is doing. Agents cannot stop
 your other requests: while TeamLead works on one request it may pause, resume
@@ -810,7 +825,9 @@ Open **Settings → Inbox** in Web Chat to decide requests:
 - **Notices** need no decision: access TeamLead handed on without asking (with
   **Revoke**), team skill changes, updates that changed an agent one of your
   schedules runs, shares and files you received, credentials to choose
-  for tools you approved, schedules and tasks that are stuck, and (for
+  for tools you approved, schedules and tasks that are stuck, the data the
+  team stores for you passing another 5 GB (see
+  [Storage notices](configuration.md#storage-notices)), and (for
   administrators) MCP servers that stopped answering, after agents gave up
   retrying them. The list opens on **Unread** notices (**All** shows read
   ones too), 20 to a page. Mark one read with its **Mark as read** button,
@@ -1144,22 +1161,41 @@ disappears once it is fixed:
 
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
-  is not answering, the secure tool broker does not answer, or TeamLead
-  stopped reporting.
+  is not answering, the secure tool broker does not answer, TeamLead
+  stopped reporting, or a disk the instance uses is nearly full (95% by
+  default).
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved
   setting or a key saved with `/auth model`, memory search that stopped
-  working, schedules an administrator needs to check, or people who may not
-  use the team's model keys and have no model of their own yet.
+  working, schedules an administrator needs to check, people who may not
+  use the team's model keys and have no model of their own yet, a disk the
+  instance uses, or the message server's storage, nearing its limit (80% by
+  default), or people's stored-data totals that are out of date, so they get
+  no storage notices.
 - **Note**: a deliberate choice worth knowing, such as access checks turned
-  off, or people whose work goes to their own model provider.
+  off, people whose work goes to their own model provider, or a message
+  server that sets no limit for stored messages.
 
 When new problems appear, administrators also get one Inbox notice that
-links to the page. The notice stays in the Inbox after the problems are
+links to the page. Storage nearing its limit is told the same way, although
+it is only a warning, so there is time to make room: once when it reaches
+80%, and once more at 95%, not again on each check as the percentage changes.
+If space is freed and the disk fills up again later, administrators hear
+again. A disk finding's **Technical Details** list the databases and their
+sizes. The notice stays in the Inbox after the problems are
 fixed; the page always shows the current state. The page only reads; it
 never changes anything.
 
 ## Deterministic code and managed services
+
+For generated Python code, each request and each scheduled run gets its own
+default environment. Helpers share the current request's environment. Defaults
+are removed as whole environments after 7 days without use, once active tool
+calls have finished. Ask for a named environment when code and packages should
+be reused across requests or scheduled runs. Named environments stay until
+deleted, even if later calls omit the name. Cleanup skips busy environments
+until a later run so it does not delay scheduling. Keep lasting results
+outside default environments.
 
 Agents can promote fixed Python or single-file Rust code into an immutable
 revision. A trusted profile records the exact language, toolchain, isolation

@@ -17,10 +17,10 @@ from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.ports.repositories import SessionRepository
 
 
-# Added to the reply of a command that moved a parallel thread to another
-# conversation (``GatewaySessionService.switch_conversation``).
+# Added to the reply of a command that moved a thread set to Run concurrently
+# to another conversation (``GatewaySessionService.switch_conversation``).
 PARALLEL_MARK_CLEARED_NOTICE = (
-    "This thread no longer runs in parallel: its requests now wait their turn with your other work."
+    "Run concurrently is now off for this thread: its requests wait their turn with your other work."
 )
 
 
@@ -66,7 +66,6 @@ class GatewaySessionService:
         manager_agent_id: str | None,
         owner_canonical_user_id: str | None,
         route: GatewaySessionRoute = GatewaySessionRoute(),
-        parallel_thread: bool = False,
     ) -> SessionRecord:
         return self._repository.create_session(
             session_key=self._id_generator.new_session_key(),
@@ -77,7 +76,6 @@ class GatewaySessionService:
             chat_id=route.chat_id,
             thread_id=route.thread_id,
             owner_canonical_user_id=owner_canonical_user_id,
-            parallel_thread=parallel_thread,
         )
 
     def resolve_session(
@@ -157,12 +155,16 @@ class GatewaySessionService:
     ) -> SessionRecord | None:
         """Atomically select a conversation while preserving session routing.
 
-        A thread started with Launch parallel thread loses its parallel mark
-        when it moves to another conversation, so its next requests queue with
-        ordinary work. The mark is the person's word that this thread's work
-        does not overlap their other work; that word was about the thread's
-        own conversation, and an older one may be continued elsewhere (owner,
-        2026-10-29). Callers tell the person (``PARALLEL_MARK_CLEARED_NOTICE``).
+        A thread set to Run concurrently loses the setting when it moves to
+        another conversation, so its next requests queue with ordinary work.
+        The setting is the person's word that this conversation's work does
+        not overlap their other work; an older conversation may be continued
+        elsewhere (owner, 2026-10-29). Callers tell the person
+        (``PARALLEL_MARK_CLEARED_NOTICE``). Only Web Chat changes the
+        setting, and it does not offer the switch commands; a marked thread
+        reaches them when the debug-only ``/switch_session`` moves it to
+        Telegram, Discord or the command line, where it can no longer be
+        turned off (owner kept this rule for that case, 2026-10-29).
         """
 
         existing = self._repository.get_session(session_key)

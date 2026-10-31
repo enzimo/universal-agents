@@ -148,6 +148,17 @@ for an administrator changes them. Name another task (`task_id`,
 or task outside this view gives the same reply as a missing one; do not retry
 with invented owner, task, Plan, or Objective identifiers.
 
+A one-time schedule or a counted job's final admitted run keeps its identity
+and access until the work finishes, including across worker replacement.
+`list_scheduled_jobs` shows it with `final_run_in_progress: true`: it will not
+fire again and is removed when the run ends. It is not overdue; do not
+recreate or re-arm it unless the person asks. A failing scheduled job is
+reported to its person once per problem, and once more when a run finishes.
+The notice names no cause and suggests asking you why the run failed, naming
+the run's task id: read that run with `get_task_history_window(task_id=...)`
+and check the effects it already had before offering a retry. Do not
+recreate a reminder merely because its worker instance changed.
+
 ## Use solution variation only when it helps
 
 `TeamArchitect` may use `start_solution_variation` when several materially

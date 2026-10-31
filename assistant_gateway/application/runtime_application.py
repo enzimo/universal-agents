@@ -263,9 +263,8 @@ class GatewayRuntimeApplication:
         chat_id: str | None = None,
         thread_id: str | None = None,
         canonical_user_id: str | None = None,
-        parallel_thread: bool = False,
     ) -> GatewaySession:
-        """Start a new chat thread; ``parallel_thread`` marks one Web Chat launched as parallel."""
+        """Start a new chat thread; it starts with Run concurrently off."""
 
         route = GatewayRequestRoute(
             channel_name=channel_name,
@@ -283,7 +282,6 @@ class GatewayRuntimeApplication:
                 chat_id=chat_id,
                 thread_id=thread_id,
             ),
-            parallel_thread=parallel_thread,
         )
         return gateway_session_view(session)
 

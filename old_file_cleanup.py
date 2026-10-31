@@ -1,26 +1,40 @@
-"""Remove files older than a cutoff below an opened folder, never following a link.
+"""Remove old files below an opened folder, never following a link.
 
-The trusted cleanups that keep folders from growing forever share this walk:
-people's and agents' scratch folders (``custom_agents.scratch_retention``) and
-the gateway's chat uploads (``assistant_gateway.upload_retention``).
+The trusted cleanups that keep folders from growing forever share these walks:
+people's and agents' scratch folders (``custom_agents.scratch_retention``),
+the gateway's chat uploads (``assistant_gateway.upload_retention``), saved
+tool outputs (``custom_agents.output_retention``) and the files of a removed
+person's held conversation artifacts (``remove_listed_file``).
 
-Agents' code can write scratch folders and may plant links in them, so the
-walk never follows a link: every folder is opened relative to the one before
-it with ``O_NOFOLLOW``, and files are removed by name inside the folder that
-was opened. Following a planted link could delete files anywhere the process
-can write. Links, devices, sockets and other unusual entries are left alone
-and logged with the caller's event name (``OldFilesRemoved.SKIPPED_EVENT``).
+Agents' code can write scratch folders and may plant links in them, so no
+walk follows a link: every folder is opened relative to the one before it
+with ``O_NOFOLLOW``, and files are removed by name inside the folder that was
+opened. Following a planted link could delete files anywhere the process can
+write. Three walks:
+
+- ``remove_old_files`` decides file by file by when each was last changed.
+  Links, devices, sockets and other unusual entries are left alone and logged
+  with the caller's event name (``OldFilesRemoved.SKIPPED_EVENT``).
+- ``remove_folder_tree`` deletes one folder that is old as a whole (a saved
+  tool result, a research result), with everything in it. A link inside is
+  removed as a link; what it points at is never touched.
+- ``remove_listed_file`` deletes one file a record names, only when it lies
+  inside the given folder.
 """
 
 from __future__ import annotations
 
 import logging
+import errno
 import os
 import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
+
+from access_control import safe_open
+from access_control.safe_open import UnsafePath
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +47,18 @@ SKIPPED_NOT_FILE_OR_FOLDER = "not_a_regular_file_or_folder"
 SKIPPED_TOO_DEEP = "too_deep"
 SKIPPED_CANNOT_OPEN = "cannot_open"
 SKIPPED_CANNOT_REMOVE = "cannot_remove"
+SKIPPED_OUTSIDE_FOLDER = "outside_cleaned_folder"
 
 
 @dataclass
 class OldFilesRemoved:
-    """What a walk removed and what it left in place."""
+    """What a walk removed and what it left in place.
+
+    With ``dry_run`` the walks remove nothing: they count the files (and
+    their bytes) and the whole folders they would remove, with the same
+    decisions, so a dry run tells what a real one would delete. Folders that
+    a real walk removes only because it emptied them are not counted.
+    """
 
     # Log event for entries left in place; each cleanup names its own.
     SKIPPED_EVENT: ClassVar[str] = "old_file_skipped"
@@ -46,6 +67,9 @@ class OldFilesRemoved:
     bytes_removed: int = 0
     folders_removed: int = 0
     skipped: int = 0
+    dry_run: bool = False
+    # Expected skips (links, busy builds) differ from an incomplete filesystem walk.
+    failures: int = 0
 
 
 def retention_cutoff(retention_days: int, now: float | None = None) -> float:
@@ -70,33 +94,190 @@ def remove_old_files(
         except FileNotFoundError:
             continue  # removed while we looked
         if stat.S_ISREG(info.st_mode):
-            _remove_file(folder, name, info, shown, cutoff, counts)
+            remove_file_if_old(folder, name, info, shown, cutoff, counts)
         elif stat.S_ISDIR(info.st_mode):
             _remove_subfolder(folder, name, info, shown, cutoff, counts, depth=depth)
         else:
             note_skipped(counts, shown / name, SKIPPED_NOT_FILE_OR_FOLDER)
 
 
-def note_skipped(counts: OldFilesRemoved, path: Path, reason: str) -> None:
+def remove_folder_tree(
+    parent: int,
+    name: str,
+    shown: Path,
+    counts: OldFilesRemoved,
+    *,
+    first: str | None = None,
+    last: str | None = None,
+    depth: int = 0,
+) -> bool:
+    """Delete the folder ``name`` in the open ``parent`` and everything in it; True when it is gone.
+
+    ``shown`` is the folder's path, for logs only. ``first`` names an entry
+    to delete before any other, so a reader that finds the folder half
+    deleted finds that entry missing first (a saved tool result's
+    ``manifest.json``). ``last`` names one to delete after all the others,
+    whatever the listing order (a build folder's lock file, which keeps a new
+    build out until the rest is gone). A link inside is removed as a link and never
+    followed; a link in place of the folder itself is left alone. Regular
+    files count as files removed (with their bytes), folders as folders
+    removed. When something cannot be removed the folder stays, and the
+    entry is logged.
+    """
+
+    if depth >= MAX_DEPTH:
+        note_skipped(counts, shown, SKIPPED_TOO_DEEP, failed=True)
+        return False
+    try:
+        folder = os.open(name, FOLDER_FLAGS, dir_fd=parent)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        note_open_failure(counts, shown, exc)
+        return False
+    try:
+        names = os.listdir(folder)
+        if first in names:
+            names.remove(first)
+            names.insert(0, first)
+        if last in names:
+            names.remove(last)
+            names.append(last)
+        for entry in names:
+            _remove_entry(folder, entry, shown / entry, counts, depth=depth)
+    finally:
+        os.close(folder)
+    if counts.dry_run:
+        counts.folders_removed += 1
+        return True
+    try:
+        os.rmdir(name, dir_fd=parent)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        if exc.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+            note_skipped(counts, shown, SKIPPED_CANNOT_REMOVE, failed=True)
+        return False  # something could not be removed (logged) or was added meanwhile
+    counts.folders_removed += 1
+    return True
+
+
+def _remove_entry(folder: int, name: str, shown: Path, counts: OldFilesRemoved, *, depth: int) -> None:
+    try:
+        info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        remove_folder_tree(folder, name, shown, counts, depth=depth + 1)
+        return
+    try:
+        # unlink removes the entry itself: a link goes, its target stays.
+        if not counts.dry_run:
+            os.unlink(name, dir_fd=folder)
+    except FileNotFoundError:
+        return
+    except OSError:
+        note_skipped(counts, shown, SKIPPED_CANNOT_REMOVE, failed=True)
+        return
+    if stat.S_ISREG(info.st_mode):
+        counts.files_removed += 1
+        counts.bytes_removed += info.st_size
+
+
+def remove_listed_file(root: Path, path: Path, counts: OldFilesRemoved) -> None:
+    """Delete the regular file a record names, only inside ``root``, then its folder if that is now empty.
+
+    ``root`` is the trusted folder the records' files are kept in (the
+    gateway's uploads, conversation artifacts). A path outside it, or one
+    through a link, is left alone and logged. A file already gone is not
+    counted. ``root`` itself is never removed.
+    """
+
+    root = root.expanduser().resolve()
+    try:
+        parts = Path(os.path.abspath(path)).relative_to(root).parts
+    except ValueError:
+        note_skipped(counts, path, SKIPPED_OUTSIDE_FOLDER)
+        return
+    if not parts:
+        note_skipped(counts, path, SKIPPED_OUTSIDE_FOLDER)
+        return
+    try:
+        info = safe_open.entry_status(root, parts)
+        if info is None:
+            return  # already gone
+        if counts.dry_run:
+            if not stat.S_ISREG(info.st_mode):
+                raise UnsafePath(f"Not a regular file: {path}", reason=safe_open.REASON_NOT_REGULAR_FILE)
+        else:
+            safe_open.remove_file(root, parts)
+    except UnsafePath as exc:
+        if exc.reason != safe_open.REASON_NOT_FOUND:
+            note_open_failure(counts, path, exc)
+        return
+    counts.files_removed += 1
+    counts.bytes_removed += info.st_size
+    if not counts.dry_run:
+        _remove_emptied_folder(root, parts[:-1], counts)
+
+
+def _remove_emptied_folder(root: Path, parts: tuple[str, ...], counts: OldFilesRemoved) -> None:
+    """Remove the folder a listed file was in when that left it empty; ``root`` stays."""
+
+    if not parts:
+        return
+    try:
+        parent = safe_open.open_directory(root, parts[:-1])
+    except UnsafePath:
+        return
+    try:
+        os.rmdir(parts[-1], dir_fd=parent)  # only an empty folder, never through a link
+    except OSError:
+        return  # not empty, or no longer a folder: leave it
+    finally:
+        os.close(parent)
+    counts.folders_removed += 1
+
+
+def note_skipped(counts: OldFilesRemoved, path: Path, reason: str, *, failed: bool = False) -> None:
     counts.skipped += 1
-    logger.info(
+    counts.failures += int(failed)
+    logger.log(
+        logging.WARNING if failed else logging.INFO,
         "A cleanup left an entry in place. event=%s reason=%s path=%s", counts.SKIPPED_EVENT, reason, path
     )
 
 
-def _remove_file(
+def note_open_failure(counts: OldFilesRemoved, path: Path, exc: OSError) -> None:
+    """Record expected missing/link races separately from errors that prevent a complete walk."""
+
+    reason = exc.reason if isinstance(exc, UnsafePath) else SKIPPED_CANNOT_OPEN
+    cause = exc.__cause__ if isinstance(exc.__cause__, OSError) else exc
+    if cause.errno == errno.ENOENT or reason == safe_open.REASON_NOT_FOUND:
+        return
+    expected = cause.errno in {errno.ELOOP, errno.ENOTDIR} or reason in {
+        safe_open.REASON_LINK, safe_open.REASON_NOT_DIRECTORY,
+        safe_open.REASON_NOT_REGULAR_FILE, safe_open.REASON_SEVERAL_LINKS,
+    }
+    note_skipped(counts, path, reason, failed=not expected)
+
+
+def remove_file_if_old(
     folder: int, name: str, info: os.stat_result, shown: Path, cutoff: float, counts: OldFilesRemoved
 ) -> None:
+    """Delete the regular file ``name`` in the open ``folder`` (path ``shown``) when ``info`` says it is old."""
+
     if info.st_mtime >= cutoff:
         return
     try:
         # unlink never follows a link: if the file was swapped for one, the
         # link itself is removed and its target is untouched.
-        os.unlink(name, dir_fd=folder)
+        if not counts.dry_run:
+            os.unlink(name, dir_fd=folder)
     except FileNotFoundError:
         return
     except OSError:
-        note_skipped(counts, shown / name, SKIPPED_CANNOT_REMOVE)
+        note_skipped(counts, shown / name, SKIPPED_CANNOT_REMOVE, failed=True)
         return
     counts.files_removed += 1
     counts.bytes_removed += info.st_size
@@ -114,12 +295,12 @@ def _remove_subfolder(
 ) -> None:
     path = shown / name
     if depth >= MAX_DEPTH:
-        note_skipped(counts, path, SKIPPED_TOO_DEEP)
+        note_skipped(counts, path, SKIPPED_TOO_DEEP, failed=True)
         return
     try:
         child = os.open(name, FOLDER_FLAGS, dir_fd=folder)
-    except OSError:
-        note_skipped(counts, path, SKIPPED_CANNOT_OPEN)  # e.g. replaced by a link since the listing
+    except OSError as exc:
+        note_open_failure(counts, path, exc)
         return
     removed_before = counts.files_removed + counts.folders_removed
     try:
@@ -128,7 +309,7 @@ def _remove_subfolder(
     finally:
         os.close(child)
     emptied_now = counts.files_removed + counts.folders_removed > removed_before
-    if not empty or not (emptied_now or info.st_mtime < cutoff):
+    if counts.dry_run or not empty or not (emptied_now or info.st_mtime < cutoff):
         return
     try:
         os.rmdir(name, dir_fd=folder)
@@ -138,12 +319,18 @@ def _remove_subfolder(
 
 
 __all__ = [
+    "FOLDER_FLAGS",
     "MAX_DEPTH",
     "SECONDS_PER_DAY",
     "SKIPPED_CANNOT_OPEN",
     "SKIPPED_NOT_FILE_OR_FOLDER",
+    "SKIPPED_OUTSIDE_FOLDER",
     "OldFilesRemoved",
     "note_skipped",
+    "note_open_failure",
+    "remove_file_if_old",
+    "remove_folder_tree",
+    "remove_listed_file",
     "remove_old_files",
     "retention_cutoff",
 ]

@@ -1198,6 +1198,7 @@ def test_gateway_runtime_has_no_manager_repository_imports() -> None:
         "storage.pinned_memory_repository",
         "storage.runtime_state_repository",
         "storage.task_archive_repository",
+        "storage.conversation_repository",
         "storage.plan_repository",
     )
     violations = {

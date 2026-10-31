@@ -156,8 +156,9 @@ async def list_task_queue(offset: int = 0, limit: int = 20) -> str:
 
     Use task IDs with get_task_history_window to explain what each task is
     doing or waiting for. Tasks of the person's other requests are listed too,
-    but only the person can stop, pause or resume those. Paging is bounded to
-    20 tasks per call.
+    but only the person can stop, pause or resume those. is_parallel marks a
+    request from a parallel thread, which runs at the same time as the
+    person's other work. Paging is bounded to 20 tasks per call.
     """
     from custom_agents.manager_control_runtime import (
         _runtime_work_roots,

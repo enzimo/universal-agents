@@ -215,6 +215,31 @@ class ConsumerQueueState:
 
 
 @dataclass(frozen=True)
+class JetStreamAccountUsage:
+    """What the NATS server reports about this account's stored messages (JetStream account info).
+
+    ``storage``/``memory``: bytes used on disk and in memory. A limit is None
+    when the account has none (the server reports -1, or 0); the server may
+    still have its own, which the account information does not show.
+    """
+
+    storage: int
+    memory: int
+    max_storage: int | None
+    max_memory: int | None
+
+
+def _positive_limit(value: Any) -> int | None:
+    """A JetStream account limit, or None for "no limit" (-1) and "not allowed here" (0)."""
+
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return None
+    return limit if limit > 0 else None
+
+
+@dataclass(frozen=True)
 class NatsTransportConfig:
     servers: list[str] = field(default_factory=lambda: ["nats://127.0.0.1:4222"])
     name: Optional[str] = None
@@ -595,6 +620,24 @@ class NatsTransportAdapter:
             stream_name=self.mapper.work_stream_name(),
             config=self.worker_queue_consumer_config(named_agent_type),
             logger=self._logger,
+        )
+
+    async def jetstream_account_usage(self) -> Optional[JetStreamAccountUsage]:
+        """This account's stored messages and its limits; None while JetStream is not in use here.
+
+        For administrators' Status page (``assistant_gateway.storage_capacity``).
+        A server that does not answer raises, so the page can say so.
+        """
+
+        if self._js is None:
+            return None
+        info = await self._js.account_info()
+        limits = getattr(info, "limits", None)
+        return JetStreamAccountUsage(
+            storage=int(getattr(info, "storage", 0) or 0),
+            memory=int(getattr(info, "memory", 0) or 0),
+            max_storage=_positive_limit(getattr(limits, "max_storage", None)),
+            max_memory=_positive_limit(getattr(limits, "max_memory", None)),
         )
 
     async def worker_queue_state(self, named_agent_type: str) -> Optional[ConsumerQueueState]:

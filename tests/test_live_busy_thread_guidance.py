@@ -135,6 +135,8 @@ class _Team:
     published_tasks: list[MessageEnvelope] = field(default_factory=list)
     published_steering: list[MessageEnvelope] = field(default_factory=list)
     steering_statuses: list[MessageEnvelope] = field(default_factory=list)
+    # Task ids of the lead's final replies (Task responses) the gateway received.
+    final_replies: list[str] = field(default_factory=list)
     hold_steering_status: bool = False
     current: _Gateway | None = None
 
@@ -165,6 +167,8 @@ class _Team:
 
         async def hold_statuses(envelope: MessageEnvelope) -> None:
             content = envelope.msg_content
+            if isinstance(content, Task) and content.task_type == MessageMetaType.RESPONSE:
+                self.final_replies.append(content.task_id)
             if isinstance(content, TaskSteering) and content.steering_type == TaskSteeringType.STATUS:
                 self.steering_statuses.append(envelope)
             if (

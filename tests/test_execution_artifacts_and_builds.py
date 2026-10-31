@@ -7,6 +7,7 @@ import pytest
 
 from runtime_hosting.artifacts import ArtifactIntegrityError, FilesystemArtifactStore
 from runtime_hosting.builds import (
+    BUILD_LOCK_FILENAME,
     BuildPolicyError,
     DeterministicBuilder,
     OpenShellRustBuilder,
@@ -183,3 +184,53 @@ def test_rust_builder_invokes_direct_isolated_rustc_and_promotes_output(
     assert isinstance(argv, tuple)
     assert argv[:3] == ("/usr/local/bin/openshell", "sandbox", "exec")
     assert "/usr/bin/rustc" in argv
+
+
+def test_a_rust_build_starts_over_when_the_cleanup_deleted_its_folder_while_it_waited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The saved output cleanup deletes an old build folder, lock file included, while holding its lock.
+
+    A build that was waiting on that lock then holds a lock on a file no
+    longer in the folder; it must start over in a new folder rather than
+    build in a deleted one or beside another build.
+    """
+
+    import fcntl
+    import shutil
+
+    workspace = tmp_path / "workspace"
+    build_root = workspace / "runs" / "rust-builds"
+    store = FilesystemArtifactStore(workspace / "artifacts")
+    code = _code(store, language=ExecutionLanguage.RUST, source=b"fn main() {}\n", source_name="main.rs")
+    profile = _profile(language=ExecutionLanguage.RUST, backend=ExecutionBackendKind.OPENSHELL)
+    real_flock = fcntl.flock
+    locks: list[int] = []
+
+    def lock_after_the_cleanup_deleted_the_folder(descriptor, operation):
+        real_flock(descriptor, operation)
+        locks.append(operation)
+        if len(locks) == 1:
+            shutil.rmtree(build_root)  # what the cleanup did while this build waited
+
+    def fake_run(argv, **kwargs):
+        build_dir = next(build_root.iterdir())
+        assert (build_dir / BUILD_LOCK_FILENAME).is_file() and (build_dir / "main.rs").is_file()
+        (build_dir / "program").write_bytes(b"ELF-test")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(fcntl, "flock", lock_after_the_cleanup_deleted_the_folder)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    builder = DeterministicBuilder(
+        store,
+        "builder:test",
+        isolated_rust_builder=OpenShellRustBuilder(
+            host_workspace_root=workspace, build_root=build_root, openshell_executable="/usr/local/bin/openshell"
+        ),
+    )
+
+    attestation = builder.build(code=code, profile=profile)
+
+    assert store.read_verified(attestation.output) == b"ELF-test"
+    assert len(locks) == 2
