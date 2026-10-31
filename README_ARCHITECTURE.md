@@ -516,6 +516,47 @@ move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
 A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Admitting a job's last run does not remove the schedule's identity or access
+(2026-10-30). A worker's run proves whom it works for with the schedule's
+permit, checked live against the row (`access_control.task_identity`), and its
+job access comes from the schedule, so removing the row at admission failed
+one-time reminders within a second of starting. While the run's receipt is
+unfinished the schedule is *finishing* (`remaining_count = 0`,
+`schedule_store.is_finishing`): claims, wake times and enabled listings skip
+it, and the Settings card, stuck-schedule notices, telemetry and the agent's
+`list_scheduled_jobs` (`final_run_in_progress`) show it as finishing, not
+overdue. A schedule ended by its end date keeps its following run time
+instead, blocked by that date, so a later end date set during the run lets it
+go on. The pruning pass removes the row, and ends its grants, once the run's
+terminal snapshot closes its receipt, or once the receipt is older than a
+run's identity lasts (7 days), so a receipt nothing closed cannot keep a
+schedule forever. Only runs a worker claims get receipts (a person's
+schedules and `local_worker` system timers); the team lead's own system
+timers sign their runs, are never checked against the row, and still finish
+at admission. Removing or turning off a schedule still ends a running last
+run's access at once. Moving a finishing one-time reminder, or making it
+repeat, gives it its runs back; any other edit leaves it finishing.
+
+A schedule whose runs fail is reported once per problem
+(`custom_agents.scheduled_run_failures`). A top-level scheduled run's outcome
+is saved in its terminal snapshot transaction, because the task is archived
+right after (`storage.scheduled_run_problems`: one row per schedule, holding
+the first failed run of the current problem and the run that finished after
+it, with routing and the schedule's name, never instructions or output). The
+lead's scheduler pass reports the rows through the stuck-work notices
+(`custom_agents.stuck_work`): the person the run's original signature names
+(`task_identity.reported_schedule_run`) gets one Inbox notice and one chat
+message at once, administrators an Inbox notice for team or system work.
+Further failures say nothing until a run finishes, which sends one "working
+again" notice; a schedule that ended, was removed or was turned off closes the
+problem with no message. The notice never names a cause (a failed task keeps
+only error text, and a typed cause would change a shared message contract);
+it suggests a question for the person's assistant that names the run's task
+id, which `get_task_history_window` reads. It ignores the schedule's
+`notify_on_failure`, which governs the results a run reports, and replaces the
+wait limit's own chat message for scheduled runs. These rows are operational
+state and do not move in a team transfer.
+
 Every write that depends on a schedule's current values reads, decides and
 writes in one write transaction (`ScheduleRepository.write_locked`: SQLite's
 write lock, or PostgreSQL's schedule-id and row locks). A run changes only its
@@ -605,7 +646,10 @@ recovery is reported the same way, and each incident once
 (`storage/stuck_work_repository.py`). The Schedules card shows **Not running**
 with the same explanation. A missed one-time run is turned off and its owner
 told. This replaced a self-addressed TeamLead review task that carried no person
-and no chat route, so its findings reached nobody.
+and no chat route, so its findings reached nobody. A finishing schedule (its
+last run still working) is never stuck. Scheduled jobs whose runs fail are
+reported through the same notices (`custom_agents.scheduled_run_failures`,
+above).
 
 Stuck tasks are reported the same way (`custom_agents.stuck_tasks`). The team
 lead reads every agent's saved work in its team (read-only) and reports one
@@ -1881,6 +1925,33 @@ that, because both members may hold the same tool. The first user is an owner
 and administrator but in normal use acts like any other user, escalating only
 when a request needs it.
 
+Each catalog tool has an owner scope (`owner_scope` in `ua_definitions/access`,
+`OwnerScope` in `custom_messages/contracts/access_v2.py`), which says who may
+hold and give it:
+
+- `team` (the default): the team's tools. Administrators hold and give them
+  (`std:admin`); members give agents, for their own work, what they hold.
+- `platform`: platform objects (settings, access, capabilities, restarts).
+  Only administrators hold `full`; agents never do and only propose
+  (`guard:agents-no-platform-full`).
+- `administrators`: settings every person shares, such as model choice. Only
+  administrators hold or give them at any level (`guard:admin-only-tools`);
+  an agent holds them only for an administrator's work.
+- `person`: a tool that acts on each person's own records, such as the clean-up
+  of their chat history (`fn:history_cleanup`). It belongs to the person whose
+  work or request it is, never to whoever acts: Cedar marks that person as its
+  owner (`AccessService.person_owner`), so `std:owner` lets that person use and
+  give it, and `std:admin`, which skips owned targets, gives administrators
+  nothing over anyone else's. Only that person opens it to agents, only to
+  TeamLead, only for their own work and never handed on: grants for everyone,
+  for someone else's work, to workers, schedules, roles or people, and with
+  delegation are refused (`AccessService.person_owned_refusal`), agents cannot
+  ask for it with `request_access`, and its reviews are decided by that person
+  alone (`AccessRequests.may_decide`). A block on it applies to the whole team,
+  so only administrators add one. It belongs to no tool set (the catalog
+  refuses one) and to no starter profile. Without the person's grant each use
+  is reviewed by that person.
+
 Access follows the work (owner's decision 2026-09-30). People only talk to
 TeamLead, workers get work only from TeamLead, scheduled runs or system jobs,
 and every tool call runs in a task with a verified identity, so workers never
@@ -2291,7 +2362,50 @@ and input settings; `custom_agents/model_choice.py`) is the `model_choice` chang
 `guard:admin-only-tools`), so it applies when TeamLead holds it for an
 administrator's work (the Trusted profile gives it) and that administrator
 gets a notice. The owner asked for it because model switches are frequent,
-bounded and easy to undo, while everything else keeps the review. Staging a
+bounded and easy to undo, while everything else keeps the review.
+
+A person's chat transcripts and finished tasks are kept until they are
+deleted; only the person, through TeamLead, deletes them (owner's decision
+2026-10-27), apart from removing the person from the team.
+`custom_agents/history_cleanup.py` gives TeamLead `get_history_overview` (the
+person's conversations, sizes and ages) and `plan_history_cleanup`, which
+stages an exact plan for the person the task verifiably works for: by age,
+by named conversations of theirs, or both, for chats, finished tasks or both.
+It leaves out the conversation the request is asked in and conversations with
+unfinished work, including tasks waiting for a person regardless of age.
+That exclusion is checked again before applying a plan. In a scheduled run only a schedule the person made
+themselves (`ScheduleManagementClass.USER`) may stage one. `apply_change`
+applies it as the `history_cleanup` change of `fn:history_cleanup`, each
+person's own tool (owner scope `person`): at once when the person gave TeamLead
+that tool at `full` (Settings > Access or `/access grant`), otherwise after the person
+approves the exact plan in the Inbox, whose card names the conversations by
+the start of their first request and keeps only ids, dates and counts once
+decided (`ChangeProposalV1.effect_after_decision`). The manager never opens the
+gateway's database, so the clean-up is an order in the manager's database
+(`storage/history_cleanup_repository.py`), which both processes already open.
+TeamLead's process deletes the manager's records in one transaction (turns,
+summaries and tags, conversation artifacts and their files, memory-review jobs,
+memory-graph rows, finished tasks and the tasks delegated from them) and leaves
+the order for the gateway; a gateway loop in both authorization modes
+(`assistant_gateway/history_cleanup.py`) deletes the chat transcripts and their
+copies, sends the person an Inbox notice with what was deleted and how it was
+approved, and closes the order. Each side logs a `history_cleanup` access
+event. The manager commits the deleted-row counts and pending vector ids with
+the deletion, so a retry only finishes file and vector removal. It never
+replays SQL against a conversation that has started afresh and reused turn
+indexes. The gateway similarly journals its original counts and upload paths
+in `gateway_history_cleanups` in the same transaction as record deletion;
+failed file removals keep the order waiting. The notice therefore reports the
+original clean-up after a retry. Journals stay with their manager order for
+30 days so concurrent retries still find the original result, then are
+removed. These are runtime records, excluded from
+team transfer. The manager finishes interrupted orders at start and in
+maintenance. An age sweep leaves explicitly cut conversations to their own
+boundary, and preserves known conversations with no selected turns, so a
+kept turn's question stays even if the gateway wrote it just before the cutoff.
+Remembered facts are not part of it. A message that follows up a deleted
+conversation before the gateway applied its part starts the conversation
+afresh (`custom_agents.conversation_runtime`). Staging a
 model-affecting plan already tries each target model once
 (`RuntimeLLMOverrideApplier.prepare_candidates` and `test_candidates`, owner's
 decision 2026-10-10: try once, then ask), including instance-baseline `llm.*`

@@ -134,7 +134,7 @@ from custom_agents.manager_control_runtime import (
     handle_manager_topic_command,
     handle_task_progress_status,
 )
-from custom_agents.manager_bootstrap_runtime import run_manager_bootstrap
+from custom_agents.manager_bootstrap_runtime import resume_manager_data_cleanups, run_manager_bootstrap
 from custom_agents.sdk.strands.skills import (
     is_agent_skills_plugin,
     list_agent_skill_names,
@@ -5023,11 +5023,7 @@ class UniversalAgent(BaseModel):
             # from a worker that is gone: tell each requester who holds them.
             await report_held_delegated_tasks(self)
             if self.is_team_lead:
-                # Safety net: end the work of anyone disabled or removed while
-                # this manager was stopped (custom_agents.person_departure_runtime).
-                from custom_agents.person_departure_runtime import settle_departed_people_safely
-
-                await settle_departed_people_safely(self, when="manager_start")
+                await resume_manager_data_cleanups(self)
             from custom_agents.agent_instantiation_service import update_runtime_launch
             from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
 

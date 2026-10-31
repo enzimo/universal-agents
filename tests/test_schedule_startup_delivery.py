@@ -142,6 +142,68 @@ async def test_schedule_storage_failure_opens_no_inbound_subscription(tmp_path):
     agent._cleanup_nats_runtime_on_exit.assert_awaited_once_with(adapter)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_team_lead", [True, False])
+async def test_startup_finishes_manager_data_cleanups_after_recovery_before_ready(
+    tmp_path, monkeypatch, is_team_lead
+):
+    from custom_agents import agent_instantiation_service, delegated_work_runtime, history_cleanup
+    from custom_agents import orphaned_subtasks, person_departure_runtime, strands_agent
+    from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
+
+    agent = startup_probe(tmp_path)
+    agent.is_team_lead = is_team_lead
+    agent.named_agent_type = "TeamArchitect" if is_team_lead else "Worker"
+    agent.process_broadcasts = False
+    agent.user_name_postfix = "user"
+    agent.user_queue_postfix = "user"
+    agent._worker_ready = False
+    agent._publish_presence_status = AsyncMock()
+    agent._presence_heartbeat_loop = AsyncMock()
+    agent._subscribe_type_queue = AsyncMock()
+    events = []
+
+    async def recover():
+        assert agent._agent_state_store is not None and agent._schedule_store is not None
+        events.append("recovered")
+
+    async def settle(_agent, *, when):
+        assert _agent is agent and when == "manager_start" and not agent._worker_ready
+        assert events == ["bootstrap", "recovered"]
+        events.append("departure_started")
+        await asyncio.sleep(0)
+        events.append("departures_settled")
+
+    async def resume(_agent):
+        assert _agent is agent and not agent._worker_ready
+        assert events[-1] == "departures_settled"
+        events.append("history_resumed")
+
+    def mark_ready(_agent, *, state):
+        assert _agent is agent and state is AgentLaunchState.READY
+        assert events == (["bootstrap", "recovered", "departure_started", "departures_settled", "history_resumed"]
+                          if is_team_lead else ["recovered"])
+        raise SubscriptionProbeComplete()
+
+    agent._recover_runtime_after_restart = recover
+    agent._ensure_nats_transport_adapter = lambda: SimpleNamespace(
+        connect=AsyncMock(), subscribe_route=AsyncMock(), subscribe_subject=AsyncMock()
+    )
+    monkeypatch.setattr(strands_agent, "run_manager_bootstrap", lambda _agent: events.append("bootstrap"))
+    monkeypatch.setattr(strands_agent, "_subscribe_manager_control_route", AsyncMock())
+    monkeypatch.setattr(strands_agent, "install_custody_listeners", Mock())
+    monkeypatch.setattr(orphaned_subtasks, "register_parent_end_stops", Mock())
+    monkeypatch.setattr(delegated_work_runtime, "register_delegated_task_endings", Mock())
+    monkeypatch.setattr(delegated_work_runtime, "report_held_delegated_tasks", AsyncMock())
+    monkeypatch.setattr(person_departure_runtime, "settle_departed_people_safely", settle)
+    monkeypatch.setattr(history_cleanup, "resume_history_cleanups", resume)
+    monkeypatch.setattr(agent_instantiation_service, "update_runtime_launch", mark_ready)
+    with pytest.raises(SubscriptionProbeComplete):
+        await agent._connect_nats()
+    agent._cleanup_nats_runtime_on_exit.assert_awaited_once()
+    await agent._presence_task
+
+
 @pytest.mark.live
 @pytest.mark.nats
 @pytest.mark.asyncio

@@ -8,7 +8,8 @@ import {
   STANDARD_GROUP_TITLE, STARTER_PROFILE_TITLE, TEAM_BLOCK_LABEL, WAITING_LABEL, YOUR_WORK_TITLE,
   accessMapPath, chainText, createAccessMap, grantGroups, grantRowModel, isToolSet, lifetimeText, operationsPath,
   parseAccessMapLink, removeDataFolderPath, renderAgentCard, renderBlockForm, renderFilesView, renderPersonCard,
-  renderStarterProfile, renderToolCard, revokePath, stopSharingPath,
+  renderHistoryCleanup, renderStarterProfile, renderToolCard, revokePath, stopSharingPath,
+  HISTORY_CLEANUP_LABEL, HISTORY_CLEANUP_TITLE,
 } from "../assistant_gateway/onboarding_web/assets/access_map.mjs";
 
 // A small DOM stand-in (as in access_inbox.test.mjs). innerHTML throws, so any
@@ -744,6 +745,61 @@ test("saving TeamLead's standing access posts the profile name, then reloads the
   await settle();
   assert.equal(f.status.textContent, "Trusted team for your work: TeamLead gets full access.");
   assert.match(f.list.children[0].textContent, /Trusted teamIn use/);
+});
+
+const HISTORY_CLEANUP = {
+  available: true, on: false, grant_id: null,
+  description: "When you ask TeamLead to delete your old chats or finished tasks, it does so without asking you. "
+    + "Remembered facts are kept; you manage them under Memories.",
+};
+
+test("the history clean-up switch says what it does and reports each flip", () => {
+  const document = fakeDocument();
+  const flips = [];
+  const view = renderHistoryCleanup(document, HISTORY_CLEANUP, { onToggle: parts => flips.push(parts) });
+  assert.equal(byTag(view.node, "h4")[0].textContent, HISTORY_CLEANUP_TITLE);
+  assert.match(view.node.textContent, new RegExp(HISTORY_CLEANUP_LABEL));
+  assert.match(view.node.textContent, /Remembered facts are kept/);
+  assert.equal(view.input.getAttribute("role"), "switch");
+  assert.equal(view.input.checked, false);
+  view.input.checked = true;
+  view.input.dispatchEvent(new Event("change"));
+  assert.equal(flips.length, 1);
+  assert.equal(flips[0].on, true);
+  assert.equal(renderHistoryCleanup(document, { ...HISTORY_CLEANUP, on: true }).input.checked, true);
+});
+
+test("flipping the history clean-up switch posts it, and a refusal puts the switch back", async () => {
+  const f = controllerFixture();
+  await loaded(f, { items: [holder()], starter_profile: STARTER_PROFILE, history_cleanup: HISTORY_CLEANUP });
+  const [profile, cleanup] = f.list.children;
+  assert.equal(byTag(profile, "h4")[0].textContent, STARTER_PROFILE_TITLE);
+  assert.equal(byTag(cleanup, "h4")[0].textContent, HISTORY_CLEANUP_TITLE, "the switch sits below the profile");
+  const input = byTag(cleanup, "input")[0];
+  input.checked = true;
+  input.dispatchEvent(new Event("change"));
+  await settle();
+  assert.equal(f.posts[0].path, "/api/web-chat/access-map/history-cleanup");
+  assert.deepEqual(f.posts[0].body, { on: true });
+  assert.equal(input.disabled, true, "no second flip while saving");
+  f.posts[0].reject(new Error("Only you can give this."));
+  await settle();
+  assert.equal(input.checked, false, "the switch shows what is stored");
+  assert.equal(input.disabled, false);
+  assert.match(cleanup.textContent, /Only you can give this\./);
+
+  input.checked = true;
+  input.dispatchEvent(new Event("change"));
+  await settle();
+  f.posts[1].resolve({ status: "ok", message: "TeamLead may now clean up your old chats." });
+  await settle();
+  assert.equal(f.gets.at(-1).path, "/api/web-chat/access-map?view=agents&offset=0", "the view is read again");
+});
+
+test("the history clean-up switch is left out when the catalog has no such tool", async () => {
+  const f = controllerFixture();
+  await loaded(f, { items: [holder()], starter_profile: STARTER_PROFILE, history_cleanup: { ...HISTORY_CLEANUP, available: false } });
+  assert.doesNotMatch(f.list.textContent, new RegExp(HISTORY_CLEANUP_TITLE));
 });
 
 test("the standing access control belongs to By Agent Type only", async () => {

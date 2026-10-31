@@ -64,6 +64,12 @@ export const STARTER_PROFILE_API = `${ACCESS_MAP_API}/starter-profile`;
 export const SAVE_LABEL = "Save";
 export const IN_USE_LABEL = "In use";
 
+// The By Agent Type view's switch for TeamLead cleaning up the person's own
+// history without asking (custom_agents.history_cleanup).
+export const HISTORY_CLEANUP_TITLE = "Cleaning up your chat history";
+export const HISTORY_CLEANUP_LABEL = "Let TeamLead clean up my history without asking";
+export const HISTORY_CLEANUP_API = `${ACCESS_MAP_API}/history-cleanup`;
+
 // Files view section titles and the keys their status lines are kept under.
 export const FILES_SECTIONS = Object.freeze({
   sharedByYou: Object.freeze({ key: "shared_by_you", title: "Shared by you" }),
@@ -638,6 +644,38 @@ export function renderBlockForm(document, holder, blockTools, { allowTeam = fals
 /* -- TeamLead's standing access ---------------------------------------------- */
 
 /**
+ * The switch below the starter profile control: whether TeamLead may clean up
+ * the signed-in person's own chat history without asking each time. `model`
+ * is the gateway's `history_cleanup` (`on`, `description`); `onToggle`
+ * receives `{ on, input, message }` when the person flips it. The gateway
+ * gives or removes the one grant and decides again when it is sent.
+ */
+export function renderHistoryCleanup(document, model, { onToggle } = {}) {
+  const node = element(document, "section", "access-map-profile access-map-history");
+  const heading = element(document, "h4", "settings-subsection-title", HISTORY_CLEANUP_TITLE);
+  heading.id = uniqueId("access-map-history-title");
+  node.setAttribute("aria-labelledby", heading.id);
+  const row = element(document, "div", "access-map-history-switch");
+  const label = element(document, "span", "access-map-history-label", HISTORY_CLEANUP_LABEL);
+  label.id = uniqueId("access-map-history-label");
+  const toggle = element(document, "label", "toggle");
+  const input = element(document, "input");
+  input.type = "checkbox";
+  input.setAttribute("role", "switch");
+  input.setAttribute("aria-labelledby", label.id);
+  input.checked = model && model.on === true;
+  toggle.append(input, element(document, "span"));
+  row.append(label, toggle);
+  const message = messageLine(document);
+  node.append(heading, element(document, "p", "settings-subsection-copy", text(model && model.description)), row, message);
+  input.addEventListener("change", () => {
+    if (input.disabled || typeof onToggle !== "function") return;
+    onToggle({ on: input.checked, input, message });
+  });
+  return { node, input, message };
+}
+
+/**
  * The starter profile control at the top of By Agent Type: how much TeamLead
  * may do for the signed-in person's own work without asking them each time
  * (TeamLead can hand that on to workers). `profile` is the gateway's
@@ -1100,8 +1138,13 @@ export function createAccessMap({
       const items = Array.isArray(payload.items) ? payload.items : [];
       const cards = text(payload.notice) ? [] : items.map(renderCard);
       const profile = payload.starter_profile;
-      const top = state.view === "agents" && !text(payload.notice) && profile && Array.isArray(profile.choices)
+      const ownWork = state.view === "agents" && !text(payload.notice);
+      const top = ownWork && profile && Array.isArray(profile.choices)
         && profile.choices.length ? [renderStarterProfile(document, profile, { onSave: saveStarterProfile }).node] : [];
+      const cleanup = payload.history_cleanup;
+      if (ownWork && cleanup && cleanup.available === true) {
+        top.push(renderHistoryCleanup(document, cleanup, { onToggle: saveHistoryCleanup }).node);
+      }
       list.replaceChildren(...top,
         ...(cards.length ? cards : [emptyState(document, text(payload.notice) || EMPTY[state.view])]));
     }
@@ -1209,6 +1252,23 @@ export function createAccessMap({
         // The choice stays selected so the person can try again.
         finish();
         setCardMessage(message, failureMessage(error, "The choice was not saved. Refresh and try again."), true);
+      });
+  }
+
+  function saveHistoryCleanup({ on, input, message }) {
+    input.disabled = true;
+    setCardMessage(message, "Saving…", false);
+    return Promise.resolve()
+      .then(() => post(HISTORY_CLEANUP_API, { on }))
+      .then(payload => {
+        input.disabled = false;
+        return finishedAction(text(payload && payload.message)
+          || (on ? "TeamLead may now clean up your history without asking." : "TeamLead now asks before each clean-up."));
+      }, error => {
+        // The switch goes back to what is stored, so it never shows a choice that was not saved.
+        input.disabled = false;
+        input.checked = !on;
+        setCardMessage(message, failureMessage(error, "The change was not saved. Refresh and try again."), true);
       });
   }
 

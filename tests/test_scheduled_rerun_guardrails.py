@@ -17,6 +17,7 @@ from custom_messages.contracts.redispatch_v1 import TaskRedispatchNoticeV1
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.config import resolve_storage_settings
 from storage.schedule_worker_repository import ScheduleWorkerRepository
+from storage.schedule_occurrences import ensure_occurrence_schema
 from storage.worker_handback_repository import (
     HANDBACK_STATUS_SUPERSEDED,
 )
@@ -35,7 +36,7 @@ def records(tmp_path) -> ScheduleWorkerRepository:
     )
     store = ScheduleStore(storage_settings=settings)
     with store.worker_records._connect() as conn:
-        ScheduleWorkerRepository.ensure_occurrence_schema(conn)
+        ensure_occurrence_schema(conn)
         conn.commit()
     return store.worker_records
 
@@ -143,6 +144,20 @@ async def test_skipped_rerun_closes_the_run(records, monkeypatch):
     status = await runtime._scheduled_run_status(agent, "task_o1")
     assert status == HANDBACK_STATUS_SUPERSEDED
     assert records.for_task("task_o1", TEAM).state == "superseded"
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_final_run_can_be_resumed_without_a_next_fire(records, monkeypatch):
+    _insert(records, _occurrence("o1", due=_now() - timedelta(minutes=5)))
+    row = {**_row(next_in=timedelta(minutes=-5)), "remaining_count": 0}
+    store = _lead_store(records, row=row, monkeypatch=monkeypatch)
+    agent = SimpleNamespace(
+        id="lead", team_id=TEAM, _schedule_store=store,
+        task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime()),
+        _logger=logging.getLogger("test.guard"),
+    )
+    assert await runtime._scheduled_run_status(agent, "task_o1") is None
+    assert records.for_task("task_o1", TEAM).finished_at_utc is None
 
 
 # --- worker: taking over a rerun --------------------------------------------

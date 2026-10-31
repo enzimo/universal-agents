@@ -27,6 +27,12 @@ there, within your own authority. `/webchat?view=access` opens it directly, and
 `/webchat?view=access#agent=<type>` opens it at one agent type. See
 [The Access page](permissions.md#the-access-page).
 
+Your chats and finished tasks are kept until you ask TeamLead to delete some,
+by date or by conversation; you approve each clean-up in the Inbox, or let
+TeamLead do it without asking with a switch on the Access page, and you get a
+notice each time. See
+[Cleaning up your chat history](permissions.md#cleaning-up-your-chat-history).
+
 ### Messages while your request is running
 
 A message in a busy chat gives guidance to the request already running there.
@@ -459,7 +465,9 @@ other agents stops too.
 A request that involves several agents is reported once, as your request.
 Administrators' notices name the kind of agent and what to check, never the
 text of your request. Stuck schedules are reported the same way (see
-[Scheduled workers](scheduled-workers.md#when-a-schedule-is-stuck)).
+[Scheduled workers](scheduled-workers.md#when-a-schedule-is-stuck)), and so are
+scheduled jobs whose runs fail, once per problem (see
+[Scheduled workers](scheduled-workers.md#when-a-scheduled-jobs-run-fails)).
 
 After the host wakes from sleep, the task monitor gives workers one minute to
 refresh their status before treating old heartbeats as a stopped worker. A

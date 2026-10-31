@@ -1,4 +1,4 @@
-"""Tell people when their schedules or tasks are stuck, and when they work again.
+"""Tell people when their schedules or tasks are stuck or failing, and when they work again.
 
 Why trusted code: a stuck schedule used to produce only a self-addressed review
 task for TeamLead's model. That task carried no signed person and no chat
@@ -10,21 +10,26 @@ every pass, with no model turn.
 
 How it works:
 
-- A source (``custom_agents.stuck_schedules``, ``custom_agents.stuck_tasks``)
-  lists what is stuck now, as ``StuckFinding``\\ s: what, since when, why (a
-  reason code with a plain-language explanation), whom it affects and the
-  chat route to reach them.
+- A source (``custom_agents.stuck_schedules``, ``custom_agents.stuck_tasks``,
+  ``custom_agents.scheduled_run_failures``,
+  ``custom_agents.worker_pool_reviews``) lists what is stuck now, as
+  ``StuckFinding``\\ s: what, since when, why (a reason code with a
+  plain-language explanation), whom it affects and the chat route to reach
+  them.
 - ``report_stuck_work`` keeps one open incident per finding
   (``storage.stuck_work_repository``). Once an incident has lasted
   ``notice_after``, the affected person gets one Inbox notice and one chat
   message; administrators get an Inbox notice when only they can fix it or
   when the work is the team's. When a finding disappears, everyone who was
   told gets a "working again" notice and message, and the incident closes.
+  A source may close it with no message instead (``recovery`` returns
+  None), when the work ended and nothing will run again.
 - Inbox notices are stored once per notice id (``send_runtime_notice_once``),
   in both authorization modes. Chat messages are ``UserNotification``\\ s sent
   through the gateway like any proactive message; this is the one place
   notices are pushed to chat, by the owner's decision of 2026-10-04 (notices
-  are otherwise silent, decision D3).
+  are otherwise silent, decision D3), extended on 2026-10-30 to scheduled
+  runs that fail.
 
 Every step logs an ``event=stuck_work_*`` line with the subject and incident ids.
 A failure to tell someone is logged and retried on the next pass; it never
@@ -112,8 +117,12 @@ class StuckWorkSource(Protocol):
     def findings(self, now: datetime) -> list[StuckFinding]:
         """What is stuck now. Runs in the storage lane, so it may read stores."""
 
-    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery:
-        """The "working again" notice for a closed incident, and where to send it."""
+    def recovery(self, incident: StuckWorkIncidentV1) -> Recovery | None:
+        """The "working again" notice for a closed incident, and where to send it.
+
+        None closes the incident with no message: the work ended, so nothing
+        is working again (a failed one-time reminder's removed schedule).
+        """
 
 
 def _notice_id(incident: StuckWorkIncidentV1, suffix: str) -> str:
@@ -278,6 +287,16 @@ async def _tell_recovered(agent: Any, source: StuckWorkSource, incident: StuckWo
     recovery = await agent.task_manager.operations_runtime.run(
         partial(source.recovery, incident)
     )
+    if recovery is None:
+        agent._logger.info(
+            "Closed stuck work with nothing more to tell: it ended. event=stuck_work_closed_silently "
+            "kind=%s subject_id=%s incident_id=%s person_id=%s",
+            incident.subject_kind,
+            incident.subject_id,
+            incident.incident_id,
+            incident.person_id,
+        )
+        return
     await agent.task_manager.operations_runtime.run(
         partial(
             _store_notices,

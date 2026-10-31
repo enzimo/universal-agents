@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "2a3de0356339b163d4a896c3be091ff9eb96dee2c5a093f295bcf7610f605d2f",
+    "contracts/messages/v1/README.md": "1caf92fa2aec1dc9bd57c2feee5a51ec095635b0ddac529635e8dabdcd1cd9b8",
     "contracts/messages/v1/examples/invalid/access-request-token-on-a-command.json": "45c09aa4dad7c72401ffd76b7dfd582b3ba8608b75fdeffb548be7197be4b7f3",
     "contracts/messages/v1/examples/invalid/access-until-without-hours.json": "ff280196b6c0e78cb759f65ca9d41a88d589d3e92431452e6df0c04df9348c9f",
     "contracts/messages/v1/examples/invalid/access-withdraw-without-request-id.json": "913ae59b2c70f2ebee832e56406f80293e0d67c1e251c87f2b3047d12ccdd3c6",
@@ -1125,7 +1125,7 @@
     "contracts/messages/v1/examples/valid/people.set_standing/full.json": "bb982b42c6fe94c6c9811e6689a94eae237dcb5a2050b3f858ead47043ca5405",
     "contracts/messages/v1/examples/valid/person.notify/administrators.json": "a57a1b6483feaa791063d19dd217ca4d0d0be9d3e5210c909a572ca38022c7bf",
     "contracts/messages/v1/examples/valid/person.notify/agent.json": "32f7f77703d0ee94aecc86246c55665e0636424ea36a5c3165df5910d966522b",
-    "contracts/messages/v1/examples/valid/person.notify/code.json": "906e03f50d5e19f23e5ae72f89ad47ef042729fea8f038ea796c33a99e62c3ab",
+    "contracts/messages/v1/examples/valid/person.notify/code.json": "5ddede3728ca110ee2e303ed7d59547c3c5237842c1652b4955e0eebd2f97313",
     "contracts/messages/v1/examples/valid/question.closed/full.json": "ec3229dc7f49d10a574f18ff9f8fbfd3ecd14107c243d9a3b47f0f59aac71366",
     "contracts/messages/v1/examples/valid/requests.pause.reply/not_found.json": "f843b5dcbc363957bc9ef6d88951ad78f19668958579ac8ce830a1161bb61ca7",
     "contracts/messages/v1/examples/valid/requests.pause.reply/not_own_request.json": "f019ade7e4e5fb7686bb4a3c2146a6f197cd1de64bdf5b31d1f226485cee9f05",
@@ -1635,7 +1635,7 @@
     "contracts/messages/v1/schemas/bodies/objectives.work_sessions.status.schema.json": "c1dd5eaa82043cfd90f60eb7e0e8a5fe909bb3eebb72b91a62f467659dc00857",
     "contracts/messages/v1/schemas/bodies/people.set_standing.reply.schema.json": "e88c0545c74b36a8bf20706ab77c3cc5ad54e072167acb9740d4c012797b204a",
     "contracts/messages/v1/schemas/bodies/people.set_standing.schema.json": "4cb108388ee94108da8794cdb0b2c51b8ab6057d11e086507bca548a7970b281",
-    "contracts/messages/v1/schemas/bodies/person.notify.schema.json": "eaee9322413da947d0111ec56ce39de7af0c84f1acc1dc4595c63a65b4864716",
+    "contracts/messages/v1/schemas/bodies/person.notify.schema.json": "bf01e122bf1492325a64f6098920f7031bb4d5cbc3b7098b9516e0f31156e1e5",
     "contracts/messages/v1/schemas/bodies/question.closed.schema.json": "4c8eb20a2dd9cadf51cb6fc412d92d900cc4af3ea1ec506b970ded634a8d6452",
     "contracts/messages/v1/schemas/bodies/requests.pause.reply.schema.json": "e60f25e31a68fbe33c6d9e3ff0d6b3bd918d487b477fde9666a1bc0595e299db",
     "contracts/messages/v1/schemas/bodies/requests.pause.schema.json": "64fcfdb87caa31e0bb85f884428e4a09b8fe11c6544f44aeb0f87b214c39baf1",
@@ -1728,7 +1728,7 @@
     "contracts/messages/v1/team-topologies.yaml": "18778a8aa1bdd30dafa8721cccaa099f92ab500a927f452e8be4944d6458056a",
     "contracts/messages/v1/transport.yaml": "3cec42b1cc235bb63d5c592a01543da71f984ee902e76c3cbfa1b729a5d999d5",
     "custom_messages/wire/kinds.py": "1dd5e808508bf2bd8b2e7de9dfda9907d3d7edbf41c1318cbe887eb80ba1f7d0",
-    "custom_messages/wire/models.py": "09a0a8d0a70cc583a9e245cdbf7c08809d46ab1b38902851b2e86117066ff248"
+    "custom_messages/wire/models.py": "f1a579651f5d2f2ba06978df5175225176a8f3afdd9168b113c5ebec9450a311"
   },
   "protocol": "1.0-pre"
 }

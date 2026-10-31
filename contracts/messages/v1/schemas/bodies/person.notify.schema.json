@@ -60,7 +60,6 @@
                 "task_queue_near_capacity",
                 "task_queue_safety",
                 "model_provider_failover",
-                "task_wait_limit_reached",
                 "tool_setup_workflow",
                 "messages_set_aside",
                 "work_stuck",

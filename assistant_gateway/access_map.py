@@ -34,6 +34,14 @@ route, which notices use too), blocks are ``AccessRequests.block`` and
 again by the access service when it runs, and a refusal comes back in plain
 words.
 
+By agent type also carries two controls for the person's own work:
+TeamLead's starter profile, and the switch that lets TeamLead clean up the
+person's own chat history without asking each time: full access to
+``fn:history_cleanup`` for their work, never handed on
+(``custom_agents.history_cleanup``). The switch gives and removes that one
+grant with ``AccessService.grant_by_person`` and ``revoke_by_person``; the
+grant is also listed with TeamLead's other access and removed the same way.
+
 Roles come from current team memberships at every call, never from the
 browser. With authorization off there is nothing to show (trusted
 single-person mode, decision D8), and no access service is opened.
@@ -72,6 +80,7 @@ from assistant_gateway.application.access_map_ports import (
     AccessBlockInput,
 )
 from assistant_gateway.file_sharing import GatewayFileSharing, share_view
+from custom_agents.history_cleanup import HISTORY_CLEANUP_TOOL_ID
 from secure_tools.auth_methods import tool_sign_in
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
@@ -93,6 +102,14 @@ from custom_messages.contracts.access_v2 import (
 )
 
 YOU = "You"
+# The Settings switch for TeamLead's permission to clean up the person's history.
+HISTORY_CLEANUP_SWITCH_TEXT = (
+    "When you ask TeamLead to delete your old chats or finished tasks, it does so without asking you to approve "
+    "each clean-up, and you get a notice of what was deleted. Off: you approve each clean-up in the Inbox. Only "
+    "you can turn this on, and TeamLead never passes it on. Remembered facts are kept; you manage them under "
+    "Memories."
+)
+HISTORY_CLEANUP_GRANT_REASON = "History clean-up without asking, turned on in Settings."
 ACCESS_OFF_TEXT = (
     "Access control is off on this instance (trusted single-person mode): agents use every tool "
     "for the person they work for without asking, so there is no access to show, remove or block. "
@@ -250,7 +267,7 @@ class _MapRead:
         self.now = self.service.clock()
         self._display_name = display_name
         self._names: dict[str, str] = {}
-        self._may_give: dict[tuple[str, str, str, str | None], bool] = {}
+        self._may_give: dict[tuple[str, str, str, str | None, str | None], bool] = {}
         self._sharing: TeamAccountSharing | None = None
 
     @property
@@ -346,11 +363,15 @@ class _MapRead:
 
     # -- which buttons to show (each action is decided again when it runs) -----------
 
-    def may_give(self, target: TargetRefV1, level: AccessLevel, task_id: str | None) -> bool:
-        key = (target.kind.value, target.id, level.value, task_id)
+    def may_give(
+        self, target: TargetRefV1, level: AccessLevel, task_id: str | None, for_person_id: str | None = None
+    ) -> bool:
+        key = (target.kind.value, target.id, level.value, task_id, for_person_id)
         if key not in self._may_give:
             try:
-                self._may_give[key] = self.service.may_give(self.person, target, level, task_id=task_id)
+                self._may_give[key] = self.service.may_give(
+                    self.person, target, level, task_id=task_id, for_person_id=for_person_id
+                )
             except HandDownRefused:  # the target left the catalog
                 self._may_give[key] = False
         return self._may_give[key]
@@ -699,6 +720,7 @@ class GatewayAccessMap:
             "items": [self._holder_view(read, holder, block_tools) for holder in page],
             "block_tools": block_tools,
             "starter_profile": self._profile_view(read),
+            "history_cleanup": self._cleanup_view(read),
             "focus_key": focus_key,
             "focus_missing": focus_missing,
         }
@@ -877,6 +899,69 @@ class GatewayAccessMap:
 
     async def set_starter_profile(self, person_id: str, name: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._set_profile, person_id, str(name or "").strip())
+
+    # -- TeamLead's permission to clean up the person's own history -------------------
+
+    def _lead(self, read: _MapRead) -> SubjectRefV1:
+        return SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(read.service.team_id, self._lead_agent_type))
+
+    def _cleanup_grants(self, read: _MapRead) -> list[GrantV1]:
+        """All the person's cleanup grants, including narrower ones the switch must upgrade or remove."""
+
+        return [
+            grant
+            for grant in read.service.store.for_subjects(
+                read.service.team_id, [self._lead(read)], statuses=(GrantStatus.ACTIVE,)
+            )
+            if grant.kind is GrantKind.ACCESS
+            and grant.target.kind is TargetKind.TOOL
+            and grant.target.id == HISTORY_CLEANUP_TOOL_ID
+            and grant.for_person_id == read.person.person_id
+            and read.in_force(grant)
+        ]
+
+    def _cleanup_view(self, read: _MapRead) -> dict[str, Any]:
+        grants = [grant for grant in self._cleanup_grants(read) if grant.level is AccessLevel.FULL]
+        return {
+            "available": HISTORY_CLEANUP_TOOL_ID in read.service.catalog.tools,
+            "on": bool(grants),
+            "grant_id": grants[0].grant_id if grants else None,
+            "description": HISTORY_CLEANUP_SWITCH_TEXT,
+        }
+
+    def _set_cleanup(self, person_id: str, on: bool) -> dict[str, Any]:
+        read = self._open(person_id)
+        grants = self._cleanup_grants(read)
+        if on and not any(grant.level is AccessLevel.FULL for grant in grants):
+            read.service.grant_by_person(
+                read.person,
+                GrantV1(
+                    grant_id="new",
+                    team_id=read.service.team_id,
+                    subject=self._lead(read),
+                    target=TargetRefV1(kind=TargetKind.TOOL, id=HISTORY_CLEANUP_TOOL_ID),
+                    level=AccessLevel.FULL,
+                    granted_by=read.me,
+                    reason=HISTORY_CLEANUP_GRANT_REASON,
+                    created_at_utc=read.service.clock(),
+                    for_person_id=read.person.person_id,
+                ),
+            )
+        if not on:
+            for grant in grants:
+                read.service.revoke_by_person(read.person, grant.grant_id)
+        return {
+            "history_cleanup": self._cleanup_view(read),
+            "message": (
+                "TeamLead may now clean up your old chats and finished tasks when you ask, without asking you to "
+                "approve each clean-up. You get a notice each time."
+                if on
+                else "TeamLead now asks you to approve each clean-up of your history in the Inbox."
+            ),
+        }
+
+    async def set_history_cleanup(self, person_id: str, on: bool) -> dict[str, Any]:
+        return await asyncio.to_thread(self._set_cleanup, person_id, bool(on))
 
     # -- files: shares and data folders ------------------------------------------------
 

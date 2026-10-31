@@ -185,6 +185,25 @@ class SystemScheduleChanges:
         return SystemScheduleChangeService(agent).apply(change_id, approval)
 
 
+class HistoryCleanupChanges:
+    """Deleting part of a person's own chat history and finished tasks (``custom_agents.history_cleanup``)."""
+
+    kind = "history_cleanup"
+
+    def owns(self, change_id: str) -> bool:
+        return change_id.startswith("history_cleanup_")
+
+    def describe(self, agent: Any, change_id: str) -> ChangeProposalV1:
+        from custom_agents.history_cleanup import HistoryCleanupService
+
+        return HistoryCleanupService(agent).describe(change_id)
+
+    def apply(self, agent: Any, change_id: str, approval: ChangeApproval) -> dict[str, Any]:
+        from custom_agents.history_cleanup import HistoryCleanupService
+
+        return HistoryCleanupService(agent).apply(change_id, approval)
+
+
 async def _after_team_skill_change(agent: Any, result: dict[str, Any], verb: str, operation: Any) -> dict[str, Any]:
     """Tell administrators (decision L2) and refresh running agents' skills."""
 
@@ -206,6 +225,7 @@ CHANGE_ADAPTERS: tuple[ChangeAdapter, ...] = (
     ManagedExecutionServiceChanges(),
     ExecutionSSHInteractionChanges(),
     SystemScheduleChanges(),
+    HistoryCleanupChanges(),
 )
 
 

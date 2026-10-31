@@ -65,6 +65,7 @@ from custom_messages.contracts.access_v2 import (
     GrantStatus,
     GrantV1,
     OperationResolutionV1,
+    OwnerScope,
     SubjectKind,
     SubjectRefV1,
     TargetKind,
@@ -74,6 +75,10 @@ from id_generation import new_id
 from storage.access_repository import AccessRepository, AccessStoreConflict
 
 logger = logging.getLogger(__name__)
+
+# Stands in for the owner of a person's own tool when no person is known, so
+# the owner policy never matches it (no User has this id).
+PERSON_OWNED_BY_NOBODY = "person-owned:nobody"
 
 # The tool id recorded on file and folder decisions (the catalog's file tools).
 FILES_TOOL_ID = "fn:files"
@@ -324,7 +329,9 @@ class AccessService:
         operation_id: str | None = None,
     ) -> tuple[_SideResult, list[GrantV1]]:
         grants = self._principal_grants(agent, task_id=task_id, person_id=person_id, operation_id=operation_id)
-        resource, entities = target_entities(self.catalog, self.team_id, resolution)
+        resource, entities = target_entities(
+            self.catalog, self.team_id, resolution, owner=self.person_owner(resolution.tool_id, person_id)
+        )
         result = self._evaluate(
             principal=agent.uid(),
             principal_entities=agent_entities(agent),
@@ -339,9 +346,8 @@ class AccessService:
     def _person_side(self, person: PersonPrincipal, resolution: OperationResolutionV1, task_id: str | None) -> _SideResult:
         tool = self.catalog.tools.get(resolution.tool_id)
         personal = tool is not None and tool.account is AccountMode.PERSONAL_LOGIN
-        resource, entities = target_entities(
-            self.catalog, self.team_id, resolution, owner=person.person_id if personal else None
-        )
+        owner = person.person_id if personal else self.person_owner(resolution.tool_id, person.person_id)
+        resource, entities = target_entities(self.catalog, self.team_id, resolution, owner=owner)
         return self._evaluate(
             principal=person.uid(),
             principal_entities=person_entities(person),
@@ -923,17 +929,24 @@ class AccessService:
         *,
         task_id: str | None,
         person_id: str | None = None,
+        for_person_id: str | None = None,
     ) -> bool:
         """Whether the agent or person could give (so also restrict) the access.
 
         For an agent, ``person_id`` is the person its task works for: it may
         hand on only what it holds for that person's work (decision D13).
+        ``for_person_id`` is whose work the access would serve when a person
+        decides someone's request: a person's own tool (``OwnerScope.PERSON``)
+        then belongs to that person, not to the one deciding. Without it a
+        person gives for their own work.
         """
 
         if isinstance(grantor, AgentPrincipal):
             principal_entities = agent_entities(grantor)
+            owner_hint = None
         else:
             principal_entities = person_entities(grantor)
+            owner_hint = for_person_id or grantor.person_id
         return self._delegate_check(
             principal=grantor.uid(),
             principal_entities=principal_entities,
@@ -941,7 +954,7 @@ class AccessService:
             level=level,
             target=target,
             task_id=task_id,
-            owner_hint=grantor.person_id if isinstance(grantor, PersonPrincipal) else None,
+            owner_hint=owner_hint,
         ).allowed
 
     def chain(self, grant: GrantV1) -> list[GrantV1]:
@@ -1024,6 +1037,25 @@ class AccessService:
                 return False
         return True
 
+    def person_owned(self, tool_id: str) -> bool:
+        """Whether a tool is each person's own (``OwnerScope.PERSON``, such as their history clean-up)."""
+
+        tool = self.catalog.tools.get(tool_id.partition("#")[0])
+        return tool is not None and tool.owner_scope is OwnerScope.PERSON
+
+    def person_owner(self, tool_id: str, person_id: str | None) -> str | None:
+        """The owner Cedar sees on a tool: for a person's own tool, the person whose work or request it is.
+
+        Never whoever acts: an administrator deciding someone else's request
+        does not own that person's tool, so ``std:admin`` (which skips owned
+        targets) and ``std:owner`` both leave them out. With no person the
+        owner is one no principal is, so nobody holds it.
+        """
+
+        if not self.person_owned(tool_id):
+            return None
+        return person_id or PERSON_OWNED_BY_NOBODY
+
     def target_entities_for_ref(
         self, target: TargetRefV1, *, person_id: str | None = None
     ) -> tuple[dict[str, str], list[dict[str, Any]]]:
@@ -1032,7 +1064,8 @@ class AccessService:
         ``person_id`` is the person acting (or the person an agent's task works
         for): a folder or file inside their own folder is marked as theirs, so
         the owner policy lets them share it (decision D15). Anyone else's
-        folder gets an owner nobody is.
+        folder gets an owner nobody is. A person's own tool
+        (``OwnerScope.PERSON``) is marked as that person's the same way.
         """
 
         if target.kind in {TargetKind.FOLDER, TargetKind.FILE}:
@@ -1046,14 +1079,18 @@ class AccessService:
             resolution = OperationResolutionV1(
                 tool_id=tool_id, operation=operation, level=definition.level, source=definition.source
             )
-            return target_entities(self.catalog, self.team_id, resolution)
+            return target_entities(
+                self.catalog, self.team_id, resolution, owner=self.person_owner(tool_id, person_id)
+            )
         if target.kind is TargetKind.TOOL:
             if target.id not in self.catalog.tools:
                 raise HandDownRefused(f"{target.id} is not in the tool catalog.")
             probe = OperationResolutionV1(
                 tool_id=target.id, operation="probe", level=AccessLevel.FULL, source=ClassificationSource.TRUSTED
             )
-            _operation, entities = target_entities(self.catalog, self.team_id, probe)
+            _operation, entities = target_entities(
+                self.catalog, self.team_id, probe, owner=self.person_owner(target.id, person_id)
+            )
             return target_uid(target), [entity for entity in entities if entity["uid"]["type"] != "Operation"]
         if target.kind is TargetKind.TOOL_SET:
             if target.id not in self.catalog.tool_sets:
@@ -1231,6 +1268,37 @@ class AccessService:
             "the schedule instead."
         )
 
+    def person_owned_refusal(self, person: PersonPrincipal, spec: GrantV1) -> str | None:
+        """Why this grant or block on a person's own tool (``OwnerScope.PERSON``) is refused, or None.
+
+        Such a tool acts on one person's own records, so only that person
+        opens it, only to the team lead, only for their own work, and the team
+        lead keeps it to itself: no grants for everyone or for someone else's
+        work, none to workers, schedules, roles or people, and no handing on.
+        A block on it is team-wide, so it is an administrator's choice; a
+        person stops it for their own work by removing the access they gave.
+        """
+
+        if spec.target.kind not in {TargetKind.TOOL, TargetKind.OPERATION} or not self.person_owned(spec.target.id):
+            return None
+        name = spec.target.id.partition("#")[0]
+        if spec.kind is GrantKind.BLOCK:
+            if is_administrator(person.roles):
+                return None
+            return (
+                f"A block on {name} stops it for everyone, so only an administrator adds one. To stop TeamLead "
+                "using it for your own work, remove the access you gave it."
+            )
+        if spec.kind is not GrantKind.ACCESS:
+            return f"{name} acts on each person's own records; it has no credentials to use."
+        if not self._is_lead_subject(spec.subject):
+            return f"{name} acts on each person's own records, so only TeamLead can be given it, by that person."
+        if spec.for_person_id != person.person_id:
+            return f"{name} acts on each person's own records: each person gives it only for their own work."
+        if spec.delegation_depth:
+            return f"TeamLead keeps {name} to itself: it cannot be handed on to workers."
+        return None
+
     def grant_refusal(self, person: PersonPrincipal, spec: GrantV1) -> str | None:
         """Why the person may not create this grant, or None when they may.
 
@@ -1246,9 +1314,13 @@ class AccessService:
         - People, and blocks: who could give the access (administrator or
           owner authority, or a delegable grant). A person shares their own
           folder through owner authority (decision D15).
+        - A person's own tool (``OwnerScope.PERSON``): see
+          ``person_owned_refusal``.
         """
 
-        worker_refusal = self.operation_refusal(spec) or self.worker_lasting_refusal(spec)
+        worker_refusal = (
+            self.operation_refusal(spec) or self.worker_lasting_refusal(spec) or self.person_owned_refusal(person, spec)
+        )
         if worker_refusal:
             return worker_refusal
         agent_subject = spec.subject.kind in {
@@ -1462,13 +1534,14 @@ class AccessService:
         person: PersonPrincipal,
         grant: GrantV1,
         *,
-        could_give: Callable[[TargetRefV1, AccessLevel, str | None], bool] | None = None,
+        could_give: Callable[[TargetRefV1, AccessLevel, str | None, str | None], bool] | None = None,
     ) -> bool:
         """Whether a person may revoke a grant: they gave it, or they could give it.
 
         Blocks have their own, narrower rule (``AccessRequests.may_unblock``).
         ``could_give`` lets a caller that checks many grants reuse its own
-        cached ``may_give`` answers; the rule stays this one.
+        cached ``may_give`` answers, including whose work the grant serves;
+        the rule stays this one.
         """
 
         if grant.kind is GrantKind.BLOCK:
@@ -1478,8 +1551,12 @@ class AccessService:
         # A person may always withdraw what serves their own work (decision D13).
         if grant.for_person_id == person.person_id:
             return True
-        check = could_give or (lambda target, level, task_id: self.may_give(person, target, level, task_id=task_id))
-        return check(grant.target, grant.level, grant.task_id)
+        check = could_give or (
+            lambda target, level, task_id, for_person_id: self.may_give(
+                person, target, level, task_id=task_id, for_person_id=for_person_id
+            )
+        )
+        return check(grant.target, grant.level, grant.task_id, grant.for_person_id)
 
     def revoke_by_person(self, person: PersonPrincipal, grant_id: str) -> list[str]:
         """A person removes access: the grant's whole entry (``entry_grants``) and what was handed on from it.
