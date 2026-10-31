@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,7 @@ from custom_tools.providers.context_memory import compact_conversation_context
 from custom_tools.providers.memory import memory, topic_tags
 from tests.task_work_support import set_agent_ref
 from custom_tools.tool_results import result_text
+from storage.change_ledger import ChangeRequestStore
 from storage.config import resolve_storage_settings
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import context_signer
@@ -37,6 +39,8 @@ class _FakeTaskManager:
         self.operations_runtime = TaskOperationRuntime()
         self._canonical_user_id = canonical_user_id
         self._db_path = "task_history.db"
+        # Signed once, as the gateway signs a request: every call is the same request.
+        self.task_context = context_signer().issue(team_id=TEAM, person_id=canonical_user_id, person_roles=("member",))
 
     def get_task_info(self, task_id: str):
         if task_id != self.current_task_id:
@@ -51,9 +55,7 @@ class _FakeTaskManager:
                     canonical_user_id=self._canonical_user_id,
                     channel_name="telegram",
                     chat_id="chat_test",
-                    task_context=context_signer().issue(
-                        team_id=TEAM, person_id=self._canonical_user_id, person_roles=("member",)
-                    ),
+                    task_context=self.task_context,
                 ),
             )
         )
@@ -76,6 +78,12 @@ class _FakeAgent:
         self.task_manager.storage_settings = resolve_storage_settings(
             {"backend": "sqlite", "sqlite": {"path": str(db_path)}}
         )
+        if canonical_user_id:
+            # The person's request was admitted, as the team lead records it (storage.change_ledger).
+            context = self.task_manager.task_context.context
+            ChangeRequestStore(self.task_manager.storage_settings).open(
+                team_id=TEAM, request_id=context.context_id, person_id=context.person_id, now=datetime.now(timezone.utc)
+            )
 
 
 def test_no_memory_input_names_another_person() -> None:

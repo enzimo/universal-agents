@@ -133,25 +133,32 @@ The system uses two different YAML configuration tracks plus env files.
 
 A person can have several requests running at once, for example in separate
 Web Chat threads. When something else changes a record while a request is
-working on it (today, one of the person's own knowledge pages), the request's
-own change is not saved over it straight away. This applies to changes made by
-another request, a scheduled job, or the person in the app. Instead, the agent
-is shown what changed: who changed which parts, and when, next to what it
-planned. It then decides:
+working on it (today, one of the person's own knowledge pages, or a memory
+fact), the request's own change is not saved over it straight away. This
+applies to changes made by another request, a scheduled job (such as the
+person's memory reviews), or the person in the app; for team memory, also
+another team member's. Instead, the agent is shown what changed: who changed
+which parts, and when, next to what it planned. It then decides:
 
 - If its change touches only parts the other change left alone, it saves
   again and the change goes through.
-- If both changes set the same part, or it wants to archive the page, it
-  doesn't choose for you. It leaves the page as it is and tells you in its
-  reply what changed and what it planned.
+- If both changes set the same part, or it wants to archive the page or
+  delete the fact, it doesn't choose for you. It leaves the record as it is
+  and tells you in its reply what changed and what it planned.
+
+A memory fact's parts are its text, tags, details (metadata), start time and
+expiry, so an agent may still add a tag to a fact whose text another request
+just changed. Creating a page or a fact is never held up this way.
 
 If the record changes again before the agent saves, it is shown that change
-too. After three such conflicts on one page within an hour, agents leave that
-page alone for the rest of the hour. A request that was stopped or has finished
-changes nothing, including a helper agent still working on it. Changes made from a page that is
-out of date ("changed since you read it") are always refused. Memory facts,
-schedules, heartbeat items and Objectives have only that "changed since you
-read it" check. Files the agent writes with its file tools, and its shell or
+too. After three such conflicts on one record within an hour, agents leave
+that record alone for the rest of the hour. A request that was stopped or has finished
+changes nothing, including a helper agent still working on it. The memory
+review that runs right after a conversation turn is not part of that request:
+it runs as one of your scheduled memory reviews. Changes made from a copy that is
+out of date ("changed since you read it") are always refused. Schedules,
+heartbeat items and Objectives have only that "changed since you read it"
+check. Files the agent writes with its file tools, and its shell or
 Python commands, are not checked. A file tool write replaces the whole file at
 once, so another request never reads a half-written file and two writes never
 mix, but the later write still replaces the earlier one.

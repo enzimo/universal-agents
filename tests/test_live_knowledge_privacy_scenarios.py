@@ -75,6 +75,7 @@ hold the agents' text, for local diagnosis only.
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import json
 import logging
 import os
@@ -1035,6 +1036,7 @@ class World:
         for person_id, facts in ((DANA, DANA_FACTS), (SAM, SAM_FACTS)):
             for fact in facts:
                 pinned.create_usermem(
+                    writer=SYSTEM_MEMORY_WRITER,
                     canonical_user_id=person_id, fact_text=fact, capacity=500
                 )
         system = self.stand_in(WORKER, person_id=None)

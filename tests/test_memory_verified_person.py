@@ -22,6 +22,7 @@ Covers:
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import asyncio
 import logging
 from pathlib import Path
@@ -89,9 +90,9 @@ def _memories(tmp_path: Path, *, team_id: str = TEAM) -> tuple[SqlitePinnedMemor
     """Team memory, Ann's and Bob's private facts, and one private thread each with a team-level topic tag."""
 
     pinned = SqlitePinnedMemoryRepository(str(tmp_path / "memory.db"))
-    pinned.create_coremem(team_id=team_id, fact_text="Team fact", capacity=10)
-    pinned.create_usermem(canonical_user_id=ANN, fact_text="Ann private fact", capacity=10)
-    pinned.create_usermem(canonical_user_id=BOB, fact_text="Bob private fact", capacity=10)
+    pinned.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=team_id, fact_text="Team fact", capacity=10)
+    pinned.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id=ANN, fact_text="Ann private fact", capacity=10)
+    pinned.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id=BOB, fact_text="Bob private fact", capacity=10)
     conversations = ConversationStore(str(tmp_path / "conversations.db"), artifacts_dir=tmp_path / "artifacts")
     for person, preview in ((ANN, "Ann salary review notes"), (BOB, "Bob salary negotiation notes")):
         conversation_id = f"conversation_{person}"
@@ -235,8 +236,8 @@ def test_a_permit_backed_scheduled_run_loads_its_owners_memories(tmp_path, monke
     assert gateway_context.task_context is None and gateway_context.schedule_run is not None
 
     pinned = SqlitePinnedMemoryRepository(str(tmp_path / "memory.db"))
-    pinned.create_usermem(canonical_user_id=runs.ANN, fact_text="Owner private fact", capacity=10)
-    pinned.create_usermem(canonical_user_id=BOB, fact_text="Bob private fact", capacity=10)
+    pinned.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id=runs.ANN, fact_text="Owner private fact", capacity=10)
+    pinned.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id=BOB, fact_text="Bob private fact", capacity=10)
     agent = runs.access_agent(world, run)
     manager = _manager(agent, pinned, hydration_plugins=[UsermemHydrationPlugin()])
 

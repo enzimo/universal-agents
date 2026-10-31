@@ -13,6 +13,7 @@ idempotent (an importer name, not a person or chat).
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_CHANGE_WRITER
 import json
 from pathlib import Path
 
@@ -61,6 +62,7 @@ def _service(tmp_path: Path) -> PinnedMemoryService:
 
 def _context(bank: str) -> PinnedMemoryRequestContext:
     return PinnedMemoryRequestContext(
+        writer=SYSTEM_CHANGE_WRITER,
         team_id="team_view",
         canonical_user_id="person_view" if bank == USERMEM_BANK else None,
         source=PinnedMemorySource(

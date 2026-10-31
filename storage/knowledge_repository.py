@@ -103,6 +103,7 @@ from storage.change_ledger import (
     ensure_ledger_tables,
     record_change,
     save_review,
+    work_writer,
 )
 from storage.read_only import repositories_are_read_only
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
@@ -2162,15 +2163,8 @@ def _change_writer(actor: KnowledgeActor) -> ChangeWriter:
 
     if actor.kind is ActorKind.PERSON:
         return ChangeWriter(ChangeWriterKind.PERSON, person_id=actor.work_person_id)
-    if actor.kind is ActorKind.AGENT and actor.request_id:
-        return ChangeWriter(
-            ChangeWriterKind.REQUEST,
-            request_id=actor.request_id,
-            person_id=actor.work_person_id,
-            checked=actor.conflict_checks,
-        )
-    if actor.kind is ActorKind.AGENT and actor.work_person_id:
-        return ChangeWriter(ChangeWriterKind.SCHEDULED, person_id=actor.work_person_id, checked=actor.conflict_checks)
+    if actor.kind is ActorKind.AGENT:
+        return work_writer(person_id=actor.work_person_id, request_id=actor.request_id, checked=actor.conflict_checks)
     return ChangeWriter(ChangeWriterKind.SYSTEM)
 
 

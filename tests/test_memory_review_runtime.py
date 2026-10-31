@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import json
 import logging
 from pathlib import Path
@@ -530,9 +531,12 @@ def test_resolve_memory_review_job_rejects_invalid_status_without_claiming(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_memory_review_dispatch_is_fire_and_forget() -> None:
+async def test_memory_review_dispatch_is_fire_and_forget(monkeypatch) -> None:
+    import custom_agents.strands_agent as strands_agent
     from custom_agents.strands_agent import UniversalAgent
 
+    # Whom the review works for is tested in tests/test_memory_review_signing.py.
+    monkeypatch.setattr(strands_agent, "sign_memory_review", lambda agent, meta, **_: meta)
     team_comms = SimpleNamespace(send_message=AsyncMock())
     agent = SimpleNamespace(
         id="agent_team",
@@ -572,9 +576,9 @@ async def test_memory_review_dispatch_is_fire_and_forget() -> None:
 @pytest.mark.asyncio
 async def test_scheduled_memory_review_jobs_prepare_for_local_worker(tmp_path: Path) -> None:
     conversation_store, memory_store, pinned_repo = _stores(tmp_path)
-    pinned_repo.create_coremem(team_id="team_test", fact_text="Team prefers smoke tests.", capacity=10)
-    pinned_repo.create_usermem(canonical_user_id="user_1", fact_text="User prefers concise replies.", capacity=10)
-    pinned_repo.create_usermem(canonical_user_id="other_user", fact_text="Private fact for another user.", capacity=10)
+    pinned_repo.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team_test", fact_text="Team prefers smoke tests.", capacity=10)
+    pinned_repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="user_1", fact_text="User prefers concise replies.", capacity=10)
+    pinned_repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="other_user", fact_text="Private fact for another user.", capacity=10)
     dispatched: list[object] = []
     agent = SimpleNamespace(
         id="agent_team",
@@ -629,8 +633,8 @@ def test_a_personal_facts_audit_holds_only_its_persons_facts(tmp_path: Path) -> 
     """The job is made for the review schedule's owner; there is no audit of everyone's facts."""
 
     _conversations, memory_store, pinned_repo = _stores(tmp_path)
-    pinned_repo.create_usermem(canonical_user_id="user_1", fact_text="User prefers concise replies.", capacity=10)
-    pinned_repo.create_usermem(canonical_user_id="other_user", fact_text="Private fact for another user.", capacity=10)
+    pinned_repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="user_1", fact_text="User prefers concise replies.", capacity=10)
+    pinned_repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="other_user", fact_text="Private fact for another user.", capacity=10)
 
     job = _personal_facts_audit(memory_store, pinned_repo, "user_1")
 
@@ -643,7 +647,7 @@ def test_a_personal_facts_audit_holds_only_its_persons_facts(tmp_path: Path) -> 
 
 def test_no_personal_facts_audit_without_facts_or_a_person(tmp_path: Path) -> None:
     _conversations, memory_store, pinned_repo = _stores(tmp_path)
-    pinned_repo.create_usermem(canonical_user_id="other_user", fact_text="Private fact for another user.", capacity=10)
+    pinned_repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="other_user", fact_text="Private fact for another user.", capacity=10)
 
     assert _personal_facts_audit(memory_store, pinned_repo, "user_1") is None, "nothing to audit"
     assert _personal_facts_audit(memory_store, pinned_repo, "") is None, "nobody could review it"
@@ -653,7 +657,7 @@ def test_no_personal_facts_audit_without_facts_or_a_person(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_scheduled_memory_review_audit_skips_bank_when_automatic_creation_disabled(tmp_path: Path) -> None:
     conversation_store, memory_store, pinned_repo = _stores(tmp_path)
-    pinned_repo.create_coremem(team_id="team_test", fact_text="Team prefers smoke tests.", capacity=10)
+    pinned_repo.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team_test", fact_text="Team prefers smoke tests.", capacity=10)
     dispatched: list[object] = []
     agent = SimpleNamespace(
         id="agent_team",

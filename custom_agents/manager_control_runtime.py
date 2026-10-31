@@ -109,6 +109,7 @@ from custom_messages.enums import (
     RequesterType,
 )
 from custom_messages.records.objectives import ObjectiveHeartbeatLink, ObjectiveScheduleLink
+from storage.change_ledger import ChangeWriter, ChangeWriterKind
 from storage.pinned_memory_repository import PinnedMemoryConflictError
 
 
@@ -591,6 +592,8 @@ async def handle_manager_memory_command(
     parsed = PinnedMemoryCommand(**payload.model_dump())
     context = PinnedMemoryRequestContext(
         team_id=agent.team_id,
+        # The person the gateway signed for, in their own controls: their edits count against requests.
+        writer=ChangeWriter(ChangeWriterKind.PERSON, person_id=person.canonical_user_id),
         canonical_user_id=person.canonical_user_id,
         request_timezone=msg_meta.request_timezone,
         source=PinnedMemorySource(

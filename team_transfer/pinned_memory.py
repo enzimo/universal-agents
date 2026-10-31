@@ -172,6 +172,7 @@ class PinnedMemorySection:
             create_pinned_memory_repository(config.manager_storage_settings),
             planned,
             memory_config=memory_config(config),
+            team_id=context.reader.manifest.team_id,
         )
         no_room = [
             _fact_key(fact.fact)

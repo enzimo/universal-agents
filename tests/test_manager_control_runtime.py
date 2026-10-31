@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_CHANGE_WRITER
 from tests.task_work_support import TurnHost
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 
@@ -349,6 +350,7 @@ async def test_manager_memory_command_is_owner_scoped_and_returns_over_nats_cont
     other = service.execute(
         PinnedMemoryCommand(bank=USERMEM_BANK, action="list"),
         context=PinnedMemoryRequestContext(
+            writer=SYSTEM_CHANGE_WRITER,
             team_id=config.gateway.team_id, canonical_user_id="Other"
         ),
     )

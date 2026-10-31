@@ -26,6 +26,7 @@ gateway-signed context. Covers:
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import asyncio
 import json
 import logging
@@ -409,6 +410,7 @@ def _give_work(world: World, person_id: str) -> dict[str, str]:
     world.schedules.add(_schedule(f"sched_{person_id}", person_id))
     world.schedules.add(_schedule(f"sched_{person_id}_usermem", person_id, kind=SystemScheduleKind.MEMORY_REVIEW_USERMEM))
     create_pinned_memory_repository(world.tasks.storage_settings).create_usermem(
+        writer=SYSTEM_MEMORY_WRITER,
         canonical_user_id=person_id, fact_text=f"{person_id} likes tea.", capacity=50
     )
     world.conversations.ensure_thread(

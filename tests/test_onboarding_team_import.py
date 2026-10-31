@@ -10,6 +10,7 @@ broker then stores the credentials at the first start
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import asyncio
 import shutil
 from pathlib import Path
@@ -80,8 +81,8 @@ async def _export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         _schedule("sched_morning", "usr_ana", schedule_name="Morning briefing")
     )
     memory = create_pinned_memory_repository(config.manager_storage_settings)
-    memory.create_coremem(team_id=TEAM, fact_text="Keep the weekly report short", capacity=10)
-    memory.create_coremem(team_id=TEAM, fact_text="An outdated fact", capacity=10)
+    memory.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=TEAM, fact_text="Keep the weekly report short", capacity=10)
+    memory.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=TEAM, fact_text="An outdated fact", capacity=10)
 
     _use_store(tmp_path / "old_store", monkeypatch)
     assert write_credential_state("github.token", GITHUB_TOKEN, owner_id="usr_ana").status == "success"

@@ -1,6 +1,7 @@
 """Local catalog defaults, explicit upgrade and worker selection using real stores."""
 # ruff: noqa: F811 -- imported pytest fixture is injected by name
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 from types import SimpleNamespace
 
 import pytest
@@ -433,7 +434,7 @@ def test_upgrade_command_previews_and_applies_existing_timer(
     pinned = SqlitePinnedMemoryRepository(
         lead.task_manager.storage_settings.sqlite_path
     )
-    pinned.create_coremem(team_id="team", fact_text="Test saved memory.", capacity=10)
+    pinned.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team", fact_text="Test saved memory.", capacity=10)
     worker = SimpleNamespace(
         **{
             **vars(lead),

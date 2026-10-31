@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +32,11 @@ def _old_instance(tmp_path: Path) -> Path:
         people.create_gateway_user(canonical_user_id=person, display_name=person, timezone="UTC")
         people.create_team_membership(canonical_user_id=person, team_id=TEAM, role=role, status=status)
     memory = create_pinned_memory_repository(config.manager_storage_settings)
-    memory.create_coremem(team_id=TEAM, fact_text="The team ships on Fridays.", capacity=10, tags=["process"], actor=AUTHOR)
-    memory.create_usermem(canonical_user_id="usr_ana", fact_text="Ana prefers short answers.", capacity=10, actor=AUTHOR)
-    memory.create_usermem(canonical_user_id="usr_ben", fact_text="Ben is on call on Mondays.", capacity=10)
-    memory.create_usermem(canonical_user_id="usr_gone", fact_text="Held until deletion.", capacity=10)
-    memory.create_usermem(canonical_user_id="usr_stranger", fact_text="Not in the team.", capacity=10)
+    memory.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=TEAM, fact_text="The team ships on Fridays.", capacity=10, tags=["process"], actor=AUTHOR)
+    memory.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_ana", fact_text="Ana prefers short answers.", capacity=10, actor=AUTHOR)
+    memory.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_ben", fact_text="Ben is on call on Mondays.", capacity=10)
+    memory.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_gone", fact_text="Held until deletion.", capacity=10)
+    memory.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_stranger", fact_text="Not in the team.", capacity=10)
     return path
 
 

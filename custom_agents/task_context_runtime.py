@@ -32,6 +32,11 @@ the exception: they are system work, signed for no person
 (``sign_system_context``). When such a run escalates to the team lead, the
 lead's task works for that schedule's stored owner (``sign_system_escalation``),
 so maintenance findings reach a person.
+
+A memory review the team lead sends right after a person's turn is not part
+of that person's request, which has usually ended. It works for the person's
+own stale-conversation review schedule, like that schedule's runs, which
+review the same queued jobs (``sign_memory_review``).
 """
 
 from __future__ import annotations
@@ -443,6 +448,102 @@ def sign_for_maintenance_owner(
     return signed
 
 
+def sign_memory_review(agent: Any, meta: Any, *, person_id: str, review_job_id: str) -> Any | None:
+    """Make a memory review sent right after a turn work of the person's own conversation review schedule.
+
+    After a person's turn the team lead sends MemReviewAgent a review of it
+    (``strands_agent._publish_memory_review_task``). The review is not part of
+    the person's request, which has usually ended by then: under the turn's
+    own signed context the change ledger refuses its memory changes as
+    ``request_closed``. It is the same work the person's stale-conversation
+    review schedule does with queued jobs, so it works for that schedule's
+    owner, like its runs: the scheduler signs it for them with their current
+    roles, and the chat route comes from that schedule (as for
+    ``sign_system_escalation``). ``person_id`` is the job's person, whom the
+    turn's verified context named when the job was saved
+    (``memory_review_runtime.enqueue_conversation_window_review_job``).
+
+    Returns a signed copy of ``meta``, or None (logged) when the person has no
+    such schedule, is disabled or removed, or there is no signing key. The job
+    then stays queued for that schedule's next run, which reviews it.
+    """
+
+    from custom_messages.contracts.routing_v1 import GatewayContext
+
+    schedule = _conversation_review_schedule(agent, person_id, review_job_id=review_job_id)
+    if schedule is None:
+        return None
+    owner = people_directory(agent).person(person_id)
+    if inactive_owner(owner, schedule_id=schedule.schedule_id):
+        return None
+    signer = _signer_for(schedule.schedule_id)
+    if signer is None:
+        return None
+    stored_context = getattr(schedule.payload_meta, "gateway_context", None)
+    signed = meta.model_copy(deep=True)
+    if signed.gateway_context is None:
+        signed.gateway_context = GatewayContext()
+    for name in PERSON_GATEWAY_FIELDS:
+        setattr(signed.gateway_context, name, getattr(stored_context, name, None))
+    signed.gateway_context.canonical_user_id = person_id
+    signed.gateway_context.schedule_run = None
+    signed.gateway_context.task_context = issue_scheduled_context(
+        signer,
+        stored_context,
+        team_id=str(agent.team_id),
+        schedule_id=schedule.schedule_id,
+        conversation_id=getattr(meta, "conversation_id", None),
+        owner=owner,
+        system_managed=True,
+    )
+    logger.info(
+        "A memory review sent after a turn works for the person's conversation review schedule. "
+        "event=memory_review_signed_for_schedule schedule_id=%s person_id=%s review_job_id=%s",
+        schedule.schedule_id,
+        person_id,
+        review_job_id,
+    )
+    return signed
+
+
+def _conversation_review_schedule(agent: Any, person_id: str, *, review_job_id: str) -> Any | None:
+    """The person's own stale-conversation review schedule, read from the schedule store, or None (logged)."""
+
+    store = getattr(agent, "_schedule_store", None)
+    reason, schedule = "schedule_store_missing", None
+    if store is not None:
+        try:
+            schedule = _find_conversation_review(store, person_id)
+            reason = "schedule_not_found"
+        except Exception as exc:  # noqa: BLE001 - the job waits for the schedule's next run instead
+            reason = f"schedule_store_unreadable:{type(exc).__name__}"
+    if schedule is None:
+        logger.info(
+            "A memory review sent after a turn was not signed, so it waits for the person's next conversation "
+            "review run. event=memory_review_not_signed reason=%s person_id=%s review_job_id=%s",
+            reason,
+            person_id,
+            review_job_id,
+        )
+    return schedule
+
+
+def _find_conversation_review(store: Any, person_id: str) -> Any | None:
+    """The system-managed schedule named as a stale-conversation review whose stored owner is the person."""
+
+    from custom_agents.schedule_management import is_system_managed_schedule
+    from custom_messages.system_schedules import STALE_CONVERSATION_SCHEDULE_NAME_PREFIX
+
+    for row in store.all_rows():
+        name = str(row.get("schedule_name") or "")
+        if not name.startswith(STALE_CONVERSATION_SCHEDULE_NAME_PREFIX) or row.get("owner_canonical_user_id") != person_id:
+            continue
+        schedule = store.get_scheduled_message(str(row["schedule_id"]))
+        if schedule is not None and is_system_managed_schedule(schedule):
+            return schedule
+    return None
+
+
 __all__ = [
     "context_verifier",
     "gateway_vouches",
@@ -453,6 +554,7 @@ __all__ = [
     "scheduler_contexts_verified",
     "scheduler_signer",
     "sign_for_maintenance_owner",
+    "sign_memory_review",
     "sign_scheduled_context",
     "sign_system_context",
     "sign_system_escalation",

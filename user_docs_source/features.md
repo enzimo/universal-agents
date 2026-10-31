@@ -161,6 +161,13 @@ the assistant's change is refused and nothing changes; the assistant reads
 the memory again before it decides. In the same way, undoing a change works
 only while it is the memory's latest change.
 
+If a memory changes while one of your requests is working (from another of
+your chats, a scheduled job, you in Settings or, for team memory, a team
+member), that request is first shown what changed. It may then still change
+the parts the other change left alone, such as the tags; a change to the same
+part, or deleting the memory, it leaves to you and says so in its reply
+([Separate requests changing the same record](configuration.md#separate-requests-changing-the-same-record)).
+
 ### Knowledge base
 
 Agents keep a shared knowledge base: pages of how-tos, decisions, lessons and
@@ -331,11 +338,11 @@ Each thread keeps its own conversation history and summaries. Saved team facts
 and your preferences remain available across your threads. Use it only for work
 that does not change the same things as your other running requests:
 the agent does not coordinate them. If something changes a page of your
-personal knowledge while a request is working on it, that request is shown what
+personal knowledge or a memory fact while a request is working on it, that request is shown what
 changed before it saves, and leaves the choice to you when both changed the same
 part, unless an operator turned these checks off with `agent.request_conflict_checks`
 ([Separate requests changing the same record](configuration.md#separate-requests-changing-the-same-record)).
-Memory facts, schedules, heartbeat items and Objectives refuse a change only
+Schedules, heartbeat items and Objectives refuse a change only
 when it was decided from an older version of the record, so one request can
 still change what another just changed. File tool writes replace the whole
 file at once, so the later of two writes wins whole, never mixed with the

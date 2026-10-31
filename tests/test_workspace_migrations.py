@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_CHANGE_WRITER
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,7 @@ def test_legacy_user_markdown_is_preserved_when_source_key_content_conflicts(tmp
             metadata={"source_hash": "different"},
         ),
         context=PinnedMemoryRequestContext(
+            writer=SYSTEM_CHANGE_WRITER,
             team_id=config.gateway.team_id,
             canonical_user_id=config.user.canonical_user_id,
         ),

@@ -9,6 +9,7 @@ from access_control.ownership import (
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
+from custom_agents.change_writers import agent_change_writer
 from custom_agents.pinned_memory_runtime import (
     AGENT_TOOL_COMMAND_ORIGIN,
     PinnedMemoryActor,
@@ -51,6 +52,7 @@ def _pinned_memory_context_for_agent(
     resolved_user_id = str(canonical_user_id or "").strip() or _verified_owner(agent)
     return PinnedMemoryRequestContext(
         team_id=getattr(agent, "team_id", None),
+        writer=agent_change_writer(agent),
         canonical_user_id=resolved_user_id,
         request_timezone=getattr(task_meta, "request_timezone", None)
         if task_meta is not None

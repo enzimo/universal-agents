@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import json
 
 import pytest
@@ -73,8 +74,8 @@ def backup(tmp_path):
         else:
             store.add(_schedule(key, "usr_ana"))
     memory = create_pinned_memory_repository(config.manager_storage_settings)
-    memory.create_coremem(team_id="team_a", fact_text="First fact", capacity=10)
-    memory.create_coremem(team_id="team_a", fact_text="Second fact", capacity=10)
+    memory.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team_a", fact_text="First fact", capacity=10)
+    memory.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team_a", fact_text="Second fact", capacity=10)
     out = tmp_path / "team.uatransfer"
     export_team(
         export_source(path),

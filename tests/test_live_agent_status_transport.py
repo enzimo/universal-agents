@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import asyncio
 import contextlib
 import json
@@ -299,6 +300,7 @@ async def test_local_memory_schedule_does_not_publish_to_remote_memreview_queue(
                         await agent_task
                     await ready
                     agent._pinned_memory_repository.create_coremem(
+                        writer=SYSTEM_MEMORY_WRITER,
                         team_id=team_id,
                         fact_text="Local memory review schedules run on MemReviewAgent.",
                         capacity=10,

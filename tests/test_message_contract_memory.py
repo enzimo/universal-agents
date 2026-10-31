@@ -6,6 +6,7 @@ live yet. They exercise actual storage rather than a simulated service result.
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_CHANGE_WRITER
 import json
 from datetime import datetime
 
@@ -31,7 +32,7 @@ def fact_payload(fact):
 
 def test_memory_commands_keep_long_text_and_metadata_through_partial_edits(tmp_path):
     service = PinnedMemoryService(SqlitePinnedMemoryRepository(str(tmp_path / "memory.db")), command_origin="agent_tool")
-    context = PinnedMemoryRequestContext(team_id="team_example", canonical_user_id="person_7c1")
+    context = PinnedMemoryRequestContext(writer=SYSTEM_CHANGE_WRITER, team_id="team_example", canonical_user_id="person_7c1")
     draft = checked("memory.create", {
         "request_id": "memory_create", "bank": "coremem", "fact_text": {"type": "inline", "text": "x" * 12001},
         "metadata_json": '{"resume_section":"deployment"}', "expires": "2099-01-01T00:00:00.000Z",
@@ -60,7 +61,7 @@ def test_memory_commands_keep_long_text_and_metadata_through_partial_edits(tmp_p
 def test_an_expiry_event_can_be_undone_and_reported_without_losing_the_restored_fact(tmp_path):
     repository = SqlitePinnedMemoryRepository(str(tmp_path / "memory.db"))
     service = PinnedMemoryService(repository, command_origin="agent_tool")
-    context = PinnedMemoryRequestContext(team_id="team_example", canonical_user_id="person_7c1")
+    context = PinnedMemoryRequestContext(writer=SYSTEM_CHANGE_WRITER, team_id="team_example", canonical_user_id="person_7c1")
     service.create(bank="coremem", context=context, fact_text="Temporary note.", invalid_after_utc="2000-01-01T00:00:00Z")
     repository.prune_expired()
     with repository._connect() as connection:
