@@ -24,8 +24,8 @@ Tables, in the manager database next to the stores that use them:
   it is open, stopped or ended.
 - ``change_reviews``: for each request and record, the newest position the
   request was shown in a brief. Changes up to it count as seen.
-- ``change_cases``: one per request and record that met a conflict: its case
-  id and state. Escalation counts them.
+- ``change_cases``: one per distinct conflict a request met on a record: its
+  case id, shown position and state. Escalation counts them, never retries.
 
 A covered store calls ``check_change`` before it writes and ``record_change``
 after, on its own open write connection, so the check and the change are
@@ -86,8 +86,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any
-from uuid import uuid4
 
 from access_control.identity import ContextVerifier, ISSUER_GATEWAY, IdentityRejected
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
@@ -311,18 +311,20 @@ def ledger_table_statements(dialect: SqlDialect) -> list[str]:
             PRIMARY KEY (team_id, request_id, record_kind, record_key)
         )
         """,
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS change_cases (
             team_id TEXT NOT NULL,
             request_id TEXT NOT NULL,
             record_kind TEXT NOT NULL,
             record_key TEXT NOT NULL,
             case_id TEXT NOT NULL,
+            shown_position {integer} NOT NULL,
             person_id TEXT NOT NULL DEFAULT '',
             state TEXT NOT NULL,
             opened_at_utc TEXT NOT NULL,
             updated_at_utc TEXT NOT NULL,
-            PRIMARY KEY (team_id, request_id, record_kind, record_key)
+            PRIMARY KEY (team_id, case_id),
+            UNIQUE (team_id, request_id, record_kind, record_key, shown_position)
         )
         """,
         """
@@ -495,16 +497,16 @@ def check_change(
         raise _closed(writer, record, state)
     if change.change_type is not ChangeType.CHANGE:
         return
+    until = _escalated_until(conn, dialect, team_id=team_id, record=record, now=now)
+    if until is not None:
+        raise _escalated(writer, change, until)
     others = _counted_changes(conn, dialect, team_id=team_id, writer=writer, record=record, after=start)
     if others:
         seen = max(start, _reviewed_position(conn, dialect, team_id=team_id, writer=writer, record=record))
         unseen = [counted for counted in others if counted.position > seen]
         if unseen:
-            case_id = _open_case_id(conn, dialect, team_id=team_id, writer=writer, record=record) or _new_case_id()
+            case_id = _new_case_id(team_id, writer, record, unseen[-1].position)
             raise _not_yet_seen(team_id, writer, change, others=others, unseen=unseen, case_id=case_id, now=now)
-    until = _escalated_until(conn, dialect, team_id=team_id, record=record, now=now)
-    if until is not None:
-        raise _escalated(writer, change, until)
     overlap = _overlapping_fields(change.fields, others)
     if overlap:
         case_id = _open_case_id(conn, dialect, team_id=team_id, writer=writer, record=record)
@@ -587,12 +589,13 @@ def save_review(conn: Any, dialect: SqlDialect, review: PendingReview) -> None:
     conn.execute(
         f"""
         INSERT INTO change_cases (
-            team_id, request_id, record_kind, record_key, case_id, person_id, state, opened_at_utc, updated_at_utc
-        ) VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
-        ON CONFLICT (team_id, request_id, record_kind, record_key) DO UPDATE SET updated_at_utc = excluded.updated_at_utc
+            team_id, request_id, record_kind, record_key, case_id, shown_position,
+            person_id, state, opened_at_utc, updated_at_utc
+        ) VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
+        ON CONFLICT (team_id, case_id) DO NOTHING
         """,
         (
-            review.team_id, review.request_id, record.kind.value, record.key, review.case_id, review.person_id,
+            review.team_id, review.request_id, record.kind.value, record.key, review.case_id, review.shown_position, review.person_id,
             CaseState.OPEN.value, at, at,
         ),
     )
@@ -624,9 +627,12 @@ def prune(conn: Any, dialect: SqlDialect, *, team_id: str, before: datetime) -> 
             (team_id, RequestState.OPEN.value, before.isoformat()),
         )
         for table in (CHANGE_REVIEWS_TABLE, CHANGE_CASES_TABLE):
+            # A record can have several cases: pruning one old case must not
+            # remove its newer ones. Reviews still have one row per request/record.
+            keys = "team_id, case_id" if table == CHANGE_CASES_TABLE else "team_id, request_id, record_kind, record_key"
             conn.execute(
-                f"DELETE FROM {table} WHERE (team_id, request_id, record_kind, record_key) IN "
-                f"(SELECT team_id, request_id, record_kind, record_key FROM {table} "
+                f"DELETE FROM {table} WHERE ({keys}) IN "
+                f"(SELECT {keys} FROM {table} "
                 f"WHERE team_id={p} AND updated_at_utc < {p} FOR UPDATE SKIP LOCKED)",
                 (team_id, before.isoformat()),
             )
@@ -782,14 +788,18 @@ def _open_case_id(conn: Any, dialect: SqlDialect, *, team_id: str, writer: Chang
         f"""
         SELECT case_id FROM change_cases
         WHERE team_id={p} AND request_id={p} AND record_kind={p} AND record_key={p} AND state={p}
+        ORDER BY shown_position DESC LIMIT 1
         """,
         (team_id, writer.request_id, record.kind.value, record.key, CaseState.OPEN.value),
     ).fetchone()
     return str(row[0]) if row is not None else ""
 
 
-def _new_case_id() -> str:
-    return f"case_{uuid4().hex[:16]}"
+def _new_case_id(team_id: str, writer: ChangeWriter, record: RecordRef, shown_position: int) -> str:
+    """A new ledger position is a new conflict; concurrent retries share its case id."""
+
+    identity = json.dumps([team_id, writer.request_id, record.kind.value, record.key, shown_position])
+    return f"case_{sha256(identity.encode()).hexdigest()[:16]}"
 
 
 def _escalated_until(

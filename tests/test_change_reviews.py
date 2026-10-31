@@ -146,14 +146,31 @@ def test_a_review_only_moves_forward(db):
     def review(position: int) -> None:
         with connect_sqlite(db) as conn:
             conn.begin_write()
-            save_review(conn, SQLITE, PendingReview(TEAM, ALICE_REQUEST.request_id, ALICE, FACT, position, "case_1", NOW))
+            save_review(conn, SQLITE, PendingReview(TEAM, ALICE_REQUEST.request_id, ALICE, FACT, position, f"case_{position}", NOW))
             conn.commit()
 
     review(5)
     review(3)
+    review(5)  # Retrying a saved brief never creates another case.
 
     with connect_sqlite(db) as conn:
         rows = conn.execute("SELECT reviewed_position FROM change_reviews").fetchall()
         cases = conn.execute("SELECT case_id, state FROM change_cases").fetchall()
     assert [int(row[0]) for row in rows] == [5]
-    assert [tuple(row) for row in cases] == [("case_1", "open")]
+    assert {tuple(row) for row in cases} == {("case_5", "open"), ("case_3", "open")}
+
+
+def test_two_unsaved_retries_share_one_case(db):
+    write(db, ChangeWriter(ChangeWriterKind.PERSON, person_id=ALICE), {"text"})
+    reviews = []
+    for _ in range(2):
+        with pytest.raises(ChangeRefused) as error:
+            check(db, {"text"})
+        reviews.append(error.value.review)
+    assert reviews[0].case_id == reviews[1].case_id
+    with connect_sqlite(db) as conn:
+        conn.begin_write()
+        for review in reviews:
+            save_review(conn, SQLITE, review)
+        assert conn.execute("SELECT COUNT(*) FROM change_cases").fetchone()[0] == 1
+        conn.commit()

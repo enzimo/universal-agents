@@ -213,10 +213,10 @@ def test_a_change_after_the_review_gives_a_new_brief_with_only_that_change(stora
     again = refused(svc, request_actor("req_a"), DraftInput(title="Trip to Lyon"), base=3)
     assert again.code == ChangeRefusal.CHANGE_CONFLICT
     assert [change["fields"] for change in again.details["brief"]["changes"]] == [["title"]]
-    assert again.details["case_id"] == first.details["case_id"]
-    assert refused(svc, request_actor("req_a"), DraftInput(title="Trip to Lyon"), base=3).code == (
-        ChangeRefusal.NEEDS_PERSON_DECISION
-    )
+    assert again.details["case_id"] != first.details["case_id"]
+    overlapping = refused(svc, request_actor("req_a"), DraftInput(title="Trip to Lyon"), base=3)
+    assert overlapping.code == ChangeRefusal.NEEDS_PERSON_DECISION
+    assert overlapping.details["case_id"] == again.details["case_id"]
 
 
 def test_archiving_overlaps_every_field_another_writer_set(storage, setup):
@@ -248,6 +248,61 @@ def test_three_conflicts_within_an_hour_make_requests_wait_for_the_person(storag
 
     later = service(storage, now=NOW + ESCALATION_WINDOW + timedelta(seconds=1))
     assert save(later, request_actor("req_a", "agent_req_a"), DraftInput(title="req_a"), base=2) == 3
+
+
+def test_repeated_distinct_conflicts_for_one_request_escalate_but_retries_do_not(storage, setup):
+    svc, requests = setup
+    requests.open(team_id=TEAM, request_id="req_a", person_id=ALICE, now=NOW)
+    cases = set()
+    for revision in range(1, 4):
+        edit(svc, scheduled_actor(), f"Scheduled change {revision}.", base=revision)
+        shown = refused(svc, request_actor("req_a"), DraftInput(body="My competing plan."), base=revision + 1)
+        assert shown.code == ChangeRefusal.CHANGE_CONFLICT
+        cases.add(shown.details["case_id"])
+        assert refusal(svc, request_actor("req_a"), "My competing plan.", base=revision + 1) == (
+            ChangeRefusal.NEEDS_PERSON_DECISION
+        )
+        assert table_rows(storage, "change_cases") == revision
+    assert len(cases) == 3
+    waiting = refused(svc, request_actor("req_a"), DraftInput(title="Other field"), base=4)
+    assert waiting.code == ChangeRefusal.NEEDS_PERSON_DECISION
+    assert "escalated_until" in waiting.details
+    # Escalation covers even a new request that started after the edits.
+    requests.open(team_id=TEAM, request_id="req_new", person_id=ALICE, now=NOW)
+    assert refused(svc, request_actor("req_new"), DraftInput(title="New request"), base=4).code == (
+        ChangeRefusal.NEEDS_PERSON_DECISION
+    )
+    later = service(storage, now=NOW + ESCALATION_WINDOW + timedelta(seconds=1))
+    assert save(later, request_actor("req_a"), DraftInput(title="Other field"), base=4) == 5
+
+
+def test_unchecked_scheduled_writes_do_not_count_when_checks_resume(storage, setup):
+    svc, requests = setup
+    requests.open(team_id=TEAM, request_id="req_a", person_id=ALICE, now=NOW)
+    edit(svc, replace(scheduled_actor(), conflict_checks=False), "While checks were off.", base=1)
+    assert save(svc, request_actor("req_a"), DraftInput(title="Checked request"), base=2) == 3
+    with _connect(storage) as conn:
+        assert conn.execute("SELECT checked FROM change_ledger WHERE writer_kind='scheduled'").fetchone()[0] == 0
+    edit(svc, scheduled_actor(), "After checks resumed.", base=3)
+    assert refusal(svc, request_actor("req_a"), "My plan.", base=4) == ChangeRefusal.CHANGE_CONFLICT
+
+
+def test_pruning_an_old_case_keeps_a_new_case_for_the_same_request_and_record(storage, setup):
+    svc, requests = setup
+    requests.open(team_id=TEAM, request_id="req_a", person_id=ALICE, now=NOW)
+    edit(svc, scheduled_actor(), "First change.", base=1)
+    refused(svc, request_actor("req_a"), DraftInput(title="My title"), base=2)
+    later_time = NOW + LEDGER_RETENTION + timedelta(days=1)
+    later = service(storage, now=later_time)
+    edit(later, scheduled_actor(), "Recent change.", base=2)
+    recent = refused(later, request_actor("req_a"), DraftInput(title="My title"), base=3)
+
+    requests.close(team_id=TEAM, request_id="cleanup", person_id=ALICE, state=RequestState.ENDED, now=later_time)
+
+    with _connect(storage) as conn:
+        assert [str(row[0]) for row in conn.execute("SELECT case_id FROM change_cases").fetchall()] == [
+            recent.details["case_id"]
+        ]
 
 
 def test_the_ledger_keeps_field_names_never_values(storage, setup):

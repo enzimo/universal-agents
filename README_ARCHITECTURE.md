@@ -1124,7 +1124,9 @@ its own (coordination plan 7.10, accepted 2026-10-30).
 - **Seen changes.** The ledger records the names of the fields each change
   set, never their values. After the brief, the store saves how far the
   request has seen (`change_reviews`, in a transaction of its own, because
-  the refused one rolled back) and its case (`change_cases`). The request may
+  the refused one rolled back) and its case (`change_cases`). Each newly shown
+  ledger position has a distinct case, even for the same request and page;
+  concurrent retries share its deterministic id and count only once. The request may
   then save fields those changes did not set. A change that sets one of them,
   or archives the page, is refused with `needs_person_decision`: the person
   decides which to keep. A later change shows a new brief. If the review
@@ -1136,7 +1138,7 @@ its own (coordination plan 7.10, accepted 2026-10-30).
   Another person's writer is named only as "another team member".
 - **Escalation.** After three conflicts on one page within an hour, every
   request's change to it is refused with `needs_person_decision` until the
-  hour has passed.
+  hour has passed. Repeated conflicts in a single request count too.
 - **Creates and notes.** Creating a page and adding a note overwrite
   nothing, so they are recorded and never refused by this rule.
 - **Closed requests.** A request that was stopped or has ended changes

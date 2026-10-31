@@ -2170,7 +2170,7 @@ def _change_writer(actor: KnowledgeActor) -> ChangeWriter:
             checked=actor.conflict_checks,
         )
     if actor.kind is ActorKind.AGENT and actor.work_person_id:
-        return ChangeWriter(ChangeWriterKind.SCHEDULED, person_id=actor.work_person_id)
+        return ChangeWriter(ChangeWriterKind.SCHEDULED, person_id=actor.work_person_id, checked=actor.conflict_checks)
     return ChangeWriter(ChangeWriterKind.SYSTEM)
 
 
