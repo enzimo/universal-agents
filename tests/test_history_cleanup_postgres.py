@@ -123,7 +123,7 @@ def test_the_manager_part_deletes_old_turns_and_tasks_on_postgres(storage: Stora
     _seed(storage, tmp_path, BOB, "pg_bob", [400])
     limit = _days(100)
     selections, left_out = select_conversation_turns(
-        store.person_turns(ALICE), limit_at=limit, selected_at=NOW.isoformat(), active_since=_days(1)
+        store.person_turns(ALICE), limit_at=limit, selected_at=NOW.isoformat()
     )
     assert {item.conversation_id: item.whole for item in selections} == {"pg_mixed": False, "pg_old": True}
     assert left_out == []

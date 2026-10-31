@@ -906,7 +906,7 @@ class GatewayAccessMap:
         return SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(read.service.team_id, self._lead_agent_type))
 
     def _cleanup_grants(self, read: _MapRead) -> list[GrantV1]:
-        """The person's grants that let TeamLead clean up their history (normally one)."""
+        """All the person's cleanup grants, including narrower ones the switch must upgrade or remove."""
 
         return [
             grant
@@ -921,7 +921,7 @@ class GatewayAccessMap:
         ]
 
     def _cleanup_view(self, read: _MapRead) -> dict[str, Any]:
-        grants = self._cleanup_grants(read)
+        grants = [grant for grant in self._cleanup_grants(read) if grant.level is AccessLevel.FULL]
         return {
             "available": HISTORY_CLEANUP_TOOL_ID in read.service.catalog.tools,
             "on": bool(grants),
@@ -932,7 +932,7 @@ class GatewayAccessMap:
     def _set_cleanup(self, person_id: str, on: bool) -> dict[str, Any]:
         read = self._open(person_id)
         grants = self._cleanup_grants(read)
-        if on and not grants:
+        if on and not any(grant.level is AccessLevel.FULL for grant in grants):
             read.service.grant_by_person(
                 read.person,
                 GrantV1(

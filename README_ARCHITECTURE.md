@@ -2347,11 +2347,12 @@ person's conversations, sizes and ages) and `plan_history_cleanup`, which
 stages an exact plan for the person the task verifiably works for: by age,
 by named conversations of theirs, or both, for chats, finished tasks or both.
 It leaves out the conversation the request is asked in and conversations with
-work still running, and in a scheduled run only a schedule the person made
+unfinished work, including tasks waiting for a person regardless of age.
+That exclusion is checked again before applying a plan. In a scheduled run only a schedule the person made
 themselves (`ScheduleManagementClass.USER`) may stage one. `apply_change`
 applies it as the `history_cleanup` change of `fn:history_cleanup`, each
 person's own tool (owner scope `person`): at once when the person gave TeamLead
-that tool (Settings > Access or `/access grant`), otherwise after the person
+that tool at `full` (Settings > Access or `/access grant`), otherwise after the person
 approves the exact plan in the Inbox, whose card names the conversations by
 the start of their first request and keeps only ids, dates and counts once
 decided (`ChangeProposalV1.effect_after_decision`). The manager never opens the

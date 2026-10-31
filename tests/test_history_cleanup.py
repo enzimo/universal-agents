@@ -239,7 +239,7 @@ def test_selection_deletes_the_oldest_turns_and_keeps_newer_ones_running_and_exc
         _turn("asked_in", 1, 400),
     ]
     selections, left_out = select_conversation_turns(
-        turns, limit_at=_days(100), selected_at=NOW.isoformat(), excluded=["asked_in"], active_since=_days(1)
+        turns, limit_at=_days(100), selected_at=NOW.isoformat(), excluded=["asked_in"]
     )
     by_id = {item.conversation_id: item for item in selections}
     assert set(by_id) == {"old", "mixed"}
@@ -247,6 +247,32 @@ def test_selection_deletes_the_oldest_turns_and_keeps_newer_ones_running_and_exc
     assert not by_id["mixed"].whole and by_id["mixed"].through_turn_index == 1
     assert by_id["mixed"].keep_from == _days(10)
     assert left_out == ["asked_in", "busy"]
+
+
+@needs_cedar
+@pytest.mark.parametrize("status", ["paused", "accepted", "in_progress"])
+def test_old_unfinished_work_keeps_its_conversation_out_of_cleanup(tmp_path: Path, status: str) -> None:
+    agent = _agent(tmp_path)
+    _seed(agent, _person(agent), "waiting", "Waiting for a decision", [2])
+    _sql(agent, "DELETE FROM completed_tasks")
+    _sql(agent, "UPDATE conversation_task_links SET task_status=? WHERE conversation_id=?", (status, "waiting"))
+
+    with pytest.raises(HistoryCleanupRefused, match="Work is still running"):
+        _stage(agent, what="conversations", conversation_ids=["waiting"])
+    assert _turn_ids(agent, "waiting") == ["waiting_t1"]
+
+
+@needs_cedar
+def test_a_turn_that_becomes_unfinished_after_staging_prevents_apply(tmp_path: Path) -> None:
+    agent = _agent(tmp_path, authorization_enabled=False)
+    _seed(agent, _person(agent), "resumed", "Resumed work", [2])
+    staged = _stage(agent, what="conversations", conversation_ids=["resumed"])
+    _sql(agent, "UPDATE conversation_task_links SET task_status='paused' WHERE conversation_id='resumed'")
+
+    result = run_apply_change(agent, staged["change_id"], ToolCall(), confirmed=True)
+
+    assert result["status"] == "refused" and "changed after it was staged" in result["reason"]
+    assert _turn_ids(agent, "resumed") == ["resumed_t1"]
 
 
 def test_tasks_to_delete_follow_delegation_and_skip_left_out_work() -> None:

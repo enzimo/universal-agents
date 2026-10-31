@@ -68,7 +68,6 @@ from id_generation import new_id
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
 from storage.history_cleanup_repository import (
-    ACTIVE_TURN_WINDOW,
     MEMORIES_KEPT,
     ConversationSelectionV1,
     HistoryCleanupOrder,
@@ -335,7 +334,6 @@ def _selection(
     limit_at: str,
     selected_at: str,
     excluded: Iterable[str],
-    active_since: str | None,
 ) -> tuple[list[ConversationSelectionV1], list[str]]:
     return select_conversation_turns(
         # Named conversations only, or every conversation of the person.
@@ -343,7 +341,6 @@ def _selection(
         limit_at=limit_at,
         selected_at=selected_at,
         excluded=excluded,
-        active_since=active_since,
     )
 
 
@@ -412,7 +409,6 @@ def stage_history_cleanup(
         limit_at=draft.limit_at,
         selected_at=selected_at,
         excluded=current,
-        active_since=(now - ACTIVE_TURN_WINDOW).isoformat(),
     )
     running = sorted(set(left_out) & set(named))
     if running:
@@ -604,7 +600,6 @@ class HistoryCleanupService:
             limit_at=plan.limit_at,
             selected_at=plan.selected_at,
             excluded=plan.excluded_conversation_ids,
-            active_since=None,
         )
         tasks, _family = _task_selection(self.store, plan, selections=selections)
         if tuple(selections) != plan.conversations or len(tasks) != plan.task_count:

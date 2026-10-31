@@ -59,9 +59,6 @@ ORDERS_TABLE = "history_cleanup_orders"
 # names conversation ids and counts only, and the access event log keeps the
 # lasting record (bounded growth).
 ORDER_RETENTION = timedelta(days=30)
-# A turn still running (any status but a finished one) that changed within
-# this time keeps its whole conversation out of a clean-up.
-ACTIVE_TURN_WINDOW = timedelta(hours=24)
 FINISHED_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned", "partial"})
 # Conversation turn text counted for sizes (characters, which is close to bytes for most text).
 _TURN_TEXT_COLUMNS = ("problem_text", "final_answer_text", "execution_history_text", "turn_summary_text")
@@ -232,13 +229,13 @@ def select_conversation_turns(
     limit_at: str,
     selected_at: str,
     excluded: Iterable[str] = (),
-    active_since: str | None = None,
 ) -> tuple[list[ConversationSelectionV1], list[str]]:
     """Which turns of each conversation a clean-up deletes, and which conversations it leaves out.
 
     ``turns`` are the person's turns in turn order per conversation. A
-    conversation in ``excluded`` is left out; with ``active_since``, so is
-    one with a turn still running that changed after it. Otherwise the turns
+    conversation in ``excluded`` is left out, as is one with any unfinished
+    turn. Waiting for a person can take days; age never proves work finished.
+    Otherwise the turns
     started before ``limit_at`` are deleted, as a run from the first turn on:
     the turns kept are always the newest. ``selected_at`` is when the plan
     was staged; turns started later make the conversation partly kept.
@@ -255,9 +252,7 @@ def select_conversation_turns(
         if conversation_id in excluded_ids:
             left_out.append(conversation_id)
             continue
-        if active_since is not None and any(
-            row.task_status not in FINISHED_TURN_STATUSES and row.updated_at > active_since for row in rows
-        ):
+        if any(row.task_status not in FINISHED_TURN_STATUSES for row in rows):
             left_out.append(conversation_id)
             continue
         chosen: list[TurnRow] = []
@@ -913,7 +908,6 @@ def _remove_emptied_folder(root: Path, parts: tuple[str, ...]) -> None:
 
 
 __all__ = [
-    "ACTIVE_TURN_WINDOW",
     "ConversationSelectionV1",
     "HistoryCleanupOrder",
     "HistoryCleanupPlanV1",
