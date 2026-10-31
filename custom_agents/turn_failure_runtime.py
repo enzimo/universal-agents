@@ -50,7 +50,7 @@ from custom_agents.objective_work_completion import ObjectiveWorkCompletionError
 from custom_agents.provider_error_runtime import ProviderTimeoutError, iter_exception_chain
 from custom_agents.provider_limits import ProviderLimitExhausted
 from custom_agents.runtime_recovery import fail_recovered_executing_task
-from custom_agents.task_wait_limit import TaskWaitLimitReached, tell_person_about_wait_limit
+from custom_agents.task_wait_limit import TaskWaitLimitReached
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
 from custom_messages.enums import ProgressState
 from custom_agents.execution_lanes import executing_parallel_task_ids, lane_for_task
@@ -185,9 +185,6 @@ async def fail_task_after_turn_error(agent: Any, task_id: str, task_info: Any, e
         # The typed reason travels with the failure, for the requester's trusted code.
         failed_task = failed_task.model_copy(update={"failure": error.failure})
     await agent._send_task_error_response(failed_task, task_info.header, task_info.meta, runtime_error)
-    if isinstance(error, TaskWaitLimitReached):
-        # A scheduled run's failure goes to the scheduler; tell the person too.
-        await tell_person_about_wait_limit(agent, task_info, error)
 
 
 async def settle_failed_turn(agent: Any, task_id: str, task_info: Any, error: Exception) -> None:

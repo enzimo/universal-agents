@@ -11,6 +11,8 @@ from typing import Any
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord, decode_runtime_snapshot
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.schedule_worker_repository import ScheduleWorkerRepository
+from storage.schedule_occurrences import ensure_occurrence_schema
+from storage.scheduled_run_problems import ScheduledRunProblems
 from storage.change_ledger import ensure_ledger_tables, record_task_request_state, require_same_request_identity
 from storage import task_custody_repository as custody
 from storage.task_custody_repository import (
@@ -301,7 +303,8 @@ class _RelationalRuntimeStateRepository:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
                 ensure_ledger_tables(conn, self._dialect)
-                ScheduleWorkerRepository.ensure_occurrence_schema(conn)
+                ensure_occurrence_schema(conn)
+                ScheduledRunProblems.ensure_schema(conn)
                 custody.ensure_schema(conn)
                 conn.execute(
                     """
@@ -592,9 +595,9 @@ class _RelationalRuntimeStateRepository:
             digest = payload_digest(payload)
             if existing.get((section, record_id)) == digest:
                 continue
-            task = (
+            task, previous_state = (
                 self._checked_task_snapshot(conn, owner_agent_id, record_id, payload, saved=(section, record_id) in existing)
-                if section == "tasks" else None
+                if section == "tasks" else (None, None)
             )
             conn.execute(f"""INSERT INTO active_task_runtime_records
                 (owner_agent_id, section, record_id, payload_json, payload_digest)
@@ -603,32 +606,42 @@ class _RelationalRuntimeStateRepository:
                     payload_json = excluded.payload_json, payload_digest = excluded.payload_digest""",
                 (owner_agent_id, section, record_id, payload, digest))
             if task is not None:
-                self._record_task_outcome(conn, owner_agent_id, team_id, task)
+                self._record_task_outcome(conn, owner_agent_id, team_id, task, previous_state=previous_state)
 
     def _checked_task_snapshot(
         self, conn: Any, owner_agent_id: str, task_id: str, payload: str, *, saved: bool,
-    ) -> TaskSnapshotRecord:
-        """Validate only the changed task's immutable request identity."""
+    ) -> tuple[TaskSnapshotRecord, Any]:
+        """Validate only the changed task's immutable request identity; also return its saved state.
+
+        The saved state is None for a task this owner never saved.
+        """
 
         task = TaskSnapshotRecord.model_validate_json(payload)
-        if saved:
-            p = self._dialect.bind
-            previous = conn.execute(
-                f"SELECT payload_json FROM active_task_runtime_records "
-                f"WHERE owner_agent_id={p} AND section={p} AND record_id={p}",
-                (owner_agent_id, "tasks", task_id),
-            ).fetchone()
-            require_same_request_identity(TaskSnapshotRecord.model_validate_json(previous[0]), task)
-        return task
+        if not saved:
+            return task, None
+        p = self._dialect.bind
+        previous = conn.execute(
+            f"SELECT payload_json FROM active_task_runtime_records "
+            f"WHERE owner_agent_id={p} AND section={p} AND record_id={p}",
+            (owner_agent_id, "tasks", task_id),
+        ).fetchone()
+        saved_task = TaskSnapshotRecord.model_validate_json(previous[0])
+        require_same_request_identity(saved_task, task)
+        return task, saved_task.state
 
     def _record_task_outcome(
         self, conn: Any, owner_agent_id: str, team_id: Optional[str], task: TaskSnapshotRecord,
+        *, previous_state: Any,
     ) -> None:
         """Keep request lifecycle and schedule outcomes in the task's transaction."""
 
         from custom_messages.enums import ProgressState
 
         record_task_request_state(conn, self._dialect, team_id=team_id, task=task, now=datetime.now(timezone.utc))
+        if task.state != previous_state:
+            # Only on entering a state: a later save of an old failure must
+            # not reopen a problem a newer run resolved.
+            ScheduledRunProblems.record_outcome(conn, self._dialect, task, team_id, owner_agent_id)
         if task.state in {ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED}:
             ScheduleWorkerRepository.record_terminal_task(
                 conn, self._dialect, agent_id=owner_agent_id, task_id=task.task_id, outcome=task.state.value,

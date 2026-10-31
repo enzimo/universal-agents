@@ -515,6 +515,47 @@ move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
 A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Admitting a job's last run does not remove the schedule's identity or access
+(2026-10-30). A worker's run proves whom it works for with the schedule's
+permit, checked live against the row (`access_control.task_identity`), and its
+job access comes from the schedule, so removing the row at admission failed
+one-time reminders within a second of starting. While the run's receipt is
+unfinished the schedule is *finishing* (`remaining_count = 0`,
+`schedule_store.is_finishing`): claims, wake times and enabled listings skip
+it, and the Settings card, stuck-schedule notices, telemetry and the agent's
+`list_scheduled_jobs` (`final_run_in_progress`) show it as finishing, not
+overdue. A schedule ended by its end date keeps its following run time
+instead, blocked by that date, so a later end date set during the run lets it
+go on. The pruning pass removes the row, and ends its grants, once the run's
+terminal snapshot closes its receipt, or once the receipt is older than a
+run's identity lasts (7 days), so a receipt nothing closed cannot keep a
+schedule forever. Only runs a worker claims get receipts (a person's
+schedules and `local_worker` system timers); the team lead's own system
+timers sign their runs, are never checked against the row, and still finish
+at admission. Removing or turning off a schedule still ends a running last
+run's access at once. Moving a finishing one-time reminder, or making it
+repeat, gives it its runs back; any other edit leaves it finishing.
+
+A schedule whose runs fail is reported once per problem
+(`custom_agents.scheduled_run_failures`). A top-level scheduled run's outcome
+is saved in its terminal snapshot transaction, because the task is archived
+right after (`storage.scheduled_run_problems`: one row per schedule, holding
+the first failed run of the current problem and the run that finished after
+it, with routing and the schedule's name, never instructions or output). The
+lead's scheduler pass reports the rows through the stuck-work notices
+(`custom_agents.stuck_work`): the person the run's original signature names
+(`task_identity.reported_schedule_run`) gets one Inbox notice and one chat
+message at once, administrators an Inbox notice for team or system work.
+Further failures say nothing until a run finishes, which sends one "working
+again" notice; a schedule that ended, was removed or was turned off closes the
+problem with no message. The notice never names a cause (a failed task keeps
+only error text, and a typed cause would change a shared message contract);
+it suggests a question for the person's assistant that names the run's task
+id, which `get_task_history_window` reads. It ignores the schedule's
+`notify_on_failure`, which governs the results a run reports, and replaces the
+wait limit's own chat message for scheduled runs. These rows are operational
+state and do not move in a team transfer.
+
 Every write that depends on a schedule's current values reads, decides and
 writes in one write transaction (`ScheduleRepository.write_locked`: SQLite's
 write lock, or PostgreSQL's schedule-id and row locks). A run changes only its
@@ -604,7 +645,10 @@ recovery is reported the same way, and each incident once
 (`storage/stuck_work_repository.py`). The Schedules card shows **Not running**
 with the same explanation. A missed one-time run is turned off and its owner
 told. This replaced a self-addressed TeamLead review task that carried no person
-and no chat route, so its findings reached nobody.
+and no chat route, so its findings reached nobody. A finishing schedule (its
+last run still working) is never stuck. Scheduled jobs whose runs fail are
+reported through the same notices (`custom_agents.scheduled_run_failures`,
+above).
 
 Stuck tasks are reported the same way (`custom_agents.stuck_tasks`). The team
 lead reads every agent's saved work in its team (read-only) and reports one

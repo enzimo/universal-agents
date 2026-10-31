@@ -24,7 +24,7 @@ from custom_messages.contracts.worker_handback_v1 import (
 )
 from custom_messages.enums import MessageMetaType
 from storage.config import resolve_storage_settings
-from storage.schedule_worker_repository import ScheduleWorkerRepository
+from storage.schedule_occurrences import ensure_occurrence_schema
 from storage.worker_handback_repository import (
     HANDBACK_STATUS_ESCALATED,
     HANDBACK_STATUS_REDISPATCHED,
@@ -92,7 +92,7 @@ def lead(tmp_path, monkeypatch):
     )
     store = ScheduleStore(storage_settings=settings)
     with store.worker_records._connect() as conn:
-        ScheduleWorkerRepository.ensure_occurrence_schema(conn)
+        ensure_occurrence_schema(conn)
         conn.commit()
     return SimpleNamespace(
         id="lead",

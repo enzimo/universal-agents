@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from custom_agents.schedule_changes import RECORD_DIGEST_KEY
-from custom_agents.schedule_store import ScheduleStore, owner_canonical_user_id_for_schedule, schedule_record_digest
+from custom_agents.schedule_store import (
+    ScheduleStore,
+    is_finishing,
+    owner_canonical_user_id_for_schedule,
+    schedule_record_digest,
+)
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 
 
@@ -51,15 +56,19 @@ def list_schedule_payloads(
             continue
         scheduled_message = store.get_scheduled_message(row_id)
         if view.shows(scheduled_message):
-            schedules.append(schedule_payload(scheduled_message))
+            schedules.append(schedule_payload(scheduled_message, row))
     return schedules
 
 
-def schedule_payload(scheduled_message: ScheduledMessage) -> dict[str, Any]:
+def schedule_payload(scheduled_message: ScheduledMessage, row: dict[str, Any]) -> dict[str, Any]:
     """Everything an exact-ID detail page may show about one schedule.
 
     ``record_digest`` is the version read; a change sends it back
     (``custom_agents.schedule_changes``). Summaries keep it.
+    ``final_run_in_progress``: its last run was started and still works
+    (``schedule_store.is_finishing``); it will not run again, and its past
+    ``next_fire_at`` is that run's, not a missed one. ``remaining_runs`` is
+    None for no limit.
     """
 
     return {
@@ -81,6 +90,8 @@ def schedule_payload(scheduled_message: ScheduledMessage) -> dict[str, Any]:
         "cron_expression": scheduled_message.cron_expression,
         "cron_timezone": scheduled_message.cron_timezone,
         "repeat_count": scheduled_message.repeat_count,
+        "remaining_runs": row.get("remaining_count"),
+        "final_run_in_progress": is_finishing(row),
         "objective_id": scheduled_message.objective_id,
         "owner_canonical_user_id": owner_canonical_user_id_for_schedule(scheduled_message),
         "problem_statement": scheduled_message.payload.problem_statement,
