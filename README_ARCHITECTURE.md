@@ -1421,11 +1421,16 @@ never control files, runtime records, another person's unshared folder or a
 sensitive name), asks the access service for a folder
 decision when authorization is on, and then opens that real location through
 `access_control/safe_open.py`. `safe_open` walks from a trusted root one
-component at a time with `O_NOFOLLOW`, accepts only regular files with one
-link, and creates files with `O_EXCL`, so a link planted beforehand or swapped
+component at a time with `O_NOFOLLOW`, refuses multiply linked regular files,
+and creates files with `O_EXCL`, so a link planted beforehand or swapped
 in after the check makes the open fail. A write that replaces a file writes a
 new temporary file in the same folder and renames it over the old one, keeping
-its mode and owner. A person's parallel threads can write one file at the same
+its mode and owner. If restoring the owner or group is denied, replacement
+fails and leaves the original file and its metadata intact. An already-open
+regular-file descriptor may have zero links after a concurrent atomic
+replacement; it still reads the complete old file and is allowed to finish.
+This exception applies only to opened read descriptors, never to pathname
+checks for replacement. A person's parallel threads can write one file at the same
 time, and the rename is atomic: readers see the old content or the new, never a
 half-written file, the last writer to finish wins with its whole content, and a
 write that fails part way leaves the file unchanged. Writes that only ever
@@ -2937,8 +2942,19 @@ of response waits. A timeout, gateway restart or credential form therefore
 does not make a later message new work. The later message is saved as guidance
 for that request before publication. A final reply ends the running state,
 including when quiet hours delay showing the reply. A stopped request gets one
-too: its stopped turn sends it, or, when no turn of it was running (it still
-waited its turn), the stop itself does (`custom_agents.control_runtime.stop_task_execution`).
+too: the explicit stop owns the reply for both running and queued
+requests (`custom_agents.control_runtime.stop_task_execution`). It marks that
+ownership with the task's stop reason before cancelling its turn; the interrupted
+handler consumes the reason and cleans up without sending its own reply. Prompt
+handler cleanup keeps the queue from treating the task as orphaned when its turn
+ends. A temporary per-agent, per-root asyncio lock serializes local cleanup;
+the second caller checks the live task again and skips cleanup already done.
+These locks are weakly held in the control runtime, outside detached task records
+and persisted snapshots. The stop retains the root task's routing before
+interruption. Its reply is sent even if child cleanup exceeds the stop grace
+period or the handler resumes
+after the task was archived, without a second reply from that handler.
+An interruption without an explicit stop still uses the handler's cancellation path.
 Before, a stop that found no running turn sent none, so its thread stayed
 busy and every later message there was held as guidance for the cancelled
 request. Held guidance that its

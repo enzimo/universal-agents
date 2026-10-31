@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from weakref import WeakValueDictionary
 
 from custom_agents.turn_registry import running_turn_works
 from custom_agents.message_routing import (
@@ -44,6 +45,11 @@ from custom_tools.tool_stop import (
 ACTIVE_STOP_GRACE_SECONDS = (
     TOOL_STOP_GRACE_SECONDS + BACKGROUND_TERM_GRACE_SECONDS + BACKGROUND_KILL_GRACE_SECONDS + 2.0
 )
+
+# TaskInfo crosses the operations lane as detached data. Keep asyncio locks
+# here instead, keyed by the agent instance and root task. Callers hold each
+# lock while using it; weak values remove it once the last caller finishes.
+_CANCELLATION_LOCKS: WeakValueDictionary[tuple[int, str], asyncio.Lock] = WeakValueDictionary()
 
 
 async def _record_execution_graph_cancellation(
@@ -375,29 +381,49 @@ async def cancel_task_tree_locally(
     durable_cancellation_recorded: Optional[bool] = None,
 ) -> Dict[str, Any]:
     task_id, cancel_tree = await _execution_graph_for_task(agent, task_info)
+    root = next((item for item in cancel_tree if item.task.task_id == task_id), task_info)
     pending_subtasks = await _pending_graph_subtasks(agent, cancel_tree)
-    now_ts = datetime.now(timezone.utc).isoformat()
     if durable_cancellation_recorded is None:
         durable_cancellation_recorded = await _record_execution_graph_cancellation(
-            agent,
-            root_task_id=task_id,
-            task_ids=[item.task.task_id for item in cancel_tree],
-            canonical_user_id=canonical_user_id,
-            command_id=command_id,
-            reason=reason,
-            cancelled_at=now_ts,
+            agent, root_task_id=task_id, task_ids=[item.task.task_id for item in cancel_tree],
+            canonical_user_id=canonical_user_id, command_id=command_id, reason=reason,
+            cancelled_at=datetime.now(timezone.utc).isoformat(),
         )
+    # Signalling is the caller's choice, independent of who wins local cleanup.
     stop_signals_sent = (
         await _signal_graph_subtask_stops(
-            agent,
-            root_task_id=task_id,
-            pending_subtasks=pending_subtasks,
-            reason=reason,
-        )
-        if signal_pending_subtasks
-        else 0
+            agent, root_task_id=task_id, pending_subtasks=pending_subtasks, reason=reason,
+        ) if signal_pending_subtasks else 0
     )
+    key = (id(agent), task_id)
+    lock = _CANCELLATION_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        current = await agent.task_manager.operations_runtime.run(agent.task_manager.get_task_info, task_id)
+        if current is not None:
+            result = await _cancel_task_tree_once(
+                agent, task_id=task_id, cancel_tree=cancel_tree, root_task_info=current,
+                reason=reason, signal_pending_subtasks=signal_pending_subtasks,
+                durable_cancellation_recorded=durable_cancellation_recorded,
+            )
+        else:
+            result = {
+                "task_id": task_id, "cancelled_task_count": 0,
+                "durable_cancellation_recorded": bool(durable_cancellation_recorded),
+            }
+    result.update(
+        pending_subtask_count=len(pending_subtasks), stop_signals_sent=stop_signals_sent,
+        unconfirmed_worker_count=len(pending_subtasks),
+    )
+    if send_response:
+        await send_task_cancel_response(agent, root.task, root.header, root.meta, reason)
+    return result
 
+
+async def _cancel_task_tree_once(
+    agent: Any, *, task_id: str, cancel_tree: list[TaskInfo], root_task_info: TaskInfo,
+    reason: str, signal_pending_subtasks: bool, durable_cancellation_recorded: bool,
+) -> Dict[str, Any]:
+    now_ts = datetime.now(timezone.utc).isoformat()
     await _record_graph_stop_history(
         agent,
         graph=cancel_tree,
@@ -406,12 +432,6 @@ async def cancel_task_tree_locally(
         cascade_to_subtasks=signal_pending_subtasks,
     )
 
-    root_task_info = (
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager.get_task_info, task_id
-        )
-        or task_info
-    )
     await agent._finalize_conversation_turn(
         root_task_info,
         task_status=ProgressState.CANCELLED.value,
@@ -424,20 +444,9 @@ async def cancel_task_tree_locally(
         timestamp=now_ts,
     )
 
-    if send_response:
-        await send_task_cancel_response(
-            agent,
-            root_task_info.task,
-            root_task_info.header,
-            root_task_info.meta,
-            reason,
-        )
     return {
         "task_id": task_id,
         "cancelled_task_count": cancelled_task_count,
-        "pending_subtask_count": len(pending_subtasks),
-        "stop_signals_sent": stop_signals_sent,
-        "unconfirmed_worker_count": len(pending_subtasks),
         "durable_cancellation_recorded": durable_cancellation_recorded,
     }
 
@@ -480,7 +489,11 @@ async def handle_interrupted_turn(
             task_id,
         )
         return
-    cancel_reason = agent._consume_stop_reason(task_id) or "Task cancelled by stop command."
+    # Keep cleanup here so releasing the execution lane cannot expose an
+    # orphaned IN_PROGRESS task. An explicit stop owns only the final reply,
+    # including when this handler resumes after its grace period.
+    stop_reason = agent._consume_stop_reason(task_id)
+    cancel_reason = stop_reason or "Task cancelled by stop command."
     if (
         await agent.task_manager.operations_runtime.run(
             agent.task_manager.get_task_info, task_id
@@ -491,6 +504,7 @@ async def handle_interrupted_turn(
             task_info=task_info,
             reason=cancel_reason,
             signal_pending_subtasks=False,
+            send_response=stop_reason is None,
         )
 
 
@@ -590,6 +604,11 @@ async def stop_task_execution(
         )
         or requested_task_id
     )
+    # Retain the root's routing even if the interrupted handler archives it
+    # before this stop resumes. A command may have named one of its subtasks.
+    root_task_info = await agent.task_manager.operations_runtime.run(
+        agent.task_manager.get_task_info, task_id
+    ) or task_info
     graph_task_ids = {
         item.task.task_id
         for item in await agent.task_manager.operations_runtime.run(
@@ -616,10 +635,9 @@ async def stop_task_execution(
         reason=TASK_STOPPED_REASON,
     )
     # Every stopped request gets one final reply, which ends it for its
-    # requester (the gateway frees the thread only then). A stopped turn sends
-    # it itself (handle_interrupted_turn), so the cancellation below sends one
-    # only when no turn of the graph was running, such as for a request that
-    # still waited its turn.
+    # requester (the gateway frees the thread only then). This stop owns
+    # the reply; handle_interrupted_turn may clean up but suppresses its own
+    # reply for this explicit stop, even when cleanup exceeds the grace.
     if stopped is not None:
         active_task = stopped.turn_owner
         assert active_task is not None
@@ -629,6 +647,10 @@ async def stop_task_execution(
             agent.task_manager.get_task_info, stopped.task_id
         )
         if current_task_info is None:
+            if send_response:
+                await send_task_cancel_response(
+                    agent, root_task_info.task, root_task_info.header, root_task_info.meta, reason,
+                )
             return {
                 "task_id": task_id,
                 "cancelled_task_count": 1,
@@ -645,7 +667,7 @@ async def stop_task_execution(
             signal_pending_subtasks=cascade_to_subtasks,
             canonical_user_id=canonical_user_id,
             command_id=command_id,
-            send_response=False,
+            send_response=send_response,
             durable_cancellation_recorded=durable_cancellation_recorded,
         )
         result["active_execution_cancelled"] = (
@@ -654,7 +676,7 @@ async def stop_task_execution(
         return result
     result = await cancel_task_tree_locally(
         agent,
-        task_info=task_info,
+        task_info=root_task_info,
         reason=reason,
         signal_pending_subtasks=cascade_to_subtasks,
         canonical_user_id=canonical_user_id,
