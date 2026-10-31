@@ -132,11 +132,23 @@ The system uses two different YAML configuration tracks plus env files.
 ## Separate requests changing the same record
 
 A person can have several requests running at once, for example in separate
-Web Chat threads. When two of them change the same record (today, one of the
-person's own knowledge pages), the later change is refused instead of being
-saved over the earlier one, and the agent tells the person, who can repeat it in
-a new message. A request that was stopped or has finished changes nothing,
-including a helper agent still working on it. Changes made from a page that is
+Web Chat threads. When something else changes a record while a request is
+working on it (today, one of the person's own knowledge pages), the request's
+own change is not saved over it straight away. This applies to changes made by
+another request, a scheduled job, or the person in the app. Instead, the agent
+is shown what changed: who changed which parts, and when, next to what it
+planned. It then decides:
+
+- If its change touches only parts the other change left alone, it saves
+  again and the change goes through.
+- If both changes set the same part, or it wants to archive the page, it
+  doesn't choose for you. It leaves the page as it is and tells you in its
+  reply what changed and what it planned.
+
+If the record changes again before the agent saves, it is shown that change
+too. After three such conflicts on one page within an hour, agents leave that
+page alone for the rest of the hour. A request that was stopped or has finished
+changes nothing, including a helper agent still working on it. Changes made from a page that is
 out of date ("changed since you read it") are always refused. Memory facts,
 schedules, heartbeat items and Objectives have only that "changed since you
 read it" check. Files the agent writes with its file tools, and its shell or
@@ -146,7 +158,7 @@ mix, but the later write still replaces the earlier one.
 
 `agent.request_conflict_checks` (default `true`) turns the checks between
 requests on or off. With `false`, the later change is saved over the earlier
-one, as before this check existed, and the Status page shows a note while it is
+one without the agent being shown what changed, as before this check existed, and the Status page shows a note while it is
 off. Agents cannot change this setting. Turning it on again counts only
 changes made from then on.
 

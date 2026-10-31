@@ -377,9 +377,10 @@ schedules created elsewhere, heartbeat runs, other chat apps, and every
 worker) shares the main lane, one turn at a time, as before.
 Why: by turning Run concurrently on the person says the thread's requests do
 not overlap their other work (owner, 2026-10-27). Overlapping changes are checked
-only where stores check them: the change ledger refuses the later of two
-requests' changes to a personal knowledge page (`agent.request_conflict_checks`
-turns this off); memory facts, schedules, heartbeat items and Objectives refuse
+only where stores check them: the change ledger shows a request another
+writer's change to a personal knowledge page before letting it save, and
+refuses a change to the same fields (`agent.request_conflict_checks` turns
+this off); memory facts, schedules, heartbeat items and Objectives refuse
 only a change decided from an older version (`changed_since_read`); shell,
 Python and file-tool writes are not checked. Each turn is self-contained: its
 task, person's model, stop handle and Strands agent live in the task's work record
@@ -1105,16 +1106,39 @@ requests changed which record, in one order shared by every store that uses
 it; personal knowledge pages are the first. A person can run several
 separate requests at once, and two of them may change the same page. A
 revision check stops only stale writes, so a request that read the newest
-revision could still overwrite what another request had just changed. The
-store therefore refuses a request's change to a page that a different
-request changed after it started (`change_conflict`). The change is not made
-and the request tells the person, who can repeat it in a new message.
+revision could still overwrite what another writer had just changed without
+noticing. The store therefore refuses a request's change to a page that
+another writer changed after the request started, until the request has seen
+that change (`change_conflict`). The refusal carries a case id and a brief
+written by code: who changed which fields and when, the page's current values
+and the request's planned ones. Seeing it lets the request decide whether to
+adapt; neither the newer change nor the request's older instruction wins on
+its own (coordination plan 7.10, accepted 2026-10-30).
 
 - **Writers.** Who wrote comes from the verified context only: a person's
-  request is a context the gateway signed for that person. Scheduled work,
-  people's own edits on the Knowledge page and system upkeep are recorded,
-  but never stopped by this rule nor counted against a request; the
-  revision check still applies to them.
+  request is a context the gateway signed for that person. Changes by another
+  request, by scheduled work and by people on the Knowledge page count
+  against a request; system upkeep and the request's own tasks never do. The
+  revision check applies to everyone. Scheduled work itself is not stopped by
+  this rule yet (coordination plan phase R3).
+- **Seen changes.** The ledger records the names of the fields each change
+  set, never their values. After the brief, the store saves how far the
+  request has seen (`change_reviews`, in a transaction of its own, because
+  the refused one rolled back) and its case (`change_cases`). Each newly shown
+  ledger position has a distinct case, even for the same request and page;
+  concurrent retries share its deterministic id and count only once. The request may
+  then save fields those changes did not set. A change that sets one of them,
+  or archives the page, is refused with `needs_person_decision`: the person
+  decides which to keep. A later change shows a new brief. If the review
+  cannot be saved, the store logs `event=knowledge_ledger_review_failed` and
+  the request is shown the same change again.
+- **Briefs.** Values come from the page the request is about to change, so
+  its person may read them; anything that looks like a credential or an
+  identity number is hidden, and each value is cut to 1,000 characters.
+  Another person's writer is named only as "another team member".
+- **Escalation.** After three conflicts on one page within an hour, every
+  request's change to it is refused with `needs_person_decision` until the
+  hour has passed. Repeated conflicts in a single request count too.
 - **Creates and notes.** Creating a page and adding a note overwrite
   nothing, so they are recorded and never refused by this rule.
 - **Closed requests.** A request that was stopped or has ended changes
@@ -1137,12 +1161,15 @@ and the request tells the person, who can repeat it in a new message.
   and later writes see the closed state. SQLite's `BEGIN IMMEDIATE` provides
   the same exclusion. The shared counter row is updated last, bounded by
   `lock_timeout` in PostgreSQL.
-- **Retention.** Entries and closed request rows older than seven days are
-  pruned when a request closes. They are deleted with a removed person's
-  task records and never travel in a team transfer.
+- **Retention.** Entries, reviews, cases and closed request rows older than
+  seven days are pruned when a request closes. They are deleted with a
+  removed person's task records and never travel in a team transfer. The
+  tables are created with the instance; an upgrade moves the team into a
+  fresh instance, so there is no migration of older ledger tables.
 - **Refusal names.** The names are shared, in
   `custom_messages.enums.ChangeRefusal`. A stale revision is
-  `changed_since_read`.
+  `changed_since_read`; the message contract's replies use the same
+  `case_id` and `brief` names.
 - **Operator switch.** `agent.request_conflict_checks: false` turns both
   refusals off for every agent; the revision checks stay on. Each agent logs
   the value at start (`event=request_conflict_checks`), and the Status page
