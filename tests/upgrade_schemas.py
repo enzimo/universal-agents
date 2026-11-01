@@ -6,7 +6,11 @@ store has to open the tables those releases created and add what they lack.
 With ``--upgrade-from tests/fixtures/upgrade/0.9-sqlite.sql`` each new SQLite
 database a store creates starts with the oldest form of every table a 0.9
 release created, so a store that misses an upgrade step fails the tests that
-use it. Databases a test creates itself keep the tables the test builds, and
+use it. Dimension-specific vec0 tables are checked separately with a stored
+embedding and the complete historical fixture (tests/test_upgrade_schemas.py).
+Both stdlib sqlite3 and the memory store's macOS pysqlite3 driver are hooked.
+Tests that spawn workers prepare their shared store in the parent first:
+spawned interpreters do not inherit pytest's hooks. Databases a test creates itself keep the tables the test builds, and
 so do all databases of a test marked ``own_database``. Release candidates run the suite this way (``scripts/run_tests.sh
 upgrade``).
 
@@ -20,14 +24,18 @@ changes in them.
 from __future__ import annotations
 
 import os
+import importlib
 import sqlite3
 import sys
 import threading
+from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
 import pytest
+
+from scripts.upgrade_schema_fixture import is_vector_table
 
 _REPO = Path(__file__).resolve().parents[1]
 _TESTS = str(_REPO / "tests") + os.sep
@@ -40,6 +48,15 @@ _SCHEMA_PREFIXES = (
     "CREATE VIEW",
 )
 _original_connect = sqlite3.connect
+
+try:
+    pysqlite3 = importlib.import_module("pysqlite3")
+except ImportError:
+    _DRIVERS: tuple[Any, ...]
+    _DRIVERS = (sqlite3,)
+else:
+    _DRIVERS = (sqlite3, pysqlite3)
+_ORIGINAL_CONNECTS = {driver: driver.connect for driver in _DRIVERS}
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -66,7 +83,8 @@ def pytest_configure(config: pytest.Config) -> None:
         capture=Path(capture_path) if capture_path else None,
     )
     config.stash[_SCHEMAS] = schemas
-    sqlite3.connect = schemas.connect  # type: ignore[assignment]
+    for driver in _DRIVERS:
+        driver.connect = partial(schemas.connect, _driver=driver)
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
@@ -79,7 +97,8 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     schemas = config.stash.get(_SCHEMAS, None)
     if schemas is None:
         return
-    sqlite3.connect = _original_connect
+    for driver in _DRIVERS:
+        driver.connect = _ORIGINAL_CONNECTS[driver]
     schemas.finish()
 
 
@@ -92,7 +111,10 @@ def read_schema_statements(path: Path) -> tuple[str, ...]:
 
 class _Schemas:
     def __init__(self, *, seed: tuple[str, ...], capture: Path | None):
-        self._seed = seed
+        # A vec0 table's dimension varies across tests. The full historical
+        # fixture, including stored vectors, is exercised by its dedicated test
+        # rather than forcing one embedding dimension on every test database.
+        self._seed = tuple(statement for statement in seed if not is_vector_table(statement))
         self._capture = capture
         self._captured: dict[str, None] = {}
         self._kinds: dict[str, str] = {}
@@ -101,30 +123,38 @@ class _Schemas:
         # database through a store and must keep exactly what it builds.
         self.paused = False
 
-    def connect(self, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+    def connect(self, *args: Any, _driver: Any = sqlite3, **kwargs: Any) -> sqlite3.Connection:
         target = args[0] if args else kwargs.get("database")
         # Only a database a store creates: a test that builds its own tables
         # (an older layout, or none) keeps them.
         new = bool(self._seed) and not self.paused and _is_new_database(target) and self._product_caller()
-        conn: sqlite3.Connection = _original_connect(*args, **kwargs)
+        conn: sqlite3.Connection = _ORIGINAL_CONNECTS[_driver](*args, **kwargs)
         if new:
-            self._start_with_older_tables(conn, target)
+            try:
+                self._start_with_older_tables(conn, target, _driver)
+            except BaseException:
+                conn.close()
+                raise
         if self._capture is not None:
             conn.set_trace_callback(self._record)
         return conn
 
-    def _start_with_older_tables(self, conn: sqlite3.Connection, target: object) -> None:
+    def _start_with_older_tables(self, conn: sqlite3.Connection, target: object, driver: Any) -> None:
         """Create the earlier release's tables in one transaction; a statement that fails stops the run."""
 
         isolation = conn.isolation_level
         conn.isolation_level = None
         try:
-            conn.execute("BEGIN")
-            for statement in self._seed:
-                conn.execute(statement)
+            conn.execute("BEGIN IMMEDIATE")
+            # Another thread may have initialized this file since the earlier
+            # size check. Recheck while holding the write lock before seeding.
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1").fetchone():
+                for statement in self._seed:
+                    conn.execute(statement)
             conn.execute("COMMIT")
-        except sqlite3.Error as exc:
-            conn.execute("ROLLBACK")
+        except driver.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise pytest.UsageError(f"--upgrade-from could not create its tables in {target!r}: {exc}") from exc
         finally:
             conn.isolation_level = isolation
@@ -162,8 +192,14 @@ class _Schemas:
 
 
 _PRODUCT, _TEST, _OTHER = "product", "test", "other"
-# Stores' connection wrappers: statements pass through them from tests too.
-_CONNECTION_MODULES = {str(_REPO / "storage" / "sqlite_connection.py"), str(_REPO / "storage" / "postgres_connection.py")}
+# Connection wrappers and fixture tooling do not own runtime schemas. Their
+# caller decides ownership, so tests of the capture utility cannot pollute a
+# later release's capture with the utility tests' invented tables.
+_CONNECTION_MODULES = {
+    str(_REPO / "storage" / "sqlite_connection.py"),
+    str(_REPO / "storage" / "postgres_connection.py"),
+    str(_REPO / "scripts" / "upgrade_schema_fixture.py"),
+}
 
 
 def _frame_kind(filename: str) -> str:

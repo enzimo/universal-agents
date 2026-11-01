@@ -19,10 +19,16 @@ existing table needs its upgrade step (``storage.table_columns.ensure_column``).
 from __future__ import annotations
 
 import argparse
+import importlib
+import re
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from storage.sqlite_vec_support import load_sqlite_vec  # noqa: E402
 
 HEADER = """-- Oldest form of every table, index and trigger the {label} releases created (SQLite),
 -- for tests that start from an earlier release's database (--upgrade-from,
@@ -39,13 +45,39 @@ def read_statements(path: Path) -> list[str]:
 def build(statements: list[str]) -> sqlite3.Connection:
     """Run the statements in order on a new database; the first form of each table wins."""
 
-    conn = sqlite3.connect(":memory:")
-    for statement in statements:
-        try:
-            conn.execute(statement)
-        except sqlite3.Error:
-            pass  # A later form of a table that already exists, or an index on a column it lacks.
+    # Match the memory store's extension-capable driver on macOS too.
+    try:
+        driver = importlib.import_module("pysqlite3")
+    except ImportError:
+        driver = sqlite3
+    conn: sqlite3.Connection = driver.connect(":memory:")
+    try:
+        if any(is_vector_table(statement) for statement in statements):
+            load_sqlite_vec(conn)
+        for statement in statements:
+            try:
+                conn.execute(statement)
+            except driver.OperationalError as exc:
+                text = " ".join(statement.upper().split())
+                message = str(exc)
+                # Captures contain repeated definitions and indexes on columns
+                # added after the oldest definition. No other failure is expected.
+                duplicate = re.fullmatch(r"(?:table|index|trigger|view) .+ already exists", message)
+                newer_index = text.startswith(("CREATE INDEX ", "CREATE UNIQUE INDEX ")) and message.startswith(
+                    "no such column:"
+                )
+                if not duplicate and not newer_index:
+                    raise
+    except BaseException:
+        conn.close()
+        raise
     return conn
+
+
+def is_vector_table(statement: str) -> bool:
+    """vec0 tables have a dimension chosen by each instance's embedding profile."""
+
+    return bool(re.search(r"\bUSING\s+vec0\s*\(", statement, re.IGNORECASE))
 
 
 def tables(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
@@ -78,8 +110,9 @@ def tables(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
 def merge(out: Path, captures: list[Path], label: str) -> None:
     merged: dict[str, dict[str, Any]] = {}
     for capture in captures:
-        for name, table in tables(build(read_statements(capture))).items():
-            merged.setdefault(name, table)
+        with closing(build(read_statements(capture))) as conn:
+            for name, table in tables(conn).items():
+                merged.setdefault(name, table)
     lines = [HEADER.format(label=label, sources=", ".join(capture.name for capture in captures))]
     for name in sorted(merged):
         lines.append(merged[name]["sql"] + ";\n")
@@ -89,14 +122,19 @@ def merge(out: Path, captures: list[Path], label: str) -> None:
 
 
 def diff(fixture: Path, capture: Path) -> int:
-    old = tables(build(read_statements(fixture)))
-    new = tables(build(read_statements(capture)))
+    with closing(build(read_statements(fixture))) as conn:
+        old = tables(conn)
+    with closing(build(read_statements(capture))) as conn:
+        new = tables(conn)
     added_columns = 0
     for name in sorted(old):
         if name not in new:
             print(f"{name}: no longer created")
             continue
         o, n = old[name], new[name]
+        if is_vector_table(o["sql"]) and " ".join(o["sql"].split()) != " ".join(n["sql"].split()):
+            # PRAGMA table_info omits vec0's column types and dimensions.
+            print(f"{name}: ~ virtual table definition {o['sql']} -> {n['sql']}")
         for column, spec in n["columns"].items():
             if column not in o["columns"]:
                 added_columns += 1

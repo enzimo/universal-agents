@@ -247,19 +247,22 @@ def test_evidence_storage_cannot_skip_tests_or_hide_verification_failures() -> N
     steps = job["steps"]
     canary = next(s for s in steps if s.get("name") == "Run reviewed GitHub skill-installation canary")
     tests = next(s for s in steps if s.get("name") == "Run hermetic test profile")
-    upgrade = next(s for s in steps if s.get("name") == "Run hermetic tests on the previous minor version's databases")
     upload = next(s for s in steps if s.get("id") == "canary-evidence")
     warning = next(s for s in steps if s.get("name") == "Report unavailable evidence archive")
 
     assert "continue-on-error" not in job
-    assert upgrade["run"].startswith("./scripts/run_tests.sh upgrade ")
-    for verification in (canary, tests, upgrade):
+    assert job["strategy"]["matrix"]["profile"] == ["fast", "upgrade"]
+    assert job["strategy"]["fail-fast"] == "false"
+    assert job["timeout-minutes"] == "75"
+    assert tests["run"] == './scripts/run_tests.sh "${{ matrix.profile }}" -q -x --tb=short --durations=20'
+    for verification in (canary, tests):
         assert "continue-on-error" not in verification
         assert "if" not in verification
         assert steps.index(verification) < steps.index(upload)
     assert upload["continue-on-error"] == "true"
     assert upload["if"] == "always()"
     assert upload["with"]["retention-days"] == "7"
+    assert upload["with"]["name"].endswith("-${{ matrix.profile }}")
     assert warning["if"] == "always() && steps.canary-evidence.outcome == 'failure'"
     assert "::warning::" in warning["run"]
 

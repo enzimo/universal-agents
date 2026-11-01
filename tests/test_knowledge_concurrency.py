@@ -80,6 +80,10 @@ def _propose_archives(settings: StorageSettings, worker: int) -> int:
 @pytest.fixture(params=BACKENDS)
 def settings(request, tmp_path):
     with knowledge_storage(request.param, tmp_path) as storage_settings:
+        # Spawn starts a fresh interpreter, without pytest's connection hooks.
+        # Prepare the shared store here so child-only writes use the historical
+        # tables in upgrade mode, and schema capture includes this store.
+        create_knowledge_repository(storage_settings)
         yield storage_settings
 
 

@@ -83,8 +83,12 @@ jobs:
   fast:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
-    # Setup, the full suite, and mandatory cleanup took 63 minutes on the
-    # shared runner. Leave time for cleanup after successful verification.
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [fast, upgrade]
+    # Each profile gets its own budget: one suite plus setup and cleanup
+    # took 63 minutes on the shared runner. Never run both within that budget.
     timeout-minutes: 75
     steps:
       - name: Require managed local runner
@@ -130,11 +134,7 @@ jobs:
         run: python -m unittest discover -s .github/runner -v
       - name: Run hermetic test profile
         # Report the first failure before a later timeout can hide its details.
-        run: ./scripts/run_tests.sh fast -q -x --tb=short --durations=20
-      - name: Run hermetic tests on the previous minor version's databases
-        # Releases upgrade instances in place: every store must open the tables
-        # the previous minor version created (tests/upgrade_schemas.py).
-        run: ./scripts/run_tests.sh upgrade -q -x --tb=short
+        run: ./scripts/run_tests.sh "${{ matrix.profile }}" -q -x --tb=short --durations=20
       # Verification above is mandatory. Archiving its evidence is optional.
       - name: Upload reviewed skill-installation evidence
         id: canary-evidence
@@ -143,7 +143,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           retention-days: 7
-          name: skill-installation-canary-evidence
+          name: skill-installation-canary-evidence-${{ matrix.profile }}
           path: test_results/skill_installation_canary/evidence.json
           if-no-files-found: error
       - name: Report unavailable evidence archive

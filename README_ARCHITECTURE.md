@@ -3982,14 +3982,24 @@ the desktop app never offers an older version.
 
 - **Checked on every release candidate.** `scripts/run_tests.sh upgrade` runs
   the hermetic tests with `--upgrade-from` (`tests/upgrade_schemas.py`): every
-  new SQLite database a test opens starts with the oldest form of every table,
+  new SQLite database a store opens starts with the oldest form of each ordinary table,
   index and trigger the previous minor version created
   (`tests/fixtures/upgrade/<version>-sqlite.sql`), so a store that misses an
   upgrade step fails the tests that use it. The fixture comes from the
   releases' own test suites run with `--capture-schema`, which records only the
   statements product code runs, and is merged by
   `scripts/upgrade_schema_fixture.py`, whose `diff` command lists what a newer
-  release changes in those tables. PostgreSQL stores run the same steps
+  release changes in those tables. Replay loads sqlite-vec and rejects errors
+  other than duplicate definitions and indexes on later-added columns. The
+  fixture also retains the dimension-specific `memory_graph_vectors` table:
+  a dedicated test loads the complete fixture with a stored embedding and
+  proves it remains searchable without recreating that table. It is separate
+  because other tests use different embedding dimensions. Both SQLite drivers
+  (`sqlite3` and macOS's `pysqlite3`) are intercepted. Tests that spawn worker
+  processes initialize the shared store in the parent fixture first, so the
+  workers reopen historical tables and capture includes their schema.
+  Normal and upgrade CI profiles run as separate matrix jobs, each with its
+  own 75-minute budget. PostgreSQL stores run the same steps
   through `ensure_column`; the option covers SQLite only, and a one-off
   comparison of PostgreSQL tables from the same releases (2026-11-01) found
   the same changes.

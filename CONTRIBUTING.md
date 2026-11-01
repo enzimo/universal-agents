@@ -186,8 +186,13 @@ cargo build --locked --workspace
 ```
 
 When a change touches stored tables, also run `./scripts/run_tests.sh upgrade -q`:
-it starts every test database with the previous minor version's tables, as an
-instance upgraded in place has them.
+it starts store-created databases with the previous minor version's ordinary
+tables, as an instance upgraded in place has them. The complete historical
+vector schema and a saved embedding have a dedicated test because embedding
+dimensions vary between tests. Both SQLite drivers are covered. When a test
+opens a shared store only in spawned processes, initialize it in the parent
+fixture first: spawned interpreters do not inherit the pytest connection hooks,
+and preparing it in the parent also includes its schema in captures.
 
 Use events to hold fake workers while testing concurrent requests, and release
 them in a `finally` block. Put a deadline around the whole test rather than

@@ -213,6 +213,9 @@ CREATE INDEX idx_memory_episodes_subject_event ON memory_episodes(subject_id, ev
 CREATE TABLE memory_graph_vector_index_state ( singleton_key TEXT PRIMARY KEY, provider TEXT NOT NULL, dimensions INTEGER, sqlite_vec_version TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL ) STRICT;
 CREATE TABLE memory_graph_vector_records ( vec_rowid INTEGER PRIMARY KEY AUTOINCREMENT, record_kind TEXT NOT NULL, record_id TEXT NOT NULL, subject_id TEXT NOT NULL, embedding_profile_id TEXT, embedding_dimension INTEGER NOT NULL, updated_at TEXT NOT NULL, UNIQUE(record_kind, record_id) ) STRICT;
 CREATE INDEX idx_memory_graph_vector_records_kind_subject ON memory_graph_vector_records(record_kind, subject_id, embedding_profile_id);
+-- vec0 uses an instance's embedding dimension. The dedicated historical-vector
+-- test loads this complete fixture; the general upgrade run seeds ordinary tables.
+CREATE VIRTUAL TABLE memory_graph_vectors USING vec0( record_kind TEXT, record_id TEXT, subject_id TEXT, embedding_profile_id TEXT, embedding float[3] );
 CREATE TABLE memory_review_cleanup_events ( event_id TEXT PRIMARY KEY, review_job_id TEXT NOT NULL, team_id TEXT NOT NULL, from_status TEXT NOT NULL, to_status TEXT NOT NULL, actor_id TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL );
 CREATE TABLE memory_review_jobs ( review_job_id TEXT PRIMARY KEY, owner_team_id TEXT NOT NULL, owner_named_agent_type TEXT NOT NULL, task_id TEXT NOT NULL, conversation_id TEXT NOT NULL, turn_index INTEGER NOT NULL, agent_subject_id TEXT, user_subject_id TEXT, team_subject_id TEXT, source_payload_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL, claim_owner_agent_id TEXT, claim_expires_at TEXT, error_text TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL );
 CREATE INDEX idx_memory_review_jobs_role_status ON memory_review_jobs(owner_team_id, owner_named_agent_type, status, created_at);
