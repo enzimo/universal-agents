@@ -468,29 +468,38 @@ only when it is among the kind's receivers and serves that target (`audience_tar
 `transport.yaml`): team services receive a task's copy on `work.team`, not the agent and
 pool inboxes the same kind also uses.
 
-**Whole-team grants.** A lead or worker host may receive requests and queued work for any
-agent or pool of the teams it serves (`team_grants` in `transport.yaml`):
-- it subscribes only to the agents it runs, `ua.v1.<team>.*.ctl.agent.<agent>`, but its
-  permission is `ua.v1.{team}.*.ctl.agent.*`;
+**Grants for the agents a host runs.** A lead or worker host receives requests and queued
+work only for the agents and pools it runs:
+- it subscribes to `ua.v1.<team>.*.ctl.agent.<agent>` for each agent it runs, and its
+  permission names exactly those agents;
 - agent inboxes and worker pools live in a stream per team, `UA1_AGENT_WORK_<team>`, and
-  the host may read and acknowledge any consumer there. It pulls only from its own agents'
-  and pools' consumers.
+  the host may read and acknowledge only its own agents' and pools' consumers there.
 
-Placing or moving an agent therefore needs no new credential, work queued for an agent
-follows it to its new host, and a credential stays the same size however many agents its
-team has. The cost is isolation inside a team: a broken-into host could read or
-acknowledge work queued for its team's other agents. It still cannot sign as them, since
-every frame names its agent's session ("Who sent it"). Edge deliveries and the team
-services' inbox stay in `UA1_WORK`, read through grants on their exact consumers, so
-agent hosts reach neither.
+A broken-into host therefore cannot read, take or acknowledge work queued for agents on
+other hosts, or hear their control requests, and it cannot sign as them either, since every
+frame names its agent's session ("Who sent it"). Edge deliveries and the team services'
+inbox stay in `UA1_WORK`, read through grants on their exact consumers, so agent hosts reach
+neither.
+
+Credentials follow placement. A host gets a new NATS credential when it gains or loses an
+agent or pool. Work queued for an agent stays in that agent's consumer, and the host it
+moves to reads it with its new credential. A credential grows with the agents its host
+runs: each hosted agent adds four subjects (its consumer's info, next-message and
+acknowledgement subjects, and its control address), 862 bytes of permission JSON with
+64-character team and agent ids, which a NATS user JWT's base64url encoding turns into
+about 1,150 bytes. Each worker pool adds three subjects, 709 bytes.
+`tests/test_message_contract.py` recomputes these figures from the generated templates.
+NATS reads a user JWT in the client's `CONNECT` line, which the server's
+`max_control_line` limits (4,096 bytes unless configured), so an installation's servers set
+that limit from the largest number of agent sessions a host certificate allows.
 
 Before installing permissions, trusted membership code fills `{team}` with each team the
-host serves, `{self}` with its runtime id, and repeats each subject for every `{edge}` the
-host serves; these placeholders never become wildcards. Clients use `_INBOX.<runtime>` as
-their inbox prefix. Hosts cannot create or delete consumers or streams, read streams
-directly, or reach another team's or another role's consumers. The topology owner creates
-a team's stream with the team. The live conformance tests prove both allowed and refused
-operations.
+host serves, `{self}` with its runtime id, and repeats each subject for every `{agent}` and
+`{pool}` the host runs and every `{edge}` it serves; these placeholders never become
+wildcards. Clients use `_INBOX.<runtime>` as their inbox prefix. Hosts cannot create or
+delete consumers or streams, read streams directly, or reach another host's, another
+team's or another role's consumers. The topology owner creates a team's stream with the
+team. The live conformance tests prove both allowed and refused operations.
 
 `transport.yaml` states the broker settings too: the minimum NATS version and the
 server-wide JetStream settings under `server`, then each stream and consumer. A delivery
@@ -626,8 +635,8 @@ file. It uses public fixture signing keys and no operator credentials.
   the test checks that the server reports the same values back.
 - **What it proves:**
   - real publish, pull, acknowledgement and signed inbox replies;
-  - a host pulling and acknowledging any agent of its team with one credential, including
-    work queued before the agent moved to it;
+  - a host pulling and acknowledging only its own agents' queues, and reading work queued
+    before an agent moved to it once it holds the credential that names that agent;
   - a relayed queue request sent straight to an agent by the gateway: NATS delivers it,
     and the agent's host refuses it as `wrong_sender`;
   - a result and its team-services copy both stored and pulled by their own readers;
@@ -637,11 +646,12 @@ file. It uses public fixture signing keys and no operator credentials.
   - dead-letter raw copies and notices stored under the receiver's own id;
   - separate consumers for ids that an `_` separator would have merged;
   - refusals of: an outside agent's adapter publishing into a worker pool; fetches and
-    acknowledgements on another team's stream or the team services' consumer; consumer
-    creation and deletion; stream reads; publishing under another runtime's id,
-    dead-letter copies included; subscribing to another runtime's inbox, to stream
-    subjects, to the team services' requests or to another team's agents; writing into
-    another runtime's inbox except to answer a request once.
+    acknowledgements on another host's agent consumer, another team's stream or the team
+    services' consumer; consumer creation and deletion; stream reads; publishing under
+    another runtime's id, dead-letter copies included; subscribing to another runtime's
+    inbox, to stream subjects, to the team services' requests or to another host's or
+    another team's agents; writing into another runtime's inbox except to answer a request
+    once.
 
 A team `config.yaml` or `debug.env` cannot supply this isolated authorization fixture.
 

@@ -88,9 +88,8 @@ PORTABLE_ESCAPES = set(".-\\[](){}*+?|^$/")
 # with a character outside this set.
 ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # Address placeholders that name the receiver. A sender may address any receiver in
-# its team. A host receives for any receiver of its team whose target transport.yaml
-# lists under team_grants; for the others, subscriptions and consumer grants keep the
-# placeholder for membership code to fill per assigned id.
+# its team. Subscriptions and consumer grants keep the placeholder, and membership code
+# fills it with each id the host runs or serves, so a host reads only its own queues.
 RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
 # Other address placeholders: a dead-letter copy id (the body's copy_id), and the
 # sender of an installation address (<installation scope>.{sender}.svc).
@@ -1036,7 +1035,6 @@ def check_transport(transport: dict[str, Any]) -> None:
             raise ContractError(f"transport.yaml: class {name} states between_installations")
         check_class_streams(name, spec, transport, skew)
     check_stream_subjects(transport)
-    check_team_grants(transport)
 
 
 def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
@@ -1143,40 +1141,6 @@ def check_address_storage(class_name: str, streams: list[str] | None, address: s
         raise ContractError(f"transport.yaml: {address} is stored in exactly one of the {class_name} class's streams")
 
 
-def granted_target(consumer: dict[str, Any], transport: dict[str, Any]) -> str | None:
-    """The team-granted audience target whose work a consumer delivers, if any."""
-
-    placeholders = set(re.findall(r"\{([a-z_]+)\}", consumer["filter"])) & set(RECEIVER_PLACEHOLDERS)
-    granted = placeholders & set(transport["team_grants"])
-    return next(iter(granted), None)
-
-
-def check_team_grants(transport: dict[str, Any]) -> None:
-    """A grant on every consumer of a stream reaches only team-granted work of one team.
-
-    Team-granted consumers live in streams named with {team}, beside no other consumers,
-    and the targets sharing one stream are served by the same roles; otherwise a host
-    could read another team's work, an edge's or the team services', or work its role
-    does not serve.
-    """
-
-    grants = transport.get("team_grants")
-    if not isinstance(grants, list) or not set(grants) <= set(RECEIVER_PLACEHOLDERS) or len(set(grants)) != len(grants):
-        raise ContractError(f"transport.yaml: team_grants lists distinct targets among {list(RECEIVER_PLACEHOLDERS)}")
-    by_stream: dict[str, set[str | None]] = {}
-    for consumer in transport["consumers"].values():
-        by_stream.setdefault(consumer["stream"], set()).add(granted_target(consumer, transport))
-    for stream, targets in by_stream.items():
-        if targets == {None}:
-            continue
-        if None in targets:
-            raise ContractError(f"transport.yaml: stream {stream} holds team-granted consumers beside others")
-        if "{team}" not in stream:
-            raise ContractError(f"transport.yaml: stream {stream} holds team-granted consumers and is named with {{team}}")
-        if len({tuple(transport["audience_targets"][target]) for target in targets}) != 1:
-            raise ContractError(f"transport.yaml: the targets read from stream {stream} are served by the same roles")
-
-
 def class_addresses(transport: dict[str, Any], delivery_class: str) -> list[str]:
     spec = transport["classes"][delivery_class]
     return list(spec["addresses"]) + list(spec.get("installation_addresses", []))
@@ -1208,20 +1172,13 @@ def publication_addresses(entry: dict[str, Any], transport: dict[str, Any]) -> l
     return addresses
 
 
-def receive_pattern(address: str, transport: dict[str, Any]) -> str:
-    """The address a receiving host is granted: any receiver of its team for team-granted targets."""
-
-    return re.sub(r"\{(" + "|".join(transport["team_grants"]) + r")\}", "*", address)
-
-
 def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     """Pull, inspect and acknowledge the consumers for this delivery address.
 
-    A team-granted target's consumers fill a stream of their own per team, so the
-    grant covers every consumer of the host's team's stream. Other consumer names keep
-    their {team} and receiver placeholders; membership code fills them with the host's
-    own team and each id it serves, never with wildcards. Creating consumers stays
-    with the topology owner.
+    Consumer names keep their {team} and receiver placeholders; membership code fills
+    them with the host's own teams and each id it runs or serves, never with wildcards,
+    so a host reads no other host's agents' queues. Creating consumers stays with the
+    topology owner.
     """
 
     expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address
@@ -1231,11 +1188,11 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     subjects = set()
     for consumer in matches:
         stream = consumer["stream"]
-        name = "*" if granted_target(consumer, transport) else consumer["name"]
+        name = consumer["name"]
         subjects.update({
             f"$JS.API.CONSUMER.INFO.{stream}.{name}",
             f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
-            f"$JS.ACK.{stream}.>" if name == "*" else f"$JS.ACK.{stream}.{name}.>",
+            f"$JS.ACK.{stream}.{name}.>",
         })
     return subjects
 
@@ -1243,11 +1200,11 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: the NATS permissions it gets, as templates.
 
-    {team} is each team the host serves and {self} its runtime id. A host receives
-    requests and work for any agent or pool of its teams (transport.yaml team_grants),
-    so its permissions do not grow with its agents; the signed audience names the
-    agent. {edge} is each edge the host serves: membership code repeats a subject once
-    per id and never turns one into a wildcard. A host publishes only under its own id.
+    {team} is each team the host serves and {self} its runtime id. {agent}, {pool} and
+    {edge} are each agent and pool the host runs and each edge it serves: membership
+    code repeats a subject once per id and never turns one into a wildcard, so a host
+    receives requests and queued work only for its own agents and pools, and its
+    credential changes when it gains or loses one. A host publishes only under its own id.
     A receiver of requests answers each one once, within the class's expiry, through
     NATS allow_responses; it holds no grant on other runtimes' inboxes.
     """
@@ -1269,7 +1226,7 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                 elif entry["class"] != "dead_letter":
                     # Dead letters wait in UA1_DLQ; its read grants come with the services
                     # that read it (message contract plan 13A.9), not as a subscription.
-                    subscribe.add(full_subject(receive_pattern(address, transport), "*"))
+                    subscribe.add(full_subject(address, "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
         if answers_requests:

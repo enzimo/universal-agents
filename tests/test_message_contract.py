@@ -365,40 +365,6 @@ def test_streams_store_each_queued_address_once_and_nothing_else(change, problem
         EXPORT.check_transport(transport)
 
 
-def edges_beside_agents(transport: dict) -> None:
-    transport["streams"]["UA1_WORK"]["subjects"] = ["ua.v1.*.*.work.team"]
-    transport["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.work.edge.*")
-    transport["consumers"]["edge"]["stream"] = "UA1_AGENT_WORK_{team}"
-
-
-def agent_work_of_every_team_in_one_stream(transport: dict) -> None:
-    spec = transport["streams"].pop("UA1_AGENT_WORK_{team}")
-    spec["subjects"] = ["ua.v1.*.*.work.agent.*", "ua.v1.*.*.work.pool.*"]
-    transport["streams"]["UA1_AGENT_WORK"] = spec
-    transport["classes"]["durable"]["streams"] = ["UA1_AGENT_WORK", "UA1_WORK"]
-    for key in ("agent_inbox", "pool"):
-        transport["consumers"][key]["stream"] = "UA1_AGENT_WORK"
-
-
-@pytest.mark.parametrize(
-    ("change", "problem"),
-    [
-        # A grant on every consumer of a stream would reach the edges' work, or other teams'.
-        (edges_beside_agents, "beside others"),
-        (agent_work_of_every_team_in_one_stream, "named with {team}"),
-        (lambda t: t.update(team_grants=["agent", "pool", "edge"]), "beside others"),
-        (lambda t: t.update(team_grants=["agent", "team"]), "team_grants lists"),
-        # Gateways and edge adapters do not run agents: a shared grant would give them agent work.
-        (lambda t: t["audience_targets"].update(pool=["lead_host", "worker_host", "gateway"]), "served by the same roles"),
-    ],
-)
-def test_whole_team_grants_reach_only_one_teams_agent_and_pool_work(change, problem) -> None:
-    transport = copy.deepcopy(TRANSPORT)
-    change(transport)
-    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
-        EXPORT.check_transport(transport)
-
-
 def test_a_team_wide_address_is_received_by_the_same_roles_for_every_kind() -> None:
     """The scheduler answers only run_context.sign, so it listens at svc.scheduler, not svc.team."""
 
@@ -435,22 +401,21 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
 
 
 def consumer_grants() -> set[str]:
-    """Every JetStream subject a role may be granted: a team's agent work stream whole, other consumers by name."""
+    """Every JetStream subject a reader may be granted: each consumer by its exact name, ids still placeholders."""
 
     grants = set()
     for consumer in TRANSPORT["consumers"].values():
         stream, name = consumer["stream"], consumer["name"]
-        if "{team}" in stream:
-            grants |= {f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.*", f"$JS.ACK.{stream}.>"}
-        else:
-            grants |= {f"$JS.API.CONSUMER.INFO.{stream}.{name}", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
-                       f"$JS.ACK.{stream}.{name}.>"}
+        grants |= {f"$JS.API.CONSUMER.INFO.{stream}.{name}", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
+                   f"$JS.ACK.{stream}.{name}.>"}
     return grants
 
 
-def test_permissions_cover_whole_teams_only_for_agents_and_pools_and_publish_only_under_the_senders_own_id() -> None:
+def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own_id() -> None:
+    """A host reads only the queues and control requests of the ids membership code fills in (README, "Grants ...")."""
+
     folder = CONTRACT / "generated" / "permissions"
-    assert TRANSPORT["team_grants"] == ["agent", "pool"]
+    assert "team_grants" not in TRANSPORT
     grants = consumer_grants()
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
@@ -462,9 +427,8 @@ def test_permissions_cover_whole_teams_only_for_agents_and_pools_and_publish_onl
         assert document["subscribe"][0] == "_INBOX.{self}.>"
         for subject in document["subscribe"][1:]:
             prefix = "ua.v1._install.*." if subject.startswith("ua.v1._install.") else "ua.v1.{team}.*."
-            # Only an agent's id becomes a wildcard: requests to any agent of the team.
-            rest = subject.removeprefix(prefix)
-            assert subject.startswith(prefix) and (rest == "ctl.agent.*" or "*" not in rest), subject
+            # Only the sender slot is a wildcard; every receiver id is a placeholder.
+            assert subject.startswith(prefix) and "*" not in subject.removeprefix(prefix), subject
         receives_requests = False
         for entry in REGISTRY["kinds"].values():
             for address in EXPORT.entry_addresses(entry):
@@ -472,11 +436,59 @@ def test_permissions_cover_whole_teams_only_for_agents_and_pools_and_publish_onl
                     assert EXPORT.full_subject(EXPORT.send_pattern(address), "{self}") in document["publish"]
                 receives = role in EXPORT.receiving_roles(entry, address, TRANSPORT)
                 if entry["class"] not in {"durable", "dead_letter"}:
-                    granted = EXPORT.full_subject(EXPORT.receive_pattern(address, TRANSPORT), "*")
+                    granted = EXPORT.full_subject(address, "*")
                     assert (granted in document["subscribe"]) == receives, (role, address)
                 receives_requests |= receives and entry["class"] == "request_reply"
         expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds'] + TRANSPORT['clock_skew_seconds']}s"
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
+
+
+def expanded(role: str, **ids: list[str]) -> set[str]:
+    """A role's permission subjects filled for one host: the teams it serves and the ids it runs or serves."""
+
+    document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
+    bindings = {"team": ["team_example"], "self": [f"{role}-1"], "agent": [], "pool": [], "edge": [], **ids}
+    subjects = set()
+    for template in document["publish"] + document["subscribe"]:
+        filled = [template]
+        for name, values in bindings.items():
+            if "{" + name + "}" in template:
+                filled = [subject.replace("{" + name + "}", value) for subject in filled for value in values]
+        subjects |= set(filled)
+    return subjects
+
+
+def test_a_host_holds_no_grant_on_another_hosts_agents() -> None:
+    """The worker host running researcher-2 cannot read the lead's queue or hear the lead's control requests."""
+
+    worker = expanded("worker_host", agent=["researcher-2"], pool=["researcher"])
+    lead = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_example", agent="lead")
+    own = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_example", agent="researcher-2")
+    stream = "UA1_AGENT_WORK_team_example"
+    assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{own}" in worker
+    assert "ua.v1.team_example.*.ctl.agent.researcher-2" in worker
+    assert not {subject for subject in worker if lead in subject or subject.endswith(".ctl.agent.lead")}
+    assert not {subject for subject in worker if subject.endswith(".*") and "CONSUMER" in subject}
+    # Gaining an agent is a new credential, with that agent's subjects added.
+    moved = expanded("worker_host", agent=["researcher-2", "lead"], pool=["researcher"])
+    assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{lead}" in moved - worker
+
+
+def credential_growth(role: str, placeholder: str) -> int:
+    """Bytes of permission JSON one more ``placeholder`` id adds to ``role``'s credential, every id 64 characters."""
+
+    document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
+    long_id = "a" * 64
+    subjects = [template for template in document["publish"] + document["subscribe"] if "{" + placeholder + "}" in template]
+    return sum(len(re.sub(r"\{[a-z_]+\}", long_id, subject)) + len('"",') for subject in subjects)
+
+
+def test_the_readme_states_what_each_hosted_agent_and_pool_adds_to_a_credential() -> None:
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    agent = max(credential_growth(role, "agent") for role in ("lead_host", "worker_host"))
+    pool = max(credential_growth(role, "pool") for role in ("lead_host", "worker_host"))
+    assert f"{agent} bytes of permission JSON" in readme and f"{pool} bytes." in readme
+    assert f"about {-(-agent * 4 // 3):,} bytes" in readme
 
 
 def test_outside_agents_cannot_publish_into_worker_pools() -> None:
@@ -809,7 +821,7 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
     assert "ua.v1.{team}.{self}.svc.team" in gateway["publish"]
     assert "ua.v1.{team}.{self}.ctl.agent.*" in services["publish"]
     for host in ("lead_host", "worker_host"):
-        assert "ua.v1.{team}.*.ctl.agent.*" in role_permissions(host)["subscribe"]
+        assert "ua.v1.{team}.*.ctl.agent.{agent}" in role_permissions(host)["subscribe"]
     # Operations share their address, and the gateway sends other agent controls there,
     # so the agent's host, not NATS, refuses a relayed kind straight from the gateway.
     case = json.loads((EXAMPLES / "invalid" / "tasks-list-from-the-gateway-to-an-agent.json").read_text(encoding="utf-8"))

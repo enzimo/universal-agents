@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "c8ec40dc031a37a49eacea70b2c31a25b3729eaa75dc79b3a15e94b4d5cbab50",
+    "contracts/messages/v1/README.md": "e409a79a6bb954d365d5a12d3baac8e4cbbf59a8180be699f5cd0ed7f683fd0f",
     "contracts/messages/v1/examples/invalid/access-decision-change-decided-with-an-access-choice.json": "b0b8cd5ccf030fc9297fc4eacac6d3e562ff3337186e540c8af1a6dcc64ba43a",
     "contracts/messages/v1/examples/invalid/access-decision-change-not-decided-with-a-choice.json": "b865a96c415673210f1eb7560dc7da61385948547ea5040ba05c81df2434a577",
     "contracts/messages/v1/examples/invalid/access-request-change-review-without-question.json": "a1f4f5732bf76b88bddcd852a452959257e3870ac37dd53bc09e570cf74a4499",
@@ -1482,13 +1482,13 @@
     "contracts/messages/v1/generated/permissions/gateway.json": "06a065cc8b80607312bd125f6301ac6f1bbd0eace66109714886887c9ffabc36",
     "contracts/messages/v1/generated/permissions/installation_authority.json": "423707b619dd0d87cc498577814e6b2449c6ea3b0a8e62db138d24ac8851d835",
     "contracts/messages/v1/generated/permissions/joining_host.json": "d70d8df4224cd1959d043481c81d48480ea9d99f4681f3970601be6cf30ddf60",
-    "contracts/messages/v1/generated/permissions/lead_host.json": "61361c19cd9521439f78b47d8142156d3701b2d72f1a9df7df40f4f6712b2c4c",
+    "contracts/messages/v1/generated/permissions/lead_host.json": "0c139e59c2639c4abcd25288021d4a3c2f6bc7a7c2e392753c6d278b6da3901e",
     "contracts/messages/v1/generated/permissions/scheduler.json": "bf87921106fb95da0ffc2cc97b68655e306e063a5e29e818a8574a7f4e2adfd7",
     "contracts/messages/v1/generated/permissions/team_services.json": "527473d615c341ea2d7ed273126e29c7d37f4de69a26c71ec12cfeaf517c1a69",
-    "contracts/messages/v1/generated/permissions/worker_host.json": "06f765734637153f580cca7333c28bb48acd8c71643b78f7d7b372fb8425ac85",
+    "contracts/messages/v1/generated/permissions/worker_host.json": "8e28625d4b78d93df488a501df3840c83fd8226eae4c614f67fd6dfb782875bc",
     "contracts/messages/v1/generated/registry.json": "99239657d9f437417d9b48583a2955379b688df4b4676c2757c24679f60ab73e",
     "contracts/messages/v1/generated/team-topologies.json": "b729df141b189177c2b8962e73fd5e9cfda1ad9e3593d68e97b286908b86f44f",
-    "contracts/messages/v1/generated/transport.json": "819f86618e46d31b0ed1e59a44ebab1334a9c7aa0325deaf98963f2880487e2c",
+    "contracts/messages/v1/generated/transport.json": "418ba05824ef20000f62960ac9f72791c6f11101ef9acdcefb02edc393355660",
     "contracts/messages/v1/registry.yaml": "deb14cab5c2d45a98f867e890aa394303e1ca91bcb2116a72785f8612bc0c987",
     "contracts/messages/v1/schemas/bodies/access.decision.schema.json": "c9631ce9de70e068e9c8237599ddaee7f4884de28448b3ee9383b693f93e2db4",
     "contracts/messages/v1/schemas/bodies/access.request.schema.json": "e8cd058a553924d0602e6de35b742e5efbc537aced7f357f74a64e96151e5928",
@@ -1714,7 +1714,7 @@
     "contracts/messages/v1/signing-vectors/key-rotation.json": "fddf579da83ab830d87450bf5108a573c3d2debbe1d0f747775919758528939e",
     "contracts/messages/v1/signing-vectors/vectors.json": "5b79fb7a757d3ed8634ff3973001efa8e8628ccc8ad0df29ae10e9e753fe2826",
     "contracts/messages/v1/team-topologies.yaml": "18778a8aa1bdd30dafa8721cccaa099f92ab500a927f452e8be4944d6458056a",
-    "contracts/messages/v1/transport.yaml": "351d1bca908c6e9cdef9d57cc5b697168c3d8b7831d59ff08e0b52e27110179b",
+    "contracts/messages/v1/transport.yaml": "11569e2c383078aa158bf3f05e89fba66c684b391e0b04ad0755463b14b17505",
     "custom_messages/wire/kinds.py": "c1be754b6e3971ba0e16e9d5ca3de3b17238fa8a96edaaa7bd6869fc823b52c0",
     "custom_messages/wire/models.py": "8943de8119bca026b912c8c25659eaca537795d3bb40097e1eb9e9877991cb30"
   },

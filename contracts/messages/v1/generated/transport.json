@@ -194,9 +194,5 @@
       ]
     }
   },
-  "subject_prefix": "ua.v1.{team}.{sender}",
-  "team_grants": [
-    "agent",
-    "pool"
-  ]
+  "subject_prefix": "ua.v1.{team}.{sender}"
 }

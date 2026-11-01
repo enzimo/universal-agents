@@ -4,7 +4,7 @@
 # the sender slot is the issuer's runtime id, or x-<installation> for a frame from
 # another installation. Replies use the requester's _INBOX.<runtime>.<token(s)>
 # subject, signed in the reply frame. Pull and acknowledgement API permissions name
-# exact consumers, or every consumer of the team's agent work stream (team_grants).
+# exact consumers.
 # Edit by hand, then run scripts/export_message_contract.py.
 
 subject_prefix: ua.v1.{team}.{sender}
@@ -21,12 +21,10 @@ installation_scope: _install
 # wrong_sender). Every role that receives at an address receives every kind sent there,
 # so no role hears requests it does not answer.
 
-# Audience targets whose grants cover the whole team. A host may receive requests and
-# queued work for any agent or pool of the teams it serves, so placing or moving an agent
-# needs no new credential, and credentials stay the same size however many agents a
-# team has. The signed audience decides which agent a frame is for. Edges keep grants
-# for the ids each host serves.
-team_grants: [agent, pool]
+# Receivers' grants name exact ids: trusted membership code fills each {agent}, {pool} and
+# {edge} with the ids a host runs or serves, never with a wildcard. A host reads only the
+# queues and control requests of its own agents and pools, and gets a new credential when
+# it gains or loses one (README, "Grants for the agents a host runs").
 
 # Which host roles serve each audience target. A role receives a kind's address, and
 # gets its subscription or consumer grants, only when it is one of the kind's receivers
@@ -96,8 +94,8 @@ classes:
 # streams.
 streams:
   UA1_AGENT_WORK_{team}:
-    # Agent inboxes and worker pools only, so a grant on every consumer of this stream
-    # (team_grants) reaches no edge's or team services' work.
+    # One team's agent inboxes and worker pools; each host reads only its own agents' and
+    # pools' consumers here.
     subjects: ["ua.v1.{team}.*.work.agent.*", "ua.v1.{team}.*.work.pool.*"]
     retention: workqueue
     storage: file

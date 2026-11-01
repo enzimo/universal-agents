@@ -46,6 +46,9 @@ STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 HOSTS = {
     "lead": {"role": "lead_host", "runtime": "lead-host-1", "agents": ["lead"], "pools": [], "edges": []},
     "worker": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2"], "pools": ["researcher"], "edges": []},
+    # The same host after researcher-3 moved to it: a new credential naming both agents.
+    "worker_moved": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2", "researcher-3"],
+                     "pools": ["researcher"], "edges": []},
     "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": []},
     "services": {"role": "team_services", "runtime": "team-services-1", "agents": [], "pools": [], "edges": []},
     "scheduler": {"role": "scheduler", "runtime": "scheduler-1", "agents": [], "pools": [], "edges": []},
@@ -89,7 +92,7 @@ def consumer_stream(template: str, team: str = TEAM) -> str:
     return TRANSPORT["consumers"][template]["stream"].format(team=team)
 
 
-# The team's agent inboxes and worker pools (transport.yaml team_grants).
+# The team's agent inboxes and worker pools; each host reads only its own agents' and pools' consumers.
 AGENT_STREAM = consumer_stream("agent_inbox")
 
 
@@ -270,32 +273,42 @@ async def create_topology(admin: Client, agents: Iterable[str] = (), teams: Iter
 
 
 @pytest.mark.asyncio
-async def test_a_host_pulls_and_acknowledges_any_agent_of_its_team_and_no_other_consumer(isolated_broker) -> None:
-    """Whole-team grants (README, "Whole-team grants"): work queued for an agent follows it to any host of its team."""
+async def test_a_host_reads_only_the_queues_of_the_agents_it_runs(isolated_broker) -> None:
+    """README, "Grants for the agents a host runs": queued work waits for the host the agent moves to."""
 
     async with AsyncExitStack() as stack:
         admin = await connect(stack, isolated_broker, "admin")
         lead = await connect(stack, isolated_broker, "lead")
         worker = await connect(stack, isolated_broker, "worker")
-        await create_topology(admin, ["researcher-2", "researcher-3"], teams=(TEAM, "team_other"))
+        await create_topology(admin, ["lead", "researcher-2", "researcher-3"], teams=(TEAM, "team_other"))
         await admin.nc.jetstream().add_consumer("UA1_WORK", config=consumer_config("team_services"))
         worker_js = worker.nc.jetstream()
 
         frame = fixtures.example_frame("task.stop")
         await lead.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
-        # researcher-3 moved here after work was queued for it: the same credential reads it.
         moved = frame["subject"].replace("researcher-2", "researcher-3")
-        await lead.nc.jetstream().publish(moved, b"queued before the move")
+        await lead.nc.jetstream().publish(moved, b"queued before researcher-3 moved to the worker host")
+        own = consumer_name("agent_inbox", agent="researcher-2")
+        await worker_js.consumer_info(AGENT_STREAM, own)
+        subscription = await worker_js.pull_subscribe_bind(stream=AGENT_STREAM, consumer=own)
+        delivered, = await subscription.fetch(1, timeout=2)
+        checked = fixtures.verify(delivered.data, frame, arrived(frame, delivered))
+        assert checked.body.task_id == frame["body"]["task_id"]
+        await delivered.ack_sync(timeout=2)
+
+        # Another host's agent, and an agent not yet placed here, are out of reach.
+        for agent in ("lead", "researcher-3"):
+            await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.{AGENT_STREAM}.{consumer_name('agent_inbox', agent=agent)}")
+            await worker.publish_refused(f"$JS.API.CONSUMER.INFO.{AGENT_STREAM}.{consumer_name('agent_inbox', agent=agent)}")
+        # Once researcher-3 moved here, the host's new credential reads the work queued before the move.
+        after_move = await connect(stack, isolated_broker, "worker_moved")
+        name = consumer_name("agent_inbox", agent="researcher-3")
+        subscription = await after_move.nc.jetstream().pull_subscribe_bind(stream=AGENT_STREAM, consumer=name)
+        delivered, = await subscription.fetch(1, timeout=2)
+        assert delivered.data == b"queued before researcher-3 moved to the worker host"
+        await delivered.ack_sync(timeout=2)
         for agent in ("researcher-2", "researcher-3"):
-            name = consumer_name("agent_inbox", agent=agent)
-            await worker_js.consumer_info(AGENT_STREAM, name)
-            subscription = await worker_js.pull_subscribe_bind(stream=AGENT_STREAM, consumer=name)
-            delivered, = await subscription.fetch(1, timeout=2)
-            if agent == "researcher-2":
-                checked = fixtures.verify(delivered.data, frame, arrived(frame, delivered))
-                assert checked.body.task_id == frame["body"]["task_id"]
-            await delivered.ack_sync(timeout=2)
-            info = await admin.nc.jetstream().consumer_info(AGENT_STREAM, name)
+            info = await admin.nc.jetstream().consumer_info(AGENT_STREAM, consumer_name("agent_inbox", agent=agent))
             assert info.num_ack_pending == 0 and info.num_pending == 0
 
         other_team = consumer_stream("agent_inbox", "team_other")
@@ -308,7 +321,7 @@ async def test_a_host_pulls_and_acknowledges_any_agent_of_its_team_and_no_other_
         await worker.publish_refused(services_delivery.reply, b"+ACK")
         assert (await admin.nc.jetstream().consumer_info("UA1_WORK", services)).num_ack_pending == 1
         await services_delivery.ack_sync(timeout=2)
-        assert worker.errors.empty() and lead.errors.empty()
+        assert worker.errors.empty() and lead.errors.empty() and after_move.errors.empty()
 
 
 @pytest.mark.asyncio
@@ -335,6 +348,8 @@ async def test_workers_cannot_manage_streams_speak_for_others_or_read_others_tra
             "ua.v1.team_example.*.work.>",
             "ua.v1.team_example.*.svc.team",
             "ua.v1.team_other.*.ctl.agent.researcher-2",
+            "ua.v1.team_example.*.ctl.agent.lead",
+            "ua.v1.team_example.*.ctl.agent.*",
         ):
             await worker.subscribe_refused(subject)
         assert worker.errors.empty()
