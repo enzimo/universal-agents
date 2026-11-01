@@ -3964,7 +3964,10 @@ the desktop app never offers an older version.
   table's columns first (so later opens take no table lock), adds a missing one
   in a form processes starting together can both run (`ADD COLUMN IF NOT
   EXISTS` on PostgreSQL, a re-read after "duplicate column" on SQLite) and logs
-  `event=storage_column_added`. PostgreSQL finds the table through the search
+  `event=storage_column_added`. SQLite catches the connection's own
+  `OperationalError`, because the `pysqlite3` driver used by memory graphs on
+  macOS has a separate exception class from the standard-library driver.
+  PostgreSQL finds the table through the search
   path, as the store's own statements do, so an instance kept in its own schema
   works. The default keeps older rows correct, as the change ledger's `*` does
   (see "Upgrading in place from 0.9" above).

@@ -92,6 +92,8 @@ def test_schedule_repository_tolerates_concurrent_duplicate_column_migration() -
     class _RaceConn:
         """Another process adds ``claim_expires_at`` just before this one does."""
 
+        OperationalError = sqlite3.OperationalError
+
         def __init__(self) -> None:
             self.statements: list[str] = []
             self.columns = [

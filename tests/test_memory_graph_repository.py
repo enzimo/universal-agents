@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import logging
 import json
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -17,6 +20,43 @@ from storage.memory_graph_repository import (
 
 def _embedding(*values: float) -> str:
     return json.dumps(list(values))
+
+
+@pytest.mark.parametrize("driver", ["sqlite3", "pysqlite3"])
+def test_concurrent_older_memory_graph_opens_keep_existing_records(tmp_path, monkeypatch, caplog, driver):
+    sqlite_module = sqlite3 if driver == "sqlite3" else pytest.importorskip("pysqlite3")
+    monkeypatch.setattr(memory_graph_repository_module, "sqlite3", sqlite_module)
+    path = str(tmp_path / "older.db")
+    repo = SqliteMemoryGraphRepository(path, vector_enabled=False)
+    entity = repo.ensure_entity(subject_id="person", entity_type="concept", canonical_name="Saved memory")
+    with repo._connect() as conn:
+        conn.execute("ALTER TABLE memory_entities DROP COLUMN embedding_profile_id")
+        connection_type = type(conn)
+
+    # Both opens must see the missing column before either adds it. The losing
+    # writer raises its driver's own OperationalError, then re-reads the schema.
+    barrier = threading.Barrier(2, timeout=10)
+    execute = connection_type.execute
+
+    def competing_add(conn, statement, parameters=()):
+        if statement.startswith("ALTER TABLE memory_entities ADD COLUMN embedding_profile_id"):
+            barrier.wait()
+        return execute(conn, statement, parameters)
+
+    monkeypatch.setattr(connection_type, "execute", competing_add)
+    with caplog.at_level(logging.INFO, logger=memory_graph_repository_module.__name__):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            opens = [pool.submit(SqliteMemoryGraphRepository, path, vector_enabled=False) for _ in range(2)]
+            for opened in opens:
+                opened.result(timeout=15)
+
+    with repo._connect() as conn:
+        row = conn.execute(
+            "SELECT canonical_name, embedding_profile_id FROM memory_entities WHERE entity_id = ?",
+            (entity.entity_id,),
+        ).fetchone()
+    assert tuple(row) == ("Saved memory", None)
+    assert "SQLite column was added concurrently" in caplog.text
 
 
 def test_memory_graph_repository_persists_episodes_entities_claims_and_evidence(tmp_path):

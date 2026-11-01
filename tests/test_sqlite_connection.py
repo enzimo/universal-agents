@@ -75,6 +75,8 @@ def test_ensure_sqlite_column_reraises_duplicate_when_column_is_still_absent():
             return []
 
     class _Connection:
+        OperationalError = sqlite3.OperationalError
+
         def execute(self, statement: str):
             if statement.startswith("PRAGMA table_info"):
                 return _Cursor()
