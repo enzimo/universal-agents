@@ -1222,7 +1222,7 @@
             }
           ]
         },
-        "summary": "Tells a task's holder that the team services recorded its claim or a reassignment to it, with its custody token and the task's authority token when the work has one."
+        "summary": "Tells a task's holder that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list, and with the task's authority token when the work has one."
       },
       "custody_decide": {
         "name": "custody.decide",
@@ -1244,7 +1244,7 @@
             }
           ]
         },
-        "summary": "The lead reassigns a task or adopts late work."
+        "summary": "The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window."
       },
       "custody_decide_reply": {
         "name": "custody.decide.reply",
@@ -4625,7 +4625,7 @@
             }
           ]
         },
-        "summary": "A holder that lost its lease returns a task."
+        "summary": "A holder returns a task it will not finish, so the task can move before the holder's custody window ends."
       },
       "task_probe": {
         "name": "task.probe",

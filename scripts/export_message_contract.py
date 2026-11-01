@@ -136,7 +136,7 @@ HEADER_VALUES: dict[str, str | int] = {"Nats-Msg-Id": "idempotency_key", "UA-Kin
 # NATS's header block: a version line, one "Name: value" line per header, and an empty line.
 NATS_HEADER_VERSION, NATS_LINE_END = "NATS/1.0\r\n", "\r\n"
 STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "max_lifetime_seconds",
-                "write_rule"}
+                "fresh_seconds", "write_rule"}
 REQUIRED_STATE_FIELDS = {"description", "bucket", "key", "signer", "writers", "body", "write_rule"}
 SIGNERS = {"authority", "host"}
 
@@ -353,7 +353,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         check_entry_addresses(where, name, entry, transport)
         check_agent_addressed_edges(where, entry)
         check_idempotency(where, name, entry, schemas, registry["frame_schema"])
-        check_body_rules(where, entry, schemas)
+        check_body_rules(where, entry, schemas, registry["frame_schema"])
         check_wake_alternatives(where, entry, schemas)
         check_reply_errors(where, entry, schemas)
         check_covered_change(where, entry, registry, schemas)
@@ -772,16 +772,35 @@ def reply_alternatives(entry: dict[str, Any], schemas: dict[str, dict[str, Any]]
 
 
 class BodyFields:
-    """Looks up a kind's body fields by JSON pointer, for checking its body rules."""
+    """Looks up a kind's body fields by JSON pointer, for checking its body rules.
 
-    def __init__(self, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    ``frame_schema`` also lets a rule name a field of the frame around the body
+    (``/issued_at``), where a rule allows one.
+    """
+
+    def __init__(self, entry: dict[str, Any], schemas: dict[str, dict[str, Any]], frame_schema: str = "") -> None:
         self.resolver = ModelWriter(schemas)
         self.file, self.root = entry["body"], schemas[entry["body"]]
+        self.frame_file, self.frame_root = frame_schema, schemas.get(frame_schema, {})
 
     def leaves(self, pointer: Any) -> list[tuple[str, dict[str, Any]]]:
         if not isinstance(pointer, str) or not pointer.startswith("/body/"):
             return []
         return schema_leaves(self.resolver, self.file, self.root, pointer.split("/")[2:])
+
+    def frame_leaves(self, pointer: Any) -> list[tuple[str, dict[str, Any]]]:
+        """A field of the frame outside the body, such as ``/issued_at``."""
+
+        if not isinstance(pointer, str) or not re.fullmatch(r"(/[a-z_]+)+", pointer) or pointer.startswith("/body/"):
+            return []
+        return schema_leaves(self.resolver, self.frame_file, self.frame_root, pointer[1:].split("/"))
+
+    def timestamp(self, pointer: Any, in_frame: bool = False) -> bool:
+        """Whether every schema the pointer reaches is the shared timestamp definition."""
+
+        leaves = self.frame_leaves(pointer) if in_frame else self.leaves(pointer)
+        return bool(leaves) and all(node is self.resolver.node("common.schema.json", "/$defs/timestamp")
+                                    for _file, node in leaves)
 
     def defined(self, pointer: Any, kind: str | None = None) -> bool:
         leaves = self.leaves(pointer)
@@ -839,15 +858,24 @@ def any_of_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
     return set(rule) == {"any_of"} and len(rule["any_of"]) > 1 and all(fields.defined(p) for p in rule["any_of"])
 
 
-def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
-    """Each rule is one of the four README shapes and names fields its body defines, with values they can hold."""
+def ends_within_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    """``{ends_within, of, seconds}``: a body timestamp at most ``seconds`` after another body or frame timestamp."""
 
-    fields = BodyFields(entry, schemas)
+    seconds = rule.get("seconds")
+    return set(rule) == {"ends_within", "of", "seconds"} and type(seconds) is int and seconds > 0 \
+        and fields.timestamp(rule["ends_within"]) and rule["of"] != rule["ends_within"] \
+        and (fields.timestamp(rule["of"]) or fields.timestamp(rule["of"], in_frame=True))
+
+
+def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]], frame_schema: str) -> None:
+    """Each rule is one of the five README shapes and names fields its body defines, with values they can hold."""
+
+    fields = BodyFields(entry, schemas, frame_schema)
     for rule in entry.get("body_rules", []):
         if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)
-                or allowed_rule_valid(rule, fields)):
-            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, any_of or allowed rule over its "
-                                "body's fields")
+                or allowed_rule_valid(rule, fields) or ends_within_rule_valid(rule, fields)):
+            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, any_of, allowed or ends_within rule "
+                                "over its body's fields")
 
 
 def value_fits(resolver: "ModelWriter", file: str, node: dict[str, Any], value: Any) -> bool:
@@ -953,9 +981,20 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
         bucket_ttl = transport["key_value"][entry["bucket"]]["per_key_ttl_seconds"]
         if entry.get("ttl_seconds", 0) != bucket_ttl:
             raise ContractError(f"{where}: ttl_seconds is its bucket's per_key_ttl_seconds ({bucket_ttl}), and only then present")
-        lifetime = entry.get("max_lifetime_seconds", 1)
-        if type(lifetime) is not int or lifetime < 1 or ("max_lifetime_seconds" in entry and bucket_ttl):
-            raise ContractError(f"{where}: max_lifetime_seconds is a positive whole number, for records whose bucket keeps them")
+        check_record_ages(where, entry, bucket_ttl)
+
+
+def check_record_ages(where: str, entry: dict[str, Any], bucket_ttl: int) -> None:
+    """A longest lifetime only for records whose bucket keeps them, and a fresh age shorter than that lifetime."""
+
+    lifetime = entry.get("max_lifetime_seconds", 1)
+    if type(lifetime) is not int or lifetime < 1 or ("max_lifetime_seconds" in entry and bucket_ttl):
+        raise ContractError(f"{where}: max_lifetime_seconds is a positive whole number, for records whose bucket keeps them")
+    fresh = entry.get("fresh_seconds")
+    if fresh is not None and (type(fresh) is not int or fresh < 1 or "max_lifetime_seconds" not in entry
+                              or fresh >= entry["max_lifetime_seconds"]):
+        raise ContractError(f"{where}: fresh_seconds is a positive whole number, shorter than the record's "
+                            "max_lifetime_seconds")
 
 
 def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
@@ -1682,7 +1721,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
         f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
-        f"max_lifetime_seconds={entry.get('max_lifetime_seconds')!r}, "
+        f"max_lifetime_seconds={entry.get('max_lifetime_seconds')!r}, fresh_seconds={entry.get('fresh_seconds')!r}, "
         f"body_model=models.{class_name(name)}StateAdapter, "
         f"body_shape={shape(writer, entry['body'], schemas[entry['body']])!r}),"
         for name, entry, _body in states

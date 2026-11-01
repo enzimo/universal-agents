@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "custody.confirmed",
   "message_id": "01928f3a-7b2c-732c-8000-00000000032c",
-  "idempotency_key": "custody.confirmed:biz4iDO4wHWJ1YqLsre1IJ8iiZa_iEJ2N7MITmWU3QE",
+  "idempotency_key": "custody.confirmed:7s60rcLR-Y2mdFwQL6NBaSgKryYkslUhHJtdIQBg3ss",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -23,8 +23,14 @@
   "algorithm": "ed25519",
   "body": {
     "task_id": "task_sub_1",
-    "custody_token": 5
+    "custody_token": 5,
+    "sequence": 4,
+    "reason": "reassigned",
+    "custody_window": {
+      "renewed_by": "host_record",
+      "seconds": 300
+    }
   },
-  "body_digest": "dyNi3wdsT1PaJgepJEz_Bro8yxz96VVSfvzGlECqM-M",
-  "signature": "FgC4nPlvn_VcdAdl8aSgwr2QFD48R53R62WcrGc8CHzKoTpSKxOjUwuQD7xCPo7kFgVG35flOCiEFqhQhySbCg"
+  "body_digest": "c_HjfHKJji_78yRjF-zZwnk5ujJSG0dKRPlrIvpmX8Q",
+  "signature": "RLczwoatV8OEMmdWC2ejb9sEemY5FKc4CIDC1y0zUhjiFuFm3lR-Nserdhmkg3a8AiOy7Or3_zq_T_nMNMtxCA"
 }

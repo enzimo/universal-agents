@@ -67,6 +67,19 @@
               "is": "until"
             }
           ]
+        },
+        {
+          "ends_within": "/body/status/access_list/ends_at",
+          "of": "/body/status/access_list/issued_at",
+          "seconds": 604800
+        },
+        {
+          "by": "tool_id",
+          "unique": "/body/status/access_list/tools"
+        },
+        {
+          "by": "approval_id",
+          "unique": "/body/status/access_list/one_time"
         }
       ],
       "class": "durable",
@@ -559,12 +572,33 @@
         "type": "root_task"
       },
       "body": "bodies/custody.confirmed.schema.json",
+      "body_rules": [
+        {
+          "ends_within": "/body/custody_window/ends_at",
+          "of": "/issued_at",
+          "seconds": 604800
+        },
+        {
+          "ends_within": "/body/access_list/ends_at",
+          "of": "/body/access_list/issued_at",
+          "seconds": 604800
+        },
+        {
+          "by": "tool_id",
+          "unique": "/body/access_list/tools"
+        },
+        {
+          "by": "approval_id",
+          "unique": "/body/access_list/one_time"
+        }
+      ],
       "class": "durable",
-      "description": "Tells a task's holder that the team services recorded its claim or a reassignment to it, with its custody token and the task's authority token when the work has one.",
+      "description": "Tells a task's holder that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list, and with the task's authority token when the work has one.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/task_id",
-        "/body/custody_token"
+        "/body/custody_token",
+        "/body/sequence"
       ],
       "ledger": "custody_confirmed",
       "receivers": [
@@ -587,12 +621,24 @@
         "priority": "normal"
       },
       "authority": "required",
-      "authority_binding": {
-        "type": "root_task"
-      },
+      "authority_binding": [
+        {
+          "senders": [
+            "lead_host"
+          ],
+          "type": "root_task"
+        },
+        {
+          "at": "/body/request_id",
+          "senders": [
+            "gateway"
+          ],
+          "type": "command"
+        }
+      ],
       "body": "bodies/custody.decide.schema.json",
       "class": "request_reply",
-      "description": "The lead reassigns a task or adopts late work.",
+      "description": "The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window.",
       "expiry_seconds": 30,
       "idempotency": [
         "/body/request_id"
@@ -607,14 +653,17 @@
         "errors": [
           "not_found",
           "stale_custody",
+          "custody_window_open",
           "late_work_not_found",
           "request_closed",
-          "not_own_request"
+          "not_own_request",
+          "not_allowed"
         ]
       },
       "routing": "team",
       "senders": [
-        "lead_host"
+        "lead_host",
+        "gateway"
       ],
       "topology_edge": "none",
       "wakes_model": "never"
@@ -1090,6 +1139,11 @@
       },
       "authority": "none",
       "body": "bodies/host.join.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/tools"
+        }
+      ],
       "class": "request_reply",
       "description": "A new host asks to join the installation; the frame is signed with the key it presents.",
       "expiry_seconds": 30,
@@ -4673,7 +4727,7 @@
       "copy_to": [
         "work.team"
       ],
-      "description": "A holder that lost its lease returns a task.",
+      "description": "A holder returns a task it will not finish, so the task can move before the holder's custody window ends.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/handback_id"
@@ -5707,6 +5761,22 @@
       "write_rule": "rewritten with a higher sequence to change, renew or end it; only the receiver's own authority signs it; deleted once receivers forget it (README, \"Trust over time\")",
       "writers": [
         "installation_authority"
+      ]
+    },
+    "block_list": {
+      "body": "state/block_list.schema.json",
+      "bucket": "UA1_BLOCK_LIST",
+      "description": "A team's blocks on tools and its people's standing, read by the team's hosts that decide tool calls from signed lists.",
+      "fresh_seconds": 900,
+      "key": "<team>",
+      "max_lifetime_seconds": 604800,
+      "signer": "host",
+      "signer_roles": [
+        "team_services"
+      ],
+      "write_rule": "signed again with the next sequence at least every fresh_seconds, even when nothing changed, and at once on each change; states its expiry, at most max_lifetime_seconds after it is written; a newer list may hold fewer entries; every host of the team reads it, and keeps the highest sequence it has seen, also across restarts",
+      "writers": [
+        "team_services"
       ]
     },
     "certificate": {

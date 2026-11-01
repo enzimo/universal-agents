@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "custody.decide.reply",
+  "message_id": "01928f3a-7b2c-7d58-8000-000000000d58",
+  "idempotency_key": "custody.decide.reply:51ZzT-AE2UgXGkbmp42wErOcgOJNXHWJb0YG4CavQZU",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7d55-8000-000000000d55",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_allowed",
+    "message": "Only the person this request works for or an administrator can move it early."
+  },
+  "causation_id": "01928f3a-7b2c-7d55-8000-000000000d55",
+  "body_digest": "MGdngnChbsjE7ti4XYiavCl8oRxUsbfEblmlEcfcUZs",
+  "signature": "6VOMJ78h59ZeqEoMlIYw7AjyLS8RVNS_cb4M-pjUM_YogOZ3F8ijCEh1YneUR--EZcQKZHNlclzZkwn49ktvCw"
+}

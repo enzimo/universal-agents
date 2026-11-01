@@ -460,6 +460,19 @@
       "type": "string",
       "pattern": "^(fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}$"
     },
+    "tool_list": {
+      "description": "The catalog tools a host can run: what an administrator approved with its join (README, \"Access on remote hosts\"). Readers refuse a list that names a tool twice.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tool_id"
+      },
+      "maxItems": 1024
+    },
+    "action_digest": {
+      "description": "The digest of one exact action, which a one-time approval is bound to.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
     "credential_key": {
       "type": "string",
       "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$"
@@ -481,6 +494,168 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991
+    },
+    "connection_class": {
+      "description": "How a host is connected, approved with its join and named in its certificate: connected hosts (the main machine, servers) are expected to stay connected; intermittent hosts (edge devices, laptops) are expected to be cut off for long stretches. It decides the kind of custody window its holders get (README, \"Custody windows\").",
+      "type": "string",
+      "enum": [
+        "connected",
+        "intermittent"
+      ]
+    },
+    "custody_window": {
+      "description": "How long a holder's custody lasts without a new confirmation (README, \"Custody windows\"). Its kind matches the holder's host certificate: host_record for a connected host, reconnection for an intermittent one.",
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "A connected host's window: it lasts this many seconds after the holder's last host record write that the store acknowledged, so every host record write renews it. Standard: 300.",
+          "properties": {
+            "renewed_by": {
+              "const": "host_record"
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 3600
+            }
+          },
+          "required": [
+            "renewed_by",
+            "seconds"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "An intermittent host's window: it ends at a fixed time, standard 5 days after the confirmation and never more than 7 days after the frame that carries it was issued. Only a new custody.confirmed renews it, which the team services send when the host reconnects.",
+          "properties": {
+            "renewed_by": {
+              "const": "reconnection"
+            },
+            "ends_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "renewed_by",
+            "ends_at"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "task_access_list": {
+      "type": "object",
+      "description": "What one task may use on a host whose certificate names its tools, worked out by the team services with the same access decision as on the main machine and carried in their signed frame (README, \"Access on remote hosts\"). The holder keeps the list with the highest sequence for its task.",
+      "properties": {
+        "sequence": {
+          "description": "Rises with each new list for the task.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "holder": {
+          "$ref": "#/$defs/agent_id"
+        },
+        "task_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "root_task_id": {
+          "description": "The person's request the task belongs to: the root task its authority token is bound to.",
+          "$ref": "#/$defs/record_id"
+        },
+        "person": {
+          "description": "The person the work is for. Absent only in system work, whose token names a schedule and no person.",
+          "$ref": "#/$defs/person_ref"
+        },
+        "runtime": {
+          "description": "The holder's host.",
+          "$ref": "#/$defs/runtime_id"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "ends_at": {
+          "description": "When the list stops counting: the task's end, at most 7 days after issued_at.",
+          "$ref": "#/$defs/timestamp"
+        },
+        "tools": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "properties": {
+              "tool_id": {
+                "$ref": "#/$defs/tool_id"
+              },
+              "level": {
+                "type": "string",
+                "enum": [
+                  "read",
+                  "write",
+                  "full"
+                ]
+              },
+              "fresh_check": {
+                "description": "The tool runs only with a block list at most 15 minutes old (block_list fresh_seconds); by default tools that spend money or publish as the person.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "tool_id",
+              "level",
+              "fresh_check"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "one_time": {
+          "description": "Approvals for one exact action each. The host uses each once and records the use durably before the action.",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "properties": {
+              "approval_id": {
+                "$ref": "#/$defs/record_id"
+              },
+              "tool_id": {
+                "$ref": "#/$defs/tool_id"
+              },
+              "level": {
+                "type": "string",
+                "enum": [
+                  "read",
+                  "write",
+                  "full"
+                ]
+              },
+              "action_digest": {
+                "$ref": "#/$defs/action_digest"
+              }
+            },
+            "required": [
+              "approval_id",
+              "tool_id",
+              "level",
+              "action_digest"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "sequence",
+        "holder",
+        "task_id",
+        "root_task_id",
+        "runtime",
+        "issued_at",
+        "ends_at",
+        "tools",
+        "one_time"
+      ],
+      "additionalProperties": false
     },
     "attachment": {
       "type": "object",
@@ -964,8 +1139,7 @@
               "type": "boolean"
             },
             "action_digest": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+              "$ref": "#/$defs/action_digest"
             }
           },
           "required": [

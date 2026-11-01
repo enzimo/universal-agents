@@ -17,7 +17,7 @@
     "certificate": {
       "certificate_id": "cert_lead_host_1",
       "membership_epoch": 3,
-      "sha256": "2JcwUjk0A9PYV14eUAqSBmci9q5QHX0m-MDgPbnTTCk"
+      "sha256": "MrdPRnyTWh7VScz2dP7EwA1PiLxoLlahrMd9xFj01z8"
     },
     "session_limit": 4,
     "sessions_active": 1,
@@ -48,6 +48,6 @@
     }
   },
   "algorithm": "ed25519",
-  "body_digest": "E_QuRH_XiOFTpGhV235tmkVgcbE1QVrr3QakvqGoUyI",
-  "signature": "075ct_oD_o6Li_Zm4apZ9EBQpNrDchlF8Nkspq8-ybUOjvlf3fZ4wZgHLNWNmL8bHTlNn0AgjmSgWW-RMgDuDQ"
+  "body_digest": "lVY0NQ_FdFUf0NBjCFAw7_lvunVQ6KFcLORLBXCBbrQ",
+  "signature": "qW92fkXJ8Umihv6m7S60bcUcMPwRVdCAlgDjtgqvXPm5_EL9SkKAfmdGTa8pCZczE7mseubY-ubI906calHUBA"
 }

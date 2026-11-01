@@ -211,6 +211,12 @@ TimeZone = Annotated[str, StringConstraints(pattern='^[A-Za-z][A-Za-z0-9_+-]{0,3
 ToolId = Annotated[str, StringConstraints(pattern='^(fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}$')]
 
 
+ToolList = Annotated[list[ToolId], Field(max_length=1024)]
+
+
+ActionDigest = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]
+
+
 CredentialKey = Annotated[str, StringConstraints(pattern='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$')]
 
 
@@ -218,6 +224,54 @@ ChangeRecordKind = Literal['memory_fact', 'knowledge_page', 'schedule', 'objecti
 
 
 CustodyToken = Annotated[int, Field(ge=1, le=9007199254740991)]
+
+
+ConnectionClass = Literal['connected', 'intermittent']
+
+
+class CustodyWindowHostRecord(WireModel):
+    "A connected host's window: it lasts this many seconds after the holder's last host record write that the store acknowledged, so every host record write renews it. Standard: 300."
+
+    renewed_by: Literal['host_record']
+    seconds: Annotated[int, Field(ge=60, le=3600)]
+
+
+class CustodyWindowReconnection(WireModel):
+    "An intermittent host's window: it ends at a fixed time, standard 5 days after the confirmation and never more than 7 days after the frame that carries it was issued. Only a new custody.confirmed renews it, which the team services send when the host reconnects."
+
+    renewed_by: Literal['reconnection']
+    ends_at: Timestamp
+
+
+CustodyWindow = Annotated[Union[CustodyWindowHostRecord, CustodyWindowReconnection], Field(discriminator='renewed_by')]
+
+
+class TaskAccessListToolsItem(WireModel):
+    tool_id: ToolId
+    level: Literal['read', 'write', 'full']
+    fresh_check: bool
+
+
+class TaskAccessListOneTimeItem(WireModel):
+    approval_id: RecordId
+    tool_id: ToolId
+    level: Literal['read', 'write', 'full']
+    action_digest: ActionDigest
+
+
+class TaskAccessList(WireModel):
+    "What one task may use on a host whose certificate names its tools, worked out by the team services with the same access decision as on the main machine and carried in their signed frame (README, \"Access on remote hosts\"). The holder keeps the list with the highest sequence for its task."
+
+    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    holder: AgentId
+    task_id: RecordId
+    root_task_id: RecordId
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
+    runtime: RuntimeId
+    issued_at: Timestamp
+    ends_at: Timestamp
+    tools: Annotated[list[TaskAccessListToolsItem], Field(max_length=1024)]
+    one_time: Annotated[list[TaskAccessListOneTimeItem], Field(max_length=64)]
 
 
 class Attachment(WireModel):
@@ -358,7 +412,7 @@ class AccessAskAccess(WireModel):
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
     hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
     hand_on: bool
-    action_digest: Union[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')], MISSING] = Field(default=MISSING)
+    action_digest: Union[ActionDigest, MISSING] = Field(default=MISSING)
 
 
 class AccessAskChange(WireModel):
@@ -557,7 +611,7 @@ class Frame(WireModel):
 class State(WireModel):
     "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
 
-    record: Literal['agent', 'agent_session', 'agreement', 'certificate', 'host', 'placement', 'revocations', 'team_view']
+    record: Literal['agent', 'agent_session', 'agreement', 'block_list', 'certificate', 'host', 'placement', 'revocations', 'team_view']
     protocol: ProtocolLabel
     key: StateKey
     writer: StateWriter
@@ -610,8 +664,60 @@ class AgreementState(WireModel):
     expires_at: Timestamp
 
 
+class BlockListStateBlocksItemSubjectTeam(WireModel):
+    kind: Literal['team']
+
+
+class BlockListStateBlocksItemSubjectAgentType(WireModel):
+    kind: Literal['agent_type']
+    agent_type: AgentType
+
+
+class BlockListStateBlocksItemSubjectAgent(WireModel):
+    kind: Literal['agent']
+    agent: AgentId
+
+
+class BlockListStateBlocksItemSubjectPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class BlockListStateBlocksItemSubjectSchedule(WireModel):
+    kind: Literal['schedule']
+    schedule_id: RecordId
+
+
+class BlockListStateBlocksItemRequest(WireModel):
+    "Present on an agent's block, which stays inside the request and person it was made for; absent on people's and administrators' blocks, which are team-wide."
+
+    root_task_id: RecordId
+    person: PersonRef
+
+
+class BlockListStateBlocksItem(WireModel):
+    block_id: RecordId
+    subject: Annotated[Union[BlockListStateBlocksItemSubjectTeam, BlockListStateBlocksItemSubjectAgentType, BlockListStateBlocksItemSubjectAgent, BlockListStateBlocksItemSubjectPerson, BlockListStateBlocksItemSubjectSchedule], Field(discriminator='kind')]
+    tool_id: ToolId
+    operation: Union[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$')], MISSING] = Field(default=MISSING)
+    request: Union[BlockListStateBlocksItemRequest, MISSING] = Field(default=MISSING)
+
+
+class BlockListStatePeopleItem(WireModel):
+    person: PersonRef
+    standing: Literal['disabled', 'removed']
+
+
+class BlockListState(WireModel):
+    "A team's blocks on tools and its people's standing, for hosts that decide tool calls from signed lists (README, \"Access on remote hosts\"). Only the team services write it, one per team; they sign it again at least every 15 minutes (registry fresh_seconds) even when nothing changed, and a newer list may hold fewer entries. A host uses the newest list it holds, for at most the record's lifetime."
+
+    team: TeamId
+    blocks: Annotated[list[BlockListStateBlocksItem], Field(max_length=1000)]
+    people: Annotated[list[BlockListStatePeopleItem], Field(max_length=1000)]
+
+
 class CertificateState(WireModel):
-    "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it."
+    "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, how it is connected, which tools it may run, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it."
 
     certificate_id: RecordId
     installation: InstallationId
@@ -624,6 +730,8 @@ class CertificateState(WireModel):
     nats_public_key: NatsUserKey
     agent_types: Annotated[list[AgentType], Field(max_length=256)]
     session_limit: Annotated[int, Field(ge=0, le=100000)]
+    connection_class: ConnectionClass
+    tools: Union[ToolList, MISSING] = Field(default=MISSING)
     protocol: ProtocolLabel
     deployment: Literal['local', 'operator_managed', 'third_party']
     profile_sha256: Sha256Digest
@@ -710,6 +818,7 @@ class TeamViewStateTask(WireModel):
     requester: AgentId
     state: ProgressState
     custody_token: Union[CustodyToken, MISSING] = Field(default=MISSING)
+    custody_window: Union[CustodyWindow, MISSING] = Field(default=MISSING)
     since: Timestamp
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
@@ -744,6 +853,7 @@ class AccessDecisionBodyStatusHandedDown(WireModel):
     state: Literal['handed_down']
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
+    access_list: Union[TaskAccessList, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusWaiting(WireModel):
@@ -756,6 +866,7 @@ class AccessDecisionBodyStatusGranted(WireModel):
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
     expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    access_list: Union[TaskAccessList, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusDenied(WireModel):
@@ -1184,10 +1295,14 @@ class CredentialFormResultBody(WireModel):
 
 
 class CustodyConfirmedBody(WireModel):
-    "Tells a task's holder that the team services recorded its claim, or a reassignment to it, and its custody token. The frame carries the task's authority token when the work has one: the only way the holder of pool work receives it (README, \"On behalf of a person\")."
+    "Tells a task's holder that the team services recorded its custody, with its custody token and custody window, and, on a host whose certificate names its tools, the task's access list. The team services send it again with the same custody token to renew a window or to replace the access list. The frame carries the task's authority token when the work has one: the only way the holder of pool work receives it (README, \"On behalf of a person\", \"Custody windows\")."
 
     task_id: RecordId
     custody_token: CustodyToken
+    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    reason: Literal['claimed', 'reassigned', 'renewed', 'access_changed']
+    custody_window: CustodyWindow
+    access_list: Union[TaskAccessList, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideBodyDecisionReassignToAgent(WireModel):
@@ -1212,13 +1327,20 @@ class CustodyDecideBodyDecisionAdoptLateWork(WireModel):
     stop_current: bool
 
 
+class CustodyDecideBodyOverride(WireModel):
+    "A person moves the task before the holder's custody window ends, without a handback or a retired host. Only the gateway sends it, with the person's command token; the person is the one the request works for or an administrator, and the gateway showed them that both holders may then act (README, \"Custody windows\")."
+
+    warning_shown: Literal['both_holders_may_act']
+
+
 class CustodyDecideBody(WireModel):
-    "The lead reassigns a task or adopts late work."
+    "The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window."
 
     request_id: RecordId
     task_id: RecordId
     seen_custody_token: CustodyToken
     decision: Annotated[Union[CustodyDecideBodyDecisionReassign, CustodyDecideBodyDecisionAdoptLateWork], Field(discriminator='type')]
+    override: Union[CustodyDecideBodyOverride, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideReplyOk(WireModel):
@@ -1238,6 +1360,14 @@ class CustodyDecideReplyStaleCustody(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class CustodyDecideReplyCustodyWindowOpen(WireModel):
+    "The holder's custody window is still open, and the task was not handed back, its host was not retired, and the move is not a person's override."
+
+    outcome: Literal['custody_window_open']
+    window_ends_at: Timestamp
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class CustodyDecideReplyLateWorkNotFound(WireModel):
     outcome: Literal['late_work_not_found']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
@@ -1250,6 +1380,13 @@ class CustodyDecideReplyRequestClosed(WireModel):
 
 class CustodyDecideReplyNotOwnRequest(WireModel):
     outcome: Literal['not_own_request']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class CustodyDecideReplyNotAllowed(WireModel):
+    "An override that did not come with a gateway's command token, or from a person who is neither the one the request works for nor an administrator."
+
+    outcome: Literal['not_allowed']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1720,6 +1857,8 @@ class HostJoinBody(WireModel):
     nats_public_key: NatsUserKey
     agent_types: Annotated[list[AgentType], Field(max_length=256)]
     session_limit: Annotated[int, Field(ge=0, le=100000)]
+    connection_class: ConnectionClass
+    tools: Union[ToolList, MISSING] = Field(default=MISSING)
     protocol: ProtocolLabel
     deployment: Literal['local', 'operator_managed', 'third_party']
     profile_sha256: Sha256Digest
@@ -3109,6 +3248,7 @@ class LedgerFactBodyFactCustodyConfirmed(WireModel):
     type: Literal['custody_confirmed']
     holder: AgentId
     custody_token: CustodyToken
+    custody_window: CustodyWindow
 
 
 class LedgerFactBodyFactAccessRequested(WireModel):
@@ -7245,7 +7385,7 @@ class TaskClaimedBody(WireModel):
 
 
 class TaskHandbackBody(WireModel):
-    "A holder that lost its lease returns a task."
+    "A holder returns a task it will not finish, so the task can move before the holder's custody window ends."
 
     handback_id: RecordId
     task_id: RecordId
@@ -8059,7 +8199,7 @@ CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
 CredentialFormResultBodyAdapter = TypeAdapter(CredentialFormResultBody)
 CustodyConfirmedBodyAdapter = TypeAdapter(CustodyConfirmedBody)
 CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)
-CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest], Field(discriminator='outcome')])
+CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyCustodyWindowOpen, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest, CustodyDecideReplyNotAllowed], Field(discriminator='outcome')])
 CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)
 DebugDumpBodyAdapter = TypeAdapter(DebugDumpBody)
 DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed], Field(discriminator='outcome')])
@@ -8254,6 +8394,7 @@ TopicsTagThreadReplyAdapter = TypeAdapter(Annotated[Union[TopicsTagThreadReplyOk
 AgentStateAdapter = TypeAdapter(AgentState)
 AgentSessionStateAdapter = TypeAdapter(AgentSessionState)
 AgreementStateAdapter = TypeAdapter(AgreementState)
+BlockListStateAdapter = TypeAdapter(BlockListState)
 CertificateStateAdapter = TypeAdapter(CertificateState)
 HostStateAdapter = TypeAdapter(HostState)
 PlacementStateAdapter = TypeAdapter(PlacementState)

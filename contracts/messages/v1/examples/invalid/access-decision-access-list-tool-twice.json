@@ -1,0 +1,18 @@
+{
+  "description": "The new access list in a grant names each tool once.",
+  "refusal": "invalid_body",
+  "at": "/body/status/access_list/tools",
+  "base": "access.decision/granted-with-access-list.json",
+  "changes": [
+    {
+      "set": "/body/status/access_list/tools/2",
+      "to": {
+        "tool_id": "fn:files",
+        "level": "read",
+        "fresh_check": false
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"access.decision\", \"message_id\": \"01928f3a-7b2c-7d54-8000-000000000d54\", \"idempotency_key\": \"access.decision:Ek4HaekZH4V9lmGgFEgj4L1dNXphKh7fpOBgPWITMpE\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"surveyor-1\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.agent.surveyor-1\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"access_req_field_1\", \"task_id\": \"task_field_1\", \"status\": {\"state\": \"granted\", \"level\": \"write\", \"lifetime\": \"task\", \"access_list\": {\"sequence\": 5, \"holder\": \"surveyor-1\", \"task_id\": \"task_field_1\", \"root_task_id\": \"task_root_7f\", \"person\": \"person_7c1\", \"runtime\": \"remote-host-1\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"ends_at\": \"2026-10-29T04:00:00.000Z\", \"tools\": [{\"tool_id\": \"fn:files\", \"level\": \"write\", \"fresh_check\": false}, {\"tool_id\": \"fn:web_research\", \"level\": \"write\", \"fresh_check\": true}, {\"tool_id\": \"fn:files\", \"level\": \"read\", \"fresh_check\": false}], \"one_time\": []}}}, \"body_digest\": \"NfwtTIQwQbnEktYlC0zrnGUQeH1YSoxPQ88rCWR_eYg\", \"signature\": \"CEdNRR11_6Qg4HK4_z23c0wB47AA0p63fT9iPqkNHQRXHpyEviXBZvWVTj8hq41741o5AYLz94CtNkQIOxtFDA\"}"
+}

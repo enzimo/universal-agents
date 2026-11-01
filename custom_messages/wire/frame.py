@@ -826,19 +826,40 @@ def _holds_other(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
     return any(item not in rule["values"] for item in (value if isinstance(value, list) else [value]))
 
 
+def _ends_late(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    """Whether the time at ``ends_within`` is more than ``seconds`` after the time at ``of``; an absent time passes.
+
+    Both are timestamps the schema and the frame's own form already checked.
+    """
+
+    end, start = _pointed(raw, rule["ends_within"]), _pointed(raw, rule["of"])
+    if end is None or start is None:
+        return False
+    return parse_timestamp(end) - parse_timestamp(start) > timedelta(seconds=rule["seconds"])
+
+
+# Each body rule form (README, "What bodies carry"): the key that names it, the check that
+# finds a defect, the refusal's detail, and the place the refusal names.
+_BodyRuleForm = tuple[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool],
+                      Callable[[Mapping[str, Any]], str], Callable[[Mapping[str, Any]], str]]
+_BODY_RULE_FORMS: tuple[_BodyRuleForm, ...] = (
+    ("unique", _repeats, lambda rule: "a list holds the same value twice", lambda rule: rule["unique"]),
+    ("requires", _lacks_required, lambda rule: "a field its other fields need is missing", lambda rule: rule["requires"]),
+    ("any_of", _says_nothing, lambda rule: "the body needs one of " + ", ".join(rule["any_of"]),
+     lambda rule: rule["any_of"][0].rsplit("/", 1)[0]),
+    ("allowed", _holds_other, lambda rule: "a value its other fields do not allow here", lambda rule: rule["allowed"]),
+    ("ends_within", _ends_late, lambda rule: f"ends more than {rule['seconds']} seconds after {rule['of']}",
+     lambda rule: rule["ends_within"]),
+)
+
+
 def _check_body_rules(raw: Mapping[str, Any], spec: KindSpec) -> None:
     """What the schema cannot say (registry body_rules; README, "What bodies carry")."""
 
     for rule in spec.body_rules:
-        if "unique" in rule and _repeats(raw, rule):
-            raise FrameRefused("invalid_body", "a list holds the same value twice", at=rule["unique"])
-        if "requires" in rule and _lacks_required(raw, rule):
-            raise FrameRefused("invalid_body", "a field its other fields need is missing", at=rule["requires"])
-        if "any_of" in rule and _says_nothing(raw, rule):
-            raise FrameRefused("invalid_body", "the body needs one of " + ", ".join(rule["any_of"]),
-                               at=rule["any_of"][0].rsplit("/", 1)[0])
-        if "allowed" in rule and _holds_other(raw, rule):
-            raise FrameRefused("invalid_body", "a value its other fields do not allow here", at=rule["allowed"])
+        for key, defective, detail, place in _BODY_RULE_FORMS:
+            if key in rule and defective(raw, rule):
+                raise FrameRefused("invalid_body", detail(rule), at=place(rule))
 
 
 def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: TrustStore) -> None:
@@ -846,8 +867,9 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
 
     It verifies against this installation's authority keys and certifies the host that
     asked: its runtime, and the key and NATS key it presented or kept. A join's
-    certificate grants at most the teams, roles, agent types and sessions it asked
-    for. A renewal's has a higher membership epoch than the certificate it replaces.
+    certificate grants at most the teams, roles, agent types, sessions and tools it asked
+    for, with the connection class it asked for. A renewal's has a higher membership
+    epoch than the certificate it replaces and keeps its connection class and tools.
     """
 
     document = _pointed(raw, ISSUED_CERTIFICATE_AT)
@@ -869,7 +891,14 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
         raise refuse("runtime", "the certificate is for another host than the one that asked")
     if answering.kind == _HOST_RENEW:
         _verify_renewed_certificate(issued, answering, asked, trust, refuse)
-        return
+    else:
+        _verify_joined_certificate(issued, asked, refuse)
+
+
+def _verify_joined_certificate(issued: HostCertificate, asked: Mapping[str, Any],
+                               refuse: Callable[[str, str], FrameRefused]) -> None:
+    """A join's certificate names the keys and connection class it presented, and grants at most what it asked for."""
+
     key = asked.get("application_key") or {}
     if (issued.key_id, b64url(issued.public_key.public_bytes_raw())) != (key.get("key_id"), key.get("public_key")):
         raise refuse("application_key", "the certificate names another key than the join presented")
@@ -878,8 +907,12 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
     for field_name in ("teams", "roles", "agent_types"):
         if not getattr(issued, field_name) <= set(asked.get(field_name) or ()):
             raise refuse(field_name, f"the certificate grants {field_name} the join did not ask for")
-    if document["body"]["session_limit"] > asked.get("session_limit", 0):
+    if issued.session_limit > asked.get("session_limit", 0):
         raise refuse("session_limit", "the certificate allows more sessions than the join asked for")
+    if issued.connection_class != asked.get("connection_class"):
+        raise refuse("connection_class", "the certificate names another connection class than the join asked for")
+    if issued.tools is not None and not issued.tools <= set(asked.get("tools") or ()):
+        raise refuse("tools", "the certificate names tools the join did not ask for")
 
 
 def _verify_renewed_certificate(issued: HostCertificate, answering: Frame, asked: Mapping[str, Any], trust: TrustStore,
@@ -901,6 +934,11 @@ def _verify_renewed_certificate(issued: HostCertificate, answering: Frame, asked
         raise refuse("application_key", "the certificate names another key than the renewal kept or rotated to")
     if issued.nats_public_key != asked.get("new_nats_public_key", current.nats_public_key):
         raise refuse("nats_public_key", "the certificate names another NATS key than the renewal kept or asked for")
+    # A renewal carries neither: changing what the host is approved for needs a new join.
+    if issued.connection_class != current.connection_class:
+        raise refuse("connection_class", "a renewed certificate keeps the connection class of the one it replaces")
+    if issued.tools != current.tools:
+        raise refuse("tools", "a renewed certificate keeps the tools of the one it replaces")
 
 
 def verify_frame(

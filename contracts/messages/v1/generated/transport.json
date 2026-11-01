@@ -124,6 +124,10 @@
       "description": "one record per agent (availability, busy, idle, paused, exiting), written only on change",
       "per_key_ttl_seconds": 0
     },
+    "UA1_BLOCK_LIST": {
+      "description": "one block list per team, written by the team services and read by every host of the team; each record states its own expiry",
+      "per_key_ttl_seconds": 0
+    },
     "UA1_CERTS": {
       "description": "host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket",
       "per_key_ttl_seconds": 0

@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/state/block_list.schema.json",
+  "title": "Team block list",
+  "description": "A team's blocks on tools and its people's standing, for hosts that decide tool calls from signed lists (README, \"Access on remote hosts\"). Only the team services write it, one per team; they sign it again at least every 15 minutes (registry fresh_seconds) even when nothing changed, and a newer list may hold fewer entries. A host uses the newest list it holds, for at most the record's lifetime.",
+  "type": "object",
+  "properties": {
+    "team": {
+      "$ref": "../common.schema.json#/$defs/team_id"
+    },
+    "blocks": {
+      "description": "Every block in force when the list was signed: people's and administrators' team-wide blocks, and agents' blocks bound to one request and its person. A block on a tool set or a role is written as one entry per tool, agent type or person it covers.",
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "block_id": {
+            "$ref": "../common.schema.json#/$defs/record_id"
+          },
+          "subject": {
+            "description": "Whom the block stops: everyone in the team, an agent type, one agent, a person (and so every agent working for them), or the runs of one schedule.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "team"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "agent_type"
+                  },
+                  "agent_type": {
+                    "$ref": "../common.schema.json#/$defs/agent_type"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "agent_type"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "agent"
+                  },
+                  "agent": {
+                    "$ref": "../common.schema.json#/$defs/agent_id"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "agent"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "person"
+                  },
+                  "person": {
+                    "$ref": "../common.schema.json#/$defs/person_ref"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "person"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "schedule"
+                  },
+                  "schedule_id": {
+                    "$ref": "../common.schema.json#/$defs/record_id"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule_id"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "tool_id": {
+            "$ref": "../common.schema.json#/$defs/tool_id"
+          },
+          "operation": {
+            "description": "One operation of the tool; without it the block stops the whole tool. A block naming an operation the host's tool no longer has stops the whole tool.",
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$"
+          },
+          "request": {
+            "description": "Present on an agent's block, which stays inside the request and person it was made for; absent on people's and administrators' blocks, which are team-wide.",
+            "type": "object",
+            "properties": {
+              "root_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "person": {
+                "$ref": "../common.schema.json#/$defs/person_ref"
+              }
+            },
+            "required": [
+              "root_task_id",
+              "person"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "block_id",
+          "subject",
+          "tool_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "people": {
+      "description": "People who may no longer have work done for them. Their tasks stop on a host as soon as it learns.",
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "person": {
+            "$ref": "../common.schema.json#/$defs/person_ref"
+          },
+          "standing": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "removed"
+            ]
+          }
+        },
+        "required": [
+          "person",
+          "standing"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "team",
+    "blocks",
+    "people"
+  ],
+  "additionalProperties": false
+}

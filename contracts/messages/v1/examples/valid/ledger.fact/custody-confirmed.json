@@ -27,9 +27,13 @@
     "fact": {
       "type": "custody_confirmed",
       "holder": "researcher-2",
-      "custody_token": 3
+      "custody_token": 3,
+      "custody_window": {
+        "renewed_by": "host_record",
+        "seconds": 300
+      }
     }
   },
-  "body_digest": "AqYfdya-BC6D6U6JLOCB_y70jQv5yPxH5uOTR9KzWWw",
-  "signature": "7FxfXFlBI0o1pP1XDqlnLx3wQiTYdA05Gk4X_C8gpgIjT9Q0Wt2adcQC9pg37VhBE4apMR9BpPZ_28IhmXFKAQ"
+  "body_digest": "zsI08pXWqzku3ewG0de99N8UhG7FjGGwh0arg-8vLcw",
+  "signature": "a3yRk6QwExJbM2gr9LANXl6rFrCrQ-nrfQh5HuyWVDNh_tUd1jsF_JyvBzJGE8LSpSWdGzJ1Ln5IrPfUgkLQAg"
 }

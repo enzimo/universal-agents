@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/task.handback.schema.json",
   "title": "task.handback body",
-  "description": "A holder that lost its lease returns a task.",
+  "description": "A holder returns a task it will not finish, so the task can move before the holder's custody window ends.",
   "type": "object",
   "properties": {
     "handback_id": {

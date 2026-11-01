@@ -57,6 +57,7 @@
           "team_lead"
         ],
         "session_limit": 4,
+        "connection_class": "connected",
         "protocol": "1.0-pre",
         "deployment": "local",
         "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
@@ -69,8 +70,8 @@
         "replaces": "cert_lead_host_1"
       },
       "algorithm": "ed25519",
-      "body_digest": "SQuMxr498InsJPC7v6kRhbjdhjGN3SzWDpRVtApgQBg",
-      "signature": "1pCrPkAQKRkWnjNVhl2Jk3ppJSm9duO5PGsWzkDpdTXv4eIoGtPquq54A2CsgGKgw5HssYtgR4DJDqdgKVN6Cw"
+      "body_digest": "XnITl3Vlg3uQfPdUsTIy42NbW8iIum9LCtTMluJCPVY",
+      "signature": "rgKwdA9iIghTuZ7Rq8H9qOFZb4aNu7KLXb_zFIPZSOXfSfC3oipQgONj7ySVSn8lyBAE-vQbhCeVMuZmf5YuCw"
     },
     "connection": {
       "type": "nats_user_jwt",
@@ -79,6 +80,6 @@
     }
   },
   "causation_id": "01928f3a-7b2c-7708-8000-000000000708",
-  "body_digest": "r8thx4NNqzhT6fJbsGB_LuYb6GJ029nCeNGl8W6edPQ",
-  "signature": "3TKEVfMORmcujXb6RI2zlZOiCZo7xIs8tujwYU88zxGgRjMlE8vYzBIXisSbEfgr-akxt1qHifRATW-OAE2aAw"
+  "body_digest": "C36pY2LOmocc3aovpNh1wlGm4wB7vK0zzfnFq45-Wa4",
+  "signature": "mngBPwqEfF-n895laUFGd7akaxVg2sMrmigGefyWORDE-SAqfG3ptx-gErOmPAHTzvR0RPsT4BHWJmJ6R69EDQ"
 }

@@ -183,6 +183,9 @@ key_value:
   UA1_TEAM_VIEW:
     description: the team's shared view of open work
     per_key_ttl_seconds: 0
+  UA1_BLOCK_LIST:
+    description: one block list per team, written by the team services and read by every host of the team; each record states its own expiry
+    per_key_ttl_seconds: 0
 
 object_store:
   UA1_BLOBS:

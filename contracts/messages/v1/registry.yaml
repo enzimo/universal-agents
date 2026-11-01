@@ -18,8 +18,8 @@
 #   body           the body schema, under schemas/
 #   body_rules     optional: what a schema cannot say, checked after it (README, "What bodies carry"):
 #                  unique values in a list, a field required when others have given values,
-#                  at least one of several fields, or the values a field may hold when others
-#                  have given values
+#                  at least one of several fields, the values a field may hold when others
+#                  have given values, or a time that ends within a span of another time
 #   reply          request/reply only: the reply body schema and its error codes, which are exactly
 #                  the reply's outcomes other than ok
 #   senders        host roles that may publish it; receivers check them against the issuer's certificate
@@ -160,7 +160,10 @@ host_roles:
 # form; signer (authority | host); signer_roles, the roles whose certificates may sign it;
 # writers, the host roles that may store it (the edge adapter stores unchanged copies of a
 # peer's records under the peer's installation id); body; ttl_seconds, the bucket's per-key
-# lifetime, within which each record must expire; write_rule.
+# lifetime, within which each record must expire; max_lifetime_seconds, how long after it is
+# written a record that ends may end; fresh_seconds, how long after it is written a record
+# still counts as fresh for readers that need a recent one (its writer signs it again at
+# least this often); write_rule.
 state_records:
   certificate:
     description: A host's membership certificate.
@@ -236,6 +239,17 @@ state_records:
     writers: [team_services]
     body: state/team_view.schema.json
     write_rule: deleted when the item closes or the person it names departs; each entry at most 4 KiB
+  block_list:
+    description: A team's blocks on tools and its people's standing, read by the team's hosts that decide tool calls from signed lists.
+    bucket: UA1_BLOCK_LIST
+    key: "<team>"
+    signer: host
+    signer_roles: [team_services]
+    writers: [team_services]
+    body: state/block_list.schema.json
+    max_lifetime_seconds: 604800    # 7 days: a cut-off host keeps using its newest list for its custody window
+    fresh_seconds: 900              # 15 minutes: a fresh_check tool runs only with a list signed this recently
+    write_rule: signed again with the next sequence at least every fresh_seconds, even when nothing changed, and at once on each change; states its expiry, at most max_lifetime_seconds after it is written; a newer list may hold fewer entries; every host of the team reads it, and keeps the highest sequence it has seen, also across restarts
 
 kinds:
   task.stop:
@@ -474,7 +488,7 @@ kinds:
     rendering: none
 
   task.handback:
-    description: A holder that lost its lease returns a task.
+    description: A holder returns a task it will not finish, so the task can move before the holder's custody window ends.
     class: durable
     address: work.agent.{agent}
     copy_to: [work.team]
@@ -526,16 +540,21 @@ kinds:
     rendering: none
 
   custody.confirmed:
-    description: Tells a task's holder that the team services recorded its claim or a reassignment to it, with its custody token and the task's authority token when the work has one.
+    description: Tells a task's holder that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list, and with the task's authority token when the work has one.
     class: durable
     address: work.agent.{agent}
     body: bodies/custody.confirmed.schema.json
+    body_rules:
+      - {ends_within: /body/custody_window/ends_at, of: /issued_at, seconds: 604800}
+      - {ends_within: /body/access_list/ends_at, of: /body/access_list/issued_at, seconds: 604800}
+      - {unique: /body/access_list/tools, by: tool_id}
+      - {unique: /body/access_list/one_time, by: approval_id}
     senders: [team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 604800
     authority: optional
     authority_binding: {type: root_task}
-    idempotency: [/body/task_id, /body/custody_token]
+    idempotency: [/body/task_id, /body/custody_token, /body/sequence]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: holder
     topology_edge: none
@@ -572,6 +591,9 @@ kinds:
     body: bodies/access.decision.schema.json
     body_rules:
       - {requires: /body/status/expires_at, when: [{at: /body/status/state, is: granted}, {at: /body/status/lifetime, is: until}]}
+      - {ends_within: /body/status/access_list/ends_at, of: /body/status/access_list/issued_at, seconds: 604800}
+      - {unique: /body/status/access_list/tools, by: tool_id}
+      - {unique: /body/status/access_list/one_time, by: approval_id}
     senders: [team_services]
     receivers: [worker_host, lead_host]
     expiry_seconds: 604800
@@ -2170,18 +2192,20 @@ kinds:
     rendering: none
 
   custody.decide:
-    description: The lead reassigns a task or adopts late work.
+    description: The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window.
     class: request_reply
     address: svc.team
     body: bodies/custody.decide.schema.json
     reply:
       body: bodies/custody.decide.reply.schema.json
-      errors: [not_found, stale_custody, late_work_not_found, request_closed, not_own_request]
-    senders: [lead_host]
+      errors: [not_found, stale_custody, custody_window_open, late_work_not_found, request_closed, not_own_request, not_allowed]
+    senders: [lead_host, gateway]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: root_task}
+    authority_binding:
+      - {type: root_task, senders: [lead_host]}
+      - {type: command, at: /body/request_id, senders: [gateway]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -2765,6 +2789,8 @@ kinds:
     class: request_reply
     address: _install.{sender}.svc
     body: bodies/host.join.schema.json
+    body_rules:
+      - {unique: /body/tools}
     reply:
       body: bodies/host.join.reply.schema.json
       errors: [pending, denied, protocol_mismatch, not_allowed]

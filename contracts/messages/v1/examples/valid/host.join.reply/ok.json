@@ -57,6 +57,12 @@
           "researcher"
         ],
         "session_limit": 4,
+        "connection_class": "intermittent",
+        "tools": [
+          "fn:files",
+          "fn:web_research",
+          "cli:soil-sensor"
+        ],
         "protocol": "1.0-pre",
         "deployment": "local",
         "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
@@ -68,8 +74,8 @@
         "expires_at": "2026-11-21T04:30:00.000Z"
       },
       "algorithm": "ed25519",
-      "body_digest": "fgmzw_BVQqZzO-QLs9cNZ6xzQEIh8Y4RMJDvfxRwwmg",
-      "signature": "46lXcqCguojCSgyiwMSYsfPu1BwtLeEe5IoB63OJzyMIxZ8oPKeEydzyv7X28cd8L1APEb7yllc0DT-cZIm3Ag"
+      "body_digest": "7dV_k7iN6FxMMNZ7ydMyC-TcW9RppR_Gl-E-lmEtRgk",
+      "signature": "yRsXVeGxl2XNaMk8MFNyjwb5tcLW54a-spC3Lty-DYCKpnh58_IRDtZA1guaB5OlauOM2mmNHsP9Ic8kCChJAw"
     },
     "connection": {
       "type": "nats_user_jwt",
@@ -78,6 +84,6 @@
     }
   },
   "causation_id": "01928f3a-7b2c-7701-8000-000000000701",
-  "body_digest": "aH-POUbz3gqhVXZwvmLC5m214g1RAY5G5eoKyDb-Rew",
-  "signature": "SbGY2m3xeM55yvGNBbkmjU8so6cXGwzFT6mUBc0ue5wSbWKnhLiek2swTUWReX0nOfTqSIKaarnhWQDK99xaAQ"
+  "body_digest": "PXxbXh7F2xJNdSQ6jMfQ8L0jglqUMiwGxMzoD164vTk",
+  "signature": "78Vdhww1OsqPEu0E59Xcz1OuHVncfb3__IyFUng0P-zxKKPhQbyLsI5Vtq918pPx9SAaZw2quA2CKkdKSi4sBA"
 }

@@ -1,0 +1,14 @@
+{
+  "description": "A confirmation says why it was sent with one of its four reasons.",
+  "refusal": "invalid_body",
+  "at": "/body/reason",
+  "base": "custody.confirmed/reassignment.json",
+  "changes": [
+    {
+      "set": "/body/reason",
+      "to": "moved"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"custody.confirmed\", \"message_id\": \"01928f3a-7b2c-732c-8000-00000000032c\", \"idempotency_key\": \"custody.confirmed:7s60rcLR-Y2mdFwQL6NBaSgKryYkslUhHJtdIQBg3ss\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_sub_1\", \"custody_token\": 5, \"sequence\": 4, \"reason\": \"moved\", \"custody_window\": {\"renewed_by\": \"host_record\", \"seconds\": 300}}, \"body_digest\": \"lz6arkbVecTvzUCuc92_MLt92lw353V5bcalOXRmQEk\", \"signature\": \"7tCyd5Nv_DTYA2z8jbJ4y6Hf4vyfMaz2kUSwvgxaRGWWsRJWIu7wTTPreQQH714JT7xSjpECfIV-Bqly-itIDQ\"}"
+}

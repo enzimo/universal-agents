@@ -35,6 +35,10 @@
                 "until",
                 "until_revoked"
               ]
+            },
+            "access_list": {
+              "description": "The task's new access list, with a higher sequence; sent when the holder's host certificate names its tools (README, \"Access on remote hosts\").",
+              "$ref": "../common.schema.json#/$defs/task_access_list"
             }
           },
           "required": [
@@ -89,6 +93,10 @@
             },
             "expires_at": {
               "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "access_list": {
+              "description": "The task's new access list, with a higher sequence; sent when the holder's host certificate names its tools (README, \"Access on remote hosts\").",
+              "$ref": "../common.schema.json#/$defs/task_access_list"
             }
           },
           "required": [

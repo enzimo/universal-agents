@@ -24,12 +24,16 @@
             },
             "custody_token": {
               "$ref": "../common.schema.json#/$defs/custody_token"
+            },
+            "custody_window": {
+              "$ref": "../common.schema.json#/$defs/custody_window"
             }
           },
           "required": [
             "type",
             "holder",
-            "custody_token"
+            "custody_token",
+            "custody_window"
           ],
           "additionalProperties": false
         },

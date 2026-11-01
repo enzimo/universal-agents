@@ -30,7 +30,7 @@ from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal
-from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology
+from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology, trust as wire_trust
 from custom_messages.wire.canonical import CanonicalJsonError
 from custom_messages.wire.frame import (
     FrameRefused,
@@ -610,7 +610,7 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"copy_to": ["work.agent.{agent}"]}, "two of its addresses deliver to one audience target"),
     ({"copy_to": ["work.pool.{pool}"]}, "copies go only to"),
     ({"receivers": ["lead_host", "gateway", "edge_adapter", "scheduler"]}, "serve none of its addresses"),
-    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires, any_of or allowed rule"),
+    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires, any_of, allowed or ends_within rule"),
     ({"body_rules": [{"requires": "/body/no_such_field", "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
     ({"body_rules": [{"any_of": ["/body/summary"]}]}, "is not a unique"),
     ({"authority": "optional"}, "state authority_binding"),
@@ -638,6 +638,32 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
+@pytest.mark.parametrize("rule", [
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at", "seconds": 604800},
+    {"ends_within": "/body/access_list/ends_at", "of": "/body/access_list/issued_at", "seconds": 1},
+])
+def test_the_generator_accepts_an_ends_within_rule_between_timestamps(rule: dict) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["custody.confirmed"]["body_rules"] = [rule]
+    EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+@pytest.mark.parametrize("rule", [
+    {"ends_within": "/body/task_id", "of": "/issued_at", "seconds": 60},                         # not a timestamp
+    {"ends_within": "/body/custody_window/ends_at", "of": "/body/task_id", "seconds": 60},       # nor this
+    {"ends_within": "/body/custody_window/ends_at", "of": "/subject", "seconds": 60},            # a frame field, not a time
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at", "seconds": 0},           # no span
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at", "seconds": "604800"},    # not a whole number
+    {"ends_within": "/body/custody_window/ends_at", "of": "/body/custody_window/ends_at", "seconds": 60},
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at"},
+])
+def test_the_generator_refuses_a_broken_ends_within_rule(rule: dict) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["custody.confirmed"]["body_rules"] = [rule]
+    with pytest.raises(EXPORT.ContractError, match="is not a unique, requires, any_of, allowed or ends_within rule"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
 def test_an_allowed_rule_checks_a_single_value_and_each_item_of_a_list() -> None:
     """README, "What bodies carry": under its conditions the field, or each item of a list, holds one of the values."""
 
@@ -654,6 +680,24 @@ def test_an_allowed_rule_checks_a_single_value_and_each_item_of_a_list() -> None
         with pytest.raises(FrameRefused) as refused:
             check({"body": body}, spec)
         assert (refused.value.code, refused.value.at) == ("invalid_body", at)
+
+
+def test_an_ends_within_rule_allows_the_whole_span_and_not_a_millisecond_more() -> None:
+    """README, "What bodies carry": a custody window ends at most 7 days after the frame that carries it was issued."""
+
+    spec = kinds.KINDS["custody.confirmed"]
+    check = wire_frame._check_body_rules  # noqa: SLF001 - the rule check itself, without a signed frame
+
+    def frame(ends_at: str) -> dict:
+        return {"issued_at": "2026-10-22T04:30:00.000Z",
+                "body": {"custody_window": {"renewed_by": "reconnection", "ends_at": ends_at}}}
+
+    check(frame("2026-10-29T04:30:00.000Z"), spec)
+    check({"issued_at": "2026-10-22T04:30:00.000Z", "body": {"custody_window": {"renewed_by": "host_record", "seconds": 300}}},
+          spec)  # a window renewed by host record writes has no end to bound
+    with pytest.raises(FrameRefused) as refused:
+        check(frame("2026-10-29T04:30:00.001Z"), spec)
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/custody_window/ends_at")
 
 
 def drop_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None:
@@ -1140,6 +1184,55 @@ def test_a_host_cannot_write_another_hosts_liveness() -> None:
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/runtime")
 
 
+def test_a_certificate_names_its_connection_class_and_a_remote_hosts_tools() -> None:
+    """README, "Access on remote hosts": a host with a tool list decides from signed lists; one without reads the store."""
+
+    store = fixtures.trust_store()
+    remote = store.host_certificate("install_example", "remote-host-1", 1)
+    local = store.host_certificate("install_example", "worker-host-1", 3)
+    assert remote is not None and local is not None
+    assert (remote.connection_class, remote.tools) == ("intermittent", frozenset({"fn:files", "fn:web_research",
+                                                                                 "cli:soil-sensor"}))
+    assert (local.connection_class, local.tools) == ("connected", None)
+
+
+def test_a_block_list_is_fresh_for_fifteen_minutes_and_usable_until_it_expires() -> None:
+    """README, "Access on remote hosts": fresh_check tools need a list at most fresh_seconds old, by the reader's clock."""
+
+    data = (STATE_EXAMPLES / "valid" / "block_list" / "team.json").read_bytes()
+    written = parse_timestamp(json.loads(data)["issued_at"])
+    fresh_for = timedelta(seconds=kinds.STATE_RECORDS["block_list"].fresh_seconds) + SKEW
+    record = fixtures.verify_state(data)
+    assert wire_trust.fresh(record, written + fresh_for)
+    assert not wire_trust.fresh(record, written + fresh_for + timedelta(milliseconds=1))
+    # Older than fresh, the list still serves other tools until it expires.
+    later = written + timedelta(days=6)
+    revocations = fixtures.current_revocations(later)
+    old = fixtures.verify_state(data, {"now": format_timestamp(later)}, trust=fixtures.trust_store(
+        extra_documents=[revocations], now=later))
+    assert not wire_trust.fresh(old, later)
+    # A record without fresh_seconds is never fresh.
+    assert not wire_trust.fresh(fixtures.verify_state((STATE_EXAMPLES / "valid" / "placement" / "lead.json").read_bytes()),
+                                written)
+
+
+def test_a_reader_keeps_the_newest_block_list_even_when_it_holds_fewer_blocks() -> None:
+    """A newer list may shrink; a copy of the older one written back is refused."""
+
+    data = (STATE_EXAMPLES / "valid" / "block_list" / "team.json").read_bytes()
+    record = fixtures.verify_state(data)
+    newer = state_example("block_list/team.json")
+    newer["sequence"] += 1
+    newer["issued_at"] = "2026-10-22T04:45:00.000Z"
+    newer["body"]["blocks"] = newer["body"]["blocks"][:1]
+    newer_record = fixtures.verify_state(signed_state(newer), {"held": {"sequence": record.document.sequence,
+                                                                         "digest": record.digest},
+                                                                "now": "2026-10-22T04:45:00.000Z"})
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(data, {"held": {"sequence": newer_record.document.sequence, "digest": newer_record.digest}})
+    assert (refused.value.code, refused.value.at) == ("replayed", "/sequence")
+
+
 def test_team_view_key_must_name_its_body_entry() -> None:
     document = state_example("team_view/roster.json")
     document["key"] = "team_example.task.lead"
@@ -1609,8 +1702,8 @@ def receiver_only(case: dict) -> bool:
 
     kind = json.loads(case["frame_text"])["kind"]
     rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
-    places = {rule.get("unique") or rule.get("requires") or rule.get("allowed") or rule["any_of"][0].rsplit("/", 1)[0]
-              for rule in rules}
+    places = {rule.get("unique") or rule.get("requires") or rule.get("allowed") or rule.get("ends_within")
+              or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
     return case["at"] == "/idempotency_key" or case["at"] in places or receiver_compares_body(case)
 
 
@@ -1665,7 +1758,8 @@ def certificate_record(runtime: str, *, roles: tuple[str, ...], epoch: int = 1,
         "certificate_id": f"cert_{runtime}", "installation": installation, "runtime": runtime, "teams": ["team_example"],
         "roles": list(roles), "membership_epoch": epoch, "revocation_epoch": 1,
         "application_key": {"key_id": key_id, "public_key": fixtures.KEYS[key_id]["public_key"]},
-        "nats_public_key": "U" + "X" * 55, "agent_types": [], "session_limit": 0, "protocol": kinds.PROTOCOL,
+        "nats_public_key": "U" + "X" * 55, "agent_types": [], "session_limit": 0, "connection_class": "connected",
+        "protocol": kinds.PROTOCOL,
         "deployment": "local", "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
         "issued_at": issued_at, "expires_at": expires_at,
     }
@@ -1881,7 +1975,7 @@ def test_a_trust_record_ends_within_its_longest_lifetime(record: str) -> None:
 def test_a_trust_record_is_forgotten_when_nothing_can_still_need_it_and_does_not_come_back(record: str) -> None:
     store = fixtures.trust_store()
     held = store.held()
-    assert held == {"agreement": 1, "certificate": 8, "revocations": 2, "agent_session": 3}
+    assert held == {"agreement": 1, "certificate": 9, "revocations": 2, "agent_session": 4}
     store.forget(forgotten_from(record) - timedelta(milliseconds=1))
     assert store.held().get(record, 0) >= 1
     lookups = {"certificate": lambda: store.host_certificate("install_example", "lead-host-1", 3),

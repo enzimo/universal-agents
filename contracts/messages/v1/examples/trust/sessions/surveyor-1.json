@@ -1,0 +1,29 @@
+{
+  "record": "agent_session",
+  "protocol": "1.0-pre",
+  "key": "session.install_example.team_example.s-surveyor-1-1",
+  "writer": {
+    "type": "host",
+    "installation": "install_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "key_id": "test-services-key-1"
+  },
+  "sequence": 1,
+  "issued_at": "2026-10-22T04:00:00.000Z",
+  "body": {
+    "session": "s-surveyor-1-1",
+    "installation": "install_example",
+    "team": "team_example",
+    "agent": "surveyor-1",
+    "agent_type": "researcher",
+    "agent_role": "worker",
+    "runtime": "remote-host-1",
+    "placement_revision": 3,
+    "started_at": "2026-10-22T04:00:00.000Z",
+    "ends_at": "2026-10-23T04:00:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "4kpW75snKNspi7yEoBu0crzcv6QnwcyjTpPjapFm-Ak",
+  "signature": "F8SBMH91LFwfZWlNnT4gj2rC0H1sG1cAnU1OwgaikcowA1TwklcoWbIH2f0wUFz1uba8yUiltyGV4l1G5Xa-CA"
+}

@@ -29,6 +29,7 @@
     "nats_public_key": "USSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS",
     "agent_types": [],
     "session_limit": 0,
+    "connection_class": "connected",
     "protocol": "1.0-pre",
     "deployment": "local",
     "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
@@ -40,6 +41,6 @@
     "expires_at": "2026-11-21T00:00:00.000Z"
   },
   "algorithm": "ed25519",
-  "body_digest": "37Bm3lAh0Tg01xt2UMdX0DadybIGbnT9V4dc5y7oUPM",
-  "signature": "9_TH7ABCDYjnaYidFeAmecyuBI8PaguZ2bExBlBZxOJ1PuAoUL5xf9t1uXlyMwhw00YhZJ9T1Bbea9zkNHvdDg"
+  "body_digest": "Mk6bj62_-XdgaW-_HEI0MicnHsXXstmM2UT1pxv_qYQ",
+  "signature": "CGYSrETrnBFD3NzsdRJsHb0JEvn1rQdEl4OpVuAYFUGb3mWYaIvwSUK5L51vKlSlfYJgVQi3cAdaKnMfUHg-BA"
 }

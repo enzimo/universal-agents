@@ -41,6 +41,12 @@
       "researcher"
     ],
     "session_limit": 8,
+    "connection_class": "intermittent",
+    "tools": [
+      "fn:files",
+      "fn:web_research",
+      "cli:soil-sensor"
+    ],
     "protocol": "1.0-pre",
     "deployment": "operator_managed",
     "software": {
@@ -48,6 +54,6 @@
       "version": "0.9.8"
     }
   },
-  "body_digest": "VTO9BejxJ6G09S72iI9pvDiS2DzNhmJJSmM-qLBD-58",
-  "signature": "tcMU_hgJfjKNLG6gjD4DAH-Mqec61BZTfcP3D4Wad_79nacGVb1TzAGfBSy01rA1Bv3RsTbOgYqR3OKRJDzlDQ"
+  "body_digest": "0XSJ1fj8SQisBAlPTVKkGEwp-jxTUU6Qbyfyhsw4Nu0",
+  "signature": "1UuXcvlpS1hSgwYhDgYvYqAhgpYp6qvVQ3cbFFbHPoS5qU0ojQ_rbVv2-g9P6p9KgSfRQdnUJFQsVp1Sp46XBw"
 }

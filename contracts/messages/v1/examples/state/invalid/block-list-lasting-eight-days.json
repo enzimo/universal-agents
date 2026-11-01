@@ -1,0 +1,14 @@
+{
+  "description": "A block list expires within 7 days of being written.",
+  "refusal": "invalid_body",
+  "at": "/expires_at",
+  "base": "block_list/team.json",
+  "changes": [
+    {
+      "set": "/expires_at",
+      "to": "2026-10-30T04:30:00.000Z"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"block_list\", \"protocol\": \"1.0-pre\", \"key\": \"team_example\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 412, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-30T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"blocks\": [{\"block_id\": \"block_team_x\", \"subject\": {\"kind\": \"team\"}, \"tool_id\": \"cli:x\"}, {\"block_id\": \"block_researcher_publish\", \"subject\": {\"kind\": \"agent_type\", \"agent_type\": \"researcher\"}, \"tool_id\": \"fn:publishing\"}, {\"block_id\": \"block_surveyor_delete\", \"subject\": {\"kind\": \"agent\", \"agent\": \"surveyor-1\"}, \"tool_id\": \"fn:files\", \"operation\": \"delete_file\"}, {\"block_id\": \"block_person_github\", \"subject\": {\"kind\": \"person\", \"person\": \"person_2b9\"}, \"tool_id\": \"cli:github\"}, {\"block_id\": \"block_schedule_web\", \"subject\": {\"kind\": \"schedule\", \"schedule_id\": \"sched_1\"}, \"tool_id\": \"fn:web_research\"}, {\"block_id\": \"block_request_files\", \"subject\": {\"kind\": \"agent\", \"agent\": \"surveyor-1\"}, \"tool_id\": \"fn:files\", \"operation\": \"write_file\", \"request\": {\"root_task_id\": \"task_root_7f\", \"person\": \"person_7c1\"}}], \"people\": [{\"person\": \"person_4d2\", \"standing\": \"disabled\"}]}, \"algorithm\": \"ed25519\", \"body_digest\": \"k1DacNlbe5mt9946mzFOCbV3f1XAW4dtS6yKs303g7Q\", \"signature\": \"eMjzmK_1ozBt0PTyxqjsZ5KF-xDzt8jFhTGBIgwWlo3aQNVgoO4FlwyC458-Evm81cnZo6I9IOVpNbm0asxoAw\"}"
+}

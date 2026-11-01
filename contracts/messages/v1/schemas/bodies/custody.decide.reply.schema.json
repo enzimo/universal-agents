@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/custody.decide.reply.schema.json",
   "title": "custody.decide reply",
-  "description": "The lead reassigns a task or adopts late work.",
+  "description": "The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window.",
   "oneOf": [
     {
       "type": "object",
@@ -59,6 +59,27 @@
     },
     {
       "type": "object",
+      "description": "The holder's custody window is still open, and the task was not handed back, its host was not retired, and the move is not a person's override.",
+      "properties": {
+        "outcome": {
+          "const": "custody_window_open"
+        },
+        "window_ends_at": {
+          "description": "When the window ends by the team services' count, clock tolerance included: the earliest time the move can succeed. A window renewed by host record writes moves later while the holder keeps writing.",
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "window_ends_at"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
       "properties": {
         "outcome": {
           "const": "late_work_not_found"
@@ -92,6 +113,22 @@
       "properties": {
         "outcome": {
           "const": "not_own_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "description": "An override that did not come with a gateway's command token, or from a person who is neither the one the request works for nor an administrator.",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"

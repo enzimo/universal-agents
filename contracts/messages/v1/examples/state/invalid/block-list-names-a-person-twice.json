@@ -1,0 +1,23 @@
+{
+  "description": "A block list gives each person one standing.",
+  "refusal": "invalid_body",
+  "at": "/body/people",
+  "base": "block_list/team.json",
+  "changes": [
+    {
+      "set": "/body/people",
+      "to": [
+        {
+          "person": "person_4d2",
+          "standing": "disabled"
+        },
+        {
+          "person": "person_4d2",
+          "standing": "removed"
+        }
+      ]
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"block_list\", \"protocol\": \"1.0-pre\", \"key\": \"team_example\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 412, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-29T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"blocks\": [{\"block_id\": \"block_team_x\", \"subject\": {\"kind\": \"team\"}, \"tool_id\": \"cli:x\"}, {\"block_id\": \"block_researcher_publish\", \"subject\": {\"kind\": \"agent_type\", \"agent_type\": \"researcher\"}, \"tool_id\": \"fn:publishing\"}, {\"block_id\": \"block_surveyor_delete\", \"subject\": {\"kind\": \"agent\", \"agent\": \"surveyor-1\"}, \"tool_id\": \"fn:files\", \"operation\": \"delete_file\"}, {\"block_id\": \"block_person_github\", \"subject\": {\"kind\": \"person\", \"person\": \"person_2b9\"}, \"tool_id\": \"cli:github\"}, {\"block_id\": \"block_schedule_web\", \"subject\": {\"kind\": \"schedule\", \"schedule_id\": \"sched_1\"}, \"tool_id\": \"fn:web_research\"}, {\"block_id\": \"block_request_files\", \"subject\": {\"kind\": \"agent\", \"agent\": \"surveyor-1\"}, \"tool_id\": \"fn:files\", \"operation\": \"write_file\", \"request\": {\"root_task_id\": \"task_root_7f\", \"person\": \"person_7c1\"}}], \"people\": [{\"person\": \"person_4d2\", \"standing\": \"disabled\"}, {\"person\": \"person_4d2\", \"standing\": \"removed\"}]}, \"algorithm\": \"ed25519\", \"body_digest\": \"hbRpKux75wNO3m-YCB9xjQk7r43INhZy9yjWrmnYYXs\", \"signature\": \"GQEjab-m9JkCidUpOTuli3y_dfrXg6xXrs-FWDFaAc_T2kSE51wDgdW1F_L888wfd47D9hfuSC2V968CzukjCA\"}"
+}

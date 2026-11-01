@@ -20,10 +20,14 @@
     "requester": "lead",
     "state": "in_progress",
     "custody_token": 3,
+    "custody_window": {
+      "renewed_by": "host_record",
+      "seconds": 300
+    },
     "since": "2026-10-22T04:10:00.000Z",
     "objective_id": "obj_1"
   },
   "algorithm": "ed25519",
-  "body_digest": "syyHCObaHAaLn7hi7CelQ9E9EyDBi7RVMAvOu6m84v8",
-  "signature": "xWQaz4l7POPiMztwcoQTB6-JxeBYb21VkwDt7tPdrM-E8nh-EQFJYqcr7dGMDUrDTzA0EHfAv6vW-hvgVhBKBQ"
+  "body_digest": "wbfdzm3_yHhKTiKn4QqFVRjapNg562VVJ7BDMNXchok",
+  "signature": "mQbQCKrZgML4HJf-7huFe3jCnA-SeHdsKEtVZGRGrKIAvjRLpdoKoCwrr4TAK_X11iLb_uYfiWBQKBnvuzgSBQ"
 }

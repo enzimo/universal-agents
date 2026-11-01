@@ -31,6 +31,7 @@
       "team_lead"
     ],
     "session_limit": 4,
+    "connection_class": "connected",
     "protocol": "1.0-pre",
     "deployment": "local",
     "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
@@ -42,6 +43,6 @@
     "expires_at": "2026-11-21T00:00:00.000Z"
   },
   "algorithm": "ed25519",
-  "body_digest": "rJMNT9uJr4R9IP9lV1660pOktkq4ShOyzXXhNoZPafk",
-  "signature": "CTiCINzwYsXfD6mpuMV64hCH-lNP7w7kR5ZvJ9WCZ-cWseSc4GRm009YiEdSAigsyDt0FhpGHFnCwGVKvUO-Ag"
+  "body_digest": "eOHUHs-DFeqwmD6sjzZzF-a8V-fcIdf5asJtNUDlGKU",
+  "signature": "wptp778pAgIv6YyKauCXAhVo4afR1HD2D3MU-fpTrPHpzGqUuGxdKXdi8UGtxJUpul5DV5cbu_17zTnbzqQTAA"
 }

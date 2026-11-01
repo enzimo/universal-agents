@@ -114,9 +114,9 @@ topology checks either.
 
 **Body rules.** A schema cannot say that a list holds no value twice, that one field is
 required when others have given values, that a body needs at least one of several
-fields, or which values a field may hold when others have given values. A kind's
-`body_rules` say it, and receivers check them right after the schema, refusing as
-`invalid_body` at the rule's field:
+fields, which values a field may hold when others have given values, or that a time ends
+within a span of another time. A kind's `body_rules` say it, and receivers check them
+right after the schema, refusing as `invalid_body` at the rule's field:
 - `{unique: <list>, by: <member>}`: no two items are equal; for object items, no two
   values of the member every item carries, while plain values compare whole;
 - `{requires: <field>, when: [{at: <field>, is: <value>}, ...]}`: the field is present
@@ -124,7 +124,11 @@ fields, or which values a field may hold when others have given values. A kind's
 - `{any_of: [<field>, ...]}`: at least one is present;
 - `{allowed: <field>, values: [...], when: [{at: <field>, is: <value>}, ...]}`: whenever
   every condition holds, the field holds one of the values, and for a list every item
-  does; an absent field passes.
+  does; an absent field passes;
+- `{ends_within: <field>, of: <field>, seconds: <n>}`: the time in the first field is at
+  most `n` seconds after the time in the second, a body field or a frame field such as
+  `/issued_at`; an absent field passes. Both sides of the comparison come from the
+  sender's clock, so no clock tolerance applies.
 
 **Long text.** `long_text` holds at most 32,768 characters. A result's answer and a
 person's answer may instead go as a text file in the object store (`form: file`,
@@ -157,7 +161,9 @@ cannot record (not the person's to decide, request closed) comes back as an
 `access.review` in state `refused`, which the Inbox shows; `decided` and `closed` close
 the card. The waiting task learns the outcome from `access.decision`, which only the team
 services send. It carries what was granted because a worker on another host cannot read
-the team's store; it grants nothing the access service has not recorded. Until the
+the team's store; it grants nothing the access service has not recorded. When the task's
+holder runs on a host whose certificate names its tools, a `granted` or `handed_down`
+decision also carries the task's new access list ("Access on remote hosts"). Until the
 runtime's access notices move onto this contract, today's notice still carries ids only,
 as the repository's `AGENTS.md` says.
 
@@ -283,7 +289,7 @@ authority (`state_records` in the registry, `schemas/state/`):
 | Record | Signed by | Says |
 | --- | --- | --- |
 | authority keys | (in the bootstrap bundle every host starts from) | which keys are this installation's authority |
-| `certificate` | the installation's authority | host H of installation X signs with key K for teams T, with roles R and agent types A, between two times, at membership and revocation epochs |
+| `certificate` | the installation's authority | host H of installation X signs with key K for teams T, with roles R and agent types A, between two times, at membership and revocation epochs; it is connected or intermittent, and a remote host's certificate names the tools it may run |
 | `revocations` | the installation's authority | these certificates, and their keys, are revoked; signed again at least every 6 hours, and current for at most a day |
 | `agent_session` | a team services host of the agent's team | agent G, of type and team role, runs on host H from one time to another |
 | `agreement` | the receiver's own authority | installation Y's authority keys, and which of this installation's teams and durable kinds it may use |
@@ -378,8 +384,9 @@ An authority token (`authority` in the frame) proves that work acts for a person
   read by every host that runs the pool, so a `task.request` to a pool carries no token
   (registry `authority_by_address`); its copy to the team services does. When an agent
   claims the task, or `custody.decide` reassigns it, the team services record the custody
-  and send the holder `custody.confirmed` at `work.agent.<agent>`: the task id and its
-  custody token, and the task's authority token when the work has one.
+  and send the holder `custody.confirmed` at `work.agent.<agent>`: the task id, its
+  custody token and custody window ("Custody windows"), and the task's authority token
+  when the work has one.
 - It is bound to one root task, one command, or one access request (a person's decision
   on it), and lasts at most `authority_token_max_seconds`. A command token lasts at most
   `command_token_max_seconds` (300 seconds): the gateway signs one for each command, and
@@ -449,6 +456,172 @@ without `at`. A lead turn may act only on its own request: the team
 services compare `root_task_id` with the token's root task and answer another request
 with the typed refusal `not_own_request`, which tells the person to act in that request's
 thread, instead of refusing the frame. Replies carry no token.
+
+## Custody windows
+
+Each task has one holder at a time. The team services keep the task's custody record, whose
+revision is the custody token, and only a result that carries the current token resolves
+the requester's stand-in. Agents stay on the host they are placed on. An agent moves only
+by a handover from a connected host, which stops it at a safe point and sends its ledger to
+the team services, or after an administrator retires its host. Tasks can move to another
+holder, and the custody window says when.
+
+**Every confirmation names a window.** `custody.confirmed` carries `custody_window`. Its kind
+follows the `connection_class` in the certificate of the holder's host:
+- A `connected` host (the installation's main machine, a server) gets
+  `{renewed_by: host_record, seconds}`: standard 300, at least 60 and at most 3,600. The host
+  record that the host writes every 20 seconds renews it.
+- An `intermittent` host (an edge device, a laptop) gets `{renewed_by: reconnection, ends_at}`:
+  standard 5 days after the confirmation, and never more than 7 days after the frame that
+  carries it was issued (body rule `ends_within`, refused as `invalid_body` at
+  `/body/custody_window/ends_at`). Nothing renews it while the host is cut off.
+
+The team services choose the kind from the certificate of the host that the holder's
+placement names. The holder's host checks the kind against its own certificate and refuses
+a confirmation of the other kind as `invalid_body` at `/body/custody_window`. This is the
+handler's check, not `verify_frame`'s, because it needs the receiving host's own
+certificate. The lengths are the team services' choice, the same for every task of one
+connection class, so a new length needs no new protocol. The team view's task entry and the
+requester's `ledger.fact` (`custody_confirmed`) repeat the window, so the requester's
+stand-in knows when the task may move. A window ends at most 7 days after its confirmation,
+within the lifetime of every durable kind and of an agent session, so a host that reconnects
+inside its window still finds its queued messages and can still sign.
+
+**How each side counts.**
+- A `host_record` window lasts `seconds` after the holder's last host record that the store
+  acknowledged. The holder counts from that record's `issued_at`, the time on its own clock
+  when it wrote it; a write the store did not acknowledge renews nothing. The team services
+  count from the same record's `issued_at`, as they read it from the store, and add the clock
+  tolerance (`clock_skew_seconds` in `transport.yaml`). So the holder's window always ends
+  before the team services may move its task.
+- A `reconnection` window ends at `ends_at`. The holder counts by its own clock. The team
+  services move the task only once their clock passes `ends_at` plus the clock tolerance.
+
+**When a window ends.** Inside its window a holder acts without asking anyone, connected or
+not. When the window ends without renewal, the holder keeps working inside the team but holds
+every action that reaches outside the team or cannot be undone (sending, buying, deleting,
+publishing) until a new `custody.confirmed` gives it a window. A window that ended is never
+revived by the host's next host record: a `host_record` window ends once the holder's host
+has had no acknowledged host record for `seconds`, and only a new confirmation restores it.
+The team services send `custody.confirmed` with reason `renewed` and a new window, for each
+task the holder still holds and only if the task has not moved:
+- when a host record of the holder's host comes back after a gap: more than the window's
+  `seconds` after the previous record they saw for a `host_record` window, or after the
+  previous record expired for a `reconnection` window;
+- when they start and find a current host record of the holder's host, since they cannot
+  know whether a gap happened while they were stopped;
+- for a `reconnection` window, also before it ends while the host's record stays current, so
+  an intermittent host that stays online does not lose its window.
+
+They never renew a window while the holder's host has no current host record.
+
+**Moving a task.** The requester (the lead's model through `custody.decide`, or a team rule)
+moves a task to another holder only:
+1. after the holder's window ended, by the team services' count above;
+2. after the holder handed the task back (`task.handback`);
+3. after the holder's host was retired: an administrator revoked its certificate, which the
+   revocations record lists, so the host can never act again;
+4. by a person's override in the gateway.
+
+Otherwise the team services refuse `custody.decide` with `custody_window_open`. Its
+`window_ends_at` is the earliest time the move can succeed by their count, clock tolerance
+included; a `host_record` window's end moves later while the holder keeps writing host
+records. The refusal is a final outcome: a move after the window is a new command with a new
+`request_id`.
+
+**A person's override.** The person the request works for, or an administrator, can move a
+task before its window ends, after the gateway has warned them that both holders may then
+act. Only the gateway sends this move: `custody.decide` with
+`override: {warning_shown: both_holders_may_act}` and the person's command token, bound to
+the body's `request_id`. The person comes from the token, never from the body. The team
+services answer `not_allowed` when the frame carries no gateway command token, and when the
+token's person is neither the request's person nor an administrator by the team's people
+records. A lead host presents only root-task tokens, so a lead's model cannot override. The
+gateway checks the same before it sends.
+
+**After a move.** The former holder gets `custody.moved`. Whatever it sends later is kept as
+late work, which the gateway and the team services recognise by its custody token and the
+team view. With these rules, two holders act outside the team at the same time only after a
+person's override.
+
+## Access on remote hosts
+
+The access rules decide every tool call an agent makes: the agent side (its role's standard
+access, the team's defaults, the task's access, the lasting access of whom it works for, and
+what the lead may hand on) and the person side, minus blocks. Hosts on the installation's
+main machine read the access store for each call. A remote host cannot read that store and
+may be cut off for days, so it decides each call itself, with the same rules, from three
+signed lists:
+1. **The host's tool list:** `tools` in its certificate, the catalog tools an administrator
+   approved with its join ("Installation traffic"). It is an upper limit: an agent on that
+   host never runs a tool outside it, whatever its access.
+2. **The task's access list** (`task_access_list`): what this task may use there, which the
+   team services work out with the same access decision for every tool on the host's list.
+3. **The team's block list** (state record `block_list`), which the team services sign into
+   `UA1_BLOCK_LIST`.
+
+A call runs only when its tool is on the host's list, the task's access list gives it the
+level the call needs (or holds a one-time approval for that exact action), and no block in
+the newest block list stops it.
+
+**Which hosts use lists.** A host whose certificate names `tools` decides tool calls from
+these lists and never runs a tool outside its list. A host whose certificate names none reads
+the access store directly, which only the installation's main machine can, so a remote host
+without a list runs no tools.
+
+**The task's access list.**
+- `custody.confirmed` carries it as `access_list`, exactly when the holder's host certificate
+  names `tools`, renewals included. When access changes without a request, for example a
+  grant is taken away, the team services send `custody.confirmed` again with reason
+  `access_changed` and the new, smaller list.
+- When more access is asked for (`access.request`), a `granted` or `handed_down`
+  `access.decision` carries the new list to such a holder. While its host is cut off, the
+  asking step waits and the task's other work goes on.
+- It names the holder, the task, the person's request (`root_task_id`, the root task its
+  authority token is bound to), the person (absent only in system work, whose token names a
+  schedule and no person), the holder's host (`runtime`), a `sequence` that rises for each
+  new list of the task, and when it was issued and ends: the task's end, at most 7 days after
+  `issued_at` (body rule `ends_within`). Each tool comes with its level and `fresh_check`
+  mark, which the team services copy from the catalog, so a remote host needs no copy of the
+  catalog.
+- A one-time approval (`one_time`) is bound to the `action_digest` that the request named.
+  The host uses it once and records the use durably before the action. No one else can use
+  it, because the list belongs to one holder inside its custody window.
+- The holder's host checks, and refuses as `invalid_body` at the field: every tool and
+  one-time approval names a tool on its own certificate's `tools`; `holder` is the frame's
+  audience agent, `task_id` the body's task, `runtime` the host itself, and `person` and
+  `root_task_id` those of the task's authority token. These are handler checks, because they
+  need the host's own certificate and the task's token. The holder keeps the list with the
+  highest sequence for its task and ignores a lower one.
+- The team services' frame signature covers the list, so it carries no signature of its own.
+
+**The block list.**
+- One record per team, under the key `<team>`, signed only by the team services and read by
+  every host of the team. Its body names the team, its `blocks` and its `people`.
+- A block entry follows the access store's blocks: whom it stops (`subject`: everyone in the
+  team, an agent type, one agent, a person and so every agent working for them, or the runs
+  of one schedule), `tool_id`, and optionally one `operation`. An agent's block carries
+  `request` (`root_task_id` and `person`), because it stays inside the request and person it
+  was made for; people's and administrators' blocks carry none and apply team-wide. A block
+  on a tool set or a role is written as one entry per tool, agent type or person it covers
+  when the list is signed, because a remote host cannot read tool sets or who holds which
+  role. A block naming an operation the host's tool no longer has stops the whole tool, as
+  in the access store.
+- `people` gives the standing of people who may no longer have work done for them:
+  `disabled` or `removed`, by opaque reference. A host stops that person's tasks as soon as
+  it learns, and the gateway and the team services refuse their output when it arrives.
+- The team services sign it again with the next sequence at least every `fresh_seconds` (900
+  seconds) even when nothing changed, and at once on each change. A newer list may hold
+  fewer entries. It states its expiry, at most `max_lifetime_seconds` (7 days) after it is
+  written, so a cut-off host keeps using its newest list for its custody window; an expired
+  list is refused as `expired`, so a host with no unexpired list runs no tools.
+- A connected host watches the record and applies a change within seconds. A host counts a
+  list's age from its `issued_at` by its own clock, with the clock tolerance
+  (`custom_messages.wire.trust.fresh`). A tool marked `fresh_check` runs only with a list at
+  most `fresh_seconds` old, and otherwise waits until the host reconnects; by default these
+  are the tools that spend money or publish as the person. Other tools run with the newest
+  list the host holds. A block that ends after the list was signed stays in a cut-off host's
+  newest list until a newer list arrives, so a cut-off host errs toward refusing.
 
 ## Delivery, expiry and idempotency
 
@@ -601,7 +774,9 @@ absent optional field is `null`. For example `task.stop` lists `[/body/task_id,
   token as well as the sequence number; result keys also name the sending agent, because
   two agents can refuse one task before either holds it, and the team services pass
   results on in their own numbering. A refusal's key names its sender, because several
-  receivers can refuse one frame.
+  receivers can refuse one frame. The team services send several custody confirmations
+  for one custody token (a renewed window, a new access list), so a confirmation's key
+  names its sequence too.
 
 The Python helper is `custom_messages.wire.frame.idempotency_key(kind, *values)`. A
 receiver recomputes the key after checking the body and refuses a different one as
@@ -751,13 +926,16 @@ The authority does not answer a join with a fresh challenge to sign. A join fram
 
 **What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for.
 
-**Renewing.** A host renews with `host.renew`, signed by the certificate it renews; the body names that certificate and its membership epoch. Every renewed certificate has a higher membership epoch than the one it replaces and names it in `replaces` ("Trust over time"). A host whose reply was lost retries with the same renewal id while the old certificate still signs, or reads its new certificate from `UA1_CERTS`.
+**Connection class and tools.** A join states the host's `connection_class` (`connected` or `intermittent`, "Custody windows") and, for a host that decides tool calls from signed lists, the `tools` it can run ("Access on remote hosts"). Tool ids the catalog lacks, such as a local device's, are the host's proposal: the administrator reviews them with the join. The catalog's entries are records of the access store, not messages, so approving a proposal adds the entry there. The certificate names the connection class the join asked for and at most the tools it asked for, each once. A host whose connection class or tool list must change sends a new join under the key it holds, which an administrator approves like a lost-key recovery: its certificate gets a higher membership epoch and `replaces` the old one.
+
+**Renewing.** A host renews with `host.renew`, signed by the certificate it renews; the body names that certificate and its membership epoch. Every renewed certificate has a higher membership epoch than the one it replaces and names it in `replaces` ("Trust over time"). A renewal carries no connection class or tools: the renewed certificate keeps those of the certificate it replaces, and changing them needs a new join. A host whose reply was lost retries with the same renewal id while the old certificate still signs, or reads its new certificate from `UA1_CERTS`.
 
 **Replies.** A success reply carries the signed certificate (`certificate-document.schema.json`), which only an authority key writes, and a connection credential. The receiver verifies the certificate and refuses the reply as `invalid_body` at `/body/certificate/...` when:
 - it does not verify against the installation's own authority keys, or its record's `expires_at` differs from its body's;
 - it is for another installation or another runtime than the host that asked;
-- a join's certificate names another application or NATS key than the join presented, or grants more teams, roles, agent types or sessions than it asked for;
-- a renewal's certificate does not replace the certificate that signed the renewal, does not have a higher membership epoch, or names another key than the rotated one (or, without a rotation, the kept one), or another NATS key than the new one asked for (or the kept one).
+- a join's certificate names another application or NATS key than the join presented, grants more teams, roles, agent types or sessions than it asked for, names another connection class, or names tools the join did not ask for;
+- a renewal's certificate does not replace the certificate that signed the renewal, does not have a higher membership epoch, names another key than the rotated one (or, without a rotation, the kept one), or another NATS key than the new one asked for (or the kept one), or changes the connection class or tools of the certificate it replaces;
+- the certificate names a tool twice.
 
 The host then keeps the certificate with `TrustStore.add`. Later requests are verified as usual.
 
@@ -792,16 +970,16 @@ provide the exact bytes, proof and finished frame for other implementations.
 
 ## State records
 
-Hosts, agents, placements and the team view are key-value records, not messages. Each value is a signed state document (`schemas/state.schema.json`):
+Hosts, agents, placements, the team view and the block list are key-value records, not messages. Each value is a signed state document (`schemas/state.schema.json`):
 - the record type, the writer's protocol label ("Versions"), its key and its writer;
 - a sequence that only grows;
 - issue and expiry times;
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
 
-The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), its body schema and, for trust records that end, how long after it is written a record may end (`max_lifetime_seconds`, "Trust over time"). The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
+The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), its body schema, for records that end how long after it is written a record may end (`max_lifetime_seconds`, "Trust over time"), and for records that readers judge by age how long one counts as fresh (`fresh_seconds`). The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
 - **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. The reader holds a current revocations record of the writer's installation, unless the writer is its own installation authority (`revocations_not_current`). Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
-- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current.
+- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current. A report with a longest lifetime (the block list, 7 days) states its expiry, within that lifetime of being written (`invalid_body` at `/expires_at`).
 - **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
 
 A reader refuses a state report with the first failing check, in the registry's order:
@@ -818,9 +996,10 @@ What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
 - **Agent records.** The key is `<team>.<agent>` of the body, and the team is one the writer's certificate serves. A reader accepts an agent record only from the host its placement names; the reader checks that, since it needs the placement.
 - **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
-- **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs.
+- **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
+- **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 
-**Not generated yet.** The NATS permissions for the key-value buckets, the object store and reading the dead-letter stream come with the services that use them. Until then the registry's `writers` say who may store each record, and the readers' checks above do not depend on who stored it.
+**Not generated yet.** The NATS permissions for the key-value buckets, the object store and reading the dead-letter stream come with the services that use them. Until then the registry's `writers` say who may store each record, its `write_rule` says who reads it where only some hosts may (every host of a team reads the team's block list), and the readers' checks above do not depend on who stored it.
 
 ## Dead letters
 

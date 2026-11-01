@@ -48,6 +48,14 @@
       "minimum": 0,
       "maximum": 100000
     },
+    "connection_class": {
+      "description": "How the host expects to be connected; an administrator approves it with the join.",
+      "$ref": "../common.schema.json#/$defs/connection_class"
+    },
+    "tools": {
+      "description": "The tools the host can run. Ids the catalog lacks are the host's proposal, which an administrator reviews with the join; the certificate names at most these.",
+      "$ref": "../common.schema.json#/$defs/tool_list"
+    },
     "protocol": {
       "$ref": "../common.schema.json#/$defs/protocol_label"
     },
@@ -76,6 +84,7 @@
     "nats_public_key",
     "agent_types",
     "session_limit",
+    "connection_class",
     "protocol",
     "deployment",
     "profile_sha256"

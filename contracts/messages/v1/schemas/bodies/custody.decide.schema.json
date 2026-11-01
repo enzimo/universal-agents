@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/custody.decide.schema.json",
   "title": "custody.decide request",
-  "description": "The lead reassigns a task or adopts late work.",
+  "description": "The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window.",
   "type": "object",
   "properties": {
     "request_id": {
@@ -89,6 +89,19 @@
           "additionalProperties": false
         }
       ]
+    },
+    "override": {
+      "description": "A person moves the task before the holder's custody window ends, without a handback or a retired host. Only the gateway sends it, with the person's command token; the person is the one the request works for or an administrator, and the gateway showed them that both holders may then act (README, \"Custody windows\").",
+      "type": "object",
+      "properties": {
+        "warning_shown": {
+          "const": "both_holders_may_act"
+        }
+      },
+      "required": [
+        "warning_shown"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

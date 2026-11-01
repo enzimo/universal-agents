@@ -30,8 +30,9 @@ host keeps the newest record it verified and adds it first after a restart, so a
 copy read back from the bucket is ignored like any lower sequence.
 
 ``TrustStore.verify`` reads a state report (host liveness, agent state, placement,
-team view): reports are not kept, and are checked on every read against the reader's
-clock, minimum epochs and the record it already holds for the key.
+team view, block list): reports are not kept, and are checked on every read against the
+reader's clock, minimum epochs and the record it already holds for the key. ``fresh``
+tells whether a verified block list is recent enough for tools that need a fresh one.
 
 A renewed certificate (a renewal or a key rotation) has a higher membership epoch
 than the one it ``replaces``, so both stay in the store and queued frames still find
@@ -95,7 +96,7 @@ BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement"
 # Record names (registry state_records). The first four vouch for keys and agents and are
 # kept by the trust store; the others report state and are verified when read.
 CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT = "certificate", "revocations", "agent_session", "agreement"
-HOST, AGENT, PLACEMENT, TEAM_VIEW = "host", "agent", "placement", "team_view"
+HOST, AGENT, PLACEMENT, TEAM_VIEW, BLOCK_LIST = "host", "agent", "placement", "team_view", "block_list"
 TRUST_RECORDS = frozenset({CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT})
 WRITER_AUTHORITY = "authority"
 # The installation authority's host role: it issues certificates and the revocations
@@ -111,6 +112,18 @@ def within(start: datetime, end: datetime, moment: datetime) -> bool:
     """
 
     return start - moment <= SKEW and moment - end < SKEW
+
+
+def fresh(record: "VerifiedRecord", now: datetime) -> bool:
+    """Whether a verified state report was written at most its record's ``fresh_seconds`` before ``now``.
+
+    The age counts from the document's ``issued_at`` by the reader's clock, allowing the
+    clock tolerance. A host runs a ``fresh_check`` tool only with a block list that is
+    fresh (README, "Access on remote hosts"). A record without ``fresh_seconds`` never is.
+    """
+
+    seconds = STATE_RECORDS[record.document.record].fresh_seconds
+    return seconds is not None and now - parse_timestamp(record.document.issued_at) <= timedelta(seconds=seconds) + SKEW
 
 
 def state_signing_bytes(document: Mapping[str, Any]) -> bytes:
@@ -177,6 +190,11 @@ class HostCertificate:
     session_limit: int
     issued_at: datetime
     expires_at: datetime
+    # connected or intermittent: decides the kind of custody window its holders get.
+    connection_class: str
+    # The tools the host may run, or None when the certificate names no list: such a host
+    # reads the access store, which only the installation's main machine can.
+    tools: Optional[frozenset[str]]
     replaces: Optional[str] = None
     # When a certificate replacing this one was issued; it then signs new frames for
     # OVERLAP more (differences, not sums, so times near year 9999 cannot overflow).
@@ -352,7 +370,7 @@ class TrustStore:
 
     def verify(self, data: bytes | bytearray | memoryview, *, record: str, now: datetime,
                held: Optional[tuple[int, str]] = None) -> VerifiedRecord:
-        """Verify one state report (host liveness, agent state, placement, team view) as a reader reads it.
+        """Verify one state report (host liveness, agent state, placement, team view, block list) as a reader reads it.
 
         Reports are used as soon as they are read, like requests, so besides the
         signer's certificate and the record's rules (README, "State records"):
@@ -511,9 +529,19 @@ class TrustStore:
         if end is not None and document.expires_at is not MISSING and document.expires_at != getattr(body, end):
             raise FrameRefused("invalid_body", f"the record expires when its body's {end} says", at="/expires_at")
         lifetime = spec.max_lifetime_seconds
-        if end is not None and lifetime is not None and parse_timestamp(getattr(body, end)) - issued_at > timedelta(seconds=lifetime):
+        if lifetime is None:
+            return
+        # A trust record says in its body when it ends; a state report that ends (the block
+        # list) says it in its own expiry, which it must then state.
+        if end is not None:
+            ends, at = str(getattr(body, end)), f"/body/{end}"
+        elif document.expires_at is MISSING:
+            raise FrameRefused("invalid_body", f"a {document.record} record states when it expires", at="/expires_at")
+        else:
+            ends, at = document.expires_at, "/expires_at"
+        if parse_timestamp(ends) - issued_at > timedelta(seconds=lifetime):
             raise FrameRefused("invalid_body", f"a {document.record} record ends within {lifetime} seconds of being written",
-                               at=f"/body/{end}")
+                               at=at)
 
     def add(self, data: bytes | bytearray | memoryview, *, now: datetime) -> bool:
         """Verify one trust record and keep it; return False when a newer one is already held.
@@ -650,8 +678,19 @@ class TrustStore:
             parts = document.key.split(".")
             if len(parts) != 3 or parts[1] != body.entry:
                 raise FrameRefused("invalid_body", "a team view key is <team>.<entry>.<id>", at="/key")
+        elif document.record == BLOCK_LIST:
+            self._check_block_list(document, body)
         else:
             self._expect_key(document, f"{body.team}.{body.agent}")
+
+    def _check_block_list(self, document: State, body: Any) -> None:
+        """One list per team, under the team's key; no block or person appears twice."""
+
+        self._expect_key(document, body.team)
+        for field_name, ids in (("blocks", [block.block_id for block in body.blocks]),
+                                ("people", [entry.person for entry in body.people])):
+            if len(set(ids)) != len(ids):
+                raise FrameRefused("invalid_body", f"a block list names an entry of {field_name} twice", at=f"/body/{field_name}")
 
     def _check_host_record(self, document: State, body: Any, signer: HostCertificate) -> None:
         """A host writes only its own liveness, naming the certificate it signs with and no more sessions than it allows.
@@ -686,6 +725,9 @@ class TrustStore:
         if expires_at <= issued_at:
             raise FrameRefused("invalid_body", "a certificate must end after it starts", at="/body/expires_at")
         public_key = _public_key(body.application_key.public_key, "/body/application_key/public_key")
+        tools = None if body.tools is MISSING else frozenset(body.tools)
+        if tools is not None and len(tools) != len(body.tools):
+            raise FrameRefused("invalid_body", "a certificate names each tool once", at="/body/tools")
         return HostCertificate(
             certificate_id=body.certificate_id, installation=body.installation, runtime=body.runtime,
             teams=frozenset(body.teams), roles=frozenset(body.roles), agent_types=frozenset(body.agent_types),
@@ -693,6 +735,7 @@ class TrustStore:
             key_id=body.application_key.key_id,
             public_key=public_key,
             nats_public_key=body.nats_public_key, session_limit=body.session_limit, issued_at=issued_at, expires_at=expires_at,
+            connection_class=body.connection_class, tools=tools,
             replaces=None if body.replaces is MISSING else body.replaces,
         )
 

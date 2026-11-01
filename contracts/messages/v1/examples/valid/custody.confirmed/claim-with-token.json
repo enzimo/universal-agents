@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "custody.confirmed",
   "message_id": "01928f3a-7b2c-732b-8000-00000000032b",
-  "idempotency_key": "custody.confirmed:P-aQDL5TUY3pMJVqVKnaHf3PXTFv8HcL-Pu3MNOgEIE",
+  "idempotency_key": "custody.confirmed:rEfthwxgcL2lEA_0tbhSzMV-wJGW1F3ma0tsynrrvgU",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -23,10 +23,16 @@
   "algorithm": "ed25519",
   "body": {
     "task_id": "run_sched_1_0430",
-    "custody_token": 1
+    "custody_token": 1,
+    "sequence": 1,
+    "reason": "claimed",
+    "custody_window": {
+      "renewed_by": "host_record",
+      "seconds": 300
+    }
   },
-  "body_digest": "Op8j8APeSR29e-QfYJYowkq_lDBFAUjozmg07rykP3A",
-  "signature": "cg8uJMUpsuoi_T9TxNr88HOK3a-qNBXfdYkO8bLP6BfQ562HBYilC5wEWN8-AHrbDYuyv2SHYZJP9wwXVUANAA",
+  "body_digest": "glJaIn-NaI0efb1Msh-EmBA_TFkt_3fu1_6twZNttrI",
+  "signature": "IBBGmzsC5sdsFTE8IAqI7-5_tHTwsyNpF_-zDbpkTjcnn7ZDWDMnlY0Gh_c7oi_x4aB6SNdxsVO9_KpD2gzwAw",
   "authority": {
     "token_id": "01928f3a-7b2c-7211-8000-000000000211",
     "issuer": {
