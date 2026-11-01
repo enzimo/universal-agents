@@ -41,7 +41,8 @@ from .runtime_custody import (
     CustodyStore, DeferredMessageClaim, RuntimeCustodyLost, RuntimeRecoveryConflict,
     check_deferred_message, deferred_message_id,
 )
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 @dataclass
@@ -318,7 +319,7 @@ class _RelationalRuntimeStateRepository:
                     )
                     """
                 )
-                self._ensure_column(conn, "active_task_runtime", "team_id", "TEXT")
+                ensure_column(conn, "active_task_runtime", "team_id", "TEXT", logger=self._logger)
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS active_task_runtime_records (
                         owner_agent_id TEXT NOT NULL,
@@ -350,7 +351,7 @@ class _RelationalRuntimeStateRepository:
                     )
                     """
                 )
-                self._ensure_column(conn, "agent_deferred_messages", "team_id", "TEXT")
+                ensure_column(conn, "agent_deferred_messages", "team_id", "TEXT", logger=self._logger)
                 conn.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_agent_deferred_messages_team
@@ -1100,10 +1101,6 @@ class SqliteRuntimeStateRepository(_RelationalRuntimeStateRepository):
         conn.execute("BEGIN IMMEDIATE")
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
     def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
         return {str(row[1]) for row in rows}
@@ -1130,11 +1127,6 @@ class PostgresRuntimeStateRepository(_RelationalRuntimeStateRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
 
 
     def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:

@@ -358,6 +358,18 @@ def _process_label() -> str:
     return ":".join(parts)
 
 
+def log_added_column(logger: logging.Logger | None, backend: str, table_name: str, column_name: str) -> None:
+    """Record that an upgrade added a column a table from an earlier release lacked."""
+
+    (logger or _LOGGER).info(
+        "Added a column that a table from an earlier version lacked. "
+        "event=storage_column_added backend=%s table=%s column=%s",
+        backend,
+        table_name,
+        column_name,
+    )
+
+
 def sqlite_column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
     """Return SQLite column names for a repository-owned table."""
 
@@ -373,12 +385,17 @@ def ensure_sqlite_column(
     *,
     logger: logging.Logger | None = None,
 ) -> None:
-    """Add a SQLite column, tolerating a concurrent process that added it first."""
+    """Add a SQLite column an earlier release's table lacks, tolerating a concurrent process that added it first.
+
+    Stores on either backend call ``storage.table_columns.ensure_column``,
+    which uses this for SQLite.
+    """
 
     if column_name in sqlite_column_names(conn, table_name):
         return
     try:
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+        log_added_column(logger, "SQLite", table_name, column_name)
     except sqlite3.OperationalError as exc:
         message = str(exc).lower()
         if ("duplicate column" in message or "already exists" in message) and column_name in sqlite_column_names(

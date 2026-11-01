@@ -24,7 +24,8 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ class _RelationalAgentStateRepository:
                     )
                     """
                 )
-                self._ensure_column(conn, "agent_states", "team_id", "TEXT")
+                ensure_column(conn, "agent_states", "team_id", "TEXT", logger=self._logger)
                 for column_name, column_type in (
                     ("is_executing", "INTEGER"),
                     ("has_execution_capacity", "INTEGER"),
@@ -104,7 +105,7 @@ class _RelationalAgentStateRepository:
                     ("last_seen_at", "TEXT"),
                     ("is_exiting", "INTEGER"),
                 ):
-                    self._ensure_column(conn, "agent_states", column_name, column_type)
+                    ensure_column(conn, "agent_states", column_name, column_type, logger=self._logger)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_name ON agent_states(agent_name)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_named_agent_type ON agent_states(named_agent_type)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_team_id ON agent_states(team_id)")
@@ -339,10 +340,6 @@ class SqliteAgentStateRepository(_RelationalAgentStateRepository):
         return connect_sqlite(self._db_path, logger=self._logger)
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
     def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
         return {str(row[1]) for row in rows}
@@ -362,11 +359,6 @@ class PostgresAgentStateRepository(_RelationalAgentStateRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
-
 
     def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         rows = conn.execute(f'\n                SELECT column_name\n                FROM information_schema.columns\n                WHERE table_name = {self._dialect.bind}\n                ', (table_name,)).fetchall()

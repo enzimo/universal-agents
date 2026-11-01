@@ -10,7 +10,6 @@ import storage.memory_graph_repository as memory_graph_repository_module
 from storage.memory_graph_repository import (
     MEMORY_GRAPH_VECTOR_RECORDS_TABLE,
     MEMORY_GRAPH_VECTOR_STATE_TABLE,
-    PostgresMemoryGraphRepository,
     SqliteMemoryGraphRepository,
     create_memory_graph_repository,
 )
@@ -302,20 +301,3 @@ def test_sqlite_memory_graph_repository_fails_when_required_vector_extension_is_
 
     with pytest.raises(RuntimeError, match="sqlite-vec unavailable"):
         SqliteMemoryGraphRepository(str(tmp_path / "task_history.db"), logger=logging.getLogger("test"))
-
-
-def test_postgres_ensure_column_uses_native_idempotent_ddl():
-    repo = PostgresMemoryGraphRepository.__new__(PostgresMemoryGraphRepository)
-
-    class Connection:
-        def __init__(self):
-            self.queries = []
-
-        def execute(self, query):
-            self.queries.append(query)
-
-    conn = Connection()
-    repo._ensure_column(conn, "memory_entities", "embedding_profile_id", "TEXT")
-    assert conn.queries == [
-        "ALTER TABLE memory_entities ADD COLUMN IF NOT EXISTS embedding_profile_id TEXT"
-    ]

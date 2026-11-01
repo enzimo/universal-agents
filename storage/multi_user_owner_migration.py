@@ -23,6 +23,7 @@ from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 from .config import StorageSettings
 from .postgres_connection import PostgresConnection, connect_postgres, redact_postgres_dsn
 from .sqlite_connection import connect_sqlite
+from .table_columns import table_column_names
 
 
 GATEWAY_OWNER_TABLES: tuple[str, ...] = (
@@ -101,7 +102,7 @@ def migrate_legacy_null_owner_rows(
 def _migrate_sqlite_table(conn: Any, table: str, owner_canonical_user_id: str) -> OwnerMigrationTableResult:
     if not _sqlite_table_exists(conn, table):
         return OwnerMigrationTableResult(table=table, status="missing_table")
-    if not _sqlite_column_exists(conn, table, "owner_canonical_user_id"):
+    if "owner_canonical_user_id" not in table_column_names(conn, table):
         return OwnerMigrationTableResult(table=table, status="missing_owner_column")
     return _assign_owner(conn, table, owner_canonical_user_id)
 
@@ -111,7 +112,7 @@ def _migrate_postgres_table(
     table: str,
     owner_canonical_user_id: str,
 ) -> OwnerMigrationTableResult:
-    if not _postgres_column_exists(conn, table, "owner_canonical_user_id"):
+    if "owner_canonical_user_id" not in table_column_names(conn, table):
         return OwnerMigrationTableResult(table=table, status="missing_table_or_owner_column")
     return _assign_owner(conn, table, owner_canonical_user_id)
 
@@ -128,23 +129,5 @@ def _sqlite_table_exists(conn: Any, table: str) -> bool:
     row = conn.execute(
         f"SELECT name FROM sqlite_master WHERE type = 'table' AND name = {conn.dialect.bind}",
         (table,),
-    ).fetchone()
-    return row is not None
-
-
-def _sqlite_column_exists(conn: Any, table: str, column: str) -> bool:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return column in {row[1] for row in rows}
-
-
-def _postgres_column_exists(conn: PostgresConnection, table: str, column: str) -> bool:
-    row = conn.execute(
-        f"""
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = {conn.dialect.bind} AND column_name = {conn.dialect.bind}
-        LIMIT 1
-        """,
-        (table, column),
     ).fetchone()
     return row is not None

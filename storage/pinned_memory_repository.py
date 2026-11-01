@@ -76,7 +76,8 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 COREMEM_BANK = "coremem"
 USERMEM_BANK = "usermem"
@@ -374,7 +375,7 @@ class _RelationalPinnedMemoryRepository:
                 )
                 """
             )
-            self._ensure_column(conn, "pinned_memory_facts_active", "source_key", "TEXT")
+            ensure_column(conn, "pinned_memory_facts_active", "source_key", "TEXT", logger=self._logger)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_pinned_memory_active_scope
@@ -1281,10 +1282,6 @@ class SqlitePinnedMemoryRepository(_RelationalPinnedMemoryRepository):
         return connect_sqlite(self._db_path, logger=self._logger, row_factory=sqlite3.Row)
 
 
-    def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
 class PostgresPinnedMemoryRepository(_RelationalPinnedMemoryRepository):
     _dialect = POSTGRES
 
@@ -1298,11 +1295,6 @@ class PostgresPinnedMemoryRepository(_RelationalPinnedMemoryRepository):
     def _connect(self) -> PostgresConnection:
         # ``begin_write`` takes this store's advisory lock; reads take none.
         return connect_postgres(self._dsn, write_lock_key=PINNED_MEMORY_WRITE_LOCK_KEY)
-
-
-    def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
 
 
 def create_pinned_memory_repository(

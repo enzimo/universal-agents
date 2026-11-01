@@ -22,7 +22,8 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 def utc_now_iso() -> str:
@@ -132,8 +133,8 @@ class _RelationalMemoryReviewRepository:
                 )
                 """
             )
-            self._ensure_column(conn, "memory_review_jobs", "owner_team_id", "TEXT")
-            self._ensure_column(conn, "memory_review_jobs", "team_subject_id", "TEXT")
+            ensure_column(conn, "memory_review_jobs", "owner_team_id", "TEXT", logger=self._logger)
+            ensure_column(conn, "memory_review_jobs", "team_subject_id", "TEXT", logger=self._logger)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_memory_review_jobs_role_status
@@ -419,10 +420,6 @@ class SqliteMemoryReviewRepository(_RelationalMemoryReviewRepository):
         return self.get_review_job(review_job_id)
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, ddl: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, ddl, logger=self._logger)
-
-
     def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
         rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
         return {str(row[1]) for row in rows}
@@ -529,10 +526,6 @@ class PostgresMemoryReviewRepository(_RelationalMemoryReviewRepository):
             )
             conn.commit()
         return self.get_review_job(review_job_id)
-
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, ddl: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {ddl}')
 
 
     def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:

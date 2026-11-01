@@ -1167,10 +1167,9 @@ its own (coordination plan 7.10, accepted 2026-10-30).
   removed person's task records and never travel in a team transfer.
 - **Upgrading in place from 0.9.** `CREATE TABLE IF NOT EXISTS` leaves a
   0.9 ledger table without the `changed_fields` column, and every knowledge
-  page save would then fail. Opening the ledger adds the column (an
-  information-schema or `PRAGMA table_info` read on later opens; the
-  PostgreSQL schema lock or `ensure_sqlite_column` covers processes starting
-  together). 0.9 entries did not record their fields, so they default to
+  page save would then fail. Opening the ledger adds the column
+  (`storage.table_columns.ensure_column`: a read on later opens, and an
+  addition that processes starting together can both run). 0.9 entries did not record their fields, so they default to
   every field (`*`): a request that saw one leaves an overlapping change to
   the person rather than overwriting it. The new review and case tables are
   created as usual.
@@ -3960,10 +3959,15 @@ fallback that accepts both. No release has to open what a newer one wrote, so
 the desktop app never offers an older version.
 
 - **Stores** add a new column to a table an earlier release created when they
-  open (`storage.sqlite_connection.ensure_sqlite_column`; `ALTER TABLE … ADD
-  COLUMN IF NOT EXISTS` on PostgreSQL), because `CREATE TABLE IF NOT EXISTS`
-  never changes an existing table. The default keeps older rows correct, as
-  the change ledger's `*` does (see "Upgrading in place from 0.9" above).
+  open, because `CREATE TABLE IF NOT EXISTS` never changes an existing table.
+  Every store calls `storage.table_columns.ensure_column`, which reads the
+  table's columns first (so later opens take no table lock), adds a missing one
+  in a form processes starting together can both run (`ADD COLUMN IF NOT
+  EXISTS` on PostgreSQL, a re-read after "duplicate column" on SQLite) and logs
+  `event=storage_column_added`. PostgreSQL finds the table through the search
+  path, as the store's own statements do, so an instance kept in its own schema
+  works. The default keeps older rows correct, as the change ledger's `*` does
+  (see "Upgrading in place from 0.9" above).
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the

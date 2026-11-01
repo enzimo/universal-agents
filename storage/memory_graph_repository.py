@@ -33,6 +33,7 @@ from .postgres_connection import (
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
 from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column, table_column_names
 from .sqlite_vec_support import load_sqlite_vec, serialize_float32
 
 
@@ -552,6 +553,7 @@ class _RelationalMemoryGraphRepository:
     """Shared scoped graph records; adapters own vector retrieval and schema operations."""
 
     _dialect: SqlDialect
+    _logger: logging.Logger
 
 
     def _migrate_claim_validity_columns(self, conn: sqlite3.Connection) -> None:
@@ -566,7 +568,7 @@ class _RelationalMemoryGraphRepository:
         new_column: str,
         definition: str,
     ) -> None:
-        columns = self._table_columns(conn, table)
+        columns = table_column_names(conn, table)
         if old_column not in columns:
             return
         if new_column in columns:
@@ -1044,10 +1046,10 @@ class _RelationalMemoryGraphRepository:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_embedding_profiles_status_created ON memory_embedding_profiles(status, created_at DESC)"
             )
-            self._ensure_column(conn, "case_memories", "embedding_profile_id", "TEXT")
-            self._ensure_column(conn, "memory_entities", "embedding_profile_id", "TEXT")
+            ensure_column(conn, "case_memories", "embedding_profile_id", "TEXT", logger=self._logger)
+            ensure_column(conn, "memory_entities", "embedding_profile_id", "TEXT", logger=self._logger)
             self._migrate_claim_validity_columns(conn)
-            self._ensure_column(conn, "memory_claims", "embedding_profile_id", "TEXT")
+            ensure_column(conn, "memory_claims", "embedding_profile_id", "TEXT", logger=self._logger)
             if backend_name == "SQLite":
                 self._init_sqlite_vector_support(conn)
             conn.commit()
@@ -2824,24 +2826,6 @@ class SqliteMemoryGraphRepository(_RelationalMemoryGraphRepository):
         )
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-        try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        except Exception as exc:
-            message = str(exc).lower()
-            if "duplicate column" in message or "already exists" in message:
-                rollback = getattr(conn, "rollback", None)
-                if callable(rollback):
-                    rollback()
-                return
-            raise
-
-
-    def _table_columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        return {str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in rows}
-
-
     def search_entities_by_embedding(
         self,
         *,
@@ -2927,23 +2911,6 @@ class PostgresMemoryGraphRepository(_RelationalMemoryGraphRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-    def _ensure_column(self, conn: PostgresConnection, table: str, column: str, definition: str) -> None:
-        # PostgreSQL owns concurrent schema idempotency; an exception followed
-        # by rollback would discard earlier statements in this initialization.
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
-
-    def _table_columns(self, conn: PostgresConnection, table: str) -> set[str]:
-        rows = conn.execute(
-            f"""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = {self._dialect.bind}
-            """,
-            (table,),
-        ).fetchall()
-        return {str(row["column_name"]) for row in rows}
 
     def search_entities_by_embedding(
         self,
