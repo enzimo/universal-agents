@@ -122,7 +122,8 @@ class StateSpec:
     # expire within it, so an old copy is never read as current. None when records last.
     ttl_seconds: Optional[int]
     # How long after it is written a trust record may end (registry max_lifetime_seconds),
-    # which bounds when a receiver forgets it. None for records the trust store does not forget.
+    # which bounds when a receiver forgets it (never the revocations record, which a newer
+    # one replaces). None for records without a longest lifetime.
     max_lifetime_seconds: Optional[int]
     body_model: TypeAdapter[Any]
     # What a newer minor's record body may hold that this version knows (see prune).

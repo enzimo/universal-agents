@@ -87,7 +87,9 @@ verification_refusals:
   - code: bad_digest
     meaning: the body digest does not match the body
   - code: revoked
-    meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, whenever it was revoked and whenever the frame says it was issued
+    meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, by its id or by its runtime and key id, whenever it was revoked and whenever the frame says it was issued
+  - code: revocations_not_current
+    meaning: the receiver holds no revocations record of the issuer's installation that is current at its clock (none, or only an expired one), and the issuer is not a host of the receiver's own installation authority
   - code: epoch_too_old
     meaning: the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation (request/reply and events only; queued work is judged by the certificate valid when it was issued, and a join by the key it presents)
   - code: wrong_issuer
@@ -170,13 +172,14 @@ state_records:
     max_lifetime_seconds: 7776000   # 90 days
     write_rule: written once; deleted once receivers forget it (README, "Trust over time"), which is after its expiry plus the longest kind lifetime, so queued frames can still be checked; kept while the revocations record lists it
   revocations:
-    description: An installation's revoked certificates.
+    description: An installation's revoked certificates and their keys.
     bucket: UA1_CERTS
     key: "revocations.<installation>"
     signer: authority
     writers: [installation_authority, edge_adapter]
     body: state/revocations.schema.json
-    write_rule: rewritten with a higher sequence on each revocation; the revocation epoch only grows and entries are never removed while a revoked certificate could still be named
+    max_lifetime_seconds: 86400     # 24 hours; the authority signs it again at least every 6 hours
+    write_rule: signed again with the next sequence at least every 6 hours and at once on each revocation; the revocation epoch only grows; an entry may leave once its certificate's expiry plus the longest frame lifetime and the clock tolerance have passed; receivers keep the newest record they verified, also across restarts, and never forget it
   agent_session:
     description: An agent session certificate, issued by the team services that place the agent.
     bucket: UA1_CERTS

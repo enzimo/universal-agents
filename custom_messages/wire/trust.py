@@ -6,7 +6,7 @@ Identity in protocol 1 (contracts/messages/v1/README.md, "Who sent it"):
   keys when it joins; another installation's keys come only from a federation
   agreement that the receiver's own authority signed.
 - An authority signs host certificates (a host's key, teams, roles, agent types and
-  validity), the list of revoked certificates, and agreements.
+  validity), the list of revoked certificates and keys, and agreements.
 - The team services sign agent session certificates: this agent runs on this host
   from one time to another. Hosts sign frames for the agents they run; there are
   no per-agent private keys, because agents in one process could not keep keys
@@ -18,7 +18,16 @@ already be known. A record with a sequence no higher than the one held for its k
 is ignored; the same sequence with other content is refused as ``replayed``.
 Lookups return only verified records. Revocation is checked when a
 frame is verified, so a revocation that arrives later still stops every frame that
-was not yet admitted.
+was not yet admitted. Revoking a certificate revokes its key: every certificate of the
+same runtime with the same key id counts as revoked.
+
+The revocations record expires within a day, and the authority signs it again at least
+every 6 hours. A receiver whose record for an installation is missing or expired cannot
+know what was revoked lately, so it refuses that installation's hosts' frames and
+reports, except its own installation authority's (``revocations_current``). A newer
+record may list fewer entries, once their certificates can no longer sign anything. A
+host keeps the newest record it verified and adds it first after a restart, so an older
+copy read back from the bucket is ignored like any lower sequence.
 
 ``TrustStore.verify`` reads a state report (host liveness, agent state, placement,
 team view): reports are not kept, and are checked on every read against the reader's
@@ -83,13 +92,17 @@ SESSION_REACH = timedelta(seconds=STATE_RECORDS["agent_session"].max_lifetime_se
 RESERVED_RUNTIME_PREFIXES = (PEER_SENDER_SLOT.split("{", 1)[0], INSTALLATION_SCOPE[:1])
 # Where each trust record's body says when it ends; the record's own expiry, when it
 # has one, must say the same, so the record has one validity window.
-BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement": "expires_at"}
+BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement": "expires_at", "revocations": "expires_at"}
 # Record names (registry state_records). The first four vouch for keys and agents and are
 # kept by the trust store; the others report state and are verified when read.
 CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT = "certificate", "revocations", "agent_session", "agreement"
 HOST, AGENT, PLACEMENT, TEAM_VIEW = "host", "agent", "placement", "team_view"
 TRUST_RECORDS = frozenset({CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT})
 WRITER_AUTHORITY = "authority"
+# The host role that signs the revocations record's replacements and renews certificates:
+# its frames are accepted without a current record, so a host whose record expired can
+# still renew and reconnect.
+AUTHORITY_HOST_ROLE = "installation_authority"
 
 
 def within(start: datetime, end: datetime, moment: datetime) -> bool:
@@ -221,6 +234,10 @@ class VerifiedRecord:
 class _Revocations:
     revocation_epoch: int
     certificate_ids: frozenset[str]
+    # (runtime, key id) of every listed certificate: revoking a certificate revokes its key.
+    keys: frozenset[tuple[str, str]]
+    issued_at: datetime
+    expires_at: datetime
 
 
 class _Held(NamedTuple):
@@ -285,9 +302,40 @@ class TrustStore:
         agreement = self._agreements.get(installation)
         return agreement is not None and key_id in agreement.authority_keys
 
-    def revoked(self, installation: str, certificate_id: str) -> bool:
+    def revoked(self, certificate: HostCertificate) -> bool:
+        """Whether its installation's revocations list the certificate, or another certificate of its runtime with its key."""
+
+        return self._listed(certificate.installation, certificate.certificate_id, certificate.runtime, certificate.key_id)
+
+    def key_revoked(self, installation: str, runtime: str, key_id: str) -> bool:
+        """Whether a listed certificate of this runtime had this key, so every certificate with it is revoked."""
+
         revocations = self._revocations.get(installation)
-        return revocations is not None and certificate_id in revocations.certificate_ids
+        return revocations is not None and (runtime, key_id) in revocations.keys
+
+    def _listed(self, installation: str, certificate_id: str, runtime: str, key_id: str) -> bool:
+        revocations = self._revocations.get(installation)
+        return revocations is not None and (
+            certificate_id in revocations.certificate_ids or (runtime, key_id) in revocations.keys)
+
+    def revocations_current(self, installation: str, now: datetime) -> bool:
+        """Whether the store holds the installation's revocations record and it is current at ``now``, within the tolerance."""
+
+        revocations = self._revocations.get(installation)
+        return revocations is not None and within(revocations.issued_at, revocations.expires_at, now)
+
+    def require_current_revocations(self, certificate: HostCertificate, now: datetime, at: str) -> None:
+        """Refuse a host's frame or report as ``revocations_not_current`` unless the record of its installation is current.
+
+        The receiver's own installation authority is the exception: it writes the
+        record, and a host whose record expired needs its replies to renew.
+        """
+
+        if certificate.installation == self.installation and AUTHORITY_HOST_ROLE in certificate.roles:
+            return
+        if not self.revocations_current(certificate.installation, now):
+            raise FrameRefused("revocations_not_current",
+                               f"no current revocations record of installation {certificate.installation}", at=at)
 
     def require_epochs(self, installation: str, runtime: Optional[str] = None, *,
                        membership: int = 0, revocation: int = 0) -> None:
@@ -384,7 +432,7 @@ class TrustStore:
         digest = b64url(hashlib.sha256(state_signing_bytes(raw)).digest())
         if report:
             assert signer is not None and reading is not None  # state reports are host-signed (registry signer: host)
-            self._check_report_writer(signer)
+            self._check_report_writer(signer, reading[1])
         if signer is not None and not signer.roles & set(spec.signer_roles):
             raise FrameRefused("wrong_issuer", f"only {', '.join(spec.signer_roles)} hosts sign {document.record} records",
                                at="/writer")
@@ -405,15 +453,17 @@ class TrustStore:
             self._check_state_report(document, body, signer)
         return VerifiedRecord(document=document, body=body, signer=signer, digest=digest)
 
-    def _check_report_writer(self, signer: HostCertificate) -> None:
+    def _check_report_writer(self, signer: HostCertificate, now: datetime) -> None:
         """A state report is used as soon as it is read, so its writer's certificate is not revoked and meets the minimum epochs.
 
+        The reader also needs a current revocations record of the writer's installation.
         A kept trust record's signer is checked whenever the record is used instead, so a
         later revocation still counts.
         """
 
-        if self.revoked(signer.installation, signer.certificate_id):
+        if self.revoked(signer):
             raise FrameRefused("revoked", "the writer's certificate is revoked", at="/writer/key_id")
+        self.require_current_revocations(signer, now, at="/writer/installation")
         membership, revocation = self.minimum_epochs(signer.installation, signer.runtime)
         if signer.membership_epoch < membership or signer.revocation_epoch < revocation:
             raise FrameRefused("epoch_too_old", "the writer's certificate is below the receiver's minimum epochs",
@@ -485,7 +535,8 @@ class TrustStore:
         held_sequence, held_digest = (held.sequence, held.digest) if held else (0, "")
         if held_sequence == document.sequence and held_digest != record.digest:
             raise FrameRefused("replayed", "the writer used this sequence for other content", at="/sequence")
-        revoked = document.record == CERTIFICATE and self.revoked(record.body.installation, record.body.certificate_id)
+        revoked = document.record == CERTIFICATE and self._listed(
+            record.body.installation, record.body.certificate_id, record.body.runtime, record.body.application_key.key_id)
         if held_sequence >= document.sequence or (held is None and not revoked and self._forgettable(document.record, issued_at)):
             return False
         keeper = {CERTIFICATE: self._keep_certificate, REVOCATIONS: self._keep_revocations,
@@ -505,8 +556,8 @@ class TrustStore:
         retention and the clock tolerance: every version of it has ended, and every
         frame it vouched for has expired. A certificate is kept an agent session's
         lifetime longer, for sessions it signed. ``add`` then ignores records this would
-        forget. Revoked certificates and the revocations record are kept, so a revoked
-        key stays refused; the contract bounds both. A receiver calls this at least
+        forget. The revocations record and the certificates it lists are kept, so a revoked
+        key stays refused while it is listed; the contract bounds both. A receiver calls this at least
         daily. A clock that jumped ahead forgets records still in use until the receiver
         restarts, with a correct clock and a new store.
         """
@@ -534,10 +585,14 @@ class TrustStore:
         return dict(Counter(record for record, _key in self._sequences))
 
     def _forgettable(self, record: str, issued_at: datetime) -> bool:
-        """Whether ``forget`` forgets a record whose newest version was written at ``issued_at``, unless revoked."""
+        """Whether ``forget`` forgets a record whose newest version was written at ``issued_at``, unless revoked.
+
+        Never the revocations record: an expired one still names revoked keys, and only a
+        newer one replaces it.
+        """
 
         lifetime = STATE_RECORDS[record].max_lifetime_seconds
-        if lifetime is None or self._forgotten_at is None:
+        if record == REVOCATIONS or lifetime is None or self._forgotten_at is None:
             return False
         kept = timedelta(seconds=lifetime) + RETENTION + SKEW + (SESSION_REACH if record == CERTIFICATE else timedelta())
         return self._forgotten_at - issued_at >= kept
@@ -545,8 +600,7 @@ class TrustStore:
     def _revoked_certificate(self, record: str, entry: Any) -> bool:
         if record != CERTIFICATE:
             return False
-        certificate = self._certificates[entry]
-        return self.revoked(certificate.installation, certificate.certificate_id)
+        return self.revoked(self._certificates[entry])
 
     def _signer(self, document: State, spec: StateSpec, issued_at: datetime) -> tuple[Ed25519PublicKey, Optional[HostCertificate]]:
         """The key that must have signed the record, from an authority key or the writer's certificate."""
@@ -664,15 +718,19 @@ class TrustStore:
         return entry
 
     def _keep_revocations(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> str:
+        """Keep a newer revocations record. It may list fewer entries: one leaves once its certificate can sign nothing."""
+
         self._same_installation(document, body.installation)
         self._expect_key(document, f"revocations.{body.installation}")
         held = self._revocations.get(body.installation)
-        listed = frozenset(entry.certificate_id for entry in body.entries)
-        if held is not None and (body.revocation_epoch < held.revocation_epoch or not held.certificate_ids <= listed):
-            raise FrameRefused("invalid_body", "the revocation epoch only grows and revoked certificates stay listed",
-                               at="/body/revocation_epoch")
-        self._revocations[body.installation] = _Revocations(body.revocation_epoch, listed)
-        return body.installation
+        if held is not None and body.revocation_epoch < held.revocation_epoch:
+            raise FrameRefused("invalid_body", "the revocation epoch only grows", at="/body/revocation_epoch")
+        self._revocations[body.installation] = _Revocations(
+            revocation_epoch=body.revocation_epoch,
+            certificate_ids=frozenset(entry.certificate_id for entry in body.entries),
+            keys=frozenset((entry.runtime, entry.key_id) for entry in body.entries),
+            issued_at=parse_timestamp(document.issued_at), expires_at=parse_timestamp(body.expires_at))
+        return str(body.installation)
 
     def _keep_session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> tuple[str, str, str]:
         assert signer is not None  # sessions are host-signed (registry signer: host)
@@ -709,4 +767,4 @@ class TrustStore:
                             for index, key in enumerate(body.authority_keys)},
             teams=frozenset(body.teams), kinds=frozenset(body.kinds), issued_at=issued_at, expires_at=expires_at,
         )
-        return body.peer
+        return str(body.peer)

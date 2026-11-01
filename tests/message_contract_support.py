@@ -11,16 +11,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from custom_messages.wire.encoding import b64url_decode
-from custom_messages.wire.frame import Receiver, ReplayKey, ReplayLookup, VerifiedFrame, sign_frame, verify_frame
+from custom_messages.wire.frame import Receiver, ReplayKey, ReplayLookup, VerifiedFrame, format_timestamp, sign_frame, verify_frame
 from custom_messages.wire.models import Frame
-from custom_messages.wire.trust import AuthorityKey, TrustStore, VerifiedRecord
+from custom_messages.wire.trust import AuthorityKey, TrustStore, VerifiedRecord, sign_state
 from custom_messages.wire.values import parse_timestamp
 
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "messages" / "v1"
@@ -63,6 +63,24 @@ def trust_store(add: Iterable[str] = (), remove: Iterable[str] = (), extra_docum
     for data in documents:
         store.add(data, now=now)
     return store
+
+
+LATEST_TIME = parse_timestamp("9999-12-31T23:59:59.999Z")
+
+
+def current_revocations(now: datetime, sequence: int = 100) -> bytes:
+    """The example revocations record signed again, current at ``now``: written an hour before, ending within a day.
+
+    For tests that move the receiver's clock far from the examples' time, where the
+    example record has expired and the receiver would refuse every host but its
+    authority (README, "Trust over time").
+    """
+
+    document = json.loads((TRUST / "revocations" / "install_example.json").read_text(encoding="utf-8"))
+    written = now - timedelta(hours=1)
+    document["sequence"], document["issued_at"] = sequence, format_timestamp(written)
+    document["body"]["expires_at"] = format_timestamp(written + min(timedelta(days=1), LATEST_TIME - written))
+    return json.dumps(sign_state(document, private_key(document["writer"]["key_id"]))).encode()
 
 
 def valid_frames() -> dict[str, dict[str, Any]]:
@@ -167,6 +185,7 @@ def example_frame(kind: str, name: str = "basic") -> dict[str, Any]:
 
 
 __all__ = [
-    "CONTRACT", "EXAMPLES", "KEYS", "NOW", "ReplayKey", "anchors", "answered_request", "default_receiver", "example_frame",
-    "private_key", "replay_holding", "resign", "trust_store", "valid_frames", "verify", "verify_state",
+    "CONTRACT", "EXAMPLES", "KEYS", "NOW", "ReplayKey", "anchors", "answered_request", "current_revocations",
+    "default_receiver", "example_frame", "private_key", "replay_holding", "resign", "trust_store", "valid_frames", "verify",
+    "verify_state",
 ]

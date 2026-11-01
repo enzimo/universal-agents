@@ -284,7 +284,7 @@ authority (`state_records` in the registry, `schemas/state/`):
 | --- | --- | --- |
 | authority keys | (in the bootstrap bundle every host starts from) | which keys are this installation's authority |
 | `certificate` | the installation's authority | host H of installation X signs with key K for teams T, with roles R and agent types A, between two times, at membership and revocation epochs |
-| `revocations` | the installation's authority | these certificates are revoked |
+| `revocations` | the installation's authority | these certificates, and their keys, are revoked; signed again at least every 6 hours, and current for at most a day |
 | `agent_session` | a team services host of the agent's team | agent G, of type and team role, runs on host H from one time to another |
 | `agreement` | the receiver's own authority | installation Y's authority keys, and which of this installation's teams and durable kinds it may use |
 
@@ -320,21 +320,28 @@ frame it checks, in the registry's order:
    Another installation needs an agreement.
 2. **Signature and digest** with that certificate's key.
 3. **Revocation (`revoked`):** neither the certificate nor the one that signed the
-   frame's agent session is revoked, whenever it was revoked and whatever issue time
-   the frame gives: a revoked key still stops queued work, because the sender chooses that time.
-4. **Epochs (`epoch_too_old`):** for request/reply messages and events, the certificate's
+   frame's agent session is revoked, by its id or by its runtime and key id, whenever it
+   was revoked and whatever issue time the frame gives: a revoked key still stops queued
+   work, because the sender chooses that time.
+4. **Current revocations (`revocations_not_current`):** the receiver holds a revocations
+   record of the issuer's installation that is current at its clock, within the clock
+   tolerance. With none, or only an expired one, it cannot know what was revoked lately,
+   so it refuses frames from every host except its own installation authority, whose
+   replies a host needs to renew its certificate. A host that reconnects reads the current
+   record first ("Trust over time").
+5. **Epochs (`epoch_too_old`):** for request/reply messages and events, the certificate's
    epochs meet the receiver's minimum for that runtime and installation. Queued work
    (durable and dead-letter frames) is judged by the certificate valid when it was issued
    and skips this step ("Trust over time"). The frame's own epochs only name the
    certificate.
-5. **Issuer (`wrong_issuer`):** the frame's revocation epoch matches the certificate, and
+6. **Issuer (`wrong_issuer`):** the frame's revocation epoch matches the certificate, and
    its team is one the certificate serves; installation operations and their replies name
    the installation scope `_install` instead, and no agent. A frame that names an agent
    names its session too, and the session must place that agent, of a type the
    certificate allows, on the signing runtime when the frame was issued. A reply must
    answer the request the receiver sent, from the team and agent that request was for. A
    renewal's body names the certificate that signs it.
-6. **Sender (`wrong_sender`):** one of the certificate's roles may send the kind to its
+7. **Sender (`wrong_sender`):** one of the certificate's roles may send the kind to its
    audience's address (for a reply, receive its request; a kind's `senders_by_address`
    narrows some addresses). A frame from the receiver's own installation is addressed to
    its issuer's team: reaching another team needs a later agreement between teams. Another
@@ -682,13 +689,15 @@ A team `config.yaml` or `debug.env` cannot supply this isolated authorization fi
 
 A queued message can wait days, for example while a host is cut off.
 - **Certificate at issue time.** Receivers verify every frame and state record with the writer's certificate that was valid when it was issued, even if that certificate has expired since.
-- **Revocation.** A certificate on the installation's revocations record refuses all of its frames and records, whenever it was revoked.
+- **Revocation.** A certificate on the installation's revocations record, and every other certificate of its runtime with its key id, refuses all of its frames and records, whenever it was revoked: revoking a certificate revokes its key.
+- **The revocations record expires.** The installation authority signs it again with the next sequence at least every 6 hours and at once on each revocation, and each version is current for at most 24 hours (registry `max_lifetime_seconds`; its body's `expires_at`). A receiver without a current record of an installation refuses that installation's hosts, except its own installation authority (`revocations_not_current`). Hosts store the newest record they verified and never accept a lower sequence, also after a restart: a restarted host adds its stored record before any it reads from `UA1_CERTS`, so an older copy written back to the bucket is ignored. The edge adapter copies another installation's record, which that installation's authority signs again on the same schedule.
+- **Entries leave the record.** An entry may leave once the revoked certificate's own expiry plus the longest frame lifetime (30 days, a dead-letter notice's) and the clock tolerance have passed: by then nothing it signed can still be accepted. Receivers accept a newer record with fewer entries; the revocation epoch still never falls.
 - **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
 - **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued (authorization plan 12.5). A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
-- **Longest lifetime.** A record is written at its document's `issued_at`. A certificate, agent session or agreement ends no later than its record's `max_lifetime_seconds` (registry `state_records`: 90 days, 7 days and 366 days) after it is written; a later end is refused (`invalid_body` at the body's end). A record that must last longer is renewed. A rewrite is written no earlier than the version it replaces. A receiver keeps a trust record with its clock (`TrustStore.add(data, now=...)`) and refuses one dated ahead of it by more than the clock tolerance (`not_yet_valid` at `/issued_at`), so the lifetime counts from a time that has come.
+- **Longest lifetime.** A record is written at its document's `issued_at`. A certificate, agent session, agreement or revocations record ends no later than its record's `max_lifetime_seconds` (registry `state_records`: 90 days, 7 days, 366 days and a day) after it is written; a later end is refused (`invalid_body` at the body's end). A record that must last longer is renewed. A rewrite is written no earlier than the version it replaces. A receiver keeps a trust record with its clock (`TrustStore.add(data, now=...)`) and refuses one dated ahead of it by more than the clock tolerance (`not_yet_valid` at `/issued_at`), so the lifetime counts from a time that has come.
 - **Forgetting.** A receiver forgets an agent session or agreement once its newest version was written longer ago than its `max_lifetime_seconds` plus `replay_ledger_retention_seconds` and the clock tolerance (`TrustStore.forget(now)`, at least daily). A certificate is kept an agent session's `max_lifetime_seconds` and the clock tolerance longer, since a session it signed may arrive as late as the certificate's end. By then every version of the record has ended and every frame it vouched for has expired, so the store stays bounded. A forgotten record is not taken back: the store ignores a record it would forget when it holds none under that key, so an older version cannot return either.
-- **Revoked certificates are kept.** The revocations record and every certificate it lists are never forgotten, so a join or rotation that names a revoked key stays refused; the record's 2,000 entries bound them. Once a certificate that was not revoked is forgotten, its key id is no longer known, and a join or rotation that names it is judged as a new key. Writers delete a record from `UA1_CERTS` once receivers forget it, and keep revoked certificates there.
+- **Revoked certificates are kept.** The revocations record is never forgotten, nor is any certificate it lists, so a join or rotation that names a revoked key stays refused while its entry lasts; the record's 2,000 entries bound them. A certificate whose entry left the record is forgotten like any other. Once a certificate that is not revoked is forgotten, its key id is no longer known, and a join or rotation that names it is judged as a new key. Writers delete a record from `UA1_CERTS` once receivers forget it, and keep revoked certificates there.
 - **State reports outlive certificates.** Agent, placement and team-view records do not expire, but a receiver that forgot the certificate that signed one refuses it as `unknown_key`. Their writers write them again under a current certificate before an old one is forgotten, for example when a renewal's overlap ends.
 
 ## Installation traffic
@@ -697,7 +706,7 @@ Joining an installation and renewing a certificate use the address `ua.v1._insta
 
 **Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it (authorization plan 12.2). The bundle holds:
 - the installation's authority keys;
-- the certificates of the installation authority's hosts, and the installation's revocations record, so the host can check the authority's replies before it has a certificate of its own;
+- the certificates of the installation authority's hosts, so the host can check the authority's replies before it has a certificate of its own, and the installation's revocations record. The authority's replies need no current record, so a bundle older than a day still lets the host join; the host reads the current record before it accepts other hosts' frames;
 - the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`. With it the host can publish its own installation requests and read its own reply inbox, and nothing else. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
 
 **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. A receiver checks:
@@ -760,7 +769,7 @@ Hosts, agents, placements and the team view are key-value records, not messages.
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
 
 The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), its body schema and, for trust records that end, how long after it is written a record may end (`max_lifetime_seconds`, "Trust over time"). The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
-- **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
+- **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. The reader holds a current revocations record of the writer's installation, unless the writer is its own installation authority (`revocations_not_current`). Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
 - **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current.
 - **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
@@ -768,7 +777,7 @@ The registry's `state_records` section names each record's bucket, key form, sig
 A reader refuses a state report with the first failing check, in the registry's order:
 1. `too_large`, `malformed` (the document's form, and a record of another type than the one read: `TrustStore.verify` takes the record type its bucket holds);
 2. `wrong_issuer` when the writer's type is not the record's signer (it decides where the key comes from), then `unknown_key`;
-3. `bad_signature`, `bad_digest`, `revoked`, `epoch_too_old`;
+3. `bad_signature`, `bad_digest`, `revoked`, `revocations_not_current`, `epoch_too_old`;
 4. `wrong_issuer` for the writer's roles or installation, then `wrong_team` for the record's team, read from the key or the body as received;
 5. `expired`, `not_yet_valid`, `replayed`;
 6. `invalid_body`: the body schema, then the record's dates (its expiry, its bucket's lifetime, a trust record's single validity window and its longest lifetime), then its key and body rules.

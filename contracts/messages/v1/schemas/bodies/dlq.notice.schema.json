@@ -19,6 +19,7 @@
         "bad_signature",
         "bad_digest",
         "revoked",
+        "revocations_not_current",
         "epoch_too_old",
         "wrong_issuer",
         "wrong_sender",

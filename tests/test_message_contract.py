@@ -1652,16 +1652,75 @@ def test_a_session_signed_by_a_host_without_team_services_is_refused() -> None:
     assert (refused.value.code, refused.value.at) == ("wrong_issuer", "/writer")
 
 
-def test_an_older_record_never_replaces_a_newer_one_and_revocations_only_grow() -> None:
+def test_a_newer_revocations_record_may_list_fewer_entries_and_an_older_one_never_returns() -> None:
+    """README, "Trust over time": an entry leaves once its certificate can sign nothing; the epoch never falls."""
+
     store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"])
-    assert store.revoked("install_example", "cert_lead_host_1")
+    lead = store.host_certificate("install_example", "lead-host-1", 3)
+    assert lead is not None and store.revoked(lead)
     assert store.add((EXAMPLES / "trust" / "revocations" / "install_example.json").read_bytes(), now=fixtures.NOW) is False
-    assert store.revoked("install_example", "cert_lead_host_1")
-    shrunk = json.loads((EXAMPLES / "trust" / "revocations" / "install_example.json").read_text())
-    shrunk["sequence"] = 9
+    assert store.revoked(lead)
+    pruned = json.loads((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_text())
+    pruned["sequence"] = 9
+    pruned["body"]["entries"] = pruned["body"]["entries"][:1]
+    assert store.add(signed_state(pruned), now=fixtures.NOW) is True
+    assert not store.revoked(lead)
+    lower = copy.deepcopy(pruned)
+    lower["sequence"], lower["body"]["revocation_epoch"] = 10, 1
     with pytest.raises(FrameRefused) as refused:
-        store.add(json.dumps(sign_state(shrunk, fixtures.private_key("test-authority-key-1"))).encode(), now=fixtures.NOW)
-    assert refused.value.code == "invalid_body"
+        store.add(signed_state(lower), now=fixtures.NOW)
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/revocation_epoch")
+
+
+def test_a_restarted_host_adds_its_stored_record_first_so_an_older_copy_is_ignored() -> None:
+    stored = (EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_bytes()
+    restarted = fixtures.trust_store(remove=["revocations/install_example.json"], extra_documents=[stored])
+    assert restarted.add((EXAMPLES / "trust" / "revocations" / "install_example.json").read_bytes(), now=fixtures.NOW) is False
+    lead = restarted.host_certificate("install_example", "lead-host-1", 3)
+    assert lead is not None and restarted.revoked(lead)
+
+
+def test_revoking_a_certificate_revokes_every_certificate_of_its_runtime_with_its_key() -> None:
+    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"],
+                                 extra_documents=[renewed_lead_certificate(key_id="test-lead-key-1")])
+    renewed = store.host_certificate("install_example", "lead-host-1", 4)
+    assert renewed is not None and renewed.certificate_id != "cert_lead_host_1" and store.revoked(renewed)
+    assert store.key_revoked("install_example", "lead-host-1", "test-lead-key-1")
+    assert not store.key_revoked("install_example", "lead-host-2", "test-lead-key-1")
+    rotated = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"],
+                                   extra_documents=[renewed_lead_certificate(key_id="test-lead-key-2")])
+    assert not rotated.revoked(rotated.host_certificate("install_example", "lead-host-1", 4))
+
+
+def test_a_receiver_without_a_current_revocations_record_refuses_every_host_but_its_authority() -> None:
+    frame = signed_example()
+    data = json.dumps(frame).encode()
+    store = fixtures.trust_store(remove=["revocations/install_example.json"])
+    refused = refusal(data, frame, trust=store)
+    assert (refused.code, refused.at) == ("revocations_not_current", "/issuer/installation")
+    # The authority still answers, so a host whose record expired can renew and read a current one.
+    reply = fixtures.example_frame("host.renew.reply", "ok")
+    fixtures.verify(json.dumps(reply).encode(), reply, trust=store)
+    token = fixtures.example_frame("access.resolved", "full")["authority"]
+    with pytest.raises(FrameRefused) as refused_token:
+        wire_frame.verify_authority_token(models.AuthorityToken.model_validate(token), token, store,
+                                          valid_at=fixtures.NOW, now=fixtures.NOW)
+    assert (refused_token.value.code, refused_token.value.at) == ("bad_authority", "/authority/issuer")
+    # Only an expired record is as good as none, within the clock tolerance.
+    ends = parse_timestamp(json.loads((EXAMPLES / "trust" / "revocations" / "install_example.json").read_text())
+                           ["body"]["expires_at"])
+    fixtures.verify(data, frame, {"now": format_timestamp(ends + SKEW - timedelta(milliseconds=1))})
+    assert refusal(data, frame, {"now": format_timestamp(ends + SKEW)}).code == "revocations_not_current"
+    fixtures.verify(data, frame, trust=fixtures.trust_store(now=ends + SKEW,
+                                                            extra_documents=[fixtures.current_revocations(ends + SKEW)]),
+                    context={"now": format_timestamp(ends + SKEW)})
+
+
+def test_the_revocations_record_is_never_forgotten() -> None:
+    store = fixtures.trust_store()
+    store.forget(forgotten_from("certificate") + timedelta(days=4000))
+    assert store.held()["revocations"] == 2
+    assert store.add((EXAMPLES / "trust" / "revocations" / "install_example.json").read_bytes(), now=fixtures.NOW) is False
 
 
 def test_a_record_sequence_reused_for_other_content_is_refused() -> None:
@@ -1717,7 +1776,10 @@ def test_a_host_that_joins_later_is_trusted_once_its_certificate_arrives() -> No
 # Trust records that end: the example record and the body field that says when.
 ENDING_RECORDS = {"certificate": ("certificates/lead-host-1.json", "expires_at"),
                   "agent_session": ("sessions/lead.json", "ends_at"),
-                  "agreement": ("agreements/install_peer.json", "expires_at")}
+                  "agreement": ("agreements/install_peer.json", "expires_at"),
+                  "revocations": ("revocations/install_example.json", "expires_at")}
+# Those a receiver forgets once nothing can still need them; never the revocations record.
+FORGOTTEN_RECORDS = sorted(set(ENDING_RECORDS) - {"revocations"})
 RETENTION = timedelta(seconds=kinds.REPLAY_LEDGER_RETENTION_SECONDS)
 
 
@@ -1760,11 +1822,11 @@ def test_a_trust_record_ends_within_its_longest_lifetime(record: str) -> None:
     assert (refused.value.code, refused.value.at) == ("invalid_body", f"/body/{ENDING_RECORDS[record][1]}")
 
 
-@pytest.mark.parametrize("record", sorted(ENDING_RECORDS))
+@pytest.mark.parametrize("record", FORGOTTEN_RECORDS)
 def test_a_trust_record_is_forgotten_when_nothing_can_still_need_it_and_does_not_come_back(record: str) -> None:
     store = fixtures.trust_store()
     held = store.held()
-    assert held == {"agreement": 1, "certificate": 8, "revocations": 1, "agent_session": 3}
+    assert held == {"agreement": 1, "certificate": 8, "revocations": 2, "agent_session": 3}
     store.forget(forgotten_from(record) - timedelta(milliseconds=1))
     assert store.held().get(record, 0) >= 1
     lookups = {"certificate": lambda: store.host_certificate("install_example", "lead-host-1", 3),
@@ -1776,7 +1838,7 @@ def test_a_trust_record_is_forgotten_when_nothing_can_still_need_it_and_does_not
     # The record, and any version of it written no later, is ignored from now on.
     assert store.add((EXAMPLES / "trust" / ENDING_RECORDS[record][0]).read_bytes(), now=fixtures.NOW) is False
     assert lookups[record]() is None
-    assert store.held()["revocations"] == 1
+    assert store.held()["revocations"] == 2
 
 
 def test_forgetting_needs_a_newer_version_to_be_forgotten_too() -> None:
@@ -1956,8 +2018,14 @@ def test_the_clock_tolerance_applies_at_both_ends_of_the_lifetime(kind: str) -> 
     def at(moment):
         return {"now": wire_frame.format_timestamp(moment)}
 
-    fixtures.verify(data, frame, at(issued_at + limit + SKEW - millisecond))
-    assert refusal(data, frame, at(issued_at + limit + SKEW)).code == "expired"
+    def current(moment):
+        """The receiver at ``moment`` holds a revocations record current then (README, "Trust over time")."""
+
+        return fixtures.trust_store(now=moment, extra_documents=[fixtures.current_revocations(moment)])
+
+    late = issued_at + limit + SKEW
+    fixtures.verify(data, frame, at(late - millisecond), trust=current(late - millisecond))
+    assert refusal(data, frame, at(late), trust=current(late)).code == "expired"
     fixtures.verify(data, frame, at(issued_at - SKEW))
     assert refusal(data, frame, at(issued_at - SKEW - millisecond)).code == "not_yet_valid"
 
@@ -1972,9 +2040,10 @@ def test_the_senders_own_expiry_counts_before_the_kinds_lifetime() -> None:
 
 
 def test_timestamp_extremes_do_not_overflow_lifetime_checks() -> None:
+    latest = parse_timestamp("9999-12-31T23:59:59.999Z")
     store = fixtures.trust_store(extra_documents=[certificate_record(
-        "far-host", roles=("lead_host",), issued_at="9999-10-02T23:59:59.999Z", expires_at="9999-12-31T23:59:59.999Z")],
-        now=parse_timestamp("9999-12-31T23:59:59.999Z"))
+        "far-host", roles=("lead_host",), issued_at="9999-10-02T23:59:59.999Z", expires_at="9999-12-31T23:59:59.999Z"),
+        fixtures.current_revocations(latest)], now=latest)
     frame = signed_example()
     frame["issuer"] = {"installation": "install_example", "team": "team_example", "runtime": "far-host", "membership_epoch": 1,
                        "revocation_epoch": 1, "key_id": "test-worker-key-1"}

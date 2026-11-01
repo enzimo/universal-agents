@@ -361,19 +361,23 @@ def _verify_signature(raw: Mapping[str, Any], frame: Frame, public_key: Ed25519P
         raise FrameRefused("bad_signature", at="/signature") from error
 
 
-def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore) -> None:
+def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore, now: datetime) -> None:
     """A join speaks for its own new host only (README, "Installation traffic").
 
-    Its known key must not be revoked. It names the installation scope, no agent, epoch
-    zero and an unreserved runtime id; its body asks for that runtime in that
-    installation, and only for roles a joining host may hold (the kind's senders, which
-    the receiver cannot check against a certificate the host does not have yet).
+    Its key must not be revoked, and the receiver needs a current revocations record to
+    know that. It names the installation scope, no agent, epoch zero and an unreserved
+    runtime id; its body asks for that runtime in that installation, and only for roles a
+    joining host may hold (the kind's senders, which the receiver cannot check against a
+    certificate the host does not have yet).
     """
 
     issuer = frame.issuer
-    if any(trust.revoked(certificate.installation, certificate.certificate_id)
-           for certificate in trust.certificates_with_key(issuer.installation, issuer.key_id)):
+    if trust.key_revoked(issuer.installation, issuer.runtime, issuer.key_id) or any(
+            trust.revoked(certificate) for certificate in trust.certificates_with_key(issuer.installation, issuer.key_id)):
         raise FrameRefused("revoked", "the presented key's certificate is revoked", at="/issuer/key_id")
+    if not trust.revocations_current(issuer.installation, now):
+        raise FrameRefused("revocations_not_current", "no current revocations record of this installation",
+                           at="/issuer/installation")
     if issuer.team != INSTALLATION_SCOPE:
         raise FrameRefused("wrong_issuer", "a join names the installation scope", at="/issuer/team")
     if issuer.agent is not MISSING or issuer.session is not MISSING:
@@ -404,13 +408,20 @@ def _session(frame: Frame, trust: TrustStore) -> Optional[AgentSession]:
     return trust.agent_session(frame.issuer.installation, frame.issuer.team, frame.issuer.session)
 
 
-def _verify_revocation(certificate: HostCertificate, session: Optional[AgentSession], trust: TrustStore) -> None:
-    # A revoked certificate stops every frame not yet admitted, whatever issue time
-    # the frame gives: the sender chooses that time.
-    if trust.revoked(certificate.installation, certificate.certificate_id):
+def _verify_revocation(certificate: HostCertificate, session: Optional[AgentSession], trust: TrustStore,
+                       now: datetime) -> None:
+    """Neither certificate is revoked, and the receiver's revocations record of the issuer's installation is current.
+
+    A revoked certificate, or key, stops every frame not yet admitted, whatever issue
+    time the frame gives: the sender chooses that time. The session's signer belongs to
+    the issuer's installation, so one current record covers both.
+    """
+
+    if trust.revoked(certificate):
         raise FrameRefused("revoked", "the issuer's certificate is revoked", at="/issuer/key_id")
-    if session is not None and trust.revoked(session.signer.installation, session.signer.certificate_id):
+    if session is not None and trust.revoked(session.signer):
         raise FrameRefused("revoked", "the certificate that signed the agent session is revoked", at="/issuer/session")
+    trust.require_current_revocations(certificate, now, at="/issuer/installation")
 
 
 def _verify_epochs(certificate: HostCertificate, spec: Optional[KindSpec], trust: TrustStore) -> None:
@@ -699,7 +710,7 @@ def verify_authority_token(token: AuthorityToken, fields: Mapping[str, Any], tru
     """
 
     signed = _SignedToken(at, fields, authority_signing_bytes(fields))
-    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, token.audience.team, "a gateway or scheduler")
+    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, token.audience.team, "a gateway or scheduler", now)
     if token.schedule_id is not MISSING and SCHEDULE_ISSUER_ROLE not in certificate.roles:
         raise FrameRefused("bad_authority", "only a scheduler names the schedule a run belongs to", at=at + "/schedule_id")
     if token.person is MISSING and token.schedule_id is MISSING:
@@ -728,14 +739,18 @@ class _SignedToken:
 
 
 def _token_certificate(token: _SignedToken, trust: TrustStore, roles: frozenset[str], team: str,
-                       signers: str) -> HostCertificate:
-    """The unrevoked certificate, valid when the token was issued, of a host in one of ``roles`` serving ``team``."""
+                       signers: str, now: datetime) -> HostCertificate:
+    """The unrevoked certificate, valid when the token was issued, of a host in one of ``roles`` serving ``team``.
+
+    The receiver needs a current revocations record of its installation to know it is unrevoked.
+    """
 
     issuer = token.fields["issuer"]
     certificate = trust.host_certificate(issuer["installation"], issuer["runtime"], issuer["membership_epoch"])
     if (certificate is None or certificate.key_id != issuer["key_id"] or not certificate.valid_at(token.issued_at)
-            or trust.revoked(certificate.installation, certificate.certificate_id)):
-        raise FrameRefused("bad_authority", "no unrevoked certificate for the token's issuer", at=token.at + "/issuer")
+            or trust.revoked(certificate) or not trust.revocations_current(certificate.installation, now)):
+        raise FrameRefused("bad_authority", "no certificate known to be unrevoked for the token's issuer",
+                           at=token.at + "/issuer")
     if not certificate.roles & roles or team not in certificate.teams:
         raise FrameRefused("bad_authority", f"only {signers} of the team signs this token", at=token.at + "/issuer")
     return certificate
@@ -931,10 +946,10 @@ def verify_frame(
         raise FrameRefused("bad_digest", at="/body_digest")
     if certificate is None:
         assert spec is not None  # only a known kind proves possession
-        _verify_join(raw, frame, spec, trust)
+        _verify_join(raw, frame, spec, trust, now)
     else:
         session = _session(frame, trust)
-        _verify_revocation(certificate, session, trust)
+        _verify_revocation(certificate, session, trust, now)
         _verify_epochs(certificate, spec, trust)
         _verify_issuer(frame, spec, certificate, session, issued_at, is_reply, answering)
         if not is_reply:
