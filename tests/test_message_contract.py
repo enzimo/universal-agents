@@ -432,9 +432,10 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
 
     folder = CONTRACT / "generated" / "permissions"
     assert "team_grants" not in TRANSPORT
-    grants = consumer_grants()
+    management = EXPORT.stream_management_grants(TRANSPORT)
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
+        grants = consumer_grants() | management.get(role, set())
         for subject in document["publish"]:
             if subject.startswith("$JS."):
                 assert subject in grants, (role, subject)
@@ -507,6 +508,29 @@ def test_the_readme_states_what_each_hosted_agent_and_pool_adds_to_a_credential(
     assert f"about {-(-agent * 4 // 3):,} bytes" in readme
 
 
+def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_withdraw_queued_work() -> None:
+    """README, "Who sets up the streams" and "Withdrawing queued work"."""
+
+    assert (TRANSPORT["topology_owner"], TRANSPORT["withdrawal"]["role"]) == ("installation_authority", "team_services")
+    for role in REGISTRY["host_roles"]:
+        publish = role_permissions(role)["publish"]
+        creates = {subject for subject in publish if ".CREATE." in subject or ".UPDATE." in subject or ".DELETE." in subject}
+        deletes = {subject for subject in creates if ".MSG.DELETE." in subject}
+        if role == "installation_authority":
+            assert "$JS.API.STREAM.CREATE.UA1_AGENT_WORK_{team}" in publish and not deletes
+            assert "$JS.API.CONSUMER.CREATE.UA1_AGENT_WORK_{team}.*.>" in publish
+        elif role == "team_services":
+            assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_WORK"}
+        else:
+            assert not creates, role
+    for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
+                            (lambda t: t["withdrawal"].update(streams=["UA1_DLQ"]), "only from the durable class's streams")):
+        transport = copy.deepcopy(TRANSPORT)
+        change(transport)
+        with pytest.raises(EXPORT.ContractError, match=problem):
+            EXPORT.check_stream_management(EXPORT.load_yaml("registry.yaml"), transport)
+
+
 def test_outside_agents_cannot_publish_into_worker_pools() -> None:
     edge = json.loads((CONTRACT / "generated" / "permissions" / "edge_adapter.json").read_text(encoding="utf-8"))
     assert "ua.v1.{team}.{self}.work.pool.*" not in edge["publish"]
@@ -518,7 +542,7 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
 
     services = json.loads((CONTRACT / "generated" / "permissions" / "team_services.json").read_text(encoding="utf-8"))
     consumers = {subject.split(".")[-1] if not subject.startswith("$JS.ACK.") else subject.split(".")[3]
-                 for subject in services["publish"] if subject.startswith("$JS.")}
+                 for subject in services["publish"] if subject.startswith(("$JS.API.CONSUMER.", "$JS.ACK."))}
     assert consumers == {TRANSPORT["consumers"]["team_services"]["name"]}
 
 

@@ -127,11 +127,12 @@ COVERED_ONLY_REFUSALS = {"change_conflict", "needs_person_decision", "record_bus
 PER_FRAME_PARTS = {"/message_id", "/idempotency_key", "/issued_at", "/not_before", "/expires_at", "/body_digest",
                    "/signature"}
 # The NATS headers a sender may set (README, "NATS headers"), each with the longest value it
-# holds: the idempotency key and the kind (their schemas' maxLength), the message id (a
-# UUID's 36 characters), and W3C Trace Context's traceparent (always 55 characters) and
-# tracestate (senders keep it within the 512 characters W3C asks every system to pass on).
-HEADER_VALUES = {"Nats-Msg-Id": ("idempotency_key", None), "UA-Kind": ("kind", None), "UA-Id": (None, 36),
-                 "traceparent": (None, 55), "tracestate": (None, 512)}
+# holds: the idempotency key and the kind (the common schema definition whose maxLength
+# bounds them), the message id (a UUID's 36 characters), and W3C Trace Context's traceparent
+# (always 55 characters) and tracestate (senders keep it within the 512 characters W3C asks
+# every system to pass on).
+HEADER_VALUES: dict[str, str | int] = {"Nats-Msg-Id": "idempotency_key", "UA-Kind": "kind", "UA-Id": 36,
+                                       "traceparent": 55, "tracestate": 512}
 # NATS's header block: a version line, one "Name: value" line per header, and an empty line.
 NATS_HEADER_VERSION, NATS_LINE_END = "NATS/1.0\r\n", "\r\n"
 STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "max_lifetime_seconds",
@@ -1070,7 +1071,7 @@ def largest_header_block(schemas: dict[str, dict[str, Any]]) -> int:
     """Bytes of the largest NATS header block a sender may set (HEADER_VALUES)."""
 
     common = schemas["common.schema.json"]["$defs"]
-    sizes = {name: common[definition]["maxLength"] if definition else size for name, (definition, size) in HEADER_VALUES.items()}
+    sizes = {name: value if isinstance(value, int) else int(common[value]["maxLength"]) for name, value in HEADER_VALUES.items()}
     return len(NATS_HEADER_VERSION) + sum(len(f"{name}: {NATS_LINE_END}") + size for name, size in sizes.items()) \
         + len(NATS_LINE_END)
 
@@ -1088,6 +1089,18 @@ def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, 
     for name, stream in transport["streams"].items():
         if stream.get("max_message_bytes") != message:
             raise ContractError(f"transport.yaml: stream {name}'s max_message_bytes is max_frame_bytes plus max_header_bytes")
+
+
+def check_stream_management(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """The topology owner and the withdrawal role are host roles; withdrawal deletes only from durable work streams."""
+
+    withdrawal = transport.get("withdrawal")
+    if transport.get("topology_owner") not in registry["host_roles"] or not isinstance(withdrawal, dict) \
+            or set(withdrawal) != {"role", "streams"} or withdrawal["role"] not in registry["host_roles"]:
+        raise ContractError("transport.yaml: topology_owner and withdrawal.role name host roles")
+    work = set(transport["classes"]["durable"]["streams"])
+    if not withdrawal["streams"] or not set(withdrawal["streams"]) <= work:
+        raise ContractError("transport.yaml: withdrawal deletes queued work only from the durable class's streams")
 
 
 def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
@@ -1250,6 +1263,30 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     return subjects
 
 
+def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
+    """The JetStream API subjects of the topology owner and of the role that withdraws queued work.
+
+    The topology owner creates, updates and inspects every stream, and creates, inspects
+    and deletes every consumer of them. Consumer names are a wildcard for it: it serves
+    every agent, pool and edge, and membership code fills {team} with every team of the
+    installation. The withdrawal role deletes a message by its stream sequence; NATS
+    cannot narrow that to some subjects of a stream.
+    """
+
+    owner: set[str] = set()
+    for stream in transport["streams"]:
+        owner |= {f"$JS.API.STREAM.{action}.{stream}" for action in ("CREATE", "UPDATE", "INFO")}
+    for stream in {consumer["stream"] for consumer in transport["consumers"].values()}:
+        owner |= {f"$JS.API.CONSUMER.CREATE.{stream}.*", f"$JS.API.CONSUMER.CREATE.{stream}.*.>",
+                  f"$JS.API.CONSUMER.DURABLE.CREATE.{stream}.*", f"$JS.API.CONSUMER.INFO.{stream}.*",
+                  f"$JS.API.CONSUMER.DELETE.{stream}.*"}
+    grants = {transport["topology_owner"]: owner}
+    withdrawal = transport["withdrawal"]
+    grants.setdefault(withdrawal["role"], set()).update(
+        f"$JS.API.STREAM.MSG.DELETE.{stream}" for stream in withdrawal["streams"])
+    return grants
+
+
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: the NATS permissions it gets, as templates.
 
@@ -1263,9 +1300,10 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
     """
 
     reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
+    management = stream_management_grants(transport)
     result = {}
     for role in registry["host_roles"]:
-        publish: set[str] = set()
+        publish: set[str] = set(management.get(role, set()))
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
@@ -1675,6 +1713,7 @@ def render() -> dict[Path, str]:
     check_message_sizes(transport, schemas)
     check_consumer_names(transport)
     check_registry(registry, transport, topologies, schemas)
+    check_stream_management(registry, transport)
     files: dict[Path, str] = {
         GENERATED / "registry.json": json_text(registry),
         GENERATED / "transport.json": json_text(transport),

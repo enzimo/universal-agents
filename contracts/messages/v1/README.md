@@ -524,10 +524,26 @@ that limit from the largest number of agent sessions a host certificate allows.
 Before installing permissions, trusted membership code fills `{team}` with each team the
 host serves, `{self}` with its runtime id, and repeats each subject for every `{agent}` and
 `{pool}` the host runs and every `{edge}` it serves; these placeholders never become
-wildcards. Clients use `_INBOX.<runtime>` as their inbox prefix. Hosts cannot create or
-delete consumers or streams, read streams directly, or reach another host's, another
-team's or another role's consumers. The topology owner creates a team's stream with the
-team. The live conformance tests prove both allowed and refused operations.
+wildcards. Clients use `_INBOX.<runtime>` as their inbox prefix. Hosts cannot read streams
+directly or reach another host's, another team's or another role's consumers, and only the
+two roles below create, change or delete JetStream objects or messages. The live
+conformance tests prove both allowed and refused operations.
+
+**Who sets up the streams.** The topology owner (`topology_owner` in `transport.yaml`) is
+the installation authority. It already decides which hosts serve which teams, agents and
+pools, since it issues their certificates and credentials, so it knows when a team, agent
+or pool appears or leaves, and it runs no model. It creates a team's stream with the team,
+and each agent's or pool's consumer with the agent or pool. Its generated grants create,
+update and inspect every stream, and create, inspect and delete every consumer of them:
+consumer names are a wildcard for it, and membership code fills `{team}` with every team of
+the installation.
+
+**Withdrawing queued work.** The team services withdraw a queued message by deleting it by
+its stream sequence, in `UA1_AGENT_WORK_<team>` and `UA1_WORK` (`withdrawal` in
+`transport.yaml`); no other role may. NATS cannot narrow such a delete to some subjects of a
+stream, so the grant reaches every message of the shared `UA1_WORK`, other teams' included.
+The team services delete only what their custody record says the work stream holds for
+their team; they still cannot read another team's messages.
 
 `transport.yaml` states the broker settings too: the minimum NATS version and the
 server-wide JetStream settings under `server`, then each stream and consumer. A delivery
@@ -684,6 +700,9 @@ file. It uses public fixture signing keys and no operator credentials.
     reply from its bootstrap records;
   - dead-letter raw copies and notices stored under the receiver's own id;
   - separate consumers for ids that an `_` separator would have merged;
+  - the topology owner creating, changing and deleting streams and consumers with its own
+    grants, and the team services withdrawing a queued message by its sequence;
+  - a full-size frame stored with the largest headers senders may set;
   - refusals of: an outside agent's adapter publishing into a worker pool; fetches and
     acknowledgements on another host's agent consumer, another team's stream or the team
     services' consumer; consumer creation and deletion; stream reads; publishing under

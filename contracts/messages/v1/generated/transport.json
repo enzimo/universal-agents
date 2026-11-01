@@ -195,5 +195,13 @@
       ]
     }
   },
-  "subject_prefix": "ua.v1.{team}.{sender}"
+  "subject_prefix": "ua.v1.{team}.{sender}",
+  "topology_owner": "installation_authority",
+  "withdrawal": {
+    "role": "team_services",
+    "streams": [
+      "UA1_AGENT_WORK_{team}",
+      "UA1_WORK"
+    ]
+  }
 }

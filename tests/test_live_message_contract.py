@@ -356,6 +356,30 @@ async def test_workers_cannot_manage_streams_speak_for_others_or_read_others_tra
 
 
 @pytest.mark.asyncio
+async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw_queued_work(isolated_broker) -> None:
+    """README, "Who sets up the streams" and "Withdrawing queued work", with each role's generated grants."""
+
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        services = await connect(stack, isolated_broker, "services")
+        lead = await connect(stack, isolated_broker, "lead")
+        worker = await connect(stack, isolated_broker, "worker")
+        await create_topology(authority, ["researcher-2"])
+        owner = authority.nc.jetstream()
+        await owner.update_stream(config=stream_config("UA1_WORK"))
+        await owner.add_consumer(AGENT_STREAM, config=consumer_config("pool", pool="researcher"))
+        frame = fixtures.example_frame("task.stop")
+        queued = await lead.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
+        await worker.publish_refused(f"$JS.API.STREAM.MSG.DELETE.{AGENT_STREAM}", json.dumps({"seq": queued.seq}).encode())
+        await lead.publish_refused(f"$JS.API.STREAM.CREATE.{AGENT_STREAM}")
+        assert await services.nc.jetstream().delete_msg(AGENT_STREAM, queued.seq)
+        inbox = consumer_name("agent_inbox", agent="researcher-2")
+        assert (await owner.consumer_info(AGENT_STREAM, inbox)).num_pending == 0
+        assert await owner.delete_consumer(AGENT_STREAM, consumer_name("pool", pool="researcher"))
+        assert authority.errors.empty() and services.errors.empty() and lead.errors.empty() and worker.errors.empty()
+
+
+@pytest.mark.asyncio
 async def test_a_host_may_hear_its_teams_agents_and_answers_each_request_once(isolated_broker) -> None:
     async with AsyncExitStack() as stack:
         lead = await connect(stack, isolated_broker, "lead")

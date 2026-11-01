@@ -158,6 +158,15 @@ consumers:
     ack_wait_seconds: 60
     max_deliveries: 20
 
+# Who manages the JetStream objects above (README, "Who sets up the streams"). The
+# topology owner creates and updates every stream and consumer: the installation authority,
+# which already decides which hosts serve which teams, agents and pools. The withdrawal role
+# withdraws queued work by deleting a message by its stream sequence; no other role may.
+topology_owner: installation_authority
+withdrawal:
+  role: team_services
+  streams: ["UA1_AGENT_WORK_{team}", UA1_WORK]
+
 key_value:
   UA1_CERTS:
     description: host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket
