@@ -179,6 +179,21 @@ def test_generated_files_are_current() -> None:
     assert EXPORT.stale(EXPORT.render()) == []
 
 
+def test_the_compatibility_record_names_the_contract_by_its_digest() -> None:
+    """README, "Versions": the SHA-256 of every source path and its bytes, in path order; peers compare it while -pre."""
+
+    digest = hashlib.sha256()
+    sources = sorted((path for path in CONTRACT.rglob("*") if path.is_file() and "generated" not in path.relative_to(CONTRACT).parts),
+                     key=lambda path: path.relative_to(CONTRACT).as_posix().encode("utf-8"))
+    assert CONTRACT / "README.md" in sources and CONTRACT / "registry.yaml" in sources
+    for path in sources:
+        data = path.read_bytes()
+        digest.update(path.relative_to(CONTRACT).as_posix().encode("utf-8") + b"\0" + str(len(data)).encode() + b"\0" + data)
+    record = json.loads((CONTRACT / "generated" / "compatibility.json").read_text(encoding="utf-8"))
+    assert record["contract_sha256"] == digest.hexdigest()
+    assert record["protocol"].endswith("-pre") and "-pre" in record["accepts"]["contract_sha256"]
+
+
 def test_export_refuses_a_retry_key_based_on_an_optional_field() -> None:
     registry = deepcopy(REGISTRY)
     registry["kinds"]["tasks.steer"]["idempotency"] = ["/body/replied_message/author"]

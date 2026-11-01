@@ -6,8 +6,8 @@ transport.yaml, team-topologies.yaml and schemas/. This script validates them an
 writes:
 
 - contracts/messages/v1/generated/: JSON copies of the YAML files, per-role NATS
-  permissions, the AsyncAPI 3.1 document, the compatibility record and a digest
-  manifest of every source and generated file;
+  permissions, the AsyncAPI 3.1 document, the compatibility record (with the digest
+  of the contract's sources) and a digest manifest of every source and generated file;
 - custom_messages/wire/models.py: Pydantic models for the shared values, the
   frame and every body;
 - custom_messages/wire/kinds.py: the registry as Python constants, each kind's
@@ -1415,13 +1415,34 @@ def address_operations(key: str, entry: dict[str, Any], address: str, channel_id
     return operations
 
 
-def compatibility(registry: dict[str, Any]) -> dict[str, Any]:
+def contract_sha256(files: dict[Path, str]) -> str:
+    """The digest of the contract's sources (README, "Versions"): every file under the contract folder but generated/.
+
+    In order of their paths relative to the folder, compared as UTF-8 bytes, it hashes
+    each path in UTF-8, a zero byte, the file's size in decimal digits, a zero byte and
+    the file's bytes. Examples and vectors count as this run renders them, so the digest
+    never depends on a stale signature.
+    """
+
+    paths = {path for path in CONTRACT.rglob("*") if path.is_file() and GENERATED not in path.parents}
+    paths |= {path for path in files if CONTRACT in path.parents and GENERATED not in path.parents}
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(CONTRACT).as_posix().encode("utf-8")):
+        data = files[path].encode("utf-8") if path in files else path.read_bytes()
+        digest.update(path.relative_to(CONTRACT).as_posix().encode("utf-8") + b"\0" + str(len(data)).encode("ascii")
+                      + b"\0" + data)
+    return digest.hexdigest()
+
+
+def compatibility(registry: dict[str, Any], digest: str) -> dict[str, Any]:
     label = registry["protocol"]
     major, rest = label.split(".", 1)
     return {
         "protocol": label,
+        "contract_sha256": digest,
         "accepts": {"major": int(major), "label": rest.split("-", 1)[1] if "-" in rest else None,
-                    "minors": "any; a newer minor's unknown optional fields are ignored"},
+                    "minors": "any; a newer minor's unknown optional fields are ignored",
+                    "contract_sha256": "the same, while the label ends in -pre"},
         "signing_domain": registry["signing_domain"],
         "state_signing_domain": registry["state_signing_domain"],
         "authority_token_domain": registry["authority_token_domain"],
@@ -1719,14 +1740,14 @@ def render() -> dict[Path, str]:
         GENERATED / "transport.json": json_text(transport),
         GENERATED / "team-topologies.json": json_text(topologies),
         GENERATED / "asyncapi.json": json_text(asyncapi(registry, transport)),
-        GENERATED / "compatibility.json": json_text(compatibility(registry)),
     }
     for role, document in permissions(registry, transport).items():
         files[GENERATED / "permissions" / f"{role}.json"] = json_text(document)
     files.update(render_python(registry, schemas, transport, topologies))
     # Examples are sources whose digests and signatures this run fills in; the
-    # manifest records them as rendered.
+    # contract digest and the manifest record them as rendered.
     files.update(render_examples(registry))
+    files[GENERATED / "compatibility.json"] = json_text(compatibility(registry, contract_sha256(files)))
     sources = sorted(path for path in CONTRACT.rglob("*") if path.is_file() and GENERATED not in path.parents)
     entries = {path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
     entries.update({path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(text.encode("utf-8")).hexdigest()
