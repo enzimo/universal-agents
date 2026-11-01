@@ -7,7 +7,9 @@ import os
 import stat
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, current_thread
 
 import pytest
 
@@ -97,11 +99,13 @@ def test_an_existing_file_is_replaced_keeping_its_mode(root: Path) -> None:
     script = root / "docs" / "run.sh"
     script.write_text("old", encoding="utf-8")
     script.chmod(0o755)
+    previous = script.stat()
 
     safe_open.write_bytes(root, ("docs", "run.sh"), b"new")
 
     assert script.read_bytes() == b"new"
     assert stat.S_IMODE(script.stat().st_mode) == 0o755
+    assert (script.stat().st_uid, script.stat().st_gid) == (previous.st_uid, previous.st_gid)
 
 
 def test_a_reader_sees_the_old_content_until_the_new_content_is_complete(root: Path) -> None:
@@ -113,6 +117,62 @@ def test_a_reader_sees_the_old_content_until_the_new_content_is_complete(root: P
         writer.write(b" and second half")
 
     assert safe_open.read_bytes(root, ("docs", "note.txt")) == b"new content, first half and second half"
+
+
+@pytest.mark.parametrize("copy", [False, True], ids=["read", "copy"])
+def test_a_reader_opened_before_replacement_can_finish(root, tmp_path, monkeypatch, copy):
+    opened, replaced = Event(), Event()
+    original_open = os.open
+    links = []
+
+    def delayed_open(name, flags, *args, **kwargs):
+        descriptor = original_open(name, flags, *args, **kwargs)
+        if current_thread().name.startswith("old-reader") and name == "note.txt":
+            opened.set()
+            assert replaced.wait(5)
+            links.append(os.fstat(descriptor).st_nlink)
+        return descriptor
+
+    def read():
+        if copy:
+            destination = tmp_path / "copied.txt"
+            assert safe_open.copy_file(root, ("docs", "note.txt"), destination) == 5
+            return destination.read_bytes()
+        return safe_open.read_bytes(root, ("docs", "note.txt"))
+
+    monkeypatch.setattr(safe_open.os, "open", delayed_open)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="old-reader") as pool:
+        reading = pool.submit(read)
+        try:
+            assert opened.wait(5)
+            safe_open.write_bytes(root, ("docs", "note.txt"), b"new complete")
+        finally:
+            replaced.set()
+        assert reading.result(timeout=5) == b"hello"
+    assert links == [0]
+    assert safe_open.read_bytes(root, ("docs", "note.txt")) == b"new complete"
+
+
+def test_replacement_aborts_when_owner_cannot_be_kept(root, monkeypatch, caplog):
+    original = root / "docs" / "note.txt"
+    before = original.stat()
+    replaceable = safe_open._replaceable
+
+    def foreign_owner(*args):
+        fields = list(replaceable(*args))
+        fields[4] = before.st_uid + 1
+        return os.stat_result(fields)
+
+    def refused(*args):
+        raise PermissionError(errno.EPERM, "injected ownership denial")
+
+    monkeypatch.setattr(safe_open, "_replaceable", foreign_owner)
+    monkeypatch.setattr(safe_open.os, "fchown", refused)
+    assert _reason(lambda: safe_open.write_bytes(root, ("docs", "note.txt"), b"replacement")) == safe_open.REASON_OPEN_FAILED
+    assert original.stat() == before
+    assert original.read_bytes() == b"hello"
+    assert sorted(p.name for p in original.parent.iterdir()) == ["note.txt"]
+    assert "event=safe_open_owner_preservation_failed" in caplog.text
 
 
 def test_two_writers_of_one_file_never_mix_their_content(root: Path) -> None:

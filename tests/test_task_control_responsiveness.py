@@ -41,7 +41,12 @@ def gateway_signed_commands(monkeypatch):
 @pytest.mark.nats
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_team_lead", [True, False])
-async def test_controls_remain_available_during_model_work_and_after_stop(tmp_path, is_team_lead, gateway_signed_commands):
+@pytest.mark.parametrize("slow_cleanup", [False, True])
+async def test_controls_remain_available_during_model_work_and_after_stop(
+    tmp_path, is_team_lead, gateway_signed_commands, slow_cleanup, monkeypatch, caplog,
+):
+    from custom_agents import control_runtime
+
     team = _team("controls")
     manager = TaskManager(db_path=str(tmp_path / "tasks.db"), max_queued_top_level_tasks=50)
     manager.set_owner_identity("lead", "Lead", team, "TeamArchitect")
@@ -51,6 +56,9 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
     agent.task_manager.set_owner_identity(agent.id, "Lead", team, "TeamArchitect")
     adapter = _adapter(team)
     entered, release = asyncio.Event(), asyncio.Event()
+    cleanup_allowed = asyncio.Event()
+    if slow_cleanup:
+        monkeypatch.setattr(control_runtime, "ACTIVE_STOP_GRACE_SECONDS", 0.01)
 
     async def held_turn(content, header, meta):
         agent._set_active_execution_context(content.task_id)
@@ -58,6 +66,10 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
         try:
             await release.wait()
             return content.model_copy(update={"task_type": MessageMetaType.RESPONSE})
+        except asyncio.CancelledError:
+            if slow_cleanup:
+                await cleanup_allowed.wait()
+            raise
         finally:
             agent._clear_active_execution_context()
 
@@ -128,7 +140,7 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
             )
             # Each stopped request also gets its final reply, its cancellation,
             # before the command's answer (control_runtime.stop_task_execution):
-            # current work from its stopped turn, queued work from the stop.
+            # the explicit stop owns this reply for current and queued work.
             cancelled.clear()
             while True:
                 received = await asyncio.wait_for(responses.get(), MANAGER_CONTROL_TIMEOUT_SECONDS)
@@ -185,7 +197,10 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
         stopped = (await exchange("cancel") if is_team_lead else
                    await exchange("remove_task", target_task_id="held", inventory_digest=purged.inventory_digest))
         assert stopped.success
-        assert cancelled == ["held"], "one final reply, from the stopped turn"
+        assert cancelled == ["held"], "one final reply from the stop"
+        if slow_cleanup:
+            assert "event=active_turn_stop_timeout" in caplog.text
+        cleanup_allowed.set()
         assert agent.task_manager.is_execution_cancelled("held")
         assert agent._conversation_store.get_turn_by_task_id("held")["task_status"] == "cancelled"
         agent._conversation_summary_generator.summarize_turn.assert_not_called()
@@ -198,6 +213,7 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
     finally:
         agent._should_exit.set()
         release.set()
+        cleanup_allowed.set()
         pending = getattr(agent, "_pending_work_task", None)
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)

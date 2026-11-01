@@ -8,8 +8,8 @@ or through a link planted beforehand. The rules here close both:
 - a path is opened from a trusted root one component at a time, relative to
   the folder opened before it, with ``O_NOFOLLOW``, so a link anywhere on the
   path fails instead of being followed, whenever it appeared;
-- only regular files with exactly one link are read or replaced, so a hard
-  link cannot expose or change a file somewhere else;
+- only regular files without multiple links are read; replacement requires
+  exactly one link, so a hard link cannot expose or change a file elsewhere;
 - new content is written to a new temporary file (``O_EXCL``) in the same
   folder, which then replaces the file in one ``rename``; folders are created
   with ``mkdirat``.
@@ -152,13 +152,17 @@ def open_directory(root: Path, parts: tuple[str, ...], *, create: bool = False) 
 
 
 def _require_single_link_regular(descriptor: int, shown: Path) -> os.stat_result:
-    return _single_link_regular(os.fstat(descriptor), shown)
+    # Atomic replacement may unlink this already-open inode before fstat.
+    # Its descriptor still holds the complete old file and follows no link.
+    return _single_link_regular(os.fstat(descriptor), shown, allow_unlinked=True)
 
 
-def _single_link_regular(info: os.stat_result, shown: Path) -> os.stat_result:
+def _single_link_regular(
+    info: os.stat_result, shown: Path, *, allow_unlinked: bool = False,
+) -> os.stat_result:
     if not stat.S_ISREG(info.st_mode):
         raise UnsafePath(f"Not a regular file: {shown}", reason=REASON_NOT_REGULAR_FILE)
-    if info.st_nlink != 1:
+    if info.st_nlink != 1 and not (allow_unlinked and info.st_nlink == 0):
         raise UnsafePath(
             f"Files with more than one hard link are not opened: {shown}. Copy it to a new file first.",
             reason=REASON_SEVERAL_LINKS,
@@ -174,7 +178,7 @@ def _split(parts: tuple[str, ...], root: Path) -> tuple[tuple[str, ...], str]:
 
 @contextmanager
 def opened_file(root: Path, parts: tuple[str, ...]) -> Iterator[tuple[int, os.stat_result]]:
-    """A read descriptor for the one-link regular file ``root/parts``, and its status."""
+    """A regular-file read descriptor and status, retained across atomic replacement."""
 
     folder_parts, name = _split(_checked_parts(parts), root)
     shown = _display(root, parts)
@@ -351,14 +355,18 @@ def _keep_owner_and_mode(descriptor: int, replaced: os.stat_result, shown: Path)
     if (own.st_uid, own.st_gid) != (replaced.st_uid, replaced.st_gid):
         try:
             os.fchown(descriptor, replaced.st_uid, replaced.st_gid)
-        except PermissionError:
+        except PermissionError as exc:
             logger.warning(
-                "A replaced file now belongs to this process, which may not give it its former owner. "
-                "event=safe_open_owner_not_kept path=%s former_uid=%s former_gid=%s",
+                "The replacement was refused because its owner and group could not be preserved. "
+                "event=safe_open_owner_preservation_failed path=%s former_uid=%s former_gid=%s",
                 shown,
                 replaced.st_uid,
                 replaced.st_gid,
             )
+            raise UnsafePath(
+                f"Cannot replace {shown}: its owner and group cannot be preserved.",
+                reason=REASON_OPEN_FAILED,
+            ) from exc
     os.fchmod(descriptor, stat.S_IMODE(replaced.st_mode))  # after fchown, which may clear set-id bits
 
 
