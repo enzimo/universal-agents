@@ -652,20 +652,23 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
 
 
 def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_reply: bool,
-                      trust: TrustStore, sender: Optional[HostCertificate]) -> Optional[VerifiedAuthority]:
-    """The frame's token, if any: allowed on the kind, valid on its own, and of a type this sender may present here.
+                      trust: TrustStore, sender: Optional[HostCertificate], now: datetime) -> Optional[VerifiedAuthority]:
+    """The frame's token, if any: allowed on the kind at this address, valid on its own, and of a type this sender may present here.
 
     ``sender`` is None only for a join, which takes no token (registry ``authority: none``).
+    A kind's ``authority_by_target`` narrows it for some addresses: a task for a worker
+    pool carries no token, since every host running the pool reads its queue.
     """
 
-    mode = "none" if is_reply or sender is None else spec.authority
+    target = frame.audience.target
+    mode = "none" if is_reply or sender is None else spec.authority_by_target.get(target, spec.authority)
     token = frame.authority
     if token is MISSING:
         if mode == "required":
             raise FrameRefused("bad_authority", f"{frame.kind} requires an authority token", at=AUTHORITY_AT)
         return None
     if mode == "none":
-        raise FrameRefused("bad_authority", f"{frame.kind} takes no authority token", at=AUTHORITY_AT)
+        raise FrameRefused("bad_authority", f"{frame.kind} to a {target} takes no authority token", at=AUTHORITY_AT)
     assert sender is not None  # a frame without a certificate takes no token (mode none above)
     issuer, audience = token.issuer, token.audience
     if not issuer.installation == audience.installation == frame.issuer.installation:
@@ -674,17 +677,19 @@ def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_r
     if audience.team != frame.issuer.team:
         raise FrameRefused("bad_authority", "only the team the person asked presents the token", at="/authority/audience/team")
     # Over the token as received: a newer minor's unknown fields are signed too.
-    verified = verify_authority_token(token, raw["authority"], trust, valid_at=parse_timestamp(frame.issued_at))
+    verified = verify_authority_token(token, raw["authority"], trust, valid_at=parse_timestamp(frame.issued_at), now=now)
     return _verify_binding(raw, frame, spec, sender, verified)
 
 
 def verify_authority_token(token: AuthorityToken, fields: Mapping[str, Any], trust: TrustStore, *,
-                           valid_at: datetime, at: str = AUTHORITY_AT) -> VerifiedAuthority:
+                           valid_at: datetime, now: datetime, at: str = AUTHORITY_AT) -> VerifiedAuthority:
     """Check an authority token on its own; raise ``FrameRefused`` (``bad_authority``) at ``at`` when it fails.
 
     ``token`` is the validated token and ``fields`` its JSON object as received,
-    which its signature covers. ``valid_at`` is when it must be valid: the issue
-    time of the frame that carries it. The checks (README, "On behalf of a person"):
+    which its signature covers. It must be valid both at ``valid_at``, the issue time
+    of the frame that carries it, and at ``now``, the receiver's clock: a durable
+    frame dated back cannot carry a token that has since expired. Both allow the clock
+    tolerance. The checks (README, "On behalf of a person"):
     an unrevoked gateway or scheduler certificate of its audience team signed it;
     only a scheduler names a schedule; a token names its person, unless it is
     system work, which names its schedule instead; it lasts at most
@@ -700,7 +705,7 @@ def verify_authority_token(token: AuthorityToken, fields: Mapping[str, Any], tru
     if token.person is MISSING and token.schedule_id is MISSING:
         raise FrameRefused("bad_authority", "a token names its person, or for system work its schedule", at=at + "/person")
     command = token.bound_to.type == COMMAND_BINDING
-    _verify_token_signature_and_time(signed, certificate, valid_at,
+    _verify_token_signature_and_time(signed, certificate, valid_at, now,
                                      COMMAND_TOKEN_MAX_SECONDS if command else AUTHORITY_TOKEN_MAX_SECONDS)
     return VerifiedAuthority(token=token, certificate=certificate)
 
@@ -737,8 +742,8 @@ def _token_certificate(token: _SignedToken, trust: TrustStore, roles: frozenset[
 
 
 def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCertificate, valid_at: datetime,
-                                     max_seconds: int = AUTHORITY_TOKEN_MAX_SECONDS) -> None:
-    """The signature verifies, the token lasts at most ``max_seconds``, and it was valid at ``valid_at``."""
+                                     now: datetime, max_seconds: int) -> None:
+    """The signature verifies, the token lasts at most ``max_seconds``, and it is valid at ``valid_at`` and at ``now``."""
 
     try:
         certificate.public_key.verify(b64url_decode(token.fields["signature"]), token.signing_bytes)
@@ -748,6 +753,8 @@ def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCerti
         raise FrameRefused("bad_authority", f"the token lasts longer than {max_seconds} seconds", at=token.at + "/expires_at")
     if not within(token.issued_at, token.expires_at, valid_at):
         raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at=token.at + "/expires_at")
+    if not within(token.issued_at, token.expires_at, now):
+        raise FrameRefused("bad_authority", "the token is not valid when the frame is received", at=token.at + "/expires_at")
 
 
 def _verify_binding(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, sender: HostCertificate,
@@ -963,6 +970,6 @@ def verify_frame(
     elif _installation_operation(spec) and ISSUED_CERTIFICATE_AT.rsplit("/", 1)[1] in known:
         assert answering is not None  # _verify_issuer refused replies without their request
         _verify_issued_certificate(raw, answering, trust)
-    authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate)
+    authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate, now)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

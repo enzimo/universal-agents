@@ -49,7 +49,8 @@ SCHEMA_BASE = "https://universal-agents.local/contracts/messages/v1/schemas/"
 
 CLASSES = {"durable", "request_reply", "event", "dead_letter"}
 VERIFICATION = {"standard", "proof_of_possession"}
-AUTHORITY = {"none", "optional", "required"}
+# How strongly a kind asks for an authority token, weakest first.
+AUTHORITY = ("none", "optional", "required")
 ROUTING = {"requester", "holder", "team", "person", "named", "broadcast", "sender"}
 EDGES = {"up", "down", "person", "sideways", "out", "none"}
 WAKES = {"never", "always", "next_turn"}
@@ -59,9 +60,10 @@ ENTRY_FIELDS = {
     "description", "class", "address", "body", "reply", "senders", "receivers", "expiry_seconds",
     "authority", "idempotency", "admission", "routing", "topology_edge", "ledger", "wakes_model",
     "rendering", "covered_change", "copy_to", "senders_by_address", "authority_binding", "body_rules", "verification",
+    "authority_by_address",
 }
 REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "senders_by_address", "authority_binding",
-                                        "body_rules", "verification"}
+                                        "body_rules", "verification", "authority_by_address"}
 
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
@@ -369,7 +371,7 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
     if missing or unknown:
         raise ContractError(f"{where}: missing {sorted(missing)}, unknown {sorted(unknown)}")
     checks = {
-        "class": (entry["class"], CLASSES), "authority": (entry["authority"], AUTHORITY),
+        "class": (entry["class"], CLASSES), "authority": (entry["authority"], set(AUTHORITY)),
         "routing": (entry["routing"], ROUTING), "rendering": (entry["rendering"], RENDERING),
         "admission.priority": (entry["admission"].get("priority"), PRIORITIES),
     }
@@ -388,6 +390,7 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
         raise ContractError(f"{where}: request/reply kinds, and only they, have a reply")
     if "reply" in entry and entry["reply"]["body"] not in schemas:
         raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
+    check_authority_by_address(where, entry)
     check_authority_binding(where, entry, schemas)
     if entry.get("verification", "standard") not in VERIFICATION:
         raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
@@ -428,6 +431,24 @@ def check_agent_addressed_edges(where: str, entry: dict[str, Any]) -> None:
             raise ContractError(f"{where}: agent hosts send it to {address}, so it is a topology check: "
                                 "name the edges it may take instead of none")
 
+
+
+def address_authority(entry: dict[str, Any], address: str) -> str:
+    """Whether frames to one of the kind's addresses carry a token: its own authority, or a narrower one for that address."""
+
+    return str(entry.get("authority_by_address", {}).get(address, entry["authority"]))
+
+
+def check_authority_by_address(where: str, entry: dict[str, Any]) -> None:
+    """``authority_by_address`` only narrows the kind's authority, for some of its own addresses."""
+
+    narrower = entry.get("authority_by_address", {})
+    if not isinstance(narrower, dict):
+        raise ContractError(f"{where}: authority_by_address maps some of its own addresses to an authority")
+    for address, authority in narrower.items():
+        if address not in own_addresses(entry) or authority not in AUTHORITY \
+                or AUTHORITY.index(authority) >= AUTHORITY.index(entry["authority"]):
+            raise ContractError(f"{where}: authority_by_address narrows the authority of one of its own addresses")
 
 
 def token_bindings(entry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -478,9 +499,9 @@ def check_binding_parameters(where: str, entry: dict[str, Any], schemas: dict[st
 def check_binding_presenters(where: str, entry: dict[str, Any], bindings: list[dict[str, Any]]) -> None:
     """Every sender of a token-required operation can present one of its accepted token types."""
 
-    if entry["authority"] != "required":
-        return
     for address in own_addresses(entry):
+        if address_authority(entry, address) != "required":
+            continue
         for sender in address_senders(entry, address):
             if not any(sender in binding.get("senders", [sender]) for binding in bindings):
                 raise ContractError(f"{where}: {sender} sends it to {address} but may present none of its token types")
@@ -1550,6 +1571,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
             f"        receivers={tuple(entry['receivers'])!r},\n"
             f"        expiry_seconds={entry['expiry_seconds']!r},\n"
             f"        authority={entry['authority']!r},\n"
+            f"        authority_by_target={ {audience_target(a): v for a, v in entry.get('authority_by_address', {}).items()}!r},\n"
             f"        authority_binding={binding_text(entry)},\n"
             f"        body_rules={tuple(entry.get('body_rules', ()))!r},\n"
             f"        execution_slot={entry['admission']['execution_slot']!r},\n"

@@ -17,6 +17,7 @@
     "agent.status",
     "credential.form.request",
     "credential.form.result",
+    "custody.confirmed",
     "custody.decide",
     "custody.moved",
     "debug.dump",

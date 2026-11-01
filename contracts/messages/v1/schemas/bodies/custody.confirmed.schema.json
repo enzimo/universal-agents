@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/custody.confirmed.schema.json",
+  "title": "custody.confirmed body",
+  "description": "Tells a task's holder that the team services recorded its claim, or a reassignment to it, and its custody token. The frame carries the task's authority token when the work has one: the only way the holder of pool work receives it (README, \"On behalf of a person\").",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "custody_token": {
+      "$ref": "../common.schema.json#/$defs/custody_token"
+    }
+  },
+  "required": [
+    "task_id",
+    "custody_token"
+  ],
+  "additionalProperties": false
+}

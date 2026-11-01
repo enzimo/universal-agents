@@ -367,14 +367,21 @@ An authority token (`authority` in the frame) proves that work acts for a person
 - It names its audience: the installation and team the person asked. Only that team
   presents it, copied unchanged down a delegation tree, and only inside frames of the
   token's own installation.
+- It reaches only the task's holder, in the holder's own inbox. A worker pool's queue is
+  read by every host that runs the pool, so a `task.request` to a pool carries no token
+  (registry `authority_by_address`); its copy to the team services does. When an agent
+  claims the task, or `custody.decide` reassigns it, the team services record the custody
+  and send the holder `custody.confirmed` at `work.agent.<agent>`: the task id and its
+  custody token, and the task's authority token when the work has one.
 - It is bound to one root task, one command, or one access request (a person's decision
   on it), and lasts at most `authority_token_max_seconds`. A command token lasts at most
   `command_token_max_seconds` (300 seconds): the gateway signs one for each command, and
   it is useful only for minutes (plan, section 8).
 - It names no roles: receivers read the person's current roles and standing from the
   team's people records, so a role taken away while a token lasts no longer counts.
-- A scheduled job's run carries a token the scheduler signed with the run's
-  `schedule_id`. A run's schedule comes only from there: the work context names no
+- A scheduled job's run has a token the scheduler signed with the run's `schedule_id`;
+  the run's holder gets it with the task, or with `custody.confirmed` when the run went
+  to a worker pool. A run's schedule comes only from there: the work context names no
   schedule, so a host that passes the task on cannot change it, and a run handed back
   and dispatched again keeps it.
 - System work, a run of a schedule that works for no person, carries a scheduler's token
@@ -386,6 +393,20 @@ missing token where it is `required`, and a token that is not signed by an unrev
 gateway or scheduler certificate serving its audience team, names a schedule without a
 scheduler's signature, names neither a person nor a schedule, names another team than the
 frame's issuer, lasts longer than its limit, or was not valid when the frame was issued.
+It also refuses a token that is not valid when the frame is received, by the receiver's
+clock within the clock tolerance: a durable frame dated back cannot carry a token that
+had already expired.
+
+**Who may present a token.** A receiver accepts an authority token only from the current
+holder of the task the token is bound to, or of a task under that root task, and a
+command token only from the command's sender. Tokens also come from those who hand them
+on without holding the task: the gateway or scheduler that signed the token and starts
+the work, and the team services, which keep custody, give a task's token to its holder
+and pass a gateway's command on to an agent's host unchanged. The team services and the
+gateway check this against the custody record and the team view, and hosts check it
+against the thread record. It is the handler's check, not `verify_frame`'s, because it
+needs custody state; the handler refuses as `bad_authority`. A token another host read
+from a queue therefore does nothing for that host.
 
 **A run's token.** A worker that claimed a due schedule itself asks for its run's token
 with `run_context.sign`. Only a scheduler signs a run's token (plan, section 13A.10), so a
@@ -560,7 +581,9 @@ work-queue streams: each message goes to one consumer and is deleted once acknow
 and NATS refuses a second consumer whose filter overlaps the first. So the team services
 cannot read the requester's inbox; a kind's `copy_to` addresses get a second frame:
 - the same kind and body, signed by the same sender, for the copy's audience target
-  (`team_services` on `work.team`, audience id the team);
+  (`team_services` on `work.team`, audience id the team). A copy of a `task.request` to a
+  worker pool carries the task's authority token, which the pool frame may not ("On behalf
+  of a person");
 - its own `message_id`, and its own key: the kind's parts plus the audience target. A
   stream drops a repeated `Nats-Msg-Id` on any of its subjects within its duplicate
   window, and an edge delivery and its copy share `UA1_WORK`, so a copy with its

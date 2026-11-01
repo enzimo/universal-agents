@@ -547,6 +547,38 @@
       "topology_edge": "none",
       "wakes_model": "next_turn"
     },
+    "custody.confirmed": {
+      "address": "work.agent.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "optional",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/custody.confirmed.schema.json",
+      "class": "durable",
+      "description": "Tells a task's holder that the team services recorded its claim or a reassignment to it, with its custody token and the task's authority token when the work has one.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/task_id",
+        "/body/custody_token"
+      ],
+      "ledger": "custody_confirmed",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "none",
+      "routing": "holder",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "custody.decide": {
       "address": "svc.team",
       "admission": {
@@ -4838,6 +4870,9 @@
       "authority_binding": {
         "at": "/body/work/root_task_id",
         "type": "root_task"
+      },
+      "authority_by_address": {
+        "work.pool.{pool}": "none"
       },
       "body": "bodies/task.request.schema.json",
       "class": "durable",

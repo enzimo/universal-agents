@@ -82,6 +82,9 @@ class KindSpec:
     receivers: tuple[str, ...]
     expiry_seconds: int
     authority: str
+    # Audience target -> a narrower authority for that address (registry
+    # authority_by_address); other targets take ``authority``.
+    authority_by_target: dict[str, str]
     # The token types this kind takes, one binding per type; empty when it takes no
     # token. A token of any other type is refused.
     authority_binding: tuple[TokenBinding, ...]

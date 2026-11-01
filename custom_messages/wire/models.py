@@ -1181,6 +1181,13 @@ class CredentialFormResultBody(WireModel):
     credential: Union[CredentialFormResultBodyCredential, MISSING] = Field(default=MISSING)
 
 
+class CustodyConfirmedBody(WireModel):
+    "Tells a task's holder that the team services recorded its claim, or a reassignment to it, and its custody token. The frame carries the task's authority token when the work has one: the only way the holder of pool work receives it (README, \"On behalf of a person\")."
+
+    task_id: RecordId
+    custody_token: CustodyToken
+
+
 class CustodyDecideBodyDecisionReassignToAgent(WireModel):
     target: Literal['agent']
     agent: AgentId
@@ -8048,6 +8055,7 @@ AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
 CredentialFormResultBodyAdapter = TypeAdapter(CredentialFormResultBody)
+CustodyConfirmedBodyAdapter = TypeAdapter(CustodyConfirmedBody)
 CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)
 CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest], Field(discriminator='outcome')])
 CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)

@@ -541,17 +541,20 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
     """The scheduler's task names the person's gateway route as its reply target (README, "Replies").
 
     Each host publishes and pulls with its own generated grants: the scheduler puts
-    the run into the worker pool, the worker sends its result to the route the task
-    names, and the gateway reads it with the delivery reference it needs.
+    the run into the worker pool without its token, the team services hand the
+    token to the worker that claimed the run in its own inbox (custody.confirmed),
+    the worker sends its result to the route the task names, and the gateway reads it
+    with the delivery reference it needs.
     """
 
     async with AsyncExitStack() as stack:
         admin = await connect(stack, isolated_broker, "admin")
         scheduler = await connect(stack, isolated_broker, "scheduler")
+        services = await connect(stack, isolated_broker, "services")
         worker = await connect(stack, isolated_broker, "worker")
         gateway = await connect(stack, isolated_broker, "gateway")
         js = admin.nc.jetstream()
-        await create_topology(admin)
+        await create_topology(admin, ["researcher-2"])
         await js.add_consumer(AGENT_STREAM, config=consumer_config("pool", pool="researcher"))
         await js.add_consumer("UA1_WORK", config=consumer_config("edge", edge="web"))
         run = fixtures.example_frame("task.request", "scheduled-run")
@@ -560,8 +563,17 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         pool = await worker.nc.jetstream().pull_subscribe_bind(stream=AGENT_STREAM, consumer=consumer_name("pool", pool="researcher"))
         received, = await pool.fetch(1, timeout=2)
         task = fixtures.verify(received.data, run, arrived(run, received))
-        assert task.authority is not None and task.authority.token.schedule_id == "sched_1"
+        assert task.authority is None  # every host running the pool reads its queue
         await received.ack_sync(timeout=2)
+        confirmed = fixtures.example_frame("custody.confirmed", "claim-with-token")
+        await services.nc.jetstream().publish(confirmed["subject"], json.dumps(confirmed).encode(), headers=headers(confirmed))
+        inbox = await worker.nc.jetstream().pull_subscribe_bind(stream=AGENT_STREAM,
+                                                                consumer=consumer_name("agent_inbox", agent="researcher-2"))
+        delivered, = await inbox.fetch(1, timeout=2)
+        custody = fixtures.verify(delivered.data, confirmed, arrived(confirmed, delivered))
+        assert custody.authority is not None and custody.authority.token.schedule_id == "sched_1"
+        custody.authority.require_bound_to("root_task", task.body.work.root_task_id)
+        await delivered.ack_sync(timeout=2)
         reply_to = task.body.work.reply_to
         assert (reply_to.target, reply_to.id) == ("edge", "web") and result["audience"]["id"] == reply_to.id
         await worker.nc.jetstream().publish(result["subject"], json.dumps(result).encode(), headers=headers(result))
@@ -570,7 +582,7 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         answer = fixtures.verify(delivered.data, result, arrived(result, delivered))
         assert answer.body.delivery_ref == task.body.work.delivery_ref
         await delivered.ack_sync(timeout=2)
-        assert scheduler.errors.empty() and worker.errors.empty() and gateway.errors.empty()
+        assert scheduler.errors.empty() and services.errors.empty() and worker.errors.empty() and gateway.errors.empty()
 
 
 @pytest.mark.asyncio

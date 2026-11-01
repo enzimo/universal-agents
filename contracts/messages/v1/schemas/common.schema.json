@@ -477,7 +477,7 @@
       ]
     },
     "custody_token": {
-      "description": "The custody record's revision. A holder learns it from its claim's confirmation.",
+      "description": "The custody record's revision. A holder learns it from custody.confirmed, which the team services send when they record its claim or a reassignment to it.",
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991

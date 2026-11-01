@@ -864,9 +864,49 @@ def test_every_token_an_example_body_carries_verifies() -> None:
         frame = json.loads(path.read_text(encoding="utf-8"))
         for at, token in carried_tokens(frame["body"], "/body"):
             verified = wire_frame.verify_authority_token(models.AuthorityToken.model_validate(token), token, trust,
-                                                         valid_at=parse_timestamp(frame["issued_at"]), at=at)
+                                                         valid_at=parse_timestamp(frame["issued_at"]), now=fixtures.NOW,
+                                                         at=at)
             checked.append((path.parent.name, verified.certificate.runtime))
     assert ("run_context.sign.reply", "scheduler-1") in checked, checked
+
+
+def test_a_token_is_valid_when_the_frame_is_received_within_the_clock_tolerance() -> None:
+    """README, "On behalf of a person": a durable frame dated back cannot carry a token that has expired since."""
+
+    frame = fixtures.example_frame("access.resolved", "full")
+    data = json.dumps(frame).encode()
+    token_end = parse_timestamp(frame["authority"]["expires_at"])
+    assert parse_timestamp(frame["issued_at"]) < token_end
+    fixtures.verify(data, frame, {"now": format_timestamp(token_end + SKEW - timedelta(milliseconds=1))})
+    refused = refusal(data, frame, {"now": format_timestamp(token_end + SKEW)})
+    assert (refused.code, refused.at) == ("bad_authority", "/authority/expires_at")
+
+
+def test_tasks_for_a_worker_pool_carry_no_token_and_their_copies_do() -> None:
+    """The holder of pool work receives the task's token from the team services, in custody.confirmed."""
+
+    assert kinds.KINDS["task.request"].authority_by_target == {"pool": "none"}
+    for path in (EXAMPLES / "valid" / "task.request").glob("*.json"):
+        frame = json.loads(path.read_text(encoding="utf-8"))
+        if frame["audience"]["target"] == "pool":
+            assert "authority" not in frame, path.name
+    copy_frame = fixtures.example_frame("task.request", "scheduled-run-copy-to-team-services")
+    confirmed = fixtures.example_frame("custody.confirmed", "claim-with-token")
+    assert copy_frame["authority"] == confirmed["authority"]
+    assert confirmed["body"]["task_id"] == fixtures.example_frame("task.request", "scheduled-run")["body"]["task_id"]
+
+
+@pytest.mark.parametrize(("narrower", "problem"), [
+    ({"work.pool.{pool}": "required"}, "narrows the authority"),
+    ({"work.team": "none"}, "narrows the authority"),
+    ({"work.pool.{pool}": "sometimes"}, "narrows the authority"),
+    (["work.pool.{pool}"], "maps some of its own addresses"),
+])
+def test_authority_by_address_only_narrows_a_kinds_own_addresses(narrower, problem: str) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["task.request"]["authority_by_address"] = narrower
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), CONTRACT_SCHEMAS)
 
 
 def test_a_run_token_names_no_person_exactly_when_the_run_is_system_work() -> None:

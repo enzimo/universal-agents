@@ -28,6 +28,8 @@
 #   receivers      host roles that may receive it at its own addresses (and so send its reply)
 #   expiry_seconds how long after issue a receiver still accepts it (at most its class's max_expiry_seconds)
 #   authority      none | optional | required: whether the frame carries an authority token
+#   authority_by_address  optional: a narrower authority for some of its own addresses (task.request
+#                  carries no token into a worker pool; README, "On behalf of a person")
 #   authority_binding  the token types it takes: one binding {type, at, senders}, or a list of them,
 #                  one per type; a token of another type is refused. `type` is what the token is
 #                  bound to (root_task, command or access_request). With `at`, the body field
@@ -304,6 +306,10 @@ kinds:
     receivers: [lead_host, worker_host, edge_adapter]
     expiry_seconds: 604800
     authority: optional
+    # A worker pool's queue is read by every host that runs the pool, so the token waits
+    # for the holder's custody.confirmed; the copy to the team services carries it.
+    authority_by_address:
+      work.pool.{pool}: none
     authority_binding: {type: root_task, at: /body/work/root_task_id}
     idempotency: [/body/task_id, /message_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
@@ -513,6 +519,24 @@ kinds:
     routing: named
     topology_edge: none
     ledger: custody_lost
+    wakes_model: never
+    rendering: none
+
+  custody.confirmed:
+    description: Tells a task's holder that the team services recorded its claim or a reassignment to it, with its custody token and the task's authority token when the work has one.
+    class: durable
+    address: work.agent.{agent}
+    body: bodies/custody.confirmed.schema.json
+    senders: [team_services]
+    receivers: [lead_host, worker_host]
+    expiry_seconds: 604800
+    authority: optional
+    authority_binding: {type: root_task}
+    idempotency: [/body/task_id, /body/custody_token]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: holder
+    topology_edge: none
+    ledger: custody_confirmed
     wakes_model: never
     rendering: none
 

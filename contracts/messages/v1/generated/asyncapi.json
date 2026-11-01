@@ -671,6 +671,9 @@
         "credential_form_result": {
           "$ref": "#/components/messages/credential_form_result"
         },
+        "custody_confirmed": {
+          "$ref": "#/components/messages/custody_confirmed"
+        },
         "custody_moved": {
           "$ref": "#/components/messages/custody_moved"
         },
@@ -1198,6 +1201,28 @@
           ]
         },
         "summary": "What became of a credential form."
+      },
+      "custody_confirmed": {
+        "name": "custody.confirmed",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/custody.confirmed.schema.json"
+                },
+                "kind": {
+                  "const": "custody.confirmed"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Tells a task's holder that the team services recorded its claim or a reassignment to it, with its custody token and the task's authority token when the work has one."
       },
       "custody_decide": {
         "name": "custody.decide",
@@ -5538,6 +5563,17 @@
         }
       ]
     },
+    "receive_custody_confirmed_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/custody_confirmed"
+        }
+      ]
+    },
     "receive_custody_decide_team_services": {
       "action": "receive",
       "channel": {
@@ -8047,6 +8083,17 @@
       "messages": [
         {
           "$ref": "#/channels/work_agent/messages/credential_form_result"
+        }
+      ]
+    },
+    "send_custody_confirmed_agent": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/work_agent"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_agent/messages/custody_confirmed"
         }
       ]
     },
