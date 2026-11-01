@@ -14,6 +14,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from live_provider_safety import sanitize_provider_failure  # noqa: E402
 from tests.postgres_marker_guard import unmarked_postgres_cases  # noqa: E402
+from tests.upgrade_schemas import (  # noqa: E402,F401 - pytest hooks: --upgrade-from, --capture-schema
+    pytest_addoption,
+    pytest_configure,
+    pytest_runtest_setup,
+    pytest_unconfigure,
+)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

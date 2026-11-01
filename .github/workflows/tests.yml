@@ -131,6 +131,10 @@ jobs:
       - name: Run hermetic test profile
         # Report the first failure before a later timeout can hide its details.
         run: ./scripts/run_tests.sh fast -q -x --tb=short --durations=20
+      - name: Run hermetic tests on the previous minor version's databases
+        # Releases upgrade instances in place: every store must open the tables
+        # the previous minor version created (tests/upgrade_schemas.py).
+        run: ./scripts/run_tests.sh upgrade -q -x --tb=short
       # Verification above is mandatory. Archiving its evidence is optional.
       - name: Upload reviewed skill-installation evidence
         id: canary-evidence

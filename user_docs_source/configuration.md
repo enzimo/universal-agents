@@ -707,8 +707,9 @@ manager or gateway storage blocks.
 ## Moving memories to a new instance
 
 To move a whole team (settings, people, access, schedules, credentials and
-pinned memory) to a new version, use the team transfer instead:
-[Moving a team to a new version](team-transfer.md). The commands below move
+pinned memory) to a fresh instance, use the team transfer instead:
+[Moving a team to a fresh instance](team-transfer.md). Upgrading the instance
+you have needs neither ([Upgrading](upgrading.md)). The commands below move
 only pinned memories, and also read instances older than the team transfer.
 
 `assistant_cli.py memory export` and `memory import` copy pinned memories from

@@ -337,11 +337,18 @@ def test_replacement_manager_rejects_ambiguous_duplicate_legacy_plans_atomically
               AND name='durable_owner_scope_reconciliation_archive'
             """
         ).fetchone()
+        # Nothing archived: the table is absent, or empty on a database an
+        # earlier release created (scripts/run_tests.sh upgrade).
+        archived = (
+            conn.execute("SELECT COUNT(*) FROM durable_owner_scope_reconciliation_archive").fetchone()[0]
+            if archive_table
+            else 0
+        )
     assert rows == [
         ("agent_id_ambiguous_a", PlanStatus.ACTIVE.value),
         ("agent_id_ambiguous_b", PlanStatus.FAILED.value),
     ]
-    assert archive_table is None
+    assert archived == 0
 
 
 def test_create_objective_spawn_mode_creates_separate_root_task_and_plan(tmp_path: Path) -> None:

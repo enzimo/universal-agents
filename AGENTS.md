@@ -203,8 +203,15 @@ For each change, define a verification plan that matches that strategy. Generate
   so do not bury important upgrade information in an unlabeled or vague PR.
 - Run the full release verification appropriate to the change, including the
   synchronized-version tests, CI workflow tests, strict documentation build,
-  Python tests, Cargo checks/tests, and Photon sidecar tests. Do not tag a commit
+  Python tests, the in-place upgrade run (`scripts/run_tests.sh upgrade`),
+  Cargo checks/tests, and Photon sidecar tests. Do not tag a commit
   with failing or skipped-required release checks.
+- After a release, add its schema to the upgrade fixture of its minor version:
+  run its tests with `--capture-schema` and merge the capture with
+  `scripts/upgrade_schema_fixture.py merge` (`tests/fixtures/upgrade/`). When
+  work on the next minor version starts, point `UPGRADE_FROM` in
+  `scripts/run_tests.sh` at the minor version just released and remove the
+  upgrade steps for releases before it.
 - Commit the synchronized version as `Release vX.Y.Z`, push `main`, then create
   an annotated signed tag `vX.Y.Z` on that exact commit and push the tag. If
   signing is unavailable, stop and ask the user rather than silently creating
@@ -234,7 +241,7 @@ For each change, define a verification plan that matches that strategy. Generate
 
 ### Change-specific requirements
 - If you change SQLite-backed stores, persisted schemas, or DB-owned models, update the affected tests and fixtures in the same change so validation exercises the real schema.
-- A change to a table an earlier release created brings its upgrade step in the same change, because `CREATE TABLE IF NOT EXISTS` never changes an existing table: a new column is added and logged when the store opens (`storage.table_columns.ensure_column`, for both backends), with a default that keeps older rows correct, and a test starts from the previous release's table. Before pushing, compare the `CREATE TABLE` statements with the last release tag.
+- A change to a table an earlier release created brings its upgrade step in the same change, because `CREATE TABLE IF NOT EXISTS` never changes an existing table: a new column is added and logged when the store opens (`storage.table_columns.ensure_column`, for both backends), with a default that keeps older rows correct, and a test starts from the previous release's table. `scripts/run_tests.sh upgrade` runs the tests on databases holding the previous minor version's tables.
 
 ## 3. What Belongs Where
 - Keep this file focused on cross-project behavior and repo-level operating rules.

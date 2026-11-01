@@ -185,6 +185,10 @@ cargo build --locked --workspace
 ./scripts/run_tests.sh fast -q
 ```
 
+When a change touches stored tables, also run `./scripts/run_tests.sh upgrade -q`:
+it starts every test database with the previous minor version's tables, as an
+instance upgraded in place has them.
+
 Use events to hold fake workers while testing concurrent requests, and release
 them in a `finally` block. Put a deadline around the whole test rather than
 letting a held worker time out: a slow status request must not end the operation

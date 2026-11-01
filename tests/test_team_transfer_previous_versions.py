@@ -113,7 +113,7 @@ def test_the_refusal_says_which_versions_this_version_reads_and_what_to_do(monke
         "This file's notes section is version 1, but this version of Universal Agents reads version 3 only. "
         "The file was exported by an older release (0.8.4): import it into a newer release that can read it "
         "and export the team again there. Repeat with newer releases until this release can read the file. "
-        "See the 'Moving a team to a new version' guide for the required releases."
+        "See the 'Moving a team to a fresh instance' guide for the required releases."
     )
     newer = readable_version_problem("notes", 4, 3)
     assert "reads version 3 only. The file was exported by a newer release: import it with that release" in newer
@@ -204,7 +204,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
         assert message.startswith(expected_problem)
         assert f"exported by an older release ({source_release})" in message
         assert "Repeat with newer releases until this release can read the file." in message
-        assert "See the 'Moving a team to a new version' guide for the required releases." in message
+        assert "See the 'Moving a team to a fresh instance' guide for the required releases." in message
 
     # The CLI requires a saved review before writing. Exercise the write-capable
     # service directly to prove an unsupported file never creates the target.

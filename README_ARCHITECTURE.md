@@ -3980,10 +3980,24 @@ the desktop app never offers an older version.
   the notes of every skipped release, warns on that heading and requires an
   acknowledgment before it switches versions.
 
+- **Checked on every release candidate.** `scripts/run_tests.sh upgrade` runs
+  the hermetic tests with `--upgrade-from` (`tests/upgrade_schemas.py`): every
+  new SQLite database a test opens starts with the oldest form of every table,
+  index and trigger the previous minor version created
+  (`tests/fixtures/upgrade/<version>-sqlite.sql`), so a store that misses an
+  upgrade step fails the tests that use it. The fixture comes from the
+  releases' own test suites run with `--capture-schema`, which records only the
+  statements product code runs, and is merged by
+  `scripts/upgrade_schema_fixture.py`, whose `diff` command lists what a newer
+  release changes in those tables. PostgreSQL stores run the same steps
+  through `ensure_column`; the option covers SQLite only, and a one-off
+  comparison of PostgreSQL tables from the same releases (2026-11-01) found
+  the same changes.
+
 When a minor version ships, the upgrade steps for releases before the previous
 minor version are removed, as the team transfer's conversion steps are.
 
-### Moving a team to a new version
+### Moving a team to a fresh instance
 
 A team moves to a fresh instance, on another machine or across a jump the
 in-place upgrade does not cover, through a transfer file (`team_transfer`,

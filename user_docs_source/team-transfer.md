@@ -1,7 +1,9 @@
-# Moving a team to a new version
+# Moving a team to a fresh instance
 
-Export the old instance's setup, then import it into a fresh instance of the
-new version. The simplest way is onboarding's **Import a team export** choice:
+To move a team to another machine, or across a jump the in-place upgrade does
+not cover, export the old instance's setup and import it into a fresh instance
+of the new version. To upgrade the instance you have, install the new version
+over it instead ([Upgrading](upgrading.md)). The simplest way is onboarding's **Import a team export** choice:
 copy the export into the new data folder, open it in onboarding, choose what
 to bring, and the team starts
 ([Import during onboarding](#import-during-onboarding)). Host commands do the

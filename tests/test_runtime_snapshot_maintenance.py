@@ -349,9 +349,10 @@ def test_failure_after_first_removal_rolls_back_whole_retirement(
     assert raw_rows(settings, "active_task_runtime") == before
     assert raw_rows(settings, "active_task_runtime_records") == records
     with maintenance._connection(settings) as conn:
-        assert not maintenance._has_table(
-            conn, maintenance.ARCHIVE_TABLE, postgres=settings.backend == "postgres"
-        )
+        # Nothing archived: the table is absent, or empty on a database an
+        # earlier release created (scripts/run_tests.sh upgrade).
+        if maintenance._has_table(conn, maintenance.ARCHIVE_TABLE, postgres=settings.backend == "postgres"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {maintenance.ARCHIVE_TABLE}").fetchone()[0] == 0
 
 
 def test_upgrade_before_record_table_bootstrap(seeded_store):

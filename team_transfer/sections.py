@@ -326,7 +326,7 @@ def readable_version_problem(
     return (
         f"{found} The file was exported by an older release{release}: import it into a newer release that can read it "
         "and export the team again there. Repeat with newer releases until this release can read the file. "
-        "See the 'Moving a team to a new version' guide for the required releases."
+        "See the 'Moving a team to a fresh instance' guide for the required releases."
     )
 
 
