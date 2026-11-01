@@ -185,7 +185,7 @@ state_records:
     signer_roles: [team_services]
     writers: [team_services, edge_adapter]
     body: state/agent_session.schema.json
-    max_lifetime_seconds: 86400     # a day; a longer session is renewed
+    max_lifetime_seconds: 604800    # 7 days: covers the longest cut-off the contract promises (every durable kind lives 7 days); hosts renew sessions while connected
     write_rule: rewritten with a higher sequence to renew it or to record its actual end; deleted once receivers forget it (README, "Trust over time"), which is after its end plus the longest kind lifetime
   agreement:
     description: A federation agreement with another installation.
@@ -244,7 +244,7 @@ kinds:
     senders_by_address:
       work.edge.{edge}: [lead_host, team_services]
     receivers: [lead_host, worker_host, edge_adapter]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: optional
     authority_binding: {type: root_task}
     idempotency: [/body/task_id, /body/stop_id]
@@ -402,7 +402,7 @@ kinds:
     body: bodies/task.progress.schema.json
     senders: [worker_host, lead_host, edge_adapter]
     receivers: [lead_host]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/task_id, /body/custody_token, /body/sequence]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
@@ -421,7 +421,7 @@ kinds:
     senders_by_address:
       work.edge.{edge}: [lead_host, team_services]
     receivers: [worker_host, lead_host, edge_adapter]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: optional
     authority_binding: {type: root_task}
     idempotency: [/body/task_id, /body/steer_id]
@@ -442,7 +442,7 @@ kinds:
     body: bodies/task.account.schema.json
     senders: [worker_host, lead_host]
     receivers: [lead_host]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/task_id, /body/steer_id, /body/stage/type]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
@@ -460,7 +460,7 @@ kinds:
     body: bodies/task.claimed.schema.json
     senders: [worker_host, lead_host, edge_adapter]
     receivers: [lead_host]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/claim_id]
     admission: {execution_slot: false, accepted_while_paused: false, priority: normal}
@@ -681,7 +681,7 @@ kinds:
     senders_by_address:
       work.edge.{edge}: [lead_host, team_services]
     receivers: [lead_host, worker_host, team_services, gateway, edge_adapter]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/refused_message_id, /issuer/runtime, /issuer/agent]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}

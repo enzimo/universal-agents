@@ -745,7 +745,7 @@
       "body": "bodies/delivery.refused.schema.json",
       "class": "durable",
       "description": "A receiver refused a message; sent back to its sender.",
-      "expiry_seconds": 86400,
+      "expiry_seconds": 604800,
       "idempotency": [
         "/body/refused_message_id",
         "/issuer/runtime",
@@ -4544,7 +4544,7 @@
         "work.team"
       ],
       "description": "A held holder's account of where its task stopped.",
-      "expiry_seconds": 86400,
+      "expiry_seconds": 604800,
       "idempotency": [
         "/body/task_id",
         "/body/steer_id",
@@ -4640,7 +4640,7 @@
         "work.team"
       ],
       "description": "A holder took a task.",
-      "expiry_seconds": 86400,
+      "expiry_seconds": 604800,
       "idempotency": [
         "/body/claim_id"
       ],
@@ -4740,7 +4740,7 @@
         "work.team"
       ],
       "description": "Where a task stands, from its holder to its requester.",
-      "expiry_seconds": 86400,
+      "expiry_seconds": 604800,
       "idempotency": [
         "/body/task_id",
         "/body/custody_token",
@@ -4997,7 +4997,7 @@
       "body": "bodies/task.steer.schema.json",
       "class": "durable",
       "description": "Steering for the holder of one named task.",
-      "expiry_seconds": 86400,
+      "expiry_seconds": 604800,
       "idempotency": [
         "/body/task_id",
         "/body/steer_id"
@@ -5050,7 +5050,7 @@
       "body": "bodies/task.stop.schema.json",
       "class": "durable",
       "description": "Stop one task. Sent only to the task's current holder.",
-      "expiry_seconds": 86400,
+      "expiry_seconds": 604800,
       "idempotency": [
         "/body/task_id",
         "/body/stop_id"
@@ -5686,7 +5686,7 @@
       "bucket": "UA1_CERTS",
       "description": "An agent session certificate, issued by the team services that place the agent.",
       "key": "session.<installation>.<team>.<session>",
-      "max_lifetime_seconds": 86400,
+      "max_lifetime_seconds": 604800,
       "signer": "host",
       "signer_roles": [
         "team_services"

@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "a2c21d39f75e09965969748d5023bcfa153514b811f8492312599c9addb4d913",
+    "contracts/messages/v1/README.md": "d74fc4c0d9323065bcb68885723a5199ccd1551e1dd8367fbd3007d31a6a0373",
     "contracts/messages/v1/examples/invalid/access-decision-change-decided-with-an-access-choice.json": "b0b8cd5ccf030fc9297fc4eacac6d3e562ff3337186e540c8af1a6dcc64ba43a",
     "contracts/messages/v1/examples/invalid/access-decision-change-not-decided-with-a-choice.json": "b865a96c415673210f1eb7560dc7da61385948547ea5040ba05c81df2434a577",
     "contracts/messages/v1/examples/invalid/access-request-change-review-without-question.json": "a1f4f5732bf76b88bddcd852a452959257e3870ac37dd53bc09e570cf74a4499",
@@ -152,7 +152,7 @@
     "contracts/messages/v1/examples/invalid/knowledge-write-without-request-id.json": "ca434124d234b35e66c30a75ee185af931771860a146b661fe07da7e974ad759",
     "contracts/messages/v1/examples/invalid/knowledge-write-wrong-page-type.json": "0def4d0a310abda5dbe8e66690b236f4f8e204b4a150cee1a88a71c68efd44ab",
     "contracts/messages/v1/examples/invalid/ledger-fact-from-a-lead.json": "232d04a997f141cbf02210167d2fae6fa6047075f5e804c70edc0062782df1d2",
-    "contracts/messages/v1/examples/invalid/lifetime-capped.json": "b324f2d12c341d530b7f77877391212227b9cfec99ab0ee7c145f64a3e807e61",
+    "contracts/messages/v1/examples/invalid/lifetime-capped.json": "19f728f37259385f2f10e3ce7534af565749cd8411e99546c938097ec408fbc6",
     "contracts/messages/v1/examples/invalid/memory-clear-expiry-as-one.json": "18e7db13c4ec8bbf5d1b4b32835149df7d04ce80998d1a482d040514cede868a",
     "contracts/messages/v1/examples/invalid/memory-create-both-text-forms.json": "96e371ca3f788af182cf5a8dc9d77c8aba8fda0280a35f7d4f2c9a2cc5a3941c",
     "contracts/messages/v1/examples/invalid/memory-create-too-many-tags.json": "71ecf834f75a77c49a712833e6fdd386606fb82957eee6eae3f4e860bdec503a",
@@ -1493,10 +1493,10 @@
     "contracts/messages/v1/generated/permissions/scheduler.json": "bf87921106fb95da0ffc2cc97b68655e306e063a5e29e818a8574a7f4e2adfd7",
     "contracts/messages/v1/generated/permissions/team_services.json": "527473d615c341ea2d7ed273126e29c7d37f4de69a26c71ec12cfeaf517c1a69",
     "contracts/messages/v1/generated/permissions/worker_host.json": "8e28625d4b78d93df488a501df3840c83fd8226eae4c614f67fd6dfb782875bc",
-    "contracts/messages/v1/generated/registry.json": "32696dc49029c5b4fc105cef63dff26db7e2cbc72a42ea8614ef58ef635a123b",
+    "contracts/messages/v1/generated/registry.json": "897b4983b9f3f33c40517f69bfb58d1e2ee168cbd5c43824b532930fe53fd619",
     "contracts/messages/v1/generated/team-topologies.json": "b729df141b189177c2b8962e73fd5e9cfda1ad9e3593d68e97b286908b86f44f",
     "contracts/messages/v1/generated/transport.json": "418ba05824ef20000f62960ac9f72791c6f11101ef9acdcefb02edc393355660",
-    "contracts/messages/v1/registry.yaml": "eaa710d70429d901913e1c41f19220a655763b4f168bff0d5e5cfca1bf0a55c9",
+    "contracts/messages/v1/registry.yaml": "2c02a283224f216f604d84db04975c287347a09bb29e7f3142057e14e0b5e82a",
     "contracts/messages/v1/schemas/bodies/access.decision.schema.json": "c9631ce9de70e068e9c8237599ddaee7f4884de28448b3ee9383b693f93e2db4",
     "contracts/messages/v1/schemas/bodies/access.request.schema.json": "e8cd058a553924d0602e6de35b742e5efbc537aced7f357f74a64e96151e5928",
     "contracts/messages/v1/schemas/bodies/access.resolved.schema.json": "311348fc4b4e2d68fb218fd751ed427e5e17d90274a390584e9de91fe369da50",
@@ -1723,7 +1723,7 @@
     "contracts/messages/v1/signing-vectors/vectors.json": "5b79fb7a757d3ed8634ff3973001efa8e8628ccc8ad0df29ae10e9e753fe2826",
     "contracts/messages/v1/team-topologies.yaml": "18778a8aa1bdd30dafa8721cccaa099f92ab500a927f452e8be4944d6458056a",
     "contracts/messages/v1/transport.yaml": "11569e2c383078aa158bf3f05e89fba66c684b391e0b04ad0755463b14b17505",
-    "custom_messages/wire/kinds.py": "0c701ccbf236fc91cc929f97dcf7c2654f074c6a76b660f58da8c8ca878488ae",
+    "custom_messages/wire/kinds.py": "c7a46f802e92bd45b9d5c47fb5fda5da27bb671119b4328a0c10e7ff2a7b2a25",
     "custom_messages/wire/models.py": "7100a479ef4cdb1e7b8c8a10f1777464c8247908d8b276f92493e5b574eb25ce"
   },
   "protocol": "1.0-pre"
