@@ -3921,12 +3921,38 @@ and anomaly records support diagnosis. The activity collector consumes curated
 events into a separate read model. It does not route Tasks or treat manager
 tables as its control plane.
 
+### Upgrading an instance in place
+
+A release upgrades a running instance in place from every earlier release of
+its own minor version and of the previous one (0.10.x opens what any 0.9.x
+wrote), keeping settings, people, access, memory, knowledge, schedules and
+history. Owners upgrade by installing the new version over the old one, and a
+team transfer for every release would be a heavy step for that. Each change
+that alters what older releases stored brings an upgrade step, and the running
+code reads only the current format, with no fallback that accepts both:
+
+- **Stores** add a new column to a table an earlier release created when they
+  open (`storage.sqlite_connection.ensure_sqlite_column`; `ALTER TABLE … ADD
+  COLUMN IF NOT EXISTS` on PostgreSQL), because `CREATE TABLE IF NOT EXISTS`
+  never changes an existing table. The default keeps older rows correct, as
+  the change ledger's `*` does (see "Upgrading in place from 0.9" above).
+- **Configuration files** carry a `schema_version` and are upgraded one version
+  at a time (`assistant_gateway.config.migrate_instance_config_file`,
+  `config_loader.migrate_config_file`); startup offers the upgrade or names the
+  `migrate-config` command.
+- **What cannot carry over**, such as work still running in an old format, is
+  reported at startup with what to do, and the upgrade notes say it, rather
+  than failing later.
+
+When a minor version ships, the upgrade steps for releases before the previous
+minor version are removed, as the team transfer's conversion steps are.
+
 ### Moving a team to a new version
 
-Releases may change storage without migrations, so a team moves to a new
-version through a transfer file (`team_transfer`, `assistant_cli team export |
-inspect | review | import | import-credentials | finish-import`; guide:
-`user_docs_source/team-transfer.md`).
+A team moves to a fresh instance, on another machine or across a jump the
+in-place upgrade does not cover, through a transfer file (`team_transfer`,
+`assistant_cli team export | inspect | review | import | import-credentials |
+finish-import`; guide: `user_docs_source/team-transfer.md`).
 
 - **Two pages, one review.** The operator's loopback page (`team review`,
   `team_transfer.review_web`) and onboarding's **Import a team export**
@@ -3973,8 +3999,8 @@ inspect | review | import | import-credentials | finish-import`; guide:
   converter rather than replacing an existing fingerprint. A version
   imports its own section versions and the ones the previous release exported,
   through one conversion step per section that changed since
-  (`team_transfer.sections.SECTION_UPGRADES`). This is the one deliberate
-  compatibility layer. Steps are pruned by release: when a release ships, the
+  (`team_transfer.sections.SECTION_UPGRADES`). Steps are pruned by release:
+  when a release ships, the
   steps from older releases' versions are deleted, and files from those
   releases are refused before anything is written. Refusal messages explain
   that moving an older export may require several import/export steps and
