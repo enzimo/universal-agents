@@ -3927,9 +3927,11 @@ A release upgrades a running instance in place from every earlier release of
 its own minor version and of the previous one (0.10.x opens what any 0.9.x
 wrote), keeping settings, people, access, memory, knowledge, schedules and
 history. Owners upgrade by installing the new version over the old one, and a
-team transfer for every release would be a heavy step for that. Each change
-that alters what older releases stored brings an upgrade step, and the running
-code reads only the current format, with no fallback that accepts both:
+team transfer for every release would be a heavy step for that. Upgrades only
+go forward: each change that alters what older releases stored brings an
+upgrade step, and the running code reads only the current format, with no
+fallback that accepts both. No release has to open what a newer one wrote, so
+the desktop app never offers an older version.
 
 - **Stores** add a new column to a table an earlier release created when they
   open (`storage.sqlite_connection.ensure_sqlite_column`; `ALTER TABLE … ADD
@@ -3941,8 +3943,12 @@ code reads only the current format, with no fallback that accepts both:
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
   `migrate-config` command.
 - **What cannot carry over**, such as work still running in an old format, is
-  reported at startup with what to do, and the upgrade notes say it, rather
-  than failing later.
+  reported at startup with what to do, rather than failing later. People learn
+  it before they upgrade: the pull request carries the `breaking-change` label
+  and a title that says what breaks and what to do first. The generated release
+  notes list only titles, under "Breaking Changes", and the desktop app shows
+  the notes of every skipped release, warns on that heading and requires an
+  acknowledgment before it switches versions.
 
 When a minor version ships, the upgrade steps for releases before the previous
 minor version are removed, as the team transfer's conversion steps are.
