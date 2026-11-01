@@ -473,7 +473,7 @@ def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str
     """A kind that takes a token lists each token type it takes, where the body names its record, and who presents it.
 
     A binding is ``{type, at?, senders?}``. A command token always names its
-    command in the body (``at``): the plan binds commands to the command id, and
+    command in the body (``at``): a command token is bound to its command's id, and
     the receiver checks the field that names it. ``senders`` narrows who may
     present that type; without it every sender of the frame's address may. A kind
     that requires a token must accept one from each of its senders.
@@ -1316,7 +1316,7 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                     publish.update(consumer_permissions(address, transport))
                 elif entry["class"] != "dead_letter":
                     # Dead letters wait in UA1_DLQ; its read grants come with the services
-                    # that read it (message contract plan 13A.9), not as a subscription.
+                    # that read it, not as a subscription.
                     subscribe.add(full_subject(address, "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}

@@ -89,7 +89,7 @@ progress, claims and reports go to (registry routing `requester`).
   record it and tell the person (`person.notify`) when the refused frame was theirs.
 
 The reply target is part of the signed frame, so no reply needs a lookup, a broadcast or
-a fallback (plan, section 11A.1).
+a fallback.
 
 ## Who may talk to whom
 
@@ -158,8 +158,8 @@ cannot record (not the person's to decide, request closed) comes back as an
 the card. The waiting task learns the outcome from `access.decision`, which only the team
 services send. It carries what was granted because a worker on another host cannot read
 the team's store; it grants nothing the access service has not recorded. Until the
-runtime moves onto this contract (plan, phase 3), today's notice still carries ids only,
-as `AGENTS.md` says.
+runtime's access notices move onto this contract, today's notice still carries ids only,
+as the repository's `AGENTS.md` says.
 
 **Change reviews.** When another writer changed a stored record while a request worked on
 it, the store refuses the request's change with `change_conflict`, which carries a case id
@@ -364,8 +364,8 @@ The accepted residual risks:
 
 NATS permissions are a second layer, not the identity: queued work outlives the
 publisher's connection, the receiver never sees which login published, other
-installations do not trust this broker, and all local processes share one login until
-phase 3.
+installations do not trust this broker, and today all local processes share one NATS login
+until each process gets its own credential with these permissions.
 
 ## On behalf of a person
 
@@ -383,7 +383,7 @@ An authority token (`authority` in the frame) proves that work acts for a person
 - It is bound to one root task, one command, or one access request (a person's decision
   on it), and lasts at most `authority_token_max_seconds`. A command token lasts at most
   `command_token_max_seconds` (300 seconds): the gateway signs one for each command, and
-  it is useful only for minutes (plan, section 8).
+  it is useful only for minutes.
 - It names no roles: receivers read the person's current roles and standing from the
   team's people records, so a role taken away while a token lasts no longer counts.
 - A scheduled job's run has a token the scheduler signed with the run's `schedule_id`;
@@ -395,9 +395,11 @@ An authority token (`authority` in the frame) proves that work acts for a person
   that names its `schedule_id` and no person. No other token may leave out the person.
   Today's signed context for such a run also names its schedule and no person.
 
-A receiver refuses with `bad_authority` a token on a kind whose `authority` is `none`, a
-missing token where it is `required`, and a token that is not signed by an unrevoked
-gateway or scheduler certificate serving its audience team, names a schedule without a
+A receiver refuses with `bad_authority` a token on a kind whose `authority` is `none`, or
+at an address whose `authority_by_address` is `none` (a `task.request` to a worker pool), a
+missing token where it is `required`, and a token that is not signed by a gateway or
+scheduler certificate serving its audience team and known to be unrevoked (the receiver
+holds a current revocations record), names a schedule without a
 scheduler's signature, names neither a person nor a schedule, names another team than the
 frame's issuer, lasts longer than its limit, or was not valid when the frame was issued.
 It also refuses a token that is not valid when the frame is received, by the receiver's
@@ -416,8 +418,8 @@ needs custody state; the handler refuses as `bad_authority`. A token another hos
 from a queue therefore does nothing for that host.
 
 **A run's token.** A worker that claimed a due schedule itself asks for its run's token
-with `run_context.sign`. Only a scheduler signs a run's token (plan, section 13A.10), so a
-scheduler answers it: the scheduler serves the team services' audience at its own address,
+with `run_context.sign`. Only a scheduler signs a run's token, so a scheduler
+answers it: the scheduler serves the team services' audience at its own address,
 `svc.scheduler` (`transport.yaml`), so it never hears the team services' requests.
 The scheduler checks the claim against the frame's `issuer.agent`, which the agent's
 session confirms; a frame that names no agent is refused as `claim_not_held`. An `ok`
@@ -443,7 +445,7 @@ body field: the handler checks that the token is bound to the root task it holds
 (`VerifiedAuthority.require_bound_to`), still as `bad_authority`, before its access
 decision. Four lead operations, `steering.decide`, `intent.set`, `requests.pause` and
 `requests.resume`, name a request in their body (`root_task_id`) and keep a binding
-without `at`. A lead turn may act only on its own request (plan, section 11A.12): the team
+without `at`. A lead turn may act only on its own request: the team
 services compare `root_task_id` with the token's root task and answer another request
 with the typed refusal `not_own_request`, which tells the person to act in that request's
 thread, instead of refusing the frame. Replies carry no token.
@@ -608,7 +610,7 @@ key, and for how long, is in "Stored outcomes".
 
 **Durable copies.** Some facts must reach two inboxes. The team services keep each
 task's custody record from claims, results, handbacks, progress and hold accounts,
-which go first to the task's requester (plan, section 13A.5). The work streams are
+which go first to the task's requester. The work streams are
 work-queue streams: each message goes to one consumer and is deleted once acknowledged,
 and NATS refuses a second consumer whose filter overlaps the first. So the team services
 cannot read the requester's inbox; a kind's `copy_to` addresses get a second frame:
@@ -721,7 +723,7 @@ A queued message can wait days, for example while a host is cut off.
 - **The revocations record expires.** The installation authority signs it again with the next sequence at least every 6 hours and at once on each revocation, and each version is current for at most 24 hours (registry `max_lifetime_seconds`; its body's `expires_at`). A receiver without a current record of an installation refuses that installation's hosts, except its own installation authority (`revocations_not_current`). Hosts store the newest record they verified and never accept a lower sequence, also after a restart: a restarted host adds its stored record before any it reads from `UA1_CERTS`, so an older copy written back to the bucket is ignored. The edge adapter copies another installation's record, which that installation's authority signs again on the same schedule.
 - **Entries leave the record.** An entry may leave once the revoked certificate's own expiry plus the longest frame lifetime (30 days, a dead-letter notice's) and the clock tolerance have passed: by then nothing it signed can still be accepted. Receivers accept a newer record with fewer entries; the revocation epoch still never falls.
 - **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
-- **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued (authorization plan 12.5). A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
+- **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued, so frames already on their way when a host renews are still accepted. A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
 - **Longest lifetime.** A record is written at its document's `issued_at`. A certificate, agent session, agreement or revocations record ends no later than its record's `max_lifetime_seconds` (registry `state_records`: 90 days, 7 days, 366 days and a day) after it is written; a later end is refused (`invalid_body` at the body's end). A record that must last longer is renewed. A rewrite is written no earlier than the version it replaces. A receiver keeps a trust record with its clock (`TrustStore.add(data, now=...)`) and refuses one dated ahead of it by more than the clock tolerance (`not_yet_valid` at `/issued_at`), so the lifetime counts from a time that has come.
 - **Forgetting.** A receiver forgets an agent session or agreement once its newest version was written longer ago than its `max_lifetime_seconds` plus `replay_ledger_retention_seconds` and the clock tolerance (`TrustStore.forget(now)`, at least daily). A certificate is kept an agent session's `max_lifetime_seconds` and the clock tolerance longer, since a session it signed may arrive as late as the certificate's end. By then every version of the record has ended and every frame it vouched for has expired, so the store stays bounded. A forgotten record is not taken back: the store ignores a record it would forget when it holds none under that key, so an older version cannot return either.
@@ -732,7 +734,7 @@ A queued message can wait days, for example while a host is cut off.
 
 Joining an installation and renewing a certificate use the address `ua.v1._install.<sender>.svc`. Their frames name the scope `_install` (`transport.yaml` `installation_scope`) as both the issuer's and the audience's team, and never an agent.
 
-**Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it (authorization plan 12.2). The bundle holds:
+**Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it. The bundle holds:
 - the installation's authority keys;
 - the certificates of the installation authority's hosts, so the host can check the authority's replies before it has a certificate of its own, and the installation's revocations record. The authority's replies need no current record, so a bundle older than a day still lets the host join; the host reads the current record before it accepts other hosts' frames;
 - the NATS credential of the pre-join permission set, `generated/permissions/joining_host.json`. With it the host can publish its own installation requests and read its own reply inbox, and nothing else. Of those requests only a join can succeed: a renewal needs a certificate the host does not have yet (`unknown_key`).
@@ -745,9 +747,9 @@ Joining an installation and renewing a certificate use the address `ua.v1._insta
 
 These comparisons, and a renewal's comparison with its certificate, read the body's fields as received, before the body schema: a missing or mistyped field counts as another value (`examples/invalid/host-renew-without-certificate-id.json`).
 
-A join is not answered with a fresh challenge from the authority, as the authorization plan's enrollment endpoint is (12.3, 12.4). A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
+The authority does not answer a join with a fresh challenge to sign. A join frame lasts 30 seconds, the receiver's replay record refuses other content under its message id, and its retry key names the runtime, key and join id. A copied join can therefore only repeat the same request within its lifetime, and the certificate it gets back is useless without the private key.
 
-**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again (plan 12.5), and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for.
+**What the authority decides.** An administrator approves the key's fingerprint, or the installation approves a local process automatically; until then the reply is `pending`. A join for a runtime that already holds an unexpired certificate under another key is a lost-key recovery: an administrator approves it again, and the new certificate gets a higher membership epoch and `replaces` the old one. A join's certificate grants at most the teams, roles, agent types and sessions it asked for.
 
 **Renewing.** A host renews with `host.renew`, signed by the certificate it renews; the body names that certificate and its membership epoch. Every renewed certificate has a higher membership epoch than the one it replaces and names it in `replaces` ("Trust over time"). A host whose reply was lost retries with the same renewal id while the old certificate still signs, or reads its new certificate from `UA1_CERTS`.
 
@@ -759,7 +761,7 @@ A join is not answered with a fresh challenge from the authority, as the authori
 
 The host then keeps the certificate with `TrustStore.add`. Later requests are verified as usual.
 
-**Identifiers.** `profile_sha256` identifies the runtime profile the host asks for: the subjects, agent types and limits an administrator reviews before approving (authorization plan 12.3). The enrollment service that phase 2 adds defines that profile's document; the certificate states the profile granted.
+**Identifiers.** `profile_sha256` is the unpadded base64url SHA-256 of the runtime profile the host asks for: the document listing the subjects, agent types and limits an administrator reviews before approving the join or renewal. A join and a renewal state the profile asked for, and the certificate states the profile granted. This contract does not define the profile's format; only the authority reads the profile and compares its digest, and receivers of frames do not.
 
 ### Application key rotation
 
@@ -816,9 +818,9 @@ What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
 - **Agent records.** The key is `<team>.<agent>` of the body, and the team is one the writer's certificate serves. A reader accepts an agent record only from the host its placement names; the reader checks that, since it needs the placement.
 - **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
-- **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows (message contract plan 11A.9). An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs.
+- **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs.
 
-**Not generated yet.** The NATS permissions for the key-value buckets, the object store and the dead-letter stream come with the services that use them (message contract plan 13A.9). Until then the registry's `writers` say who may store each record, and the readers' checks above do not depend on who stored it.
+**Not generated yet.** The NATS permissions for the key-value buckets, the object store and reading the dead-letter stream come with the services that use them. Until then the registry's `writers` say who may store each record, and the readers' checks above do not depend on who stored it.
 
 ## Dead letters
 
@@ -833,7 +835,7 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
 
   It has no free text, because a refusal's details can quote the content.
 - **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes`, which with its headers fits the stream's message limit; for a larger message the notice says `raw.stored: false`.
-- **People's content.** A raw copy can hold a person's message. Only the team services read `UA1_DLQ`; its read grants come with them (message contract plan 13A.9). Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference.
+- **People's content.** A raw copy can hold a person's message. Only the team services read `UA1_DLQ`; its read grants come with them. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 
 ## Versions
@@ -877,13 +879,13 @@ them; their retry key stays the message id. An agent's operation carries its roo
 token. An operation both may send lists both bindings, each with the roles that present it.
 
 **Relays to an agent's host.** The holder answers for its own queue through the team
-services (plan, section 13A.4). The gateway sends `tasks.list`, `tasks.list_finished`,
+services. The gateway sends `tasks.list`, `tasks.list_finished`,
 `tasks.remove` and `tasks.purge` to the team services (`svc.team`), and only the team
 services pass them on to the agent's host (`ctl.agent.<agent>`, `senders_by_address`); the
 agent's host refuses them straight from the gateway as `wrong_sender`. `debug.dump` takes
 the same way to `ctl.agent.<agent>`: today the lead applies it in its own process, and
-the relay lets the team services move to another host without a new message (plan,
-section 11A.10). A relayed frame carries the gateway's command token unchanged, with the
+the relay lets the team services move to another host without a new message. A
+relayed frame carries the gateway's command token unchanged, with the
 same `request_id`. The agent's host verifies the person from the gateway's signature: no
 body names a person, and the team services never sign tokens. Command tokens are accepted
 only from these senders, so an agent host cannot use one on another operation.
@@ -1042,8 +1044,7 @@ each bank's `max_tags` setting must stay within 100, `max_tag_chars` within 256,
 and `max_metadata_chars` within 16,384. Today's settings have no upper bounds;
 these larger-than-default bounds leave room for metadata and tags in one
 frame when fact text uses a blob. The receiver still enforces the bank's
-configured limits. They do not change runtime settings in this contract-only
-phase.
+configured limits. This contract does not change runtime settings.
 
 `memory.list` takes a zero-based `offset` and a `limit` from 1 to 100. The
 adapter maps them to today's one-based start and end rows. `memory_id` sorts
@@ -1322,7 +1323,8 @@ against the same typed schema. Actual service history windows, including the
 latest 20 sessions and configured checkpoint history, still apply.
 Free event details become `details_json`, bounded at 16,384 characters.
 Inline request collections keep their 1,000-item bound where specified. For
-requests without a file alternative, phase 4 must keep inputs within these bounds.
+requests without a file alternative, code that moves a tool onto these operations must
+keep its inputs within these bounds.
 These bounds change what the adapter accepts; they do
 not authorize truncation. Senders count serialized UTF-8 bytes and move
 content to files or shorten a page before the frame reaches 262,144 bytes.
@@ -1646,11 +1648,11 @@ covered records, so the generator refuses them on an operation without `covered_
 request (`intent.set`, `custody.decide`, `requests.pause`, `requests.resume`), which change
 the request itself and no covered record.
 
-These replies include the conflict cases planned for phase 4. Until those cases
-exist, agent tool writes keep calling today's stores directly: moving them onto
-these operations earlier would leave no `case_id` or `brief` to return. Gateway
-commands may move separately because the request-specific conflict rule does not
-refuse a person's own edits.
+These replies carry the stores' conflict cases, each with its `case_id` and `brief`.
+Agent tool writes keep calling today's stores directly until they move onto these
+operations together with the change review ("Change reviews"). Gateway commands may move
+separately because the request-specific conflict rule does not refuse a person's own
+edits.
 
 ## Stored outcomes
 

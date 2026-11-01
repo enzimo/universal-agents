@@ -5868,7 +5868,7 @@
     },
     {
       "code": "bad_authority",
-      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds"
+      "meaning": "the frame carries an authority token its kind does not take at the frame's address (registry authority_by_address) or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation known to be unrevoked (with a current revocations record), names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued or is not valid when it is received, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds"
     },
     {
       "code": "access_denied",

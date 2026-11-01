@@ -503,7 +503,7 @@ def _verify_sender(frame: Frame, certificate: HostCertificate, session: Optional
     _verify_outside_boundary(frame, roles, session, receiver)
     if frame.issuer.installation == trust.installation:
         # Within an installation a host speaks inside the team it names; reaching
-        # another team is a later agreement (message contract plan, phase 6).
+        # another team needs an agreement between teams, which this contract does not define yet.
         if frame.audience.team != frame.issuer.team:
             raise FrameRefused("wrong_sender", "a frame stays within its issuer's team", at="/audience/team")
         return

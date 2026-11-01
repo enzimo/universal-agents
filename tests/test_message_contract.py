@@ -553,7 +553,7 @@ def test_outside_agents_cannot_publish_into_worker_pools() -> None:
 
 
 def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
-    """team services receive task.request's copy on work.team, not the agent and pool inboxes (review I5)."""
+    """team services receive task.request's copy on work.team, not the agent and pool inboxes (README, "Durable copies")."""
 
     services = json.loads((CONTRACT / "generated" / "permissions" / "team_services.json").read_text(encoding="utf-8"))
     consumers = {subject.split(".")[-1] if not subject.startswith("$JS.ACK.") else subject.split(".")[3]
@@ -867,7 +867,7 @@ def role_permissions(role: str) -> dict:
 
 
 def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_services() -> None:
-    """Plan 13A.4 and 11A.10: the gateway asks the team services, which pass the command on to the agent's host."""
+    """README, "Relays to an agent's host": the gateway asks the team services, which pass the command on."""
 
     relayed = ("tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump")
     for kind in relayed:
@@ -884,7 +884,7 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
 
 
 def test_the_scheduler_answers_only_run_context_sign_and_reads_no_copies() -> None:
-    """Only a scheduler signs a run's token (plan 13A.10); it listens at its own address, never at svc.team."""
+    """Only a scheduler signs a run's token (README, "A run's token"); it listens at its own address, never at svc.team."""
 
     scheduler = role_permissions("scheduler")
     assert scheduler["subscribe"] == ["_INBOX.{self}.>", "ua.v1.{team}.*.svc.scheduler"]
@@ -973,7 +973,7 @@ def test_a_run_token_names_no_person_exactly_when_the_run_is_system_work() -> No
 
 
 def test_each_example_command_has_its_own_token() -> None:
-    """Plan section 8: a command token is bound to one command; only the team services' relay carries it again."""
+    """README, "On behalf of a person": a command token is bound to one command; only the team services' relay carries it again."""
 
     uses: dict[str, list] = {}
     for path in valid_examples():
@@ -996,7 +996,7 @@ def test_every_reply_example_names_exactly_one_request() -> None:
 
 
 def test_every_kind_has_an_invalid_example() -> None:
-    """Plan 13A.8: every kind has a full example and invalid examples."""
+    """README, "Examples": every kind has a valid example and an invalid one."""
 
     refused = set()
     for path in invalid_examples():
@@ -1377,7 +1377,7 @@ def renewed_lead_certificate(*, issued_at: str = "2026-10-22T04:30:00.000Z", epo
 
 
 def test_a_replaced_certificate_signs_new_frames_only_during_the_overlap() -> None:
-    """Authorization plan 12.5: in-flight frames from the old key are accepted until a short deadline."""
+    """README, "Trust over time": frames from the replaced key are accepted until a short deadline after renewal."""
 
     store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:20:00.000Z")])
     pause = fixtures.example_frame("agent.pause")

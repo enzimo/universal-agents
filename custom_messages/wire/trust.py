@@ -36,8 +36,7 @@ clock, minimum epochs and the record it already holds for the key.
 A renewed certificate (a renewal or a key rotation) has a higher membership epoch
 than the one it ``replaces``, so both stay in the store and queued frames still find
 the certificate valid when they were issued. The replaced certificate signs new
-frames only until ``CERTIFICATE_OVERLAP_SECONDS`` after its replacement was issued
-(authorization plan 12.5).
+frames only until ``CERTIFICATE_OVERLAP_SECONDS`` after its replacement was issued.
 
 ``TrustStore.forget`` drops the certificates, sessions and agreements nothing can
 still need, so a long-running receiver's store does not grow without a bound; each
@@ -99,9 +98,9 @@ CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT = "certificate", "revocations
 HOST, AGENT, PLACEMENT, TEAM_VIEW = "host", "agent", "placement", "team_view"
 TRUST_RECORDS = frozenset({CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT})
 WRITER_AUTHORITY = "authority"
-# The host role that signs the revocations record's replacements and renews certificates:
-# its frames are accepted without a current record, so a host whose record expired can
-# still renew and reconnect.
+# The installation authority's host role: it issues certificates and the revocations
+# record, so its frames are accepted without a current record, and a host whose record
+# expired can still renew and reconnect.
 AUTHORITY_HOST_ROLE = "installation_authority"
 
 

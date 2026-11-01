@@ -660,7 +660,7 @@ async def test_the_scheduler_signs_a_run_token_for_a_worker_that_asks(isolated_b
 
 @pytest.mark.asyncio
 async def test_the_team_services_pass_a_queue_request_on_to_the_agent_that_holds_the_queue(isolated_broker) -> None:
-    """The gateway asks the team services, which relay the command, token unchanged, to the holder (plan 13A.4)."""
+    """The gateway asks the team services, which relay the command, token unchanged, to the holder (README, "Relays")."""
 
     async with AsyncExitStack() as stack:
         gateway = await connect(stack, isolated_broker, "gateway")

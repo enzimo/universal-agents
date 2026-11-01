@@ -69,8 +69,8 @@ state_schema: state.schema.json
 max_frame_bytes: 262144
 max_nesting_depth: 64
 authority_token_max_seconds: 604800   # today's signed person context lasts at most 7 days
-command_token_max_seconds: 300        # a token bound to one command lasts minutes (plan, section 8)
-certificate_overlap_seconds: 300      # a replaced certificate still signs new frames this long after its replacement is issued (authorization plan 12.5)
+command_token_max_seconds: 300        # a token bound to one command lasts minutes
+certificate_overlap_seconds: 300      # a replaced certificate still signs new frames this long after its replacement is issued
 
 # Refusals a receiver gives before any handler runs, in the order it checks them.
 # "The issuer's certificate" is the host certificate the receiver's trust store holds
@@ -113,7 +113,7 @@ verification_refusals:
   - code: invalid_body
     meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, "Installation traffic")
   - code: bad_authority
-    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds
+    meaning: the frame carries an authority token its kind does not take at the frame's address (registry authority_by_address) or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation known to be unrevoked (with a current revocations record), names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued or is not valid when it is received, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds
   - code: access_denied
     meaning: the receiver's access decision refused the sender
 # Refusals of a change to a covered store record. Each covered operation offers those that

@@ -11,7 +11,7 @@ agent_roles:
 
 # Rules that hold in every topology.
 # The edge a message travels on, from the receiver's place relative to the sender for the
-# task the message is about (the task's thread record, plan 11A.1). A receiver works it out,
+# task the message is about (the task's thread record). A receiver works it out,
 # checks it is in the kind's topology_edge list and allowed for the sending agent's role in
 # the request's topology, and refuses otherwise with delivery.refused. Messages hosts send
 # without an agent (gateway, scheduler, team services) are not topology checks.
