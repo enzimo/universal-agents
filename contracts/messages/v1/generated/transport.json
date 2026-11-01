@@ -143,6 +143,7 @@
   },
   "limits": {
     "max_frame_bytes": 262144,
+    "max_header_bytes": 1024,
     "nats_max_payload_bytes": 1048576
   },
   "object_store": {
@@ -164,7 +165,7 @@
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
       "max_consumers": 4096,
-      "max_message_bytes": 262144,
+      "max_message_bytes": 263168,
       "retention": "workqueue",
       "storage": "file",
       "subjects": [
@@ -174,7 +175,7 @@
     },
     "UA1_DLQ": {
       "max_age_seconds": 2592060,
-      "max_message_bytes": 262144,
+      "max_message_bytes": 263168,
       "retention": "limits",
       "storage": "file",
       "subjects": [
@@ -185,7 +186,7 @@
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
       "max_consumers": 4096,
-      "max_message_bytes": 262144,
+      "max_message_bytes": 263168,
       "retention": "workqueue",
       "storage": "file",
       "subjects": [

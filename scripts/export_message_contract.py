@@ -126,6 +126,14 @@ COVERED_ONLY_REFUSALS = {"change_conflict", "needs_person_decision", "record_bus
 # one of them would never repeat and could not find the stored outcome.
 PER_FRAME_PARTS = {"/message_id", "/idempotency_key", "/issued_at", "/not_before", "/expires_at", "/body_digest",
                    "/signature"}
+# The NATS headers a sender may set (README, "NATS headers"), each with the longest value it
+# holds: the idempotency key and the kind (their schemas' maxLength), the message id (a
+# UUID's 36 characters), and W3C Trace Context's traceparent (always 55 characters) and
+# tracestate (senders keep it within the 512 characters W3C asks every system to pass on).
+HEADER_VALUES = {"Nats-Msg-Id": ("idempotency_key", None), "UA-Kind": ("kind", None), "UA-Id": (None, 36),
+                 "traceparent": (None, 55), "tracestate": (None, 512)}
+# NATS's header block: a version line, one "Name: value" line per header, and an empty line.
+NATS_HEADER_VERSION, NATS_LINE_END = "NATS/1.0\r\n", "\r\n"
 STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "max_lifetime_seconds",
                 "write_rule"}
 REQUIRED_STATE_FIELDS = {"description", "bucket", "key", "signer", "writers", "body", "write_rule"}
@@ -1058,6 +1066,30 @@ def check_transport(transport: dict[str, Any]) -> None:
     check_stream_subjects(transport)
 
 
+def largest_header_block(schemas: dict[str, dict[str, Any]]) -> int:
+    """Bytes of the largest NATS header block a sender may set (HEADER_VALUES)."""
+
+    common = schemas["common.schema.json"]["$defs"]
+    sizes = {name: common[definition]["maxLength"] if definition else size for name, (definition, size) in HEADER_VALUES.items()}
+    return len(NATS_HEADER_VERSION) + sum(len(f"{name}: {NATS_LINE_END}") + size for name, size in sizes.items()) \
+        + len(NATS_LINE_END)
+
+
+def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Every stream stores a full-size frame with its headers, which JetStream counts in a message's size."""
+
+    limits = transport["limits"]
+    largest = largest_header_block(schemas)
+    if not isinstance(limits.get("max_header_bytes"), int) or limits["max_header_bytes"] < largest:
+        raise ContractError(f"transport.yaml: max_header_bytes holds the largest header block senders may set, {largest} bytes")
+    message = limits["max_frame_bytes"] + limits["max_header_bytes"]
+    if message > limits["nats_max_payload_bytes"]:
+        raise ContractError("transport.yaml: a frame and its headers fit nats_max_payload_bytes")
+    for name, stream in transport["streams"].items():
+        if stream.get("max_message_bytes") != message:
+            raise ContractError(f"transport.yaml: stream {name}'s max_message_bytes is max_frame_bytes plus max_header_bytes")
+
+
 def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
     """A queued class's streams exist and keep its messages for its longest expiry plus the clock tolerance."""
 
@@ -1610,6 +1642,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"COMMAND_TOKEN_MAX_SECONDS = {registry['command_token_max_seconds']!r}\n"
         f"CERTIFICATE_OVERLAP_SECONDS = {registry['certificate_overlap_seconds']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
+        f"MAX_HEADER_BYTES = {transport['limits']['max_header_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
@@ -1639,6 +1672,7 @@ def render() -> dict[Path, str]:
     if registry["max_frame_bytes"] != transport["limits"]["max_frame_bytes"]:
         raise ContractError("registry.yaml and transport.yaml disagree on the frame size limit")
     check_transport(transport)
+    check_message_sizes(transport, schemas)
     check_consumer_names(transport)
     check_registry(registry, transport, topologies, schemas)
     files: dict[Path, str] = {

@@ -556,8 +556,17 @@ refused as `replayed`.
 frame; a copy that disagrees is refused as `subject_mismatch`. Every publish sets
 `UA-Kind` (the kind) and `UA-Id` (the message id); JetStream publishes of durable kinds
 also set `Nats-Msg-Id` (the idempotency key). `traceparent` and `tracestate` are
-transport controls and are not compared; `baggage` is dropped at installation boundaries.
-A frame read from storage is verified without headers.
+transport controls and are not compared; a sender keeps `tracestate` within 512 characters,
+the length W3C Trace Context asks every system to pass on. Senders set no other header,
+`baggage` included. A frame read from storage is verified without headers.
+
+**Header size.** JetStream counts headers in a stream's maximum message size. The largest
+header block these five headers allow, in NATS's `NATS/1.0` header format, is 891 bytes;
+`max_header_bytes` in `transport.yaml` is 1,024, which leaves room for a header a client
+library adds to a JetStream publish, such as `Nats-Expected-Stream`. A sender refuses to
+publish headers larger than `max_header_bytes`. Every stream's `max_message_bytes` is
+`max_frame_bytes` plus `max_header_bytes`, so a frame of the full size is stored with its
+headers. The generator checks both.
 
 **Idempotency keys.** A kind's registry entry lists, under `idempotency`, the JSON
 pointers into the frame whose values make its key. The key is the kind, a colon, and the
@@ -804,7 +813,7 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   - the raw copy's size and SHA-256.
 
   It has no free text, because a refusal's details can quote the content.
-- **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes` (the stream's message limit); for a larger message the notice says `raw.stored: false`.
+- **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes`, which with its headers fits the stream's message limit; for a larger message the notice says `raw.stored: false`.
 - **People's content.** A raw copy can hold a person's message. Only the team services read `UA1_DLQ`; its read grants come with them (message contract plan 13A.9). Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 

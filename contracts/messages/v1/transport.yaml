@@ -51,6 +51,7 @@ server:
 
 limits:
   max_frame_bytes: 262144      # larger content goes to the object store by reference
+  max_header_bytes: 1024       # a frame's NATS headers: the largest block the contract allows is 891 bytes (README, "NATS headers")
   nats_max_payload_bytes: 1048576
 
 classes:
@@ -102,7 +103,7 @@ streams:
     max_age_seconds: 604860     # the durable class's longest expiry plus a minute (more than the clock tolerance): no receiver could still accept older work
     duplicate_window_seconds: 120
     max_consumers: 4096         # agents and pools of one team; NATS 2.15 defaults to 1,000 per stream
-    max_message_bytes: 262144
+    max_message_bytes: 263168   # max_frame_bytes plus max_header_bytes: JetStream counts headers in a message's size
   UA1_WORK:
     # Edge deliveries and the team services' inbox, read through exact consumer grants.
     subjects: [ua.v1.*.*.work.edge.*, ua.v1.*.*.work.team]
@@ -111,13 +112,13 @@ streams:
     max_age_seconds: 604860     # as UA1_AGENT_WORK_{team}
     duplicate_window_seconds: 120
     max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
-    max_message_bytes: 262144
+    max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}
   UA1_DLQ:
     subjects: [ua.v1.*.*.dlq.>]
     retention: limits
     storage: file
     max_age_seconds: 2592060    # the dead-letter class's expiry plus a minute
-    max_message_bytes: 262144   # a raw copy is kept only up to max_frame_bytes; a larger message gets a notice with raw.stored false
+    max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}; a raw copy keeps at most max_frame_bytes of the refused message, and a larger message gets a notice with raw.stored false
 
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
 # team "team_example" with agent "researcher-2" and team "team" with agent

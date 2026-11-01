@@ -437,6 +437,24 @@ async def test_a_reassigned_task_is_delivered_again_and_its_retry_is_deduplicate
 
 
 @pytest.mark.asyncio
+async def test_a_full_size_frame_is_stored_with_the_largest_headers_senders_may_set(isolated_broker) -> None:
+    """README, "NATS headers": the stream's message limit leaves max_header_bytes for headers."""
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        await create_topology(admin)
+        js = admin.nc.jetstream()
+        largest = {"Nats-Msg-Id": "task.stop:" + "k" * 118, "UA-Kind": "k" * 84, "UA-Id": "0" * 36,
+                   "traceparent": "00-" + "1" * 32 + "-" + "2" * 16 + "-01", "tracestate": "t" * 512}
+        subject = f"ua.v1.{TEAM}.lead-host-1.work.agent.researcher-2"
+        ack = await js.publish(subject, b"x" * TRANSPORT["limits"]["max_frame_bytes"], headers=largest)
+        assert (await js.get_msg(AGENT_STREAM, ack.seq)).headers["tracestate"] == "t" * 512
+        too_large = TRANSPORT["streams"]["UA1_AGENT_WORK_{team}"]["max_message_bytes"] + 1
+        with pytest.raises(nats.js.errors.APIError):
+            await js.publish(subject, b"x" * too_large)
+
+
+@pytest.mark.asyncio
 async def test_installation_requests_reach_the_authority_and_dead_letters_keep_raw_copies(isolated_broker) -> None:
     async with AsyncExitStack() as stack:
         admin = await connect(stack, isolated_broker, "admin")

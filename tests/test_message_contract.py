@@ -365,6 +365,22 @@ def test_streams_store_each_queued_address_once_and_nothing_else(change, problem
         EXPORT.check_transport(transport)
 
 
+def test_streams_store_a_full_size_frame_with_the_largest_headers_senders_may_set() -> None:
+    """README, "NATS headers": JetStream counts headers in a stream's maximum message size."""
+
+    assert EXPORT.largest_header_block(CONTRACT_SCHEMAS) == 891 <= TRANSPORT["limits"]["max_header_bytes"] == 1024
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    assert "is 891 bytes" in readme and "is 1,024" in readme
+    for change, problem in (
+            (lambda t: t["limits"].update(max_header_bytes=890), "max_header_bytes holds the largest header block"),
+            (lambda t: t["streams"]["UA1_WORK"].update(max_message_bytes=262144), "UA1_WORK's max_message_bytes"),
+            (lambda t: t["limits"].update(nats_max_payload_bytes=262144), "fit nats_max_payload_bytes")):
+        transport = copy.deepcopy(TRANSPORT)
+        change(transport)
+        with pytest.raises(EXPORT.ContractError, match=problem):
+            EXPORT.check_message_sizes(transport, CONTRACT_SCHEMAS)
+
+
 def test_a_team_wide_address_is_received_by_the_same_roles_for_every_kind() -> None:
     """The scheduler answers only run_context.sign, so it listens at svc.scheduler, not svc.team."""
 
