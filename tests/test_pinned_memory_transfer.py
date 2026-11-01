@@ -7,6 +7,7 @@ the stores back through the pinned memory repository.
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import json
 import stat
 from pathlib import Path
@@ -43,6 +44,7 @@ def old(tmp_path: Path) -> tuple[Path, Any]:
     path, config = _instance(tmp_path, "old", OLD_TEAM)
     repo = _repo(config)
     repo.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id=OLD_TEAM,
         fact_text="The team ships on Fridays.",
         capacity=10,
@@ -51,19 +53,20 @@ def old(tmp_path: Path) -> tuple[Path, Any]:
         source=SOURCE,
         actor=AUTHOR,
     )
-    repo.create_coremem(team_id=OLD_TEAM, fact_text="New policy starts later.", capacity=10, valid_from_utc=FUTURE)
+    repo.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=OLD_TEAM, fact_text="New policy starts later.", capacity=10, valid_from_utc=FUTURE)
     repo.create_usermem(
+        writer=SYSTEM_MEMORY_WRITER,
         canonical_user_id="usr_old_a",
         fact_text="Ana prefers short answers.",
         capacity=10,
         source_key="onboarding:user_context:v1",
         actor=AUTHOR,
     )
-    repo.create_usermem(canonical_user_id="usr_old_a", fact_text="Ana lives in Lisbon.", capacity=10)
-    repo.create_usermem(canonical_user_id="usr_b", fact_text="Ben is on call on Mondays.", capacity=10)
-    repo.create_usermem(canonical_user_id="usr_gone", fact_text="Held until deletion.", capacity=10)
+    repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_old_a", fact_text="Ana lives in Lisbon.", capacity=10)
+    repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_b", fact_text="Ben is on call on Mondays.", capacity=10)
+    repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_gone", fact_text="Held until deletion.", capacity=10)
     # Expired but not pruned yet: the export must neither include nor prune it.
-    repo.create_usermem(canonical_user_id="usr_b", fact_text="Old expired note.", capacity=10, invalid_after_utc=PAST)
+    repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_b", fact_text="Old expired note.", capacity=10, invalid_after_utc=PAST)
     _people(
         config,
         OLD_TEAM,
@@ -192,7 +195,7 @@ def test_without_people_records_only_mapped_people_are_imported(old, tmp_path: P
 def test_facts_that_do_not_fit_or_break_limits_are_reported(old, tmp_path: Path, capsys) -> None:
     out = _export(old[0], tmp_path, "--team")
     new_path, new_config = _instance(tmp_path, "new", NEW_TEAM, memory={"coremem": {"max_facts_per_team": 2, "max_tags": 0}})
-    _repo(new_config).create_coremem(team_id=NEW_TEAM, fact_text="Already here.", capacity=2)
+    _repo(new_config).create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=NEW_TEAM, fact_text="Already here.", capacity=2)
     capsys.readouterr()
 
     with pytest.raises(SystemExit):

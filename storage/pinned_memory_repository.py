@@ -32,6 +32,15 @@ Rules, all checked inside one write transaction:
   another, latest first); after a delete or expiry, the fact is still gone,
   its number is free and nothing happened to it since. Otherwise undo is
   refused, so it never restores an older copy over a later change.
+- **Separate requests are checked too.** Every create, replace, delete and
+  undo names its writer (``MemoryWriter``) and is checked and recorded in the
+  change ledger in the same transaction (``storage.change_ledger``, fields in
+  ``storage.pinned_memory_changes``). A person's request is refused once for
+  another writer's change it has not seen, with a brief; after that it may
+  change only the fields that change did not set. A refused change rolls back,
+  then what the request was shown is saved in a transaction of its own. The
+  version check runs first: a change based on an older read is
+  ``changed_since_read`` whoever made the newer change.
 """
 
 from __future__ import annotations
@@ -55,7 +64,9 @@ from custom_messages.contracts.control_v1 import PINNED_MEMORY_SORT_NEWEST
 from custom_messages.enums import ChangeRefusal
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
+from .change_ledger import ChangeRefused, PlannedChange, check_change, ensure_ledger_tables, record_change, save_review
 from .config import StorageSettings
+from .pinned_memory_changes import MemoryWriter, planned_creation, planned_removal, planned_update
 from .postgres_connection import (
     PINNED_MEMORY_WRITE_LOCK_KEY,
     DatabaseRow,
@@ -248,6 +259,7 @@ class PinnedMemoryRepository(Protocol):
         self,
         event_id: str,
         *,
+        writer: MemoryWriter,
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]: ...
@@ -263,6 +275,7 @@ class _Undo:
     now: str
     source: dict[str, Any]
     actor: dict[str, Any]
+    writer: MemoryWriter
 
 
 class _RelationalPinnedMemoryRepository:
@@ -280,6 +293,51 @@ class _RelationalPinnedMemoryRepository:
             conn.begin_write()
             yield conn
             conn.commit()
+
+    @contextmanager
+    def _checked_write(self) -> Iterator[Any]:
+        """A write whose change is checked in the change ledger (module docstring).
+
+        A refused change raises ``ChangeRefused`` inside the transaction, which
+        then rolls back; what the request was shown is saved afterwards, and
+        the refusal goes on to the caller.
+        """
+
+        try:
+            with self._write() as conn:
+                yield conn
+        except ChangeRefused as refused:
+            self._save_review(refused)
+            raise
+
+    def _save_review(self, refused: ChangeRefused) -> None:
+        if refused.review is None or repositories_are_read_only():
+            return
+        try:
+            with self._write() as conn:
+                save_review(conn, self._dialect, refused.review)
+        except Exception:
+            # The refusal still stands; without the saved review the request is shown the same change again.
+            self._logger.exception(
+                "Could not save what a refused request was shown. event=pinned_memory_ledger_review_failed "
+                "request_id=%s case_id=%s",
+                refused.review.request_id,
+                refused.review.case_id,
+            )
+
+    def _check_ledger(self, conn: Any, writer: MemoryWriter, planned: PlannedChange, *, now: str) -> None:
+        check_change(
+            conn, self._dialect, team_id=writer.team_id, writer=writer.writer, change=planned,
+            now=datetime.fromisoformat(now),
+        )
+
+    def _record_ledger(
+        self, conn: Any, writer: MemoryWriter, planned: PlannedChange, *, version: str, now: str
+    ) -> None:
+        record_change(
+            conn, self._dialect, team_id=writer.team_id, writer=writer.writer, change=planned, version=version,
+            now=datetime.fromisoformat(now),
+        )
 
     def _init_schema(self) -> None:
         if repositories_are_read_only():
@@ -361,6 +419,8 @@ class _RelationalPinnedMemoryRepository:
                 ON pinned_memory_fact_events(bank, team_id, canonical_user_id, created_at_utc DESC)
                 """
             )
+            # Fact changes are checked and recorded in the change ledger, in the same transaction.
+            ensure_ledger_tables(conn, self._dialect)
             conn.commit()
 
 
@@ -521,16 +581,18 @@ class _RelationalPinnedMemoryRepository:
         self,
         event_id: str,
         *,
+        writer: MemoryWriter,
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Reverse one event, only while the fact is still as that event left it (module docstring).
 
         Raises ``PinnedMemoryConflictError`` when the fact changed after the
-        event, and ``ValueError`` for an unknown event or an undo event.
+        event, ``ChangeRefused`` when the change ledger refuses the writer's
+        change, and ``ValueError`` for an unknown event or an undo event.
         """
 
-        with self._write() as conn:
+        with self._checked_write() as conn:
             event = self._event(conn, event_id)
             if event is None:
                 raise ValueError(f"Memory event {event_id!r} was not found.")
@@ -556,6 +618,7 @@ class _RelationalPinnedMemoryRepository:
                 now=now,
                 source=source or {},
                 actor=actor or {},
+                writer=writer,
             )
             outcome = handler(self, undo)
         return {
@@ -568,6 +631,8 @@ class _RelationalPinnedMemoryRepository:
 
     def _undo_create(self, undo: "_Undo") -> dict[str, Any]:
         snapshot = dict(self._require_event_result_current(undo))
+        planned = planned_removal(snapshot)
+        self._check_ledger(undo.conn, undo.writer, planned, now=undo.now)
         undo_event_id = self._insert_event(
             undo.conn,
             event_type="undo",
@@ -579,20 +644,33 @@ class _RelationalPinnedMemoryRepository:
             created_at=undo.now,
         )
         self._delete_active(undo.conn, snapshot)
+        self._record_ledger(undo.conn, undo.writer, planned, version="", now=undo.now)
         return {"event_id": undo_event_id, "deleted": True}
 
     def _undo_replace(self, undo: "_Undo") -> dict[str, Any]:
         current = self._require_event_result_current(undo)
         restored = dict(json.loads(undo.event.before_json or "{}"))
         restored["updated_at_utc"] = undo.now
+        planned = planned_update(dict(current), restored)
+        self._check_ledger(undo.conn, undo.writer, planned, now=undo.now)
         self._update_active(undo.conn, restored)
-        return self._record_undo(undo, operation="undo_replace", before=dict(current))
+        outcome = self._record_undo(undo, operation="undo_replace", before=dict(current))
+        self._record_ledger(
+            undo.conn, undo.writer, planned, version=pinned_memory_record_digest_values(outcome["fact"]), now=undo.now
+        )
+        return outcome
 
     def _undo_removal(self, undo: "_Undo") -> dict[str, Any]:
         restored = self._require_removal_current(undo)
         restored["updated_at_utc"] = undo.now
+        planned = planned_creation(restored)
+        self._check_ledger(undo.conn, undo.writer, planned, now=undo.now)
         self._insert_active(undo.conn, restored)
-        return self._record_undo(undo, operation="undo_removal", before={})
+        outcome = self._record_undo(undo, operation="undo_removal", before={})
+        self._record_ledger(
+            undo.conn, undo.writer, planned, version=pinned_memory_record_digest_values(outcome["fact"]), now=undo.now
+        )
+        return outcome
 
     def _record_undo(self, undo: "_Undo", *, operation: str, before: dict[str, Any]) -> dict[str, Any]:
         event = undo.event
@@ -784,6 +862,7 @@ class _RelationalPinnedMemoryRepository:
         source_key: Optional[str] = None,
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
+        writer: MemoryWriter,
     ) -> PinnedMemoryWriteResult:
         fact = str(fact_text or "").strip()
         if not fact:
@@ -793,7 +872,7 @@ class _RelationalPinnedMemoryRepository:
             raise ValueError("source_key must contain at most 240 characters.")
         # The free number is read under the write lock, so a create at the
         # same moment waits and then sees this one's number as taken.
-        with self._write() as conn:
+        with self._checked_write() as conn:
             now = utc_now_iso()
             self._prune_scope(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, now_utc=now)
             if normalized_source_key is not None:
@@ -848,6 +927,8 @@ class _RelationalPinnedMemoryRepository:
                 "updated_at_utc": now,
                 "source_key": normalized_source_key,
             }
+            planned = planned_creation(row_payload)
+            self._check_ledger(conn, writer, planned, now=now)
             self._insert_active(conn, row_payload)
             event_id = self._insert_event(
                 conn,
@@ -859,6 +940,7 @@ class _RelationalPinnedMemoryRepository:
                 actor=actor_payload,
                 created_at=now,
             )
+            self._record_ledger(conn, writer, planned, version=pinned_memory_record_digest_values(row_payload), now=now)
         return PinnedMemoryWriteResult(PinnedMemoryFactRow(**row_payload), event_id)
 
     def _replace(
@@ -877,10 +959,11 @@ class _RelationalPinnedMemoryRepository:
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
+        writer: MemoryWriter,
     ) -> Optional[PinnedMemoryWriteResult]:
         """Change fact ``memory_id``; with ``expected_record_digest``, only while it is that version."""
 
-        with self._write() as conn:
+        with self._checked_write() as conn:
             now = utc_now_iso()
             self._prune_scope(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, now_utc=now)
             row = self._get_row(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, memory_id=memory_id)
@@ -898,6 +981,17 @@ class _RelationalPinnedMemoryRepository:
                 if clear_invalid_after_utc
                 else invalid_after_utc if invalid_after_utc is not None else row["invalid_after_utc"]
             )
+            planned = planned_update(
+                before,
+                {
+                    "fact_text": next_fact,
+                    "valid_from_utc": valid_from_utc or row["valid_from_utc"],
+                    "invalid_after_utc": next_invalid_after_utc,
+                    "tags_json": next_tags,
+                    "metadata_json": next_metadata,
+                },
+            )
+            self._check_ledger(conn, writer, planned, now=now)
             conn.execute(
                 f"""
                 UPDATE pinned_memory_facts_active
@@ -941,6 +1035,9 @@ class _RelationalPinnedMemoryRepository:
                 actor=actor or {},
                 created_at=now,
             )
+            self._record_ledger(
+                conn, writer, planned, version=pinned_memory_record_digest_values(dict(after_row)), now=now
+            )
         return PinnedMemoryWriteResult(self._row_to_fact(after_row), event_id)
 
     def _delete(
@@ -953,10 +1050,11 @@ class _RelationalPinnedMemoryRepository:
         source: Optional[dict[str, Any]] = None,
         actor: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
+        writer: MemoryWriter,
     ) -> Optional[PinnedMemoryWriteResult]:
         """Delete fact ``memory_id``; with ``expected_record_digest``, only while it is that version."""
 
-        with self._write() as conn:
+        with self._checked_write() as conn:
             now = utc_now_iso()
             self._prune_scope(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, now_utc=now)
             row = self._get_row(conn, bank=bank, team_id=team_id, canonical_user_id=canonical_user_id, memory_id=memory_id)
@@ -964,6 +1062,8 @@ class _RelationalPinnedMemoryRepository:
                 return None
             self._require_version(row, expected_record_digest, operation="delete")
             snapshot = dict(row)
+            planned = planned_removal(snapshot)
+            self._check_ledger(conn, writer, planned, now=now)
             self._delete_active(conn, snapshot)
             event_id = self._insert_event(
                 conn,
@@ -975,6 +1075,7 @@ class _RelationalPinnedMemoryRepository:
                 actor=actor or {},
                 created_at=now,
             )
+            self._record_ledger(conn, writer, planned, version="", now=now)
         return PinnedMemoryWriteResult(self._row_to_fact(row), event_id)
 
     def _prune_scope(self, conn: Any, *, bank: str, team_id: str, canonical_user_id: str, now_utc: str) -> None:

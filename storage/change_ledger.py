@@ -1,7 +1,7 @@
 """The change ledger: which of a person's requests changed which record, in one order.
 
 Why: a person's separate requests can run at the same time, and two of them
-can change the same record (a personal knowledge page today; memory facts,
+can change the same record (personal knowledge pages and memory facts today;
 schedules, Objectives, heartbeat items and files as their stores join). A
 version check alone ("the record changed since you read it") stops stale
 writes but not a request that read the newest version and then changes a
@@ -189,6 +189,22 @@ class ChangeWriter:
     def __post_init__(self) -> None:
         if (self.kind is ChangeWriterKind.REQUEST) != bool(self.request_id):
             raise ValueError("A request id is given exactly for a person's request.")
+
+
+def work_writer(*, person_id: str, request_id: str, checked: bool) -> ChangeWriter:
+    """The writer for an agent's work, from its verified identity (``custom_agents.change_writers``).
+
+    A request id comes only from a context the gateway signed for a person, so
+    it is that person's request. Work for a person without one is scheduled
+    work (the scheduler signs it). Work for nobody is system upkeep, which
+    never counts against a request.
+    """
+
+    if request_id:
+        return ChangeWriter(ChangeWriterKind.REQUEST, request_id=request_id, person_id=person_id, checked=checked)
+    if person_id:
+        return ChangeWriter(ChangeWriterKind.SCHEDULED, person_id=person_id, checked=checked)
+    return ChangeWriter(ChangeWriterKind.SYSTEM)
 
 
 class CaseState(StrEnum):
@@ -1083,4 +1099,5 @@ __all__ = [
     "record_task_request_state",
     "require_same_request_identity",
     "save_review",
+    "work_writer",
 ]

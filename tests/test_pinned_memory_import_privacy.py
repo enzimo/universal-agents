@@ -26,6 +26,7 @@ from storage.pinned_memory_repository import (
     create_pinned_memory_repository,
 )
 from tests.change_approval_support import SignedTaskManager, use_signed_contexts
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 from tests.test_team_transfer_pinned_memory import TEAM, _old_instance, _transfer
 
 PERSON = "usr_ana"
@@ -60,6 +61,7 @@ def test_transferred_fact_keeps_agent_progress_without_import_provenance(
     scope = {"team_id": TEAM} if bank == COREMEM_BANK else {"canonical_user_id": PERSON}
     create(
         **scope,
+        writer=SYSTEM_MEMORY_WRITER,
         fact_text="Guide progress saved.",
         capacity=10,
         tags=["onboarding_guide"],

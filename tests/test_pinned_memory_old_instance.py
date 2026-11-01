@@ -11,6 +11,7 @@ instance.
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import hashlib
 import json
 import logging
@@ -45,15 +46,16 @@ def _write_old_memories(database: Path) -> None:
 
     database.parent.mkdir(parents=True, exist_ok=True)
     repo = SqlitePinnedMemoryRepository(str(database))
-    repo.create_coremem(team_id=OLD_TEAM, fact_text="The team ships on Fridays.", capacity=10, tags=["process"], actor=AUTHOR)
+    repo.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=OLD_TEAM, fact_text="The team ships on Fridays.", capacity=10, tags=["process"], actor=AUTHOR)
     repo.create_usermem(
+        writer=SYSTEM_MEMORY_WRITER,
         canonical_user_id="usr_ana",
         fact_text="Ana prefers short answers.",
         capacity=10,
         source_key="onboarding:user_context:v1",
         actor=AUTHOR,
     )
-    repo.create_usermem(canonical_user_id="usr_ben", fact_text="Ben is on call on Mondays.", capacity=10)
+    repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_ben", fact_text="Ben is on call on Mondays.", capacity=10)
 
 
 def _fingerprint(root: Path) -> dict[str, str]:
@@ -265,7 +267,7 @@ def test_export_with_only_the_database_takes_the_team_from_the_stored_rows(tmp_p
 def test_several_teams_need_team_id_and_no_team_memory_records_null(tmp_path: Path, capsys) -> None:
     database = tmp_path / "task_history.db"
     _write_old_memories(database)
-    SqlitePinnedMemoryRepository(str(database)).create_coremem(team_id="team_other", fact_text="Other team.", capacity=10)
+    SqlitePinnedMemoryRepository(str(database)).create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team_other", fact_text="Other team.", capacity=10)
     out = tmp_path / "memories.json"
 
     with pytest.raises(SystemExit, match="several teams: team_old, team_other. Pass --team-id"):
@@ -283,7 +285,7 @@ def test_several_teams_need_team_id_and_no_team_memory_records_null(tmp_path: Pa
     assert "Team id: team_other (given with --team-id)." in capsys.readouterr().out
 
     people_only = tmp_path / "people_only.db"
-    SqlitePinnedMemoryRepository(str(people_only)).create_usermem(canonical_user_id="usr_ana", fact_text="Only mine.", capacity=10)
+    SqlitePinnedMemoryRepository(str(people_only)).create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id="usr_ana", fact_text="Only mine.", capacity=10)
     run_cli("export", "--sqlite", str(people_only), "--out", str(tmp_path / "people.json"))
     assert json.loads((tmp_path / "people.json").read_text(encoding="utf-8"))["source_team_id"] is None
     assert "Team id: none (unknown: the database holds no team memory)." in capsys.readouterr().out
@@ -314,8 +316,8 @@ def test_export_reads_postgres_through_a_connection_file(tmp_path: Path) -> None
         pytest.skip("LIVE_TEST_POSTGRES_DSN required")
     team, person = f"team_export_{uuid4().hex[:8]}", f"usr_export_{uuid4().hex[:8]}"
     repo = PostgresPinnedMemoryRepository(dsn)
-    repo.create_coremem(team_id=team, fact_text="Postgres team fact.", capacity=10)
-    repo.create_usermem(canonical_user_id=person, fact_text="Postgres person fact.", capacity=10)
+    repo.create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=team, fact_text="Postgres team fact.", capacity=10)
+    repo.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id=person, fact_text="Postgres person fact.", capacity=10)
     dsn_file = tmp_path / "postgres_dsn"
     dsn_file.write_text(dsn + "\n", encoding="utf-8")
     out = tmp_path / "memories.json"

@@ -31,6 +31,8 @@ from custom_messages.contracts.control_v1 import (
     PinnedMemoryCommandResultPayload,
     PinnedMemoryFactPayload,
 )
+from storage.change_ledger import ChangeWriter
+from storage.pinned_memory_changes import MemoryWriter
 from storage.pinned_memory_repository import (
     COREMEM_BANK,
     USERMEM_BANK,
@@ -87,6 +89,10 @@ class PinnedMemorySource:
 @dataclass(frozen=True)
 class PinnedMemoryRequestContext:
     team_id: Optional[str]
+    # Who changes facts, from verified identity only, for the change ledger:
+    # agent tools from the task (custom_agents.change_writers), people's
+    # commands from the person the gateway signed for, trusted code as system.
+    writer: ChangeWriter
     canonical_user_id: Optional[str] = None
     request_timezone: Optional[str] = None
     source: PinnedMemorySource = PinnedMemorySource()
@@ -269,6 +275,7 @@ class PinnedMemoryService:
                 metadata=self._normalize_metadata(bank, metadata),
                 source=context.source.payload(),
                 actor=context.actor.payload(),
+                writer=_memory_writer(context),
                 source_key=source_key,
             )
         else:
@@ -282,6 +289,7 @@ class PinnedMemoryService:
                 metadata=self._normalize_metadata(bank, metadata),
                 source=context.source.payload(),
                 actor=context.actor.payload(),
+                writer=_memory_writer(context),
                 source_key=source_key,
             )
         return self._result_with_fact(bank=bank, action="create", scope=scope, row=write.fact, event_id=write.event_id)
@@ -321,6 +329,7 @@ class PinnedMemoryService:
                 metadata=self._normalize_metadata(bank, metadata) if metadata is not None else None,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
+                writer=_memory_writer(context),
                 expected_record_digest=expected_version,
             )
         else:
@@ -335,6 +344,7 @@ class PinnedMemoryService:
                 metadata=self._normalize_metadata(bank, metadata) if metadata is not None else None,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
+                writer=_memory_writer(context),
                 expected_record_digest=expected_version,
             )
         if write is None:
@@ -358,6 +368,7 @@ class PinnedMemoryService:
                 memory_id=memory_id,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
+                writer=_memory_writer(context),
                 expected_record_digest=expected_version,
             )
         else:
@@ -366,6 +377,7 @@ class PinnedMemoryService:
                 memory_id=memory_id,
                 source=context.source.payload(),
                 actor=context.actor.payload(),
+                writer=_memory_writer(context),
                 expected_record_digest=expected_version,
             )
         if write is None:
@@ -397,6 +409,7 @@ class PinnedMemoryService:
             event_id,
             source=context.source.payload(),
             actor=context.actor.payload(),
+            writer=_memory_writer(context),
         )
         fact_payload = result.get("fact")
         fact = public_pinned_memory_fact_from_dict(fact_payload) if isinstance(fact_payload, dict) else None
@@ -490,6 +503,12 @@ class PinnedMemoryService:
             )
         return version
 
+
+
+def _memory_writer(context: PinnedMemoryRequestContext) -> MemoryWriter:
+    """The change ledger writer of a memory change: the context's verified writer, in its team's ledger."""
+
+    return MemoryWriter(team_id=str(context.team_id or ""), writer=context.writer)
 
 _CAPACITY_SETTING = {COREMEM_BANK: "max_facts_per_team", USERMEM_BANK: "max_facts_per_user"}
 

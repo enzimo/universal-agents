@@ -21,6 +21,10 @@ from custom_agents.pinned_memory_runtime import (
 )
 from id_generation import new_id
 from storage.pinned_memory_repository import USERMEM_BANK
+from storage.change_ledger import ChangeWriter, ChangeWriterKind
+
+# Startup imports are trusted code working for nobody: system upkeep in the change ledger.
+_STARTUP_WRITER = ChangeWriter(ChangeWriterKind.SYSTEM)
 
 ONBOARDING_USER_CONTEXT_SOURCE_KEY = "onboarding:user_context:v1"
 LEGACY_USER_MD_SOURCE_KEY = "legacy_workspace:USER.md:v1"
@@ -98,6 +102,7 @@ def seed_onboarding_user_context(
     source_hash = _content_hash(content)
     context = PinnedMemoryRequestContext(
         team_id=team_id,
+        writer=_STARTUP_WRITER,
         canonical_user_id=canonical_user_id,
         request_timezone=request_timezone,
         actor=PinnedMemoryActor(kind="system", id="manager_bootstrap", display_name="Manager Bootstrap"),
@@ -150,6 +155,7 @@ def migrate_legacy_user_markdown(
     if content:
         context = PinnedMemoryRequestContext(
             team_id=team_id,
+            writer=_STARTUP_WRITER,
             canonical_user_id=canonical_user_id,
             request_timezone=request_timezone,
             actor=PinnedMemoryActor(

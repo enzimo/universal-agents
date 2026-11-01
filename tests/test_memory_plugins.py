@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,7 @@ def test_coremem_and_usermem_hydration_enforce_scope() -> None:
 def test_memory_plugin_manager_prunes_expired_pinned_memory(tmp_path: Path) -> None:
     repository = SqlitePinnedMemoryRepository(str(tmp_path / "memory.db"))
     repository.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id="team_test",
         fact_text="Expired team fact",
         capacity=5,

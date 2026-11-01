@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_CHANGE_WRITER, SYSTEM_MEMORY_WRITER
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ def _repo(tmp_path: Path) -> SqlitePinnedMemoryRepository:
 
 def _context() -> PinnedMemoryRequestContext:
     return PinnedMemoryRequestContext(
+        writer=SYSTEM_CHANGE_WRITER,
         team_id="team_test",
         canonical_user_id="user_123",
         request_timezone="America/Chicago",
@@ -43,9 +45,11 @@ def test_pinned_memory_repository_reuses_deleted_ids_and_enforces_capacity(
     repository = _repo(tmp_path)
 
     first = repository.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id="team_test", fact_text="Fact one", capacity=2
     )
     second = repository.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id="team_test", fact_text="Fact two", capacity=2
     )
 
@@ -53,11 +57,13 @@ def test_pinned_memory_repository_reuses_deleted_ids_and_enforces_capacity(
     assert second.fact.memory_id == 2
     with pytest.raises(ValueError, match="capacity is full"):
         repository.create_coremem(
+            writer=SYSTEM_MEMORY_WRITER,
             team_id="team_test", fact_text="Fact three", capacity=2
         )
 
-    assert repository.delete_coremem(team_id="team_test", memory_id=1) is not None
+    assert repository.delete_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team_test", memory_id=1) is not None
     reused = repository.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id="team_test", fact_text="Replacement fact", capacity=2
     )
 
@@ -75,6 +81,7 @@ def test_pinned_memory_replace_reports_missing_post_mutation_row(
 ) -> None:
     repository = _repo(tmp_path)
     repository.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id="team_test",
         fact_text="Original fact",
         capacity=2,
@@ -99,6 +106,7 @@ def test_pinned_memory_replace_reports_missing_post_mutation_row(
         ),
     ):
         repository.replace_coremem(
+            writer=SYSTEM_MEMORY_WRITER,
             team_id="team_test",
             memory_id=1,
             fact_text="Updated fact",
@@ -114,18 +122,21 @@ def test_pinned_memory_repository_source_key_is_idempotent_per_user(
     repository = _repo(tmp_path)
 
     first = repository.create_usermem(
+        writer=SYSTEM_MEMORY_WRITER,
         canonical_user_id="user_123",
         fact_text="Initial onboarding context",
         capacity=10,
         source_key="onboarding:user_context:v1",
     )
     second = repository.create_usermem(
+        writer=SYSTEM_MEMORY_WRITER,
         canonical_user_id="user_123",
         fact_text="Changed retry content must not duplicate or overwrite the fact",
         capacity=10,
         source_key="onboarding:user_context:v1",
     )
     other_user = repository.create_usermem(
+        writer=SYSTEM_MEMORY_WRITER,
         canonical_user_id="user_456",
         fact_text="Another user's onboarding context",
         capacity=10,
@@ -144,9 +155,10 @@ def test_pinned_memory_repository_undo_restore_conflicts_when_id_reused(
 ) -> None:
     repository = _repo(tmp_path)
     repository.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id="team_test", fact_text="Original fact", capacity=2
     )
-    repository.delete_coremem(team_id="team_test", memory_id=1)
+    repository.delete_coremem(writer=SYSTEM_MEMORY_WRITER, team_id="team_test", memory_id=1)
     delete_event = repository.get_latest_event(
         bank="coremem",
         team_id="team_test",
@@ -156,12 +168,13 @@ def test_pinned_memory_repository_undo_restore_conflicts_when_id_reused(
     assert delete_event is not None
 
     reused = repository.create_coremem(
+        writer=SYSTEM_MEMORY_WRITER,
         team_id="team_test", fact_text="Reused ID fact", capacity=2
     )
 
     assert reused.fact.memory_id == 1
     with pytest.raises(ValueError, match="already in use"):
-        repository.undo_memory_event(delete_event.event_id)
+        repository.undo_memory_event(delete_event.event_id, writer=SYSTEM_MEMORY_WRITER)
 
 
 def test_pinned_memory_service_rejects_stale_edit_and_delete_digests(
@@ -297,7 +310,7 @@ def test_pinned_memory_service_requires_canonical_user_for_usermem(
     tmp_path: Path,
 ) -> None:
     service = PinnedMemoryService(_repo(tmp_path))
-    context = PinnedMemoryRequestContext(team_id="team_test", canonical_user_id=None)
+    context = PinnedMemoryRequestContext(writer=SYSTEM_CHANGE_WRITER, team_id="team_test", canonical_user_id=None)
 
     result = service.execute_command(
         '/usermem add "Likes concise replies"', bank="usermem", context=context

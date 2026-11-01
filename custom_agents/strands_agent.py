@@ -13,6 +13,7 @@ from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
 from custom_agents.dead_letter_watch import DeadLetterWatchState
 from custom_agents.task_admission_runtime import handle_busy_delivery
+from custom_agents.task_context_runtime import sign_memory_review
 from custom_agents.delegated_work_runtime import send_rejection_claim
 from custom_agents import task_steering_runtime
 from runtime_hosting.blocking_io import BlockingIOLane
@@ -3847,9 +3848,15 @@ class UniversalAgent(BaseModel):
                 f"Memory review job:\n{json.dumps(payload, indent=2, sort_keys=True)}"
             ),
         )
-        envelope = MessageEnvelope(
-            msg_content=task,
-            msg_meta=MessageMeta(
+        review_job_id = str(getattr(review_job, "job_id", "") or "")
+        # The turn's own signed context names the person's request, which has
+        # usually ended; the review works for their conversation review
+        # schedule instead, or waits for its next run (task_context_runtime).
+        # Signing reads the schedule and people stores, so it runs off the loop.
+        review_meta = await asyncio.to_thread(
+            sign_memory_review,
+            self,
+            MessageMeta(
                 from_agent_name=self.name,
                 to_named_agent_type=MEM_REVIEW_AGENT_TYPE,
                 msg_correlation_id=new_id("memory_review"),
@@ -3859,6 +3866,14 @@ class UniversalAgent(BaseModel):
                 is_response_requested=False,
                 gateway_context=gateway_context,
             ),
+            person_id=str(payload.get("canonical_user_id") or ""),
+            review_job_id=review_job_id,
+        )
+        if review_meta is None:
+            return
+        envelope = MessageEnvelope(
+            msg_content=task,
+            msg_meta=review_meta,
             msg_header=MessageHeader(
                 from_agent_id=self.id,
                 to_routing_path=routing_key,

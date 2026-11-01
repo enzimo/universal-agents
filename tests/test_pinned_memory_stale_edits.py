@@ -16,6 +16,7 @@ PostgreSQL runs need ``LIVE_TEST_POSTGRES_DSN``; each test gets its own schema.
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_CHANGE_WRITER, SYSTEM_MEMORY_WRITER
 import json
 import os
 import threading
@@ -89,6 +90,7 @@ def _service(storage: StorageSettings, *, origin: str = AGENT_TOOL) -> PinnedMem
 
 def _context() -> PinnedMemoryRequestContext:
     return PinnedMemoryRequestContext(
+        writer=SYSTEM_CHANGE_WRITER,
         team_id=TEAM, canonical_user_id=PERSON, actor=PinnedMemoryActor(kind="agent", id="agent_lead")
     )
 
@@ -350,7 +352,7 @@ def test_two_creates_at_the_same_moment_both_succeed_with_distinct_numbers(stora
         monkeypatch.setattr(repository, "_insert_active", insert_after_meeting)
 
     def create(index: int) -> int:
-        row = repositories[index].create_coremem(team_id=TEAM, fact_text=f"Fact {index}", capacity=10)
+        row = repositories[index].create_coremem(writer=SYSTEM_MEMORY_WRITER, team_id=TEAM, fact_text=f"Fact {index}", capacity=10)
         return row.fact.memory_id
 
     with ThreadPoolExecutor(max_workers=2) as pool:

@@ -95,7 +95,7 @@ Use OODA as a compact operating discipline, not as narrated thought:
 
 - Use schedules and heartbeat items when the task involves reminders, recurring checks, or future follow-up. Changing a heartbeat item needs the `version` that `list_heartbeat_items` returned, as `expected_version`; after a `changed_since_read` refusal, list it again and decide on what it says now.
 - Store explicit durable user facts at once with `memory(action="create", bank="usermem", ...)`, and team-scoped operational facts with `bank="coremem"`.
-- To change or delete a fact, list the bank first and pass the fact's `record_digest` from that list (memory shown in your instructions has none). A change refused with `changed_since_read` means the fact changed meanwhile: list again and decide with the current fact. Undo only your latest change to a fact.
+- To change or delete a fact, list the bank first and pass the fact's `record_digest` from that list (memory shown in your instructions has none). A change refused with `changed_since_read` means the fact changed meanwhile: list again and decide with the current fact. A change refused with `change_conflict` means someone else changed the fact while this request ran: its `brief` shows who changed which fields; you may then save only fields they did not set. After `needs_person_decision`, leave the fact as it is and tell the person what changed and what you planned. Undo only your latest change to a fact.
 - Evaluate specialist AfterActionReports as lessons-learned candidates, but do not make the user task depend on optional AAR follow-up.
 
 ## Access

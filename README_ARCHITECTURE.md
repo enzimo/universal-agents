@@ -378,10 +378,11 @@ worker) shares the main lane, one turn at a time, as before.
 Why: by turning Run concurrently on the person says the thread's requests do
 not overlap their other work (owner, 2026-10-27). Overlapping changes are checked
 only where stores check them: the change ledger shows a request another
-writer's change to a personal knowledge page before letting it save, and
-refuses a change to the same fields (`agent.request_conflict_checks` turns
-this off); memory facts, schedules, heartbeat items and Objectives refuse
-only a change decided from an older version (`changed_since_read`); shell,
+writer's change to a personal knowledge page or a memory fact before letting
+it save, and refuses a change to the same fields
+(`agent.request_conflict_checks` turns this off); schedules, heartbeat items
+and Objectives refuse only a change decided from an older version
+(`changed_since_read`); shell,
 Python and file-tool writes are not checked. Each turn is self-contained: its
 task, person's model, stop handle and Strands agent live in the task's work record
 (`custom_tools.runtime_context.TaskWork`), bound by the runner around the
@@ -1103,7 +1104,7 @@ knowledge base), plus task history:
 
 The change ledger (`storage/change_ledger.py`) records which of a person's
 requests changed which record, in one order shared by every store that uses
-it; personal knowledge pages are the first. A person can run several
+it: personal knowledge pages and memory facts (both banks). A person can run several
 separate requests at once, and two of them may change the same page. A
 revision check stops only stale writes, so a request that read the newest
 revision could still overwrite what another writer had just changed without
@@ -1173,6 +1174,31 @@ its own (coordination plan 7.10, accepted 2026-10-30).
   every field (`*`): a request that saw one leaves an overlapping change to
   the person rather than overwriting it. The new review and case tables are
   created as usual.
+- **Memory facts.** A fact is a record keyed by its internal id
+  (`fact_uuid`), never its number, which a deleted fact gives to the next new
+  one. Its fields are what the agent `memory` tool sets: `fact_text`, `tags`,
+  `metadata`, `valid_from_utc` and `invalid_after_utc`
+  (`storage/pinned_memory_changes.py`), so a request may still change a
+  fact's tags after another request changed its text. A delete, and an undo
+  of a create, set every field; an undo of a replace sets the fields it
+  restores; an undo that brings a fact back creates it. Every store write
+  names its writer (`MemoryWriter`), required so no path can skip the check:
+  agent tools build it from the task (`custom_agents/change_writers.py`, the
+  same reading knowledge pages use), people's commands and the Settings page
+  from the person the gateway signed for, imports as system upkeep. Expiry is
+  not recorded: it is system upkeep, and a personal fact's row has no team id.
+  The fact's version check still runs first. A review that cannot be saved is
+  logged as `event=pinned_memory_ledger_review_failed`.
+- **Memory reviews after a turn.** The review the team lead sends right after
+  a person's turn used to carry the turn's signed context, which names the
+  person's request; that request has usually ended, so its memory changes
+  would be refused as `request_closed`. The manager signs it instead as work
+  of the person's own stale-conversation review schedule, which reviews the
+  same queued jobs (`task_context_runtime.sign_memory_review`): it counts as
+  one of the person's scheduled jobs. Without that schedule, for a disabled
+  or removed person, or without the scheduler's key, nothing is sent
+  (`event=memory_review_not_signed`) and the job waits for the schedule's
+  next run.
 - **Refusal names.** The names are shared, in
   `custom_messages.enums.ChangeRefusal`. A stale revision is
   `changed_since_read`; the message contract's replies use the same

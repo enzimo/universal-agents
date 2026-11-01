@@ -49,6 +49,7 @@ from custom_tools.providers.memory_review_inspection import review_job_in_scope
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.tool_results import failed
 from storage.conversation_repository import normalize_topic_tag
+from storage.change_ledger import ChangeRefused
 from storage.pinned_memory_repository import USERMEM_BANK, PinnedMemoryConflictError
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,23 @@ def _changed_since_read(action: str, bank: str, memory_id: Optional[int], error:
     return _memory_error(ChangeRefusal.CHANGED_SINCE_READ.value, message)
 
 
+def _refused_by_ledger(bank: str, memory_id: Optional[int], refused: ChangeRefused) -> dict[str, Any]:
+    """The failed result of a change the change ledger refused: its reason, message, case id and brief."""
+
+    message = refused.message
+    return failed(
+        {
+            "ok": False,
+            "error_code": refused.reason.value,
+            "message": message,
+            "error": message,
+            "bank": bank,
+            "memory_id": memory_id,
+            **refused.details,
+        }
+    )
+
+
 @tool
 def memory(
     action: MemoryAction,
@@ -134,6 +152,14 @@ def memory(
     after you read it (another request edited it, or deleted it and its number now names another fact),
     the change is refused with `changed_since_read` and nothing changes: list again and decide with the
     current fact.
+
+    While this request runs, someone else may change a fact too: another of the person's requests, one of
+    their scheduled jobs, the person in Settings, or for coremem another team member. Your next change to
+    that fact is refused once with `change_conflict`, a `case_id` and a `brief`: who changed which fields
+    (fact_text, tags, metadata, valid_from_utc, invalid_after_utc) and when, the values now and your planned
+    ones. After that you may change only the fields their change did not set. A change to the same fields,
+    or a delete, is refused with `needs_person_decision`: leave the fact as it is and tell the person in
+    your reply what changed and what you planned. Creating a fact is never refused this way.
 
     Args:
         action: What to do; see Actions.
@@ -201,6 +227,8 @@ def memory(
         return json.dumps(result, default=str)
     except PinnedMemoryConflictError as exc:
         return _changed_since_read(action, bank, memory_id, exc)
+    except ChangeRefused as refused:
+        return _refused_by_ledger(bank, memory_id, refused)
     except Exception as exc:  # noqa: BLE001 - the model gets the reason and may try again
         return _memory_error("pinned_memory_error", str(exc))
 

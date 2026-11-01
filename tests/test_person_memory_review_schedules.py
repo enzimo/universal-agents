@@ -21,6 +21,7 @@ pinned-memory stores. Covers:
 
 from __future__ import annotations
 
+from tests.memory_support import SYSTEM_MEMORY_WRITER
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -481,7 +482,7 @@ def test_each_run_prepares_jobs_only_for_its_own_person(world) -> None:
     reviews = MemoryReviewStore(db_path=db_path, logger=logging.getLogger("test"))
     pinned = SqlitePinnedMemoryRepository(db_path, logger=logging.getLogger("test"))
     for person in (OLIVE, MIA):
-        pinned.create_usermem(canonical_user_id=person, fact_text=f"{person} private fact", capacity=10)
+        pinned.create_usermem(writer=SYSTEM_MEMORY_WRITER, canonical_user_id=person, fact_text=f"{person} private fact", capacity=10)
         _seed_stale_conversation(conversations, person)
     reviewer = SimpleNamespace(
         id="memreview_1",

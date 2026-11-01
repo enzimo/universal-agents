@@ -83,6 +83,7 @@ from custom_agents.pinned_memory_runtime import (
 from custom_messages.contracts.access_v2 import PersonStanding
 from storage.backends import STORAGE_BACKEND_SQLITE
 from storage.config import StorageSettings
+from storage.pinned_memory_changes import MemoryWriter
 from storage.pinned_memory_repository import (
     COREMEM_BANK,
     USERMEM_BANK,
@@ -562,7 +563,7 @@ def plan_import(
     return [_plan_one(fact, context, scopes) for fact in document.facts]
 
 
-def _create(repository: PinnedMemoryRepository, planned: PlannedFact, capacity: int) -> None:
+def _create(repository: PinnedMemoryRepository, planned: PlannedFact, capacity: int, writer: MemoryWriter) -> None:
     fact = planned.fact
     common: dict[str, Any] = {
         "fact_text": fact.fact_text,
@@ -574,6 +575,7 @@ def _create(repository: PinnedMemoryRepository, planned: PlannedFact, capacity: 
         "source_key": fact.source_key,
         "source": {},
         "actor": dict(IMPORT_ACTOR),
+        "writer": writer,
     }
     if fact.bank == COREMEM_BANK:
         repository.create_coremem(team_id=planned.owner, **common)
@@ -582,17 +584,22 @@ def _create(repository: PinnedMemoryRepository, planned: PlannedFact, capacity: 
 
 
 def apply_import(
-    repository: PinnedMemoryRepository, plan: list[PlannedFact], *, memory_config: dict[str, Any]
+    repository: PinnedMemoryRepository, plan: list[PlannedFact], *, memory_config: dict[str, Any], team_id: str
 ) -> list[PlannedFact]:
-    """Write the planned facts; the store's own capacity check still has the last word."""
+    """Write the planned facts; the store's own capacity check still has the last word.
 
+    An import is trusted code working for nobody, so the team's change ledger
+    records its facts as system upkeep, which never counts against a request.
+    """
+
+    writer = MemoryWriter.system(team_id)
     applied: list[PlannedFact] = []
     for planned in plan:
         if planned.outcome is not ImportOutcome.IMPORTED:
             applied.append(planned)
             continue
         try:
-            _create(repository, planned, bank_capacity(memory_config, planned.fact.bank))
+            _create(repository, planned, bank_capacity(memory_config, planned.fact.bank), writer)
         except PinnedMemoryCapacityError:
             # Only when the running instance added facts after the plan was made.
             logger.warning(
@@ -678,7 +685,7 @@ def import_memories(
     if dry_run or repository is None:
         outcomes = plan
     else:
-        outcomes = apply_import(repository, plan, memory_config=instance.memory_config)
+        outcomes = apply_import(repository, plan, memory_config=instance.memory_config, team_id=target_team)
     exported_people = {fact.person_id for fact in document.facts if fact.person_id}
     counts = Counter(item.outcome.name for item in outcomes)
     logger.info(

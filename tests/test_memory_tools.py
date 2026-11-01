@@ -10,6 +10,7 @@ decided per action, so a block can still stop exactly one of them.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,8 @@ from custom_messages.contracts.access_v2 import SubjectKind, SubjectRefV1, Targe
 from custom_tools.providers.memory import memory, topic_tags
 from tests.task_work_support import set_agent_ref
 from custom_tools.tool_results import result_text
+from storage.change_ledger import ChangeRequestStore, ChangeWriter, ChangeWriterKind
+from storage.pinned_memory_changes import MemoryWriter
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, decide, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
 from tests.test_strands_user_scope_tools import _FakeAgent, _signed_task_contexts  # noqa: F401 - signing keys
@@ -159,6 +162,35 @@ def test_a_change_based_on_an_older_read_is_refused(agent, bank, action) -> None
     payload = _refused(memory(action=action, bank=bank, memory_id=1, record_digest=read["record_digest"], **fields))
 
     assert f"List {bank} again" in payload["message"]
+    assert _facts(bank) == {1: "Prefers night trains."}
+
+
+@pytest.mark.parametrize("bank", ["coremem", "usermem"])
+def test_another_requests_change_is_shown_once_then_only_other_fields_are_saved(agent, bank) -> None:
+    created = call(memory, action="create", bank=bank, fact_text="Prefers trains.")["fact"]
+    # Another of the person's requests, admitted after this one, changes the fact's text.
+    settings = agent.task_manager.storage_settings
+    ChangeRequestStore(settings).open(team_id=agent.team_id, request_id="req_other", person_id="usr_a", now=datetime.now(timezone.utc))
+    other = MemoryWriter(agent.team_id, ChangeWriter(ChangeWriterKind.REQUEST, request_id="req_other", person_id="usr_a"))
+    scope = {"team_id": agent.team_id} if bank == "coremem" else {"canonical_user_id": "usr_a"}
+    replace = getattr(agent._pinned_memory_repository, f"replace_{bank}")
+    replace(**scope, memory_id=1, fact_text="Prefers night trains.", writer=other, expected_record_digest=created["record_digest"])
+    current = call(memory, action="list", bank=bank)["facts"][0]["record_digest"]
+
+    raw = memory(action="replace", bank=bank, memory_id=1, tags=["travel"], record_digest=current)
+    assert raw["status"] == "error", raw  # A failed result, so the model step stops.
+    payload = json.loads(result_text(raw))
+    assert payload["error_code"] == "change_conflict" and payload["bank"] == bank and payload["memory_id"] == 1
+    assert payload["case_id"] == payload["brief"]["case_id"]
+    assert payload["brief"]["changes"][0] == {
+        "by": "another of your requests", "at": payload["brief"]["changes"][0]["at"], "fields": ["fact_text"],
+    }
+
+    # Shown once: tags go through, and the text it changed is the person's to decide.
+    assert call(memory, action="replace", bank=bank, memory_id=1, tags=["travel"], record_digest=current)["ok"] is True
+    current = call(memory, action="list", bank=bank)["facts"][0]["record_digest"]
+    payload = json.loads(result_text(memory(action="replace", bank=bank, memory_id=1, fact_text="Prefers planes.", record_digest=current)))
+    assert payload["error_code"] == "needs_person_decision"
     assert _facts(bank) == {1: "Prefers night trains."}
 
 
