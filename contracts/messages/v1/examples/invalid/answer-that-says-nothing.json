@@ -1,5 +1,5 @@
 {
-  "description": "An answer carries text, a choice, a decision or a decision token.",
+  "description": "An answer carries text, a choice or a decision.",
   "refusal": "invalid_body",
   "at": "/body",
   "base": "task.answer/full.json",
@@ -12,9 +12,6 @@
     },
     {
       "remove": "/body/decision"
-    },
-    {
-      "remove": "/body/decision_token"
     }
   ],
   "context": {},

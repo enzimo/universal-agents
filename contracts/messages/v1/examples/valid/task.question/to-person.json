@@ -29,24 +29,26 @@
     "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
     "conversation_id": "conv_1",
     "sequence": 7,
-    "text": "Another request changed this schedule after you asked for your change. Which should stay?",
+    "text": "Which quarter should the report cover?",
     "can_answer": "person",
     "purpose": {
-      "type": "change_conflict",
-      "case_id": "case_1",
-      "brief": {
-        "sha256": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ",
-        "size": 4096,
-        "media_type": "application/json"
-      },
+      "type": "input",
+      "choice_mode": "single",
       "choices": [
-        "keep_current",
-        "use_this_change",
-        "redo_with_note",
-        "stop_request"
-      ]
+        {
+          "choice_id": "last_quarter",
+          "label": "Last quarter",
+          "recommended": true
+        },
+        {
+          "choice_id": "this_quarter",
+          "label": "This quarter so far",
+          "recommended": false
+        }
+      ],
+      "allow_free_text": true
     }
   },
-  "body_digest": "92upJ4sjRUdRG3BaJ0Ci9g6VNjZ0BJ-9kzzqWB0KmKA",
-  "signature": "2KqiD61Uob77vUSWGqFuhj7XkvqHjP_7DuSVgPD8xnv4t73sDX9_QPmb2kevXa9AYNcdt_ff8NgbaCWqwhJOAQ"
+  "body_digest": "gcEZj_tSohCM1_aUJZTWhowkIUW-E-968Gl4Tv00-t4",
+  "signature": "wWQWVLKZ4yExiYYzY5t-zIdTefHouz95-PcJ-yuTR9hZhN7at1DsG7urQ0qOEtQ8mv_NhJtc530xHWvTTR3zCQ"
 }

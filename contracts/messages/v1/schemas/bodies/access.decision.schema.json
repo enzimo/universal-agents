@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.decision.schema.json",
   "title": "access.decision body",
-  "description": "What became of an access request, sent to the waiting task.",
+  "description": "What became of an access request or a change review, sent to the waiting task.",
   "type": "object",
   "properties": {
     "request_id": {
@@ -123,7 +123,8 @@
               "type": "string",
               "enum": [
                 "lead",
-                "task_ended"
+                "task_ended",
+                "person_message"
               ]
             }
           },
@@ -167,6 +168,44 @@
             "state",
             "code",
             "message"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "The person decided a change review; the task acts on the choice (README, \"Change reviews\").",
+          "properties": {
+            "state": {
+              "const": "change_decided"
+            },
+            "choice": {
+              "type": "string",
+              "enum": [
+                "keep_current",
+                "use_change",
+                "stop_request"
+              ]
+            },
+            "note": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            }
+          },
+          "required": [
+            "state",
+            "choice"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "Nobody decided the change review by its deadline; the change was not made.",
+          "properties": {
+            "state": {
+              "const": "change_not_decided"
+            }
+          },
+          "required": [
+            "state"
           ],
           "additionalProperties": false
         }

@@ -5,7 +5,6 @@
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "authority_token_domain": "universal-agents/authority-token/v1",
-  "decision_token_domain": "universal-agents/decision-token/v1",
   "kinds": [
     "access.decision",
     "access.request",
@@ -16,9 +15,6 @@
     "agent.pause",
     "agent.resume",
     "agent.status",
-    "conflicts.cancel",
-    "conflicts.decide",
-    "conflicts.list",
     "credential.form.request",
     "credential.form.result",
     "custody.decide",

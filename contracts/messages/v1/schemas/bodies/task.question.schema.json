@@ -214,41 +214,6 @@
           "type": "object",
           "properties": {
             "type": {
-              "const": "change_conflict"
-            },
-            "case_id": {
-              "$ref": "../common.schema.json#/$defs/record_id"
-            },
-            "brief": {
-              "$ref": "../common.schema.json#/$defs/blob_ref"
-            },
-            "choices": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "enum": [
-                  "keep_current",
-                  "use_this_change",
-                  "redo_with_note",
-                  "stop_request"
-                ]
-              },
-              "maxItems": 4,
-              "minItems": 1
-            }
-          },
-          "required": [
-            "type",
-            "case_id",
-            "brief",
-            "choices"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
               "const": "runtime_pause"
             },
             "trigger": {

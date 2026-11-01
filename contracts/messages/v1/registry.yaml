@@ -18,7 +18,8 @@
 #   body           the body schema, under schemas/
 #   body_rules     optional: what a schema cannot say, checked after it (README, "What bodies carry"):
 #                  unique values in a list, a field required when others have given values,
-#                  or at least one of several fields
+#                  at least one of several fields, or the values a field may hold when others
+#                  have given values
 #   reply          request/reply only: the reply body schema and its error codes, which are exactly
 #                  the reply's outcomes other than ok
 #   senders        host roles that may publish it; receivers check them against the issuer's certificate
@@ -61,7 +62,6 @@ signing_domain: universal-agents/message-frame/v1
 renew_key_proof_domain: universal-agents/host-renew-key-proof/v1
 state_signing_domain: universal-agents/state-record/v1
 authority_token_domain: universal-agents/authority-token/v1
-decision_token_domain: universal-agents/decision-token/v1
 frame_schema: frame.schema.json
 state_schema: state.schema.json
 max_frame_bytes: 262144
@@ -109,7 +109,7 @@ verification_refusals:
   - code: invalid_body
     meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, "Installation traffic")
   - code: bad_authority
-    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued
+    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds
   - code: access_denied
     meaning: the receiver's access decision refused the sender
 # Refusals of a change to a covered store record. Each covered operation offers those that
@@ -372,7 +372,7 @@ kinds:
     body: bodies/task.answer.schema.json
     body_rules:
       - {unique: /body/selected_choice_ids}
-      - {any_of: [/body/text, /body/text_file, /body/selected_choice_ids, /body/decision, /body/decision_token]}
+      - {any_of: [/body/text, /body/text_file, /body/selected_choice_ids, /body/decision]}
     senders: [gateway, lead_host, team_services, worker_host, edge_adapter]
     senders_by_address:
       work.edge.{edge}: [lead_host]
@@ -517,12 +517,14 @@ kinds:
     rendering: none
 
   access.request:
-    description: A task asks the team services for access; no model decides it.
+    description: A task asks the team services for access, a staged change's approval or a person's change review; no model decides it.
     class: durable
     address: work.team
     body: bodies/access.request.schema.json
     body_rules:
       - {requires: /body/what/hours, when: [{at: /body/what/lifetime, is: until}]}
+      - {requires: /body/reason, when: [{at: /body/what/type, is: access}]}
+      - {requires: /body/reason, when: [{at: /body/what/type, is: change}]}
     senders: [worker_host, lead_host]
     receivers: [team_services]
     expiry_seconds: 604800
@@ -537,7 +539,7 @@ kinds:
     rendering: none
 
   access.decision:
-    description: What became of an access request, sent to the waiting task.
+    description: What became of an access request or a change review, sent to the waiting task.
     class: durable
     address: work.agent.{agent}
     body: bodies/access.decision.schema.json
@@ -562,10 +564,12 @@ kinds:
         withdrawn: always
         already_held: always
         refused: always
+        change_decided: always
+        change_not_decided: always
     rendering: none
 
   access.resolved:
-    description: A person's decision on an access request, from the gateway to the team services.
+    description: A person's decision on an access request or a change review, from the gateway to the team services.
     class: durable
     address: work.team
     body: bodies/access.resolved.schema.json
@@ -583,12 +587,20 @@ kinds:
     rendering: none
 
   access.review:
-    description: An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.
+    description: An access or change review for the gateway's Inbox, from the team services; a refused decision returns this way too.
     class: durable
     address: work.edge.{edge}
     body: bodies/access.review.schema.json
     body_rules:
       - {unique: /body/state/choices}
+      - {requires: /body/state/reason, when: [{at: /body/state/what/type, is: access}]}
+      - {requires: /body/state/reason, when: [{at: /body/state/what/type, is: change}]}
+      - {allowed: /body/state/choices, values: [approve, approve_read, approve_task, approve_all, deny], when: [{at: /body/state/what/type, is: access}]}
+      - {allowed: /body/state/choices, values: [approve, approve_read, approve_task, approve_all, deny], when: [{at: /body/state/what/type, is: change}]}
+      # A change review: only the person the request works for decides it, from the brief code wrote.
+      - {allowed: /body/state/choices, values: [keep_current, use_change, stop_request], when: [{at: /body/state/what/type, is: change_review}]}
+      - {requires: /body/state/decider/delivery_ref, when: [{at: /body/state/what/type, is: change_review}]}
+      - {requires: /body/state/brief, when: [{at: /body/state/what/type, is: change_review}]}
     senders: [team_services]
     receivers: [gateway]
     expiry_seconds: 604800
@@ -2059,69 +2071,6 @@ kinds:
     authority: required
     authority_binding: {type: command, at: /body/request_id}
     idempotency: [/message_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
-    routing: team
-    topology_edge: none
-    ledger: none
-    wakes_model: never
-    rendering: none
-
-  conflicts.decide:
-    description: A person decides a change conflict.
-    class: request_reply
-    address: svc.team
-    body: bodies/conflicts.decide.schema.json
-    reply:
-      body: bodies/conflicts.decide.reply.schema.json
-      errors: [not_found, case_closed, values_changed, not_allowed]
-    senders: [gateway]
-    receivers: [team_services]
-    expiry_seconds: 30
-    authority: required
-    authority_binding: {type: command, at: /body/request_id}
-    idempotency: [/body/request_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
-    routing: team
-    topology_edge: none
-    ledger: none
-    wakes_model: never
-    rendering: none
-
-  conflicts.list:
-    description: Open and recent change conflicts, for administrators.
-    class: request_reply
-    address: svc.team
-    body: bodies/conflicts.list.schema.json
-    reply:
-      body: bodies/conflicts.list.reply.schema.json
-      errors: [administrator_required]
-    senders: [gateway]
-    receivers: [team_services]
-    expiry_seconds: 30
-    authority: required
-    authority_binding: {type: command, at: /body/request_id}
-    idempotency: [/message_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
-    routing: team
-    topology_edge: none
-    ledger: none
-    wakes_model: never
-    rendering: none
-
-  conflicts.cancel:
-    description: An administrator cancels a change conflict.
-    class: request_reply
-    address: svc.team
-    body: bodies/conflicts.cancel.schema.json
-    reply:
-      body: bodies/conflicts.cancel.reply.schema.json
-      errors: [not_found, administrator_required]
-    senders: [gateway]
-    receivers: [team_services]
-    expiry_seconds: 30
-    authority: required
-    authority_binding: {type: command, at: /body/request_id}
-    idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none

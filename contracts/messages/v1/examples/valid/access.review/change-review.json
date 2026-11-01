@@ -1,0 +1,55 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "access.review",
+  "message_id": "01928f3a-7b2c-733b-8000-00000000033b",
+  "idempotency_key": "access.review:-6goBtwzdZjyd7yAFnRgbxYfYDuMSVp5nvHCYaN_5ns",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "web"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.edge.web",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "areq_3",
+    "state": {
+      "type": "open",
+      "task_id": "task_sub_1",
+      "decider": {
+        "type": "person",
+        "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0"
+      },
+      "requester_agent": "researcher-2",
+      "what": {
+        "type": "change_review",
+        "case_id": "case_1",
+        "question": "Your earlier instruction says Tuesday, but the saved plan now says Wednesday. Which should I use?"
+      },
+      "brief": {
+        "sha256": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ",
+        "size": 4096,
+        "media_type": "application/json",
+        "name": "change-brief.json"
+      },
+      "choices": [
+        "keep_current",
+        "use_change",
+        "stop_request"
+      ],
+      "expires_at": "2026-10-24T04:30:00.000Z"
+    }
+  },
+  "body_digest": "Oy37enxOZvGUcukf1hjVs8p4vARa2-Vo6VJCFmS6fZA",
+  "signature": "lNZGiibcjZ4Vt2lcEEi9yxQA_55BZV_wwbRhzSlbSfoL4ol8QlXmy6dQ2f4hyyo3whQ-jOo0jVzEh0nkGOm7AQ"
+}

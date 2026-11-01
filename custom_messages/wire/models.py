@@ -320,28 +320,6 @@ class DecisionAhead(WireModel):
     kind: Literal['forward_result_to_person', 'forward_progress_to_person', 'forward_steering_to_holders']
 
 
-class DecisionTokenIssuer(WireModel):
-    installation: InstallationId
-    team: TeamId
-    runtime: RuntimeId
-    membership_epoch: Epoch
-    key_id: KeyId
-
-
-class DecisionToken(WireModel):
-    "A person's decision on a change conflict, recorded by the team services and bound to a digest of the values the person was shown. A team-services certificate signs the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/decision-token/v1 and a newline (README, \"What bodies carry\")."
-
-    token_id: MessageId
-    case_id: RecordId
-    choice: Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']
-    values_digest: Sha256Digest
-    issuer: DecisionTokenIssuer
-    issued_at: Timestamp
-    expires_at: Timestamp
-    algorithm: Literal['ed25519']
-    signature: Ed25519Signature
-
-
 class AccessTarget(WireModel):
     kind: Literal['tool', 'tool_set', 'folder']
     id: Annotated[str, StringConstraints(min_length=1, max_length=400)]
@@ -390,7 +368,15 @@ class AccessAskChange(WireModel):
     plan_digest: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]
 
 
-AccessAsk = Annotated[Union[AccessAskAccess, AccessAskChange], Field(discriminator='type')]
+class AccessAskChangeReview(WireModel):
+    "A change review: the store refused this task's change because another writer changed the record (change_conflict or needs_person_decision), and the holder asks the person the request works for (README, \"Change reviews\")."
+
+    type: Literal['change_review']
+    case_id: RecordId
+    question: NoteText
+
+
+AccessAsk = Annotated[Union[AccessAskAccess, AccessAskChange, AccessAskChangeReview], Field(discriminator='type')]
 
 
 class RecipientPerson(WireModel):
@@ -777,7 +763,7 @@ class AccessDecisionBodyStatusDenied(WireModel):
 
 class AccessDecisionBodyStatusWithdrawn(WireModel):
     state: Literal['withdrawn']
-    by: Literal['lead', 'task_ended']
+    by: Literal['lead', 'task_ended', 'person_message']
 
 
 class AccessDecisionBodyStatusAlreadyHeld(WireModel):
@@ -790,12 +776,26 @@ class AccessDecisionBodyStatusRefused(WireModel):
     message: NoteText
 
 
+class AccessDecisionBodyStatusChangeDecided(WireModel):
+    "The person decided a change review; the task acts on the choice (README, \"Change reviews\")."
+
+    state: Literal['change_decided']
+    choice: Literal['keep_current', 'use_change', 'stop_request']
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
+
+
+class AccessDecisionBodyStatusChangeNotDecided(WireModel):
+    "Nobody decided the change review by its deadline; the change was not made."
+
+    state: Literal['change_not_decided']
+
+
 class AccessDecisionBody(WireModel):
-    "What became of an access request, sent to the waiting task."
+    "What became of an access request or a change review, sent to the waiting task."
 
     request_id: RecordId
     task_id: RecordId
-    status: Annotated[Union[AccessDecisionBodyStatusHandedDown, AccessDecisionBodyStatusWaiting, AccessDecisionBodyStatusGranted, AccessDecisionBodyStatusDenied, AccessDecisionBodyStatusWithdrawn, AccessDecisionBodyStatusAlreadyHeld, AccessDecisionBodyStatusRefused], Field(discriminator='state')]
+    status: Annotated[Union[AccessDecisionBodyStatusHandedDown, AccessDecisionBodyStatusWaiting, AccessDecisionBodyStatusGranted, AccessDecisionBodyStatusDenied, AccessDecisionBodyStatusWithdrawn, AccessDecisionBodyStatusAlreadyHeld, AccessDecisionBodyStatusRefused, AccessDecisionBodyStatusChangeDecided, AccessDecisionBodyStatusChangeNotDecided], Field(discriminator='state')]
 
 
 class AccessRequestBody(WireModel):
@@ -803,15 +803,15 @@ class AccessRequestBody(WireModel):
 
     request_id: RecordId
     task_id: RecordId
-    reason: NoteText
+    reason: Union[NoteText, MISSING] = Field(default=MISSING)
     what: AccessAsk
 
 
 class AccessResolvedBody(WireModel):
-    "A person's decision on an access request, from the gateway to the team services."
+    "A person's decision on an access request or a change review, from the gateway to the team services."
 
     request_id: RecordId
-    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']
+    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request']
     note: Union[NoteText, MISSING] = Field(default=MISSING)
     kept_item_ids: Union[Annotated[list[RecordId], Field(max_length=80)], MISSING] = Field(default=MISSING)
     keep_hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
@@ -820,16 +820,16 @@ class AccessResolvedBody(WireModel):
 
 
 class AccessReviewBodyStateOpen(WireModel):
-    "A person or the administrators must decide."
+    "A person or the administrators must decide. A change review is decided only by the person the request works for."
 
     type: Literal['open']
     task_id: RecordId
     decider: Recipient
     requester_agent: AgentId
     what: AccessAsk
-    reason: NoteText
+    reason: Union[NoteText, MISSING] = Field(default=MISSING)
     brief: Union[BlobRef, MISSING] = Field(default=MISSING)
-    choices: Annotated[list[Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']], Field(min_length=1, max_length=5)]
+    choices: Annotated[list[Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request']], Field(min_length=1, max_length=5)]
     expires_at: Timestamp
 
 
@@ -846,7 +846,7 @@ class AccessReviewBodyStateDecided(WireModel):
     "The decision was recorded; the card closes."
 
     type: Literal['decided']
-    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']
+    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request']
 
 
 class AccessReviewBodyStateClosed(WireModel):
@@ -857,7 +857,7 @@ class AccessReviewBodyStateClosed(WireModel):
 
 
 class AccessReviewBody(WireModel):
-    "The team services tell the gateway about one access review: open it for whoever may decide, say a person's decision was refused, or close it. The gateway's Inbox shows it; the team services keep the request."
+    "The team services tell the gateway about one access or change review: open it for whoever may decide, say a person's decision was refused, or close it. The gateway's Inbox shows it; the team services keep the request."
 
     request_id: RecordId
     state: Annotated[Union[AccessReviewBodyStateOpen, AccessReviewBodyStateRefused, AccessReviewBodyStateDecided, AccessReviewBodyStateClosed], Field(discriminator='type')]
@@ -982,110 +982,6 @@ class AgentStatusReplyOk(WireModel):
 
 class AgentStatusReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsCancelBody(WireModel):
-    "An administrator cancels a change conflict."
-
-    request_id: RecordId
-    case_id: RecordId
-    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
-
-
-class ConflictsCancelReplyOk(WireModel):
-    outcome: Literal['ok']
-    state: Literal['cancelled', 'already_closed']
-
-
-class ConflictsCancelReplyNotFound(WireModel):
-    outcome: Literal['not_found']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsCancelReplyAdministratorRequired(WireModel):
-    outcome: Literal['administrator_required']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideBodyChoiceKeepCurrent(WireModel):
-    type: Literal['keep_current']
-
-
-class ConflictsDecideBodyChoiceUseThisChange(WireModel):
-    type: Literal['use_this_change']
-
-
-class ConflictsDecideBodyChoiceRedoWithNote(WireModel):
-    type: Literal['redo_with_note']
-    note: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
-
-
-class ConflictsDecideBodyChoiceStopRequest(WireModel):
-    type: Literal['stop_request']
-
-
-class ConflictsDecideBody(WireModel):
-    "A person decides a change conflict."
-
-    case_id: RecordId
-    question_id: RecordId
-    values_digest: Sha256Digest
-    choice: Annotated[Union[ConflictsDecideBodyChoiceKeepCurrent, ConflictsDecideBodyChoiceUseThisChange, ConflictsDecideBodyChoiceRedoWithNote, ConflictsDecideBodyChoiceStopRequest], Field(discriminator='type')]
-    request_id: RecordId
-
-
-class ConflictsDecideReplyOk(WireModel):
-    outcome: Literal['ok']
-    state: Literal['decided', 'already_decided']
-    case_id: RecordId
-    choice: Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']
-
-
-class ConflictsDecideReplyNotFound(WireModel):
-    outcome: Literal['not_found']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideReplyCaseClosed(WireModel):
-    outcome: Literal['case_closed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideReplyValuesChanged(WireModel):
-    outcome: Literal['values_changed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideReplyNotAllowed(WireModel):
-    outcome: Literal['not_allowed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsListBody(WireModel):
-    "Open and recent change conflicts, for administrators."
-
-    request_id: RecordId
-    offset: Annotated[int, Field(ge=0, le=100000)]
-    limit: Annotated[int, Field(ge=1, le=50)]
-    state: Union[Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled'], MISSING] = Field(default=MISSING)
-
-
-class ConflictsListReplyOkCasesItem(WireModel):
-    case_id: RecordId
-    record_kind: ChangeRecordKind
-    opened_at: Timestamp
-    state: Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled']
-
-
-class ConflictsListReplyOk(WireModel):
-    outcome: Literal['ok']
-    cases: Annotated[list[ConflictsListReplyOkCasesItem], Field(max_length=50)]
-    total: Count
-
-
-class ConflictsListReplyAdministratorRequired(WireModel):
-    outcome: Literal['administrator_required']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -7328,7 +7224,6 @@ class TaskAnswerBody(WireModel):
     decision: Union[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes'], MISSING] = Field(default=MISSING)
     replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
     passed_on: Union[TaskAnswerBodyPassedOn, MISSING] = Field(default=MISSING)
-    decision_token: Union[DecisionToken, MISSING] = Field(default=MISSING)
 
 
 class TaskClaimedBody(WireModel):
@@ -7432,13 +7327,6 @@ class TaskQuestionBodyPurposeOutsideHelp(WireModel):
     party: Annotated[str, StringConstraints(min_length=1, max_length=200)]
 
 
-class TaskQuestionBodyPurposeChangeConflict(WireModel):
-    type: Literal['change_conflict']
-    case_id: RecordId
-    brief: BlobRef
-    choices: Annotated[list[Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']], Field(min_length=1, max_length=4)]
-
-
 class TaskQuestionBodyPurposeRuntimePause(WireModel):
     type: Literal['runtime_pause']
     trigger: Literal['tool_call_budget_exceeded', 'context_budget_exceeded', 'delegated_subtask_timeout', 'specialist_runtime_budget_pause', 'provider_overloaded']
@@ -7463,7 +7351,7 @@ class TaskQuestionBody(WireModel):
     relays_question_id: Union[RecordId, MISSING] = Field(default=MISSING)
     deadline: Union[Timestamp, MISSING] = Field(default=MISSING)
     assumption: Union[Assumption, MISSING] = Field(default=MISSING)
-    purpose: Annotated[Union[TaskQuestionBodyPurposeInput, TaskQuestionBodyPurposeSetup, TaskQuestionBodyPurposeScope, TaskQuestionBodyPurposeBudget, TaskQuestionBodyPurposeCoordination, TaskQuestionBodyPurposeHelp, TaskQuestionBodyPurposeOutsideHelp, TaskQuestionBodyPurposeChangeConflict, TaskQuestionBodyPurposeRuntimePause, TaskQuestionBodyPurposeRecoveryCheckpoint], Field(discriminator='type')]
+    purpose: Annotated[Union[TaskQuestionBodyPurposeInput, TaskQuestionBodyPurposeSetup, TaskQuestionBodyPurposeScope, TaskQuestionBodyPurposeBudget, TaskQuestionBodyPurposeCoordination, TaskQuestionBodyPurposeHelp, TaskQuestionBodyPurposeOutsideHelp, TaskQuestionBodyPurposeRuntimePause, TaskQuestionBodyPurposeRecoveryCheckpoint], Field(discriminator='type')]
 
 
 class TaskReportBodyKindLessons(WireModel):
@@ -8158,12 +8046,6 @@ AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
 AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting], Field(discriminator='outcome')])
 AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
-ConflictsCancelBodyAdapter = TypeAdapter(ConflictsCancelBody)
-ConflictsCancelReplyAdapter = TypeAdapter(Annotated[Union[ConflictsCancelReplyOk, ConflictsCancelReplyNotFound, ConflictsCancelReplyAdministratorRequired], Field(discriminator='outcome')])
-ConflictsDecideBodyAdapter = TypeAdapter(ConflictsDecideBody)
-ConflictsDecideReplyAdapter = TypeAdapter(Annotated[Union[ConflictsDecideReplyOk, ConflictsDecideReplyNotFound, ConflictsDecideReplyCaseClosed, ConflictsDecideReplyValuesChanged, ConflictsDecideReplyNotAllowed], Field(discriminator='outcome')])
-ConflictsListBodyAdapter = TypeAdapter(ConflictsListBody)
-ConflictsListReplyAdapter = TypeAdapter(Annotated[Union[ConflictsListReplyOk, ConflictsListReplyAdministratorRequired], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
 CredentialFormResultBodyAdapter = TypeAdapter(CredentialFormResultBody)
 CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)

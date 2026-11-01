@@ -769,15 +769,41 @@ class BodyFields:
     def fits(self, pointer: str, value: Any) -> bool:
         return any(value_fits(self.resolver, file, node, value) for file, node in self.leaves(pointer))
 
+    def holds(self, pointer: str, value: Any) -> bool:
+        """Whether the field, or each item of it when it is a list, could hold ``value``."""
+
+        leaves = self.leaves(pointer)
+        return bool(leaves) and any(
+            any(value_fits(self.resolver, item_file, item, value)
+                for item_file, item in schema_leaves(self.resolver, file, node["items"], []))
+            if resolved_type(self.resolver, file, node) == "array" else value_fits(self.resolver, file, node, value)
+            for file, node in leaves)
+
 
 def unique_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
     return set(rule) <= {"unique", "by"} and fields.defined(rule.get("unique"), "array") \
         and ("by" not in rule or fields.items_have(rule["unique"], rule["by"]))
 
 
+def conditions_valid(conditions: Any, fields: BodyFields) -> bool:
+    """A rule's ``when``: at least one {at, is}, each naming a body field that can hold the value."""
+
+    return isinstance(conditions, list) and bool(conditions) and all(
+        isinstance(c, dict) and set(c) == {"at", "is"} and fields.defined(c["at"]) and fields.fits(c["at"], c["is"])
+        for c in conditions)
+
+
 def requires_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
-    return set(rule) == {"requires", "when"} and fields.defined(rule["requires"]) and bool(rule["when"]) \
-        and all(set(c) == {"at", "is"} and fields.defined(c["at"]) and fields.fits(c["at"], c["is"]) for c in rule["when"])
+    return set(rule) == {"requires", "when"} and fields.defined(rule["requires"]) and conditions_valid(rule["when"], fields)
+
+
+def allowed_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    """``{allowed, values, when}``: distinct values the field (or each item of a list) can hold, under conditions."""
+
+    values = rule.get("values")
+    return set(rule) == {"allowed", "values", "when"} and isinstance(values, list) and bool(values) \
+        and len({json.dumps(value) for value in values}) == len(values) \
+        and all(fields.holds(rule["allowed"], value) for value in values) and conditions_valid(rule["when"], fields)
 
 
 def any_of_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
@@ -785,12 +811,14 @@ def any_of_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
 
 
 def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
-    """Each rule is one of the three README shapes and names fields its body defines, with values they can hold."""
+    """Each rule is one of the four README shapes and names fields its body defines, with values they can hold."""
 
     fields = BodyFields(entry, schemas)
     for rule in entry.get("body_rules", []):
-        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)):
-            raise ContractError(f"{where}: body rule {rule} is not a unique, requires or any_of rule over its body's fields")
+        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)
+                or allowed_rule_valid(rule, fields)):
+            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, any_of or allowed rule over its "
+                                "body's fields")
 
 
 def value_fits(resolver: "ModelWriter", file: str, node: dict[str, Any], value: Any) -> bool:
@@ -1349,7 +1377,6 @@ def compatibility(registry: dict[str, Any]) -> dict[str, Any]:
         "signing_domain": registry["signing_domain"],
         "state_signing_domain": registry["state_signing_domain"],
         "authority_token_domain": registry["authority_token_domain"],
-        "decision_token_domain": registry["decision_token_domain"],
         "kinds": sorted(registry["kinds"]),
         "state_records": sorted(registry["state_records"]),
     }
@@ -1599,7 +1626,6 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
         f"AUTHORITY_TOKEN_DOMAIN = {registry['authority_token_domain']!r}\n"
-        f"DECISION_TOKEN_DOMAIN = {registry['decision_token_domain']!r}\n"
         f"RENEW_KEY_PROOF_DOMAIN = {registry['renew_key_proof_domain']!r}\n"
         f"AUTHORITY_TOKEN_MAX_SECONDS = {registry['authority_token_max_seconds']!r}\n"
         f"COMMAND_TOKEN_MAX_SECONDS = {registry['command_token_max_seconds']!r}\n"

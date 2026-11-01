@@ -543,7 +543,7 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"copy_to": ["work.agent.{agent}"]}, "two of its addresses deliver to one audience target"),
     ({"copy_to": ["work.pool.{pool}"]}, "copies go only to"),
     ({"receivers": ["lead_host", "gateway", "edge_adapter", "scheduler"]}, "serve none of its addresses"),
-    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires or any_of rule"),
+    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires, any_of or allowed rule"),
     ({"body_rules": [{"requires": "/body/no_such_field", "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
     ({"body_rules": [{"any_of": ["/body/summary"]}]}, "is not a unique"),
     ({"authority": "optional"}, "state authority_binding"),
@@ -553,6 +553,14 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"wakes_model": {"by": "outcome.state", "values": {"completed": "next_turn", "failed": "always"}}}, "must name a body oneOf"),
     ({"body_rules": [{"unique": "/body/outcome/artifacts", "by": "no_such_member"}]}, "is not a unique"),
     ({"body_rules": [{"requires": "/body/summary", "when": [{"at": "/body/outcome/state", "is": "untill"}]}]}, "is not a unique"),
+    # An allowed rule names values its field can hold, each once, under at least one condition.
+    ({"body_rules": [{"allowed": "/body/outcome/state", "values": ["complete"], "when": [{"at": "/body/sequence", "is": 1}]}]},
+     "is not a unique"),
+    ({"body_rules": [{"allowed": "/body/outcome/state", "values": ["completed", "completed"],
+                      "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
+    ({"body_rules": [{"allowed": "/body/outcome/state", "values": ["completed"], "when": []}]}, "is not a unique"),
+    ({"body_rules": [{"allowed": "/body/no_such_field", "values": ["completed"], "when": [{"at": "/body/sequence", "is": 1}]}]},
+     "is not a unique"),
     ({"idempotency": ["/body/summary"]}, "names no part every frame carries"),
     ({"senders": ["gateway"], "senders_by_address": {}}, "not a topology check"),
 ])
@@ -561,6 +569,24 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
     registry["kinds"]["task.result"].update(change)
     with pytest.raises(EXPORT.ContractError, match=problem):
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_an_allowed_rule_checks_a_single_value_and_each_item_of_a_list() -> None:
+    """README, "What bodies carry": under its conditions the field, or each item of a list, holds one of the values."""
+
+    spec = dataclasses.replace(kinds.KINDS["task.result"], body_rules=(
+        {"allowed": "/body/outcome/state", "values": ["completed"], "when": [{"at": "/body/sequence", "is": 2}]},
+        {"allowed": "/body/tags", "values": ["a", "b"], "when": [{"at": "/body/sequence", "is": 2}]},
+    ))
+    check = wire_frame._check_body_rules  # noqa: SLF001 - the rule check itself, without a signed frame
+    check({"body": {"sequence": 1, "outcome": {"state": "failed"}}}, spec)  # its condition does not hold
+    check({"body": {"sequence": 2, "outcome": {"state": "completed"}, "tags": ["b", "a"]}}, spec)
+    check({"body": {"sequence": 2}}, spec)  # an absent field holds no other value
+    for body, at in (({"sequence": 2, "outcome": {"state": "failed"}}, "/body/outcome/state"),
+                     ({"sequence": 2, "outcome": {"state": "completed"}, "tags": ["a", "c"]}, "/body/tags")):
+        with pytest.raises(FrameRefused) as refused:
+            check({"body": body}, spec)
+        assert (refused.value.code, refused.value.at) == ("invalid_body", at)
 
 
 def drop_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None:
@@ -701,7 +727,7 @@ def test_reply_errors_are_the_reply_schemas_outcomes_other_than_ok(change) -> No
 
 @pytest.mark.parametrize(("kind", "role", "edge", "given_by_person", "allowed"), [
     ("task.result", "lead", "person", False, True),     # the lead answers the person (forwarded-as-is)
-    ("task.question", "lead", "person", False, True),   # the lead asks the person (change-conflict)
+    ("task.question", "lead", "person", False, True),   # the lead asks the person
     ("task.result", "worker", "up", False, True),       # a worker answers its lead
     ("task.answer", "lead", "down", False, True),       # the lead answers its worker
     ("task.request", "lead", "out", False, True),       # the lead delegates to an outside agent
@@ -1476,7 +1502,8 @@ def receiver_only(case: dict) -> bool:
 
     kind = json.loads(case["frame_text"])["kind"]
     rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
-    places = {rule.get("unique") or rule.get("requires") or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
+    places = {rule.get("unique") or rule.get("requires") or rule.get("allowed") or rule["any_of"][0].rsplit("/", 1)[0]
+              for rule in rules}
     return case["at"] == "/idempotency_key" or case["at"] in places or receiver_compares_body(case)
 
 

@@ -33,7 +33,6 @@ from custom_messages.wire.kinds import (
     AUTHORITY_TOKEN_DOMAIN,
     AUTHORITY_TOKEN_MAX_SECONDS,
     COMMAND_TOKEN_MAX_SECONDS,
-    DECISION_TOKEN_DOMAIN,
     BETWEEN_INSTALLATIONS,
     FRAME_SHAPE,
     INSTALLATION_ADDRESS_PREFIX,
@@ -64,8 +63,8 @@ from custom_messages.wire.values import parse_timestamp
 __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
     "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
-    "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_decision_token",
-    "sign_frame", "sign_renew_key_proof", "signing_bytes", "verify_authority_token", "verify_frame",
+    "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_frame",
+    "sign_renew_key_proof", "signing_bytes", "verify_authority_token", "verify_frame",
 ]
 
 REPLY_SUFFIX = ".reply"
@@ -78,9 +77,6 @@ SCHEDULE_ISSUER_ROLE = "scheduler"
 AUTHORITY_AT = "/authority"
 # The token type bound to one command; it lasts at most COMMAND_TOKEN_MAX_SECONDS.
 COMMAND_BINDING = "command"
-# The role whose certificate signs change-conflict decision tokens (README, "What bodies carry").
-DECISION_ISSUER_ROLE = "team_services"
-DECISION_TOKEN_AT = "/body/decision_token"
 # The host role that speaks for outside agents (A2A); its frames reach only the lead.
 OUTSIDE_ROLE = "edge_adapter"
 # Who speaks for a team beyond it, to an outside agent or another installation: the lead
@@ -164,19 +160,6 @@ def frame_digest(frame: Mapping[str, Any]) -> str:
 
 def authority_signing_bytes(token: Mapping[str, Any]) -> bytes:
     return signed_bytes(AUTHORITY_TOKEN_DOMAIN, token)
-
-
-def decision_signing_bytes(token: Mapping[str, Any]) -> bytes:
-    return signed_bytes(DECISION_TOKEN_DOMAIN, token)
-
-
-def sign_decision_token(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> dict[str, Any]:
-    """Return ``unsigned`` with its algorithm and signature filled in; the team services sign it."""
-
-    token = {key: value for key, value in unsigned.items() if key != "signature"}
-    token["algorithm"] = "ed25519"
-    token["signature"] = b64url(private_key.sign(decision_signing_bytes(token)))
-    return token
 
 
 def sign_authority_token(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> dict[str, Any]:
@@ -724,7 +707,7 @@ def verify_authority_token(token: AuthorityToken, fields: Mapping[str, Any], tru
 
 @dataclass(frozen=True)
 class _SignedToken:
-    """An authority or decision token as received: where it sits, its fields, and what its signature covers."""
+    """An authority token as received: where it sits, its fields, and what its signature covers."""
 
     at: str
     fields: Mapping[str, Any]
@@ -810,6 +793,17 @@ def _says_nothing(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
     return all(_pointed(raw, pointer) is None for pointer in rule["any_of"])
 
 
+def _holds_other(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    """Whether the field holds a value outside ``values`` (each item, for a list) while every condition holds."""
+
+    if not all(_pointed(raw, condition["at"]) == condition["is"] for condition in rule["when"]):
+        return False
+    value = _pointed(raw, rule["allowed"])
+    if value is None:
+        return False
+    return any(item not in rule["values"] for item in (value if isinstance(value, list) else [value]))
+
+
 def _check_body_rules(raw: Mapping[str, Any], spec: KindSpec) -> None:
     """What the schema cannot say (registry body_rules; README, "What bodies carry")."""
 
@@ -821,21 +815,8 @@ def _check_body_rules(raw: Mapping[str, Any], spec: KindSpec) -> None:
         if "any_of" in rule and _says_nothing(raw, rule):
             raise FrameRefused("invalid_body", "the body needs one of " + ", ".join(rule["any_of"]),
                                at=rule["any_of"][0].rsplit("/", 1)[0])
-
-
-def _verify_decision_token(raw: Mapping[str, Any], frame: Frame, trust: TrustStore) -> None:
-    """A change-conflict decision token in the body is the team services' signed record of a person's choice."""
-
-    token = _pointed(raw, DECISION_TOKEN_AT)
-    if token is None:
-        return
-    issuer = token["issuer"]
-    if (issuer["installation"], issuer["team"]) != (frame.issuer.installation, frame.audience.team):
-        raise FrameRefused("bad_authority", "the decision token belongs to another installation or team",
-                           at=DECISION_TOKEN_AT + "/issuer")
-    signed = _SignedToken(DECISION_TOKEN_AT, token, decision_signing_bytes(token))
-    certificate = _token_certificate(signed, trust, frozenset({DECISION_ISSUER_ROLE}), issuer["team"], "a team-services host")
-    _verify_token_signature_and_time(signed, certificate, parse_timestamp(frame.issued_at))
+        if "allowed" in rule and _holds_other(raw, rule):
+            raise FrameRefused("invalid_body", "a value its other fields do not allow here", at=rule["allowed"])
 
 
 def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: TrustStore) -> None:
@@ -983,7 +964,5 @@ def verify_frame(
         assert answering is not None  # _verify_issuer refused replies without their request
         _verify_issued_certificate(raw, answering, trust)
     authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate)
-    if not is_reply and DECISION_TOKEN_AT.rsplit("/", 1)[1] in known:
-        _verify_decision_token(raw, frame, trust)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

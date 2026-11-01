@@ -1,8 +1,8 @@
 {
   "protocol": "1.0-pre",
-  "kind": "conflicts.cancel",
-  "message_id": "01928f3a-7b2c-74a8-8000-0000000004a8",
-  "idempotency_key": "conflicts.cancel:XIH7_ZX4lQen2eaGBnlp4M5BExcF4sj0PFzkCrLmggo",
+  "kind": "access.resolved",
+  "message_id": "01928f3a-7b2c-733c-8000-00000000033c",
+  "idempotency_key": "access.resolved:O88alhzMUde7ngPz4_cuFNhCSgqEyKRDw3aSIIpHKvs",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -17,11 +17,11 @@
     "target": "team_services",
     "id": "team_example"
   },
-  "subject": "ua.v1.team_example.gateway-1.svc.team",
+  "subject": "ua.v1.team_example.gateway-1.work.team",
   "issued_at": "2026-10-22T04:30:00.000Z",
-  "expires_at": "2026-10-22T04:30:30.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
   "authority": {
-    "token_id": "01928f3a-7b2c-7110-9000-000000000110",
+    "token_id": "01928f3a-7b2c-7033-8000-000000000033",
     "issuer": {
       "installation": "install_example",
       "runtime": "gateway-1",
@@ -34,20 +34,20 @@
     },
     "person": "person_7c1",
     "bound_to": {
-      "type": "command",
-      "id": "request_id_1"
+      "type": "access_request",
+      "id": "areq_3"
     },
     "issued_at": "2026-10-22T04:29:00.000Z",
-    "expires_at": "2026-10-22T04:34:00.000Z",
+    "expires_at": "2026-10-22T04:39:00.000Z",
     "algorithm": "ed25519",
-    "signature": "2DAgksvo3x_L43QZmcmH9Liqhyg99oWyniGP4dMrSXSNsGrR_XBtuIijFg6fIP3sbi52QI4i_tI6C-IcaQ3HBg"
+    "signature": "GpK_TOOXt0QU5iPuag_VntVob_r2EIBQ--qvI_2ik1jW_mY4iegk2ukp3L8qSAd2Vzsv2NicPCaf8C0jSRmBBQ"
   },
   "algorithm": "ed25519",
   "body": {
-    "request_id": "request_id_1",
-    "case_id": "case_id_1",
-    "reason": "Example reason"
+    "request_id": "areq_3",
+    "choice": "use_change",
+    "note": "Tuesday is right; I moved it by mistake."
   },
-  "body_digest": "hhpd9dRNK4vAidn3P1Yrxhlwfke4iAHlT_EPZHTPNhk",
-  "signature": "ZjHoN9x9FZcm5f13c_KKEyPqsnYUkWa5eLA1-RzyYb4e0Yb1dwntCMDDyq10bwWku6Yf_voAoMgAx9o-AS8oBw"
+  "body_digest": "JcBJUHvMCeAFQZWzzhoG12QqcD9CCzh2_bN_JxS37Q8",
+  "signature": "Ud7n4qlfbIDpSGH8RScOCHOY48U-eqj8Wp-SlO0YN7Yk7rH7xRwDZB2u3gndI6eXH7LbwyJkDEf34yQ44EPOCg"
 }

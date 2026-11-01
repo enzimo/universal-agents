@@ -113,14 +113,18 @@ topology checks either.
 ## What bodies carry
 
 **Body rules.** A schema cannot say that a list holds no value twice, that one field is
-required when others have given values, or that a body needs at least one of several
-fields. A kind's `body_rules` say it, and receivers check them right after the schema,
-refusing as `invalid_body` at the rule's field:
+required when others have given values, that a body needs at least one of several
+fields, or which values a field may hold when others have given values. A kind's
+`body_rules` say it, and receivers check them right after the schema, refusing as
+`invalid_body` at the rule's field:
 - `{unique: <list>, by: <member>}`: no two items are equal; for object items, no two
   values of the member every item carries, while plain values compare whole;
 - `{requires: <field>, when: [{at: <field>, is: <value>}, ...]}`: the field is present
   whenever every condition holds;
-- `{any_of: [<field>, ...]}`: at least one is present.
+- `{any_of: [<field>, ...]}`: at least one is present;
+- `{allowed: <field>, values: [...], when: [{at: <field>, is: <value>}, ...]}`: whenever
+  every condition holds, the field holds one of the values, and for a list every item
+  does; an absent field passes.
 
 **Long text.** `long_text` holds at most 32,768 characters. A result's answer and a
 person's answer may instead go as a text file in the object store (`form: file`,
@@ -144,7 +148,8 @@ broker saves after approval travels as a JSON file in the object store. The brok
 session id is its own random token.
 
 **Access reviews and decisions.** Access requests go to the team services, which hand
-access down or ask whoever may decide. They send the gateway an `access.review` to open a
+access down or ask whoever may decide. A person's review of a change uses the same kinds
+("Change reviews", below). They send the gateway an `access.review` to open a
 review in its Inbox; a staged change's review card, written by code, goes by reference.
 The person's decision returns as `access.resolved`, with the card's choice, note, kept
 items, "keep for later tasks" and "may hand it on" boxes. A decision the team services
@@ -156,13 +161,41 @@ the team's store; it grants nothing the access service has not recorded. Until t
 runtime moves onto this contract (plan, phase 3), today's notice still carries ids only,
 as `AGENTS.md` says.
 
-**Change-conflict decisions.** A person's decision on a change conflict is recorded by
-the team services and returned in a `decision_token`, bound to a digest of the values the
-person was shown. A team-services certificate of the frame's installation and team signs
-the RFC 8785 canonical JSON of the token without its signature, after the domain prefix
-`universal-agents/decision-token/v1` and a newline (`frame.sign_decision_token`).
-Receivers check it like an authority token, as `bad_authority` at the token's field, and
-the team services apply the decision once, refusing it when the values changed.
+**Change reviews.** When another writer changed a stored record while a request worked on
+it, the store refuses the request's change with `change_conflict`, which carries a case id
+and a brief, or with `needs_person_decision` ("Covered changes"). The task's holder, lead or
+worker, may then ask the person the request works for. No model decides, and the lead
+never decides for its workers.
+1. The holder sends `access.request` whose `what` is `{type: change_review, case_id,
+   question}`: the store's case and the agent's question in its own words. It needs no
+   `reason`. The task waits for the outcome, as it does for access.
+2. The team services open the review in the gateway's Inbox with `access.review` in state
+   `open`. Its decider is the person the request works for (a `person` decider), never the
+   administrators. Its `brief` is a blob reference to the text code wrote from the case:
+   what changed, who changed it and when, and the request's own planned values. Its
+   choices are `keep_current`, `use_change` and `stop_request`. Body rules refuse a change
+   review without a brief, for the administrators, or with access choices, and access
+   choices are the only ones other reviews may offer. The review expires two days after
+   it opens, or at a scheduled run's next run when that comes sooner.
+3. The person's decision returns in `access.resolved`: the choice and an optional note.
+   The fields for kept items, hours, "keep for later tasks" and "may hand it on" belong to
+   access reviews only. The body does not say which kind of review it decides, so the team
+   services refuse a choice the review did not offer, answering with `access.review` in
+   state `refused` and code `choice_not_offered`.
+4. The team services record the decision, then send the waiting task `access.decision`
+   with status `change_decided`, carrying the choice and the note, because a host on
+   another machine cannot read the team's store. On `use_change` the task sends the same
+   change again, and the store lets it through once while the record is still at the
+   version the brief showed and the planned values are unchanged; otherwise the task gets
+   a new brief. On `keep_current` the task leaves the record as it is. On `stop_request`
+   trusted code stops the request through its normal stop path, which sends one final
+   reply.
+5. With no decision by the deadline, the review closes as `expired` and the task gets
+   status `change_not_decided`: the change was not made. The request continues and says so
+   in its reply.
+6. A message from the person in that request's thread while the review is open withdraws
+   it: the card closes as `withdrawn`, and the task gets status `withdrawn` by
+   `person_message` and then sees the message.
 
 ## Schema subset
 
@@ -752,9 +785,9 @@ minor never adds, removes or reorders them.
 An operation's retry key is made from the parts its registry entry lists ("Idempotency
 keys"). Each part points at a required request-body field, a required frame field, or the
 audience id its address names (`/audience/id`). It never means a value inferred from an
-authority token. `tasks.steer` uses `/body/steer_id`; `conflicts.decide` carries a separate
-`request_id` so a new decision after a refusal has a new key. Retrying the same command
-keeps its key. The exporter rejects parts that are missing or optional.
+authority token. `tasks.steer` uses `/body/steer_id`; `staged_changes.apply` gets a new
+`request_id` when the person confirms again after `agreement_required`, so the new command
+has a new key. Retrying the same command keeps its key. The exporter rejects parts that are missing or optional.
 
 An operation that takes a token states its `authority_binding` ("On behalf of a person").
 A gateway's command carries its own id, `request_id` (`steer_id` for `tasks.steer`): the
@@ -1523,7 +1556,8 @@ that can happen to it, each with its data:
   creates cannot be stale, so they do not offer `changed_since_read`.
 - `change_conflict` carries the conflict's `case_id` and its `brief`, a blob reference.
 - `request_closed` may carry the request's state.
-- `needs_person_decision` may carry the `case_id` the person decides.
+- `needs_person_decision` may carry the `case_id` the person decides in a change review
+  ("Change reviews").
 - `record_busy` carries `retry_at`, when to try again.
 
 `change_conflict`, `needs_person_decision` and `record_busy` come only from the checks of

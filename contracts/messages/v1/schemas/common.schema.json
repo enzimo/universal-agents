@@ -819,82 +819,6 @@
       ],
       "additionalProperties": false
     },
-    "decision_token": {
-      "type": "object",
-      "description": "A person's decision on a change conflict, recorded by the team services and bound to a digest of the values the person was shown. A team-services certificate signs the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/decision-token/v1 and a newline (README, \"What bodies carry\").",
-      "properties": {
-        "token_id": {
-          "$ref": "#/$defs/message_id"
-        },
-        "case_id": {
-          "$ref": "#/$defs/record_id"
-        },
-        "choice": {
-          "type": "string",
-          "enum": [
-            "keep_current",
-            "use_this_change",
-            "redo_with_note",
-            "stop_request"
-          ]
-        },
-        "values_digest": {
-          "$ref": "#/$defs/sha256_digest"
-        },
-        "issuer": {
-          "type": "object",
-          "properties": {
-            "installation": {
-              "$ref": "#/$defs/installation_id"
-            },
-            "team": {
-              "$ref": "#/$defs/team_id"
-            },
-            "runtime": {
-              "$ref": "#/$defs/runtime_id"
-            },
-            "membership_epoch": {
-              "$ref": "#/$defs/epoch"
-            },
-            "key_id": {
-              "$ref": "#/$defs/key_id"
-            }
-          },
-          "required": [
-            "installation",
-            "team",
-            "runtime",
-            "membership_epoch",
-            "key_id"
-          ],
-          "additionalProperties": false
-        },
-        "issued_at": {
-          "$ref": "#/$defs/timestamp"
-        },
-        "expires_at": {
-          "$ref": "#/$defs/timestamp"
-        },
-        "algorithm": {
-          "const": "ed25519"
-        },
-        "signature": {
-          "$ref": "#/$defs/ed25519_signature"
-        }
-      },
-      "required": [
-        "token_id",
-        "case_id",
-        "choice",
-        "values_digest",
-        "issuer",
-        "issued_at",
-        "expires_at",
-        "algorithm",
-        "signature"
-      ],
-      "additionalProperties": false
-    },
     "access_target": {
       "type": "object",
       "properties": {
@@ -1003,7 +927,7 @@
       ]
     },
     "access_ask": {
-      "description": "What an access request asks for: access to one target, or approval of a staged change.",
+      "description": "What an access request asks for: access to one target, approval of a staged change, or the person's review of a change another writer made to a record this task wants to change.",
       "oneOf": [
         {
           "type": "object",
@@ -1077,6 +1001,29 @@
             "change_kind",
             "change_id",
             "plan_digest"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "A change review: the store refused this task's change because another writer changed the record (change_conflict or needs_person_decision), and the holder asks the person the request works for (README, \"Change reviews\").",
+          "properties": {
+            "type": {
+              "const": "change_review"
+            },
+            "case_id": {
+              "description": "The case the store's refusal named.",
+              "$ref": "#/$defs/record_id"
+            },
+            "question": {
+              "description": "The agent's question to the person, in its own words.",
+              "$ref": "#/$defs/note_text"
+            }
+          },
+          "required": [
+            "type",
+            "case_id",
+            "question"
           ],
           "additionalProperties": false
         }

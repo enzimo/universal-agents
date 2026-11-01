@@ -116,15 +116,6 @@
         "agent_status_reply": {
           "$ref": "#/components/messages/agent_status_reply"
         },
-        "conflicts_cancel_reply": {
-          "$ref": "#/components/messages/conflicts_cancel_reply"
-        },
-        "conflicts_decide_reply": {
-          "$ref": "#/components/messages/conflicts_decide_reply"
-        },
-        "conflicts_list_reply": {
-          "$ref": "#/components/messages/conflicts_list_reply"
-        },
         "custody_decide_reply": {
           "$ref": "#/components/messages/custody_decide_reply"
         },
@@ -414,15 +405,6 @@
       "messages": {
         "access_withdraw": {
           "$ref": "#/components/messages/access_withdraw"
-        },
-        "conflicts_cancel": {
-          "$ref": "#/components/messages/conflicts_cancel"
-        },
-        "conflicts_decide": {
-          "$ref": "#/components/messages/conflicts_decide"
-        },
-        "conflicts_list": {
-          "$ref": "#/components/messages/conflicts_list"
         },
         "custody_decide": {
           "$ref": "#/components/messages/custody_decide"
@@ -890,7 +872,7 @@
             }
           ]
         },
-        "summary": "What became of an access request, sent to the waiting task."
+        "summary": "What became of an access request or a change review, sent to the waiting task."
       },
       "access_request": {
         "name": "access.request",
@@ -912,7 +894,7 @@
             }
           ]
         },
-        "summary": "A task asks the team services for access; no model decides it."
+        "summary": "A task asks the team services for access, a staged change's approval or a person's change review; no model decides it."
       },
       "access_resolved": {
         "name": "access.resolved",
@@ -934,7 +916,7 @@
             }
           ]
         },
-        "summary": "A person's decision on an access request, from the gateway to the team services."
+        "summary": "A person's decision on an access request or a change review, from the gateway to the team services."
       },
       "access_review": {
         "name": "access.review",
@@ -956,7 +938,7 @@
             }
           ]
         },
-        "summary": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too."
+        "summary": "An access or change review for the gateway's Inbox, from the team services; a refused decision returns this way too."
       },
       "access_withdraw": {
         "name": "access.withdraw",
@@ -1166,135 +1148,6 @@
                 },
                 "kind": {
                   "const": "agent.status.reply"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        }
-      },
-      "conflicts_cancel": {
-        "name": "conflicts.cancel",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/conflicts.cancel.schema.json"
-                },
-                "kind": {
-                  "const": "conflicts.cancel"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        },
-        "summary": "An administrator cancels a change conflict."
-      },
-      "conflicts_cancel_reply": {
-        "name": "conflicts.cancel.reply",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/conflicts.cancel.reply.schema.json"
-                },
-                "kind": {
-                  "const": "conflicts.cancel.reply"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        }
-      },
-      "conflicts_decide": {
-        "name": "conflicts.decide",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/conflicts.decide.schema.json"
-                },
-                "kind": {
-                  "const": "conflicts.decide"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        },
-        "summary": "A person decides a change conflict."
-      },
-      "conflicts_decide_reply": {
-        "name": "conflicts.decide.reply",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/conflicts.decide.reply.schema.json"
-                },
-                "kind": {
-                  "const": "conflicts.decide.reply"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        }
-      },
-      "conflicts_list": {
-        "name": "conflicts.list",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/conflicts.list.schema.json"
-                },
-                "kind": {
-                  "const": "conflicts.list"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        },
-        "summary": "Open and recent change conflicts, for administrators."
-      },
-      "conflicts_list_reply": {
-        "name": "conflicts.list.reply",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/conflicts.list.reply.schema.json"
-                },
-                "kind": {
-                  "const": "conflicts.list.reply"
                 }
               },
               "type": "object"
@@ -5663,69 +5516,6 @@
         ]
       }
     },
-    "receive_conflicts_cancel_team_services": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/conflicts_cancel"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/conflicts_cancel_reply"
-          }
-        ]
-      }
-    },
-    "receive_conflicts_decide_team_services": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/conflicts_decide"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/conflicts_decide_reply"
-          }
-        ]
-      }
-    },
-    "receive_conflicts_list_team_services": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/conflicts_list"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/conflicts_list_reply"
-          }
-        ]
-      }
-    },
     "receive_credential_form_request_edge": {
       "action": "receive",
       "channel": {
@@ -8234,69 +8024,6 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/agent_status_reply"
-          }
-        ]
-      }
-    },
-    "send_conflicts_cancel_team_services": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/conflicts_cancel"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/conflicts_cancel_reply"
-          }
-        ]
-      }
-    },
-    "send_conflicts_decide_team_services": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/conflicts_decide"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/conflicts_decide_reply"
-          }
-        ]
-      }
-    },
-    "send_conflicts_list_team_services": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/conflicts_list"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/conflicts_list_reply"
           }
         ]
       }

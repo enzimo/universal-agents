@@ -2,20 +2,24 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.resolved.schema.json",
   "title": "access.resolved body",
-  "description": "A person's decision on an access request, from the gateway to the team services.",
+  "description": "A person's decision on an access request or a change review, from the gateway to the team services.",
   "type": "object",
   "properties": {
     "request_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "choice": {
+      "description": "One of the choices the review offered: an access choice, or for a change review keep_current, use_change or stop_request. The other fields belong to access reviews only.",
       "type": "string",
       "enum": [
         "approve",
         "approve_read",
         "approve_task",
         "approve_all",
-        "deny"
+        "deny",
+        "keep_current",
+        "use_change",
+        "stop_request"
       ]
     },
     "note": {

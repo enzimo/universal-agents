@@ -34,7 +34,6 @@
     "file",
     "staged_change"
   ],
-  "decision_token_domain": "universal-agents/decision-token/v1",
   "frame_schema": "frame.schema.json",
   "host_roles": {
     "edge_adapter": "connects outside agents (A2A)",
@@ -71,7 +70,7 @@
         }
       ],
       "class": "durable",
-      "description": "What became of an access request, sent to the waiting task.",
+      "description": "What became of an access request or a change review, sent to the waiting task.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/request_id",
@@ -92,6 +91,8 @@
         "by": "status.state",
         "values": {
           "already_held": "always",
+          "change_decided": "always",
+          "change_not_decided": "always",
           "denied": "always",
           "granted": "always",
           "handed_down": "always",
@@ -122,10 +123,28 @@
               "is": "until"
             }
           ]
+        },
+        {
+          "requires": "/body/reason",
+          "when": [
+            {
+              "at": "/body/what/type",
+              "is": "access"
+            }
+          ]
+        },
+        {
+          "requires": "/body/reason",
+          "when": [
+            {
+              "at": "/body/what/type",
+              "is": "change"
+            }
+          ]
         }
       ],
       "class": "durable",
-      "description": "A task asks the team services for access; no model decides it.",
+      "description": "A task asks the team services for access, a staged change's approval or a person's change review; no model decides it.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/request_id"
@@ -157,7 +176,7 @@
       },
       "body": "bodies/access.resolved.schema.json",
       "class": "durable",
-      "description": "A person's decision on an access request, from the gateway to the team services.",
+      "description": "A person's decision on an access request or a change review, from the gateway to the team services.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/request_id"
@@ -186,10 +205,92 @@
       "body_rules": [
         {
           "unique": "/body/state/choices"
+        },
+        {
+          "requires": "/body/state/reason",
+          "when": [
+            {
+              "at": "/body/state/what/type",
+              "is": "access"
+            }
+          ]
+        },
+        {
+          "requires": "/body/state/reason",
+          "when": [
+            {
+              "at": "/body/state/what/type",
+              "is": "change"
+            }
+          ]
+        },
+        {
+          "allowed": "/body/state/choices",
+          "values": [
+            "approve",
+            "approve_read",
+            "approve_task",
+            "approve_all",
+            "deny"
+          ],
+          "when": [
+            {
+              "at": "/body/state/what/type",
+              "is": "access"
+            }
+          ]
+        },
+        {
+          "allowed": "/body/state/choices",
+          "values": [
+            "approve",
+            "approve_read",
+            "approve_task",
+            "approve_all",
+            "deny"
+          ],
+          "when": [
+            {
+              "at": "/body/state/what/type",
+              "is": "change"
+            }
+          ]
+        },
+        {
+          "allowed": "/body/state/choices",
+          "values": [
+            "keep_current",
+            "use_change",
+            "stop_request"
+          ],
+          "when": [
+            {
+              "at": "/body/state/what/type",
+              "is": "change_review"
+            }
+          ]
+        },
+        {
+          "requires": "/body/state/decider/delivery_ref",
+          "when": [
+            {
+              "at": "/body/state/what/type",
+              "is": "change_review"
+            }
+          ]
+        },
+        {
+          "requires": "/body/state/brief",
+          "when": [
+            {
+              "at": "/body/state/what/type",
+              "is": "change_review"
+            }
+          ]
         }
       ],
       "class": "durable",
-      "description": "An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.",
+      "description": "An access or change review for the gateway's Inbox, from the team services; a refused decision returns this way too.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/request_id",
@@ -384,121 +485,6 @@
         "gateway"
       ],
       "topology_edge": "down",
-      "wakes_model": "never"
-    },
-    "conflicts.cancel": {
-      "address": "svc.team",
-      "admission": {
-        "accepted_while_paused": true,
-        "execution_slot": false,
-        "priority": "normal"
-      },
-      "authority": "required",
-      "authority_binding": {
-        "at": "/body/request_id",
-        "type": "command"
-      },
-      "body": "bodies/conflicts.cancel.schema.json",
-      "class": "request_reply",
-      "description": "An administrator cancels a change conflict.",
-      "expiry_seconds": 30,
-      "idempotency": [
-        "/body/request_id"
-      ],
-      "ledger": "none",
-      "receivers": [
-        "team_services"
-      ],
-      "rendering": "none",
-      "reply": {
-        "body": "bodies/conflicts.cancel.reply.schema.json",
-        "errors": [
-          "not_found",
-          "administrator_required"
-        ]
-      },
-      "routing": "team",
-      "senders": [
-        "gateway"
-      ],
-      "topology_edge": "none",
-      "wakes_model": "never"
-    },
-    "conflicts.decide": {
-      "address": "svc.team",
-      "admission": {
-        "accepted_while_paused": true,
-        "execution_slot": false,
-        "priority": "high"
-      },
-      "authority": "required",
-      "authority_binding": {
-        "at": "/body/request_id",
-        "type": "command"
-      },
-      "body": "bodies/conflicts.decide.schema.json",
-      "class": "request_reply",
-      "description": "A person decides a change conflict.",
-      "expiry_seconds": 30,
-      "idempotency": [
-        "/body/request_id"
-      ],
-      "ledger": "none",
-      "receivers": [
-        "team_services"
-      ],
-      "rendering": "none",
-      "reply": {
-        "body": "bodies/conflicts.decide.reply.schema.json",
-        "errors": [
-          "not_found",
-          "case_closed",
-          "values_changed",
-          "not_allowed"
-        ]
-      },
-      "routing": "team",
-      "senders": [
-        "gateway"
-      ],
-      "topology_edge": "none",
-      "wakes_model": "never"
-    },
-    "conflicts.list": {
-      "address": "svc.team",
-      "admission": {
-        "accepted_while_paused": true,
-        "execution_slot": false,
-        "priority": "normal"
-      },
-      "authority": "required",
-      "authority_binding": {
-        "at": "/body/request_id",
-        "type": "command"
-      },
-      "body": "bodies/conflicts.list.schema.json",
-      "class": "request_reply",
-      "description": "Open and recent change conflicts, for administrators.",
-      "expiry_seconds": 30,
-      "idempotency": [
-        "/message_id"
-      ],
-      "ledger": "none",
-      "receivers": [
-        "team_services"
-      ],
-      "rendering": "none",
-      "reply": {
-        "body": "bodies/conflicts.list.reply.schema.json",
-        "errors": [
-          "administrator_required"
-        ]
-      },
-      "routing": "team",
-      "senders": [
-        "gateway"
-      ],
-      "topology_edge": "none",
       "wakes_model": "never"
     },
     "credential.form.request": {
@@ -4571,8 +4557,7 @@
             "/body/text",
             "/body/text_file",
             "/body/selected_choice_ids",
-            "/body/decision",
-            "/body/decision_token"
+            "/body/decision"
           ]
         }
       ],
@@ -5843,7 +5828,7 @@
     },
     {
       "code": "bad_authority",
-      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued"
+      "meaning": "the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds"
     },
     {
       "code": "access_denied",
