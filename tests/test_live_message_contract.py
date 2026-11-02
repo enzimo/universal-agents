@@ -31,6 +31,7 @@ from typing import Iterable
 import nats
 import pytest
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
+from nats.js.errors import NotFoundError
 
 from custom_messages.wire.kinds import KINDS
 from custom_messages.wire.permissions import HostPlacement, host_permissions
@@ -357,24 +358,30 @@ async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw
         owner = authority.nc.jetstream()
         await owner.update_stream(config=stream_config("UA1_WORK"))
         await owner.add_consumer(AGENT_STREAM, config=consumer_config("pool", pool="researcher"))
-        # Two stops queued for researcher-2; the team services withdraw the second one.
-        earlier, frame = fixtures.example_frame("task.stop", "for-person"), fixtures.example_frame("task.stop")
-        assert earlier["subject"] == frame["subject"]
-        for queued in (earlier, frame):
+        # Two tasks queued for researcher-2; the team services withdraw the second one.
+        kept, withdrawn = (fixtures.example_frame("task.request", name) for name in ("delegation", "delegation-for-person"))
+        for queued in (kept, withdrawn):
             await lead.nc.jetstream().publish(queued["subject"], json.dumps(queued).encode(), headers=headers(queued))
-        lookup = json.dumps({"seq": 1, "next_by_subj": frame["subject"]}).encode()
+        work_subjects = f"ua.v1.{TEAM}.*.work.>"
+        lookup = json.dumps({"seq": 1, "next_by_subj": work_subjects}).encode()
         await worker.publish_refused(f"$JS.API.STREAM.MSG.GET.{AGENT_STREAM}", lookup)
         await worker.publish_refused(f"$JS.API.STREAM.MSG.DELETE.{AGENT_STREAM}", json.dumps({"seq": 1}).encode())
         await lead.publish_refused(f"$JS.API.STREAM.CREATE.{AGENT_STREAM}")
-        # Only the publisher learns the sequence, so the team services look the frame up by the
-        # subject and message id its copy names, in their own team's stream.
-        services_js, sequence, found = services.nc.jetstream(), 0, None
-        while found is None:
-            stored = await services_js.get_msg(AGENT_STREAM, seq=sequence + 1, subject=frame["subject"], next=True)
+        # The task's copy names only the task, so the team services read their own team's
+        # stream across its work subjects and delete each verified task frame for that task.
+        services_js, sequence, found = services.nc.jetstream(), 0, []
+        while True:
+            try:
+                stored = await services_js.get_msg(AGENT_STREAM, seq=sequence + 1, subject=work_subjects, next=True)
+            except NotFoundError:  # past the stream's last message
+                break
             sequence = stored.seq
-            if json.loads(stored.data)["message_id"] == frame["message_id"]:
-                found = sequence
-        assert found > 1 and await services_js.delete_msg(AGENT_STREAM, found)
+            if stored.headers and stored.headers.get("UA-Kind") == "task.request":
+                document = json.loads(stored.data)
+                task = fixtures.verify(stored.data, document, {"arrived_on": stored.subject, "headers": dict(stored.headers)})
+                if task.body.task_id == withdrawn["body"]["task_id"]:
+                    found.append(sequence)
+        assert len(found) == 1 and await services_js.delete_msg(AGENT_STREAM, found[0])
         inbox = consumer_name("agent_inbox", agent="researcher-2")
         assert (await owner.consumer_info(AGENT_STREAM, inbox)).num_pending == 1
         # The shared UA1_WORK, which holds other teams' messages, stays out of their reach.

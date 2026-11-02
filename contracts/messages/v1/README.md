@@ -804,12 +804,14 @@ the installation.
 **Withdrawing queued work.** The team services withdraw a task queued for one of their
 team's agents or worker pools by deleting its message from `UA1_AGENT_WORK_<team>`
 (`withdrawal` in `transport.yaml`); no other role may. Only the publisher learns a
-message's stream sequence, so the team services find it themselves:
-1. The task's copy tells them the subject its frame was sent to and that frame's
-   `message_id`, which the copy's body and the frame share.
-2. They read that subject's messages in their own team's stream, from its first sequence
-   (`$JS.API.STREAM.MSG.GET` with `next_by_subj`), until they find the frame with that
-   message id, and delete it by its sequence (`$JS.API.STREAM.MSG.DELETE`).
+message's stream sequence, and the task's copy names the task (`task_id`) but neither the
+agent or pool its frame went to nor that frame's message id, so the team services find it
+themselves:
+1. They read their own team's stream from its first sequence, across the team's work
+   subjects (`$JS.API.STREAM.MSG.GET` with `next_by_subj` set to `ua.v1.<team>.*.work.>`).
+2. They verify each `task.request` frame they find (its `UA-Kind` header names the kind)
+   and delete, by its sequence (`$JS.API.STREAM.MSG.DELETE`), every one whose body names
+   the task: a task handed back and dispatched again can wait there more than once.
 
 The stream holds only their team's messages, so neither grant reaches another team, and
 the generator allows withdrawal only from per-team streams. Work queued for an outside
