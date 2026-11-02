@@ -574,15 +574,19 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
         publish = role_permissions(role)["publish"]
         creates = {subject for subject in publish if ".CREATE." in subject or ".UPDATE." in subject or ".DELETE." in subject}
         deletes = {subject for subject in creates if ".MSG.DELETE." in subject}
+        reads = {subject for subject in publish if ".MSG.GET." in subject or ".DIRECT.GET." in subject}
         if role == "installation_authority":
-            assert "$JS.API.STREAM.CREATE.UA1_AGENT_WORK_{team}" in publish and not deletes
+            assert "$JS.API.STREAM.CREATE.UA1_AGENT_WORK_{team}" in publish and not deletes and not reads
             assert "$JS.API.CONSUMER.CREATE.UA1_AGENT_WORK_{team}.*.>" in publish
         elif role == "team_services":
-            assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_WORK"}
+            # Their own team's stream only: neither grant reaches the shared UA1_WORK.
+            assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}"}
+            assert reads == {"$JS.API.STREAM.MSG.GET.UA1_AGENT_WORK_{team}"}
         else:
-            assert not creates, role
+            assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
-                            (lambda t: t["withdrawal"].update(streams=["UA1_DLQ"]), "only from the durable class's streams")):
+                            (lambda t: t["withdrawal"].update(streams=["UA1_DLQ"]), "only from the durable class's streams"),
+                            (lambda t: t["withdrawal"].update(streams=["UA1_WORK"]), "only in per-team streams")):
         transport = copy.deepcopy(TRANSPORT)
         change(transport)
         with pytest.raises(EXPORT.ContractError, match=problem):

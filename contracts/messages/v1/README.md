@@ -771,10 +771,10 @@ each role's templates for the host (`custom_messages.wire.permissions.host_permi
 - any other subject with `{team}` is repeated for each team the host serves.
 
 These placeholders never become wildcards. Clients use `_INBOX.<runtime>` as their inbox
-prefix. Hosts cannot read streams
-directly or reach another host's, another team's or another role's consumers, and only the
-two roles below create, change or delete JetStream objects or messages. The live
-conformance tests prove both allowed and refused operations.
+prefix. Hosts cannot reach another host's, another team's or another role's consumers, and
+cannot read streams directly, except the team services, which read their own team's agent
+stream to withdraw work. Only the two roles below create, change or delete JetStream
+objects or messages. The live conformance tests prove both allowed and refused operations.
 
 **Who sets up the streams.** The topology owner (`topology_owner` in `transport.yaml`) is
 the installation authority. It already decides which hosts serve which teams, agents and
@@ -785,12 +785,27 @@ update and inspect every stream, and create, inspect and delete every consumer o
 consumer names are a wildcard for it, and membership code fills `{team}` with every team of
 the installation.
 
-**Withdrawing queued work.** The team services withdraw a queued message by deleting it by
-its stream sequence, in `UA1_AGENT_WORK_<team>` and `UA1_WORK` (`withdrawal` in
-`transport.yaml`); no other role may. NATS cannot narrow such a delete to some subjects of a
-stream, so the grant reaches every message of the shared `UA1_WORK`, other teams' included.
-The team services delete only what their custody record says the work stream holds for
-their team; they still cannot read another team's messages.
+**Withdrawing queued work.** The team services withdraw a task queued for one of their
+team's agents or worker pools by deleting its message from `UA1_AGENT_WORK_<team>`
+(`withdrawal` in `transport.yaml`); no other role may. Only the publisher learns a
+message's stream sequence, so the team services find it themselves:
+1. The task's copy tells them the subject its frame was sent to and that frame's
+   `message_id`, which the copy's body and the frame share.
+2. They read that subject's messages in their own team's stream, from its first sequence
+   (`$JS.API.STREAM.MSG.GET` with `next_by_subj`), until they find the frame with that
+   message id, and delete it by its sequence (`$JS.API.STREAM.MSG.DELETE`).
+
+The stream holds only their team's messages, so neither grant reaches another team, and
+the generator allows withdrawal only from per-team streams. Work queued for an outside
+agent or a gateway route waits in the shared `UA1_WORK`, where they have neither grant:
+they stop it with `task.stop` to that edge instead.
+
+A delete can come too late. A host may already have pulled the message without
+acknowledging it: NATS still deletes it, and the host starts the task. A holder claims a
+task before it acts outside the team, to get its custody window ("Claims"), and the team
+services answer the claim of a withdrawn task with `custody.moved`, reason `withdrawn`, so
+the host stops it and sends no result. They record the withdrawal in the task's custody
+record, so anything the host sends later is late work.
 
 `transport.yaml` states the broker settings too: the minimum NATS version and the
 server-wide JetStream settings under `server`, then each stream and consumer. A delivery
@@ -954,11 +969,13 @@ file. It uses public fixture signing keys and no operator credentials.
   - dead-letter raw copies and notices stored under the receiver's own id;
   - separate consumers for ids that an `_` separator would have merged;
   - the topology owner creating and changing streams, and creating and deleting consumers,
-    with its own grants, and the team services withdrawing a queued message by its sequence;
+    with its own grants, and the team services finding a queued message in their own team's
+    stream by its message id and withdrawing it;
   - a full-size frame stored with the largest headers senders may set;
-  - refusals of: an outside agent's adapter publishing into a worker pool; fetches and
-    acknowledgements on another host's agent consumer, another team's stream or the team
-    services' consumer; consumer creation and deletion; stream reads; publishing under
+  - refusals of: another host reading or deleting in the team's stream, and the team
+    services deleting in the shared `UA1_WORK`; an outside agent's adapter publishing into a
+    worker pool; fetches and acknowledgements on another host's agent consumer, another
+    team's stream or the team services' consumer; consumer creation and deletion; stream reads; publishing under
     another runtime's id, dead-letter copies included; subscribing to another runtime's
     inbox, to stream subjects, to the team services' requests or to another host's or
     another team's agents; writing into another runtime's inbox except to answer a request

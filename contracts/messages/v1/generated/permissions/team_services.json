@@ -8,7 +8,7 @@
     "$JS.API.CONSUMER.INFO.UA1_WORK.team~{team}",
     "$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.team~{team}",
     "$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}",
-    "$JS.API.STREAM.MSG.DELETE.UA1_WORK",
+    "$JS.API.STREAM.MSG.GET.UA1_AGENT_WORK_{team}",
     "ua.v1._install.{self}.svc",
     "ua.v1.{team}.{self}.ctl.agent.*",
     "ua.v1.{team}.{self}.dlq.notice.*",

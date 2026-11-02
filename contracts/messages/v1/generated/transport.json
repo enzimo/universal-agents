@@ -205,8 +205,7 @@
   "withdrawal": {
     "role": "team_services",
     "streams": [
-      "UA1_AGENT_WORK_{team}",
-      "UA1_WORK"
+      "UA1_AGENT_WORK_{team}"
     ]
   }
 }

@@ -24,9 +24,10 @@
         "reassigned",
         "adopted_elsewhere",
         "cancelled",
-        "claimed_elsewhere"
+        "claimed_elsewhere",
+        "withdrawn"
       ],
-      "description": "reassigned: custody.decide moved it; adopted_elsewhere: another holder took it over; cancelled: the request stopped; claimed_elsewhere: another claim for the task was recorded first, so this claimant stops and sends no result (README, \"Custody windows\")."
+      "description": "reassigned: custody.decide moved it; adopted_elsewhere: another holder took it over; cancelled: the request stopped; claimed_elsewhere: another claim for the task was recorded first; withdrawn: the team services withdrew the task from its queue after this host pulled it. In both, the receiver stops and sends no result (README, \"Custody windows\")."
     }
   },
   "required": [

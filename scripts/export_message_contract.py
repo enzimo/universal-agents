@@ -1159,6 +1159,9 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
     work = set(transport["classes"]["durable"]["streams"])
     if not withdrawal["streams"] or not set(withdrawal["streams"]) <= work:
         raise ContractError("transport.yaml: withdrawal deletes queued work only from the durable class's streams")
+    if not all("{team}" in stream for stream in withdrawal["streams"]):
+        raise ContractError("transport.yaml: withdrawal reads and deletes only in per-team streams ({team}), so it never "
+                            "reaches another team's messages")
 
 
 def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
@@ -1327,8 +1330,9 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     The topology owner creates, updates and inspects every stream, and creates, inspects
     and deletes every consumer of them. Consumer names are a wildcard for it: it serves
     every agent, pool and edge, and membership code fills {team} with every team of the
-    installation. The withdrawal role deletes a message by its stream sequence; NATS
-    cannot narrow that to some subjects of a stream.
+    installation. The withdrawal role reads its own team's stream to find a queued
+    message and deletes it by its stream sequence; NATS cannot narrow either to some
+    subjects of a stream, so withdrawal uses per-team streams only.
     """
 
     owner: set[str] = set()
@@ -1341,7 +1345,7 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     grants = {transport["topology_owner"]: owner}
     withdrawal = transport["withdrawal"]
     grants.setdefault(withdrawal["role"], set()).update(
-        f"$JS.API.STREAM.MSG.DELETE.{stream}" for stream in withdrawal["streams"])
+        f"$JS.API.STREAM.MSG.{action}.{stream}" for stream in withdrawal["streams"] for action in ("GET", "DELETE"))
     return grants
 
 

@@ -1397,7 +1397,7 @@ class CustodyMovedBody(WireModel):
     task_id: RecordId
     custody_token: CustodyToken
     sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
-    reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled', 'claimed_elsewhere']
+    reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled', 'claimed_elsewhere', 'withdrawn']
 
 
 class DebugDumpBody(WireModel):

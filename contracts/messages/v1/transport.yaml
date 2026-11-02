@@ -164,11 +164,13 @@ consumers:
 # Who manages the JetStream objects above (README, "Who sets up the streams"). The
 # topology owner creates and updates every stream and consumer: the installation authority,
 # which already decides which hosts serve which teams, agents and pools. The withdrawal role
-# withdraws queued work by deleting a message by its stream sequence; no other role may.
+# finds a queued message in its own team's stream by subject and message id, and deletes it
+# by its stream sequence; no other role may. Only per-team streams, so neither grant reaches
+# another team's messages (README, "Withdrawing queued work").
 topology_owner: installation_authority
 withdrawal:
   role: team_services
-  streams: ["UA1_AGENT_WORK_{team}", UA1_WORK]
+  streams: ["UA1_AGENT_WORK_{team}"]
 
 key_value:
   UA1_CERTS:

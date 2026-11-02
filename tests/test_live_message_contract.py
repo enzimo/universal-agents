@@ -357,13 +357,29 @@ async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw
         owner = authority.nc.jetstream()
         await owner.update_stream(config=stream_config("UA1_WORK"))
         await owner.add_consumer(AGENT_STREAM, config=consumer_config("pool", pool="researcher"))
-        frame = fixtures.example_frame("task.stop")
-        queued = await lead.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
-        await worker.publish_refused(f"$JS.API.STREAM.MSG.DELETE.{AGENT_STREAM}", json.dumps({"seq": queued.seq}).encode())
+        # Two stops queued for researcher-2; the team services withdraw the second one.
+        earlier, frame = fixtures.example_frame("task.stop", "for-person"), fixtures.example_frame("task.stop")
+        assert earlier["subject"] == frame["subject"]
+        for queued in (earlier, frame):
+            await lead.nc.jetstream().publish(queued["subject"], json.dumps(queued).encode(), headers=headers(queued))
+        lookup = json.dumps({"seq": 1, "next_by_subj": frame["subject"]}).encode()
+        await worker.publish_refused(f"$JS.API.STREAM.MSG.GET.{AGENT_STREAM}", lookup)
+        await worker.publish_refused(f"$JS.API.STREAM.MSG.DELETE.{AGENT_STREAM}", json.dumps({"seq": 1}).encode())
         await lead.publish_refused(f"$JS.API.STREAM.CREATE.{AGENT_STREAM}")
-        assert await services.nc.jetstream().delete_msg(AGENT_STREAM, queued.seq)
+        # Only the publisher learns the sequence, so the team services look the frame up by the
+        # subject and message id its copy names, in their own team's stream.
+        services_js, sequence, found = services.nc.jetstream(), 0, None
+        while found is None:
+            stored = await services_js.get_msg(AGENT_STREAM, seq=sequence + 1, subject=frame["subject"], next=True)
+            sequence = stored.seq
+            if json.loads(stored.data)["message_id"] == frame["message_id"]:
+                found = sequence
+        assert found > 1 and await services_js.delete_msg(AGENT_STREAM, found)
         inbox = consumer_name("agent_inbox", agent="researcher-2")
-        assert (await owner.consumer_info(AGENT_STREAM, inbox)).num_pending == 0
+        assert (await owner.consumer_info(AGENT_STREAM, inbox)).num_pending == 1
+        # The shared UA1_WORK, which holds other teams' messages, stays out of their reach.
+        await services.publish_refused("$JS.API.STREAM.MSG.DELETE.UA1_WORK", json.dumps({"seq": 1}).encode())
+        await services.publish_refused("$JS.API.STREAM.MSG.GET.UA1_WORK", json.dumps({"seq": 1}).encode())
         assert await owner.delete_consumer(AGENT_STREAM, consumer_name("pool", pool="researcher"))
         assert authority.errors.empty() and services.errors.empty() and lead.errors.empty() and worker.errors.empty()
 
