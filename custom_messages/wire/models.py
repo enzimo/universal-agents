@@ -886,7 +886,7 @@ class AccessDecisionBodyStatusAlreadyHeld(WireModel):
 
 class AccessDecisionBodyStatusRefused(WireModel):
     state: Literal['refused']
-    code: Literal['blocked', 'invalid_target', 'not_allowed']
+    code: Literal['blocked', 'invalid_target', 'not_allowed', 'not_own_case']
     message: NoteText
 
 
@@ -896,6 +896,7 @@ class AccessDecisionBodyStatusChangeDecided(WireModel):
     state: Literal['change_decided']
     choice: Literal['keep_current', 'use_change', 'stop_request']
     note: Union[NoteText, MISSING] = Field(default=MISSING)
+    seen_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusChangeNotDecided(WireModel):
@@ -925,7 +926,8 @@ class AccessResolvedBody(WireModel):
     "A person's decision on an access request or a change review, from the gateway to the team services."
 
     request_id: RecordId
-    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request']
+    decision_id: RecordId
+    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request', 'withdrawn_by_message']
     note: Union[NoteText, MISSING] = Field(default=MISSING)
     kept_item_ids: Union[Annotated[list[RecordId], Field(max_length=80)], MISSING] = Field(default=MISSING)
     keep_hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)

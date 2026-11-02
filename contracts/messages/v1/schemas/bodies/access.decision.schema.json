@@ -165,8 +165,10 @@
               "enum": [
                 "blocked",
                 "invalid_target",
-                "not_allowed"
-              ]
+                "not_allowed",
+                "not_own_case"
+              ],
+              "description": "blocked, invalid_target and not_allowed refuse access asks; not_own_case refuses a change review whose case the store opened for another request."
             },
             "message": {
               "$ref": "../common.schema.json#/$defs/note_text"
@@ -196,6 +198,10 @@
             },
             "note": {
               "$ref": "../common.schema.json#/$defs/note_text"
+            },
+            "seen_version": {
+              "description": "The record's version that the brief showed. On use_change the task sends its change again as a new command with this seen_version; absent when the operation takes no version.",
+              "$ref": "../common.schema.json#/$defs/record_version"
             }
           },
           "required": [

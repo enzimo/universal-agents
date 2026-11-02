@@ -1064,6 +1064,33 @@ def test_queued_works_token_is_judged_when_the_stream_stored_it() -> None:
                                 stored_at=fixtures.NOW.replace(tzinfo=None))
 
 
+def test_a_corrected_decision_is_a_new_message_and_a_retried_one_is_not() -> None:
+    """README, "Change reviews", step 3: each decision has its own id, which its key names."""
+
+    decision = fixtures.example_frame("access.resolved", "use-change")
+    corrected = copy.deepcopy(decision)
+    corrected["body"]["decision_id"] = "decision_5"
+    assert registry_key(decision) == registry_key(copy.deepcopy(decision))
+    assert registry_key(corrected) != registry_key(decision)
+    without = copy.deepcopy(decision)
+    del without["body"]["decision_id"]
+    assert not validator("bodies/access.resolved.schema.json").is_valid(without["body"])
+
+
+def test_a_change_review_answers_with_the_version_and_refuses_another_requests_case() -> None:
+    """README, "Change reviews", steps 1, 4 and 6."""
+
+    decided = fixtures.example_frame("access.decision", "change-decided")["body"]["status"]
+    assert (decided["choice"], decided["seen_version"]) == ("use_change", "3")
+    schema = json.loads((CONTRACT / "schemas/bodies/access.decision.schema.json").read_text())
+    refused = next(alternative for alternative in schema["properties"]["status"]["oneOf"]
+                   if alternative["properties"]["state"]["const"] == "refused")
+    assert "not_own_case" in refused["properties"]["code"]["enum"]
+    withdrawn = fixtures.example_frame("access.resolved", "withdrawn-by-message")
+    fixtures.verify(json.dumps(withdrawn).encode(), withdrawn)
+    assert withdrawn["body"]["choice"] == "withdrawn_by_message"
+
+
 def test_the_edge_adapter_neither_presents_nor_receives_a_persons_token() -> None:
     """README, "On behalf of a person": outside agents never hold a person's token, in either direction."""
 

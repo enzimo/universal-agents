@@ -27,9 +27,10 @@
     "status": {
       "state": "change_decided",
       "choice": "use_change",
-      "note": "Tuesday is right; I moved it by mistake."
+      "note": "Tuesday is right; I moved it by mistake.",
+      "seen_version": "3"
     }
   },
-  "body_digest": "9sbM09AIWZG644audVusi3fV-Y1i4oYV4YHRekIBYsY",
-  "signature": "K4qq5Y9oPVmN-eABvOcrKs0GLXD_s758k3EdsdAdbWAGBmgO1RyJl6NaZ0ce0vdn8u5785I8O6c_TbdnlgQlCQ"
+  "body_digest": "4XII8ibbEm3XE-_p4bECCDYYgWT3ww09exwcizPfQ7w",
+  "signature": "bqTb46zNyeO6S5Ly7dOJG2veJhNYTcXLfZzCwCscSL9WpHHAMAHu4hUFsbof7FxEvA8QIskEbMXnfVoWO9gkCQ"
 }

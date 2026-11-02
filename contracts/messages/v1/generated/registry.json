@@ -192,7 +192,8 @@
       "description": "A person's decision on an access request or a change review, from the gateway to the team services.",
       "expiry_seconds": 604800,
       "idempotency": [
-        "/body/request_id"
+        "/body/request_id",
+        "/body/decision_id"
       ],
       "ledger": "none",
       "receivers": [

@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "access.resolved",
   "message_id": "01928f3a-7b2c-733c-8000-00000000033c",
-  "idempotency_key": "access.resolved:O88alhzMUde7ngPz4_cuFNhCSgqEyKRDw3aSIIpHKvs",
+  "idempotency_key": "access.resolved:lbYr6jS60u5iuWvDx4CPfg7Rri98AGOmCcd7KH5K6bY",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -45,9 +45,10 @@
   "algorithm": "ed25519",
   "body": {
     "request_id": "areq_3",
+    "decision_id": "decision_2",
     "choice": "use_change",
     "note": "Tuesday is right; I moved it by mistake."
   },
-  "body_digest": "JcBJUHvMCeAFQZWzzhoG12QqcD9CCzh2_bN_JxS37Q8",
-  "signature": "Ud7n4qlfbIDpSGH8RScOCHOY48U-eqj8Wp-SlO0YN7Yk7rH7xRwDZB2u3gndI6eXH7LbwyJkDEf34yQ44EPOCg"
+  "body_digest": "YCIluQ1vmemRIzGvNAFMmh_o38Vo5rvLAO4LdlWZHAY",
+  "signature": "WpLWG7uUK_39bJlRdKvA3cwXiJ9lnc1FiUOh_wcsetzpEZmL4pkUvq5f2XkQK3EHphNMjGCMm22Xg74CLm3yBg"
 }

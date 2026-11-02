@@ -174,7 +174,11 @@ worker, may then ask the person the request works for. No model decides, and the
 never decides for its workers.
 1. The holder sends `access.request` whose `what` is `{type: change_review, case_id,
    question}`: the store's case and the agent's question in its own words. It needs no
-   `reason`. The task waits for the outcome, as it does for access.
+   `reason`. The task waits for the outcome, as it does for access. The store records with
+   each case the request (root task) whose change it refused, and the team services open a
+   review only for a case of the asking task's own request; another case gets
+   `access.decision` `refused` with code `not_own_case`, so a task cannot put another
+   request's case before its person.
 2. The team services open the review in the gateway's Inbox with `access.review` in state
    `open`. Its decider is the person the request works for (a `person` decider), never the
    administrators. Its `brief` is a blob reference to the text code wrote from the case:
@@ -187,21 +191,32 @@ never decides for its workers.
    The fields for kept items, hours, "keep for later tasks" and "may hand it on" belong to
    access reviews only. The body does not say which kind of review it decides, so the team
    services refuse a choice the review did not offer, answering with `access.review` in
-   state `refused` and code `choice_not_offered`.
+   state `refused` and code `choice_not_offered`. Every decision the person submits has its
+   own `decision_id`, which its key names: the person's corrected decision, sent within the
+   stream's two-minute duplicate window after a refused one, is a new message and is not
+   dropped as a duplicate.
 4. The team services record the decision, then send the waiting task `access.decision`
    with status `change_decided`, carrying the choice and the note, because a host on
    another machine cannot read the team's store. On `use_change` the task sends the same
-   change again, and the store lets it through once while the record is still at the
-   version the brief showed and the planned values are unchanged; otherwise the task gets
-   a new brief. On `keep_current` the task leaves the record as it is. On `stop_request`
+   change again as a new command: with a new `request_id`, since a repeat of the refused
+   command's key would get its stored `change_conflict` back ("Stored outcomes"), and with
+   `seen_version` set to the version the brief showed, which `access.decision` carries
+   (`seen_version`). The store lets it through once when it comes from the same request
+   (its token's root task), changes the same record with the same planned values, the
+   record is still at that version, and the case's decision is `use_change`; otherwise the
+   task gets a new brief. On `keep_current` the task leaves the record as it is. On `stop_request`
    trusted code stops the request through its normal stop path, which sends one final
    reply.
 5. With no decision by the deadline, the review closes as `expired` and the task gets
    status `change_not_decided`: the change was not made. The request continues and says so
    in its reply.
 6. A message from the person in that request's thread while the review is open withdraws
-   it: the card closes as `withdrawn`, and the task gets status `withdrawn` by
-   `person_message` and then sees the message.
+   it. The gateway, which sees the person's decisions and messages in the order the
+   person made them, does this: it closes the card and sends `access.resolved` with
+   `withdrawn_by_message` before it passes the message on. The team services then send the
+   task status `withdrawn` by `person_message`. A decision and a withdrawal reach the team
+   services in one queue from one sender, and the gateway sends at most one of them for a
+   card, so a decision the person made before writing is never undone by the message.
 
 ## Schema subset
 

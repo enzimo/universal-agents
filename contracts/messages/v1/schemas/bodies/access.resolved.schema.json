@@ -8,8 +8,12 @@
     "request_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
+    "decision_id": {
+      "description": "Made fresh for each decision the person submits, and kept when the gateway retries it. A decision corrected after a refusal gets a new one, so it is no duplicate of the refused one (registry idempotency).",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
     "choice": {
-      "description": "One of the choices the review offered: an access choice, or for a change review keep_current, use_change or stop_request. The other fields belong to access reviews only.",
+      "description": "One of the choices the review offered: an access choice, or for a change review keep_current, use_change or stop_request. withdrawn_by_message is the gateway's, not a choice offered: the person wrote in the request's thread while a change review was open, so the gateway closed the card before passing the message on (README, \"Change reviews\"). The other fields belong to access reviews only.",
       "type": "string",
       "enum": [
         "approve",
@@ -19,7 +23,8 @@
         "deny",
         "keep_current",
         "use_change",
-        "stop_request"
+        "stop_request",
+        "withdrawn_by_message"
       ]
     },
     "note": {
@@ -48,6 +53,7 @@
   },
   "required": [
     "request_id",
+    "decision_id",
     "choice"
   ],
   "additionalProperties": false

@@ -635,7 +635,8 @@ kinds:
     expiry_seconds: 604800
     authority: required
     authority_binding: {type: access_request, at: /body/request_id}
-    idempotency: [/body/request_id]
+    # A corrected decision after a refusal is a new decision, not a duplicate of the refused one.
+    idempotency: [/body/request_id, /body/decision_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none
