@@ -31,6 +31,7 @@ from storage.config import StorageSettings
 from storage.database_clock import database_now
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
 from storage.read_only import repositories_are_read_only
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 from storage.sqlite_connection import connect_sqlite
 
@@ -93,6 +94,7 @@ class ScheduledRunProblems:
 
     @staticmethod
     def ensure_schema(conn: Any) -> None:
+        begin_schema_setup(conn, __name__)
         conn.execute("""CREATE TABLE IF NOT EXISTS scheduled_run_problems (
             team_id TEXT NOT NULL, schedule_id TEXT NOT NULL, failed_task_id TEXT NOT NULL,
             failed_json TEXT NOT NULL, recovered_json TEXT,

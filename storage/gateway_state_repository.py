@@ -85,6 +85,7 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
 
@@ -1015,6 +1016,7 @@ class _RelationalGatewayStateRepository:
             return
         ensure_storage_parent_dir(self._db_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gateway_sessions (
@@ -1072,7 +1074,8 @@ class _RelationalGatewayStateRepository:
                     active_task_id TEXT,
                     owner_canonical_user_id TEXT,
                     created_at TEXT NOT NULL,
-                    status TEXT NOT NULL
+                    status TEXT NOT NULL,
+                    run_state TEXT
                 )
                 """
             )

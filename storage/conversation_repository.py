@@ -26,6 +26,7 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
 
@@ -479,6 +480,7 @@ class _RelationalConversationRepository:
         ensure_storage_parent_dir(self._db_path)
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_threads (
@@ -509,7 +511,7 @@ class _RelationalConversationRepository:
             ensure_column(conn, "conversation_threads", "team_id", "TEXT", logger=self._logger)
             ensure_column(conn, "conversation_threads", "owner_canonical_user_id", "TEXT", logger=self._logger)
             conn.execute(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS conversation_task_links (
                     conversation_id TEXT NOT NULL,
                     task_id TEXT NOT NULL,
@@ -542,6 +544,11 @@ class _RelationalConversationRepository:
                     gateway_context_json TEXT,
                     created_at TEXT,
                     updated_at TEXT,
+                    memory_review_status TEXT NOT NULL DEFAULT '{TURN_MEMORY_REVIEW_UNREVIEWED}',
+                    memory_review_job_id TEXT,
+                    memory_review_queued_at_utc TEXT,
+                    memory_reviewed_at_utc TEXT,
+                    memory_reviewed_by_agent_id TEXT,
                     PRIMARY KEY (conversation_id, task_id)
                 )
                 """

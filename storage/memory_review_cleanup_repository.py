@@ -16,6 +16,7 @@ from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapsho
 from storage.config import StorageSettings
 from storage.runtime_snapshot_layout import assemble_snapshot
 from storage.runtime_snapshot_maintenance import _connection, _has_table
+from storage.schema_setup import begin_schema_setup
 
 LOGGER = logging.getLogger(__name__)
 REVIEW_EXPIRED = "expired"
@@ -116,6 +117,7 @@ class MemoryReviewCleanupRepository:
                 )
             else:
                 conn.execute("BEGIN IMMEDIATE")
+            begin_schema_setup(conn, __name__)
             conn.execute(f"""CREATE TABLE IF NOT EXISTS {EVENT_TABLE} (
                 event_id TEXT PRIMARY KEY, review_job_id TEXT NOT NULL,
                 team_id TEXT NOT NULL, from_status TEXT NOT NULL, to_status TEXT NOT NULL,

@@ -22,6 +22,7 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
 
@@ -111,6 +112,7 @@ class _RelationalMemoryReviewRepository:
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_review_jobs (
@@ -420,11 +422,6 @@ class SqliteMemoryReviewRepository(_RelationalMemoryReviewRepository):
         return self.get_review_job(review_job_id)
 
 
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
-        return {str(row[1]) for row in rows}
-
-
 class PostgresMemoryReviewRepository(_RelationalMemoryReviewRepository):
     """Postgres implementation for durable pinned-memory review jobs."""
 
@@ -526,11 +523,6 @@ class PostgresMemoryReviewRepository(_RelationalMemoryReviewRepository):
             )
             conn.commit()
         return self.get_review_job(review_job_id)
-
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'\n                SELECT column_name\n                FROM information_schema.columns\n                WHERE table_name = {self._dialect.bind}\n                ', (table_name,)).fetchall()
-        return {str(row[0]) for row in rows}
 
 
 def create_memory_review_repository(

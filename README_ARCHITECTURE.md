@@ -853,6 +853,26 @@ concurrency audit found that on PostgreSQL an approved change could be claimed
 twice, two edits to one person's model settings lost one, and holding a
 person's records could delete a row written meanwhile without holding it.
 
+Opening a store takes turns too. Each store creates its tables and indexes
+and adds missing columns when it opens, and the launcher starts the manager,
+the startup agents and the gateway together, so several processes often open
+one store at once. In PostgreSQL, `CREATE ... IF NOT EXISTS` statements
+running together are not safe: two transactions that both find an index or
+table missing both create it, and one fails with a duplicate key in the system
+catalog; creating an index while another process adds a column to the same
+table can deadlock. Either error stops that process, and the launcher then
+stops the runtime. So every store's setup starts with
+`storage.schema_setup.begin_schema_setup`, a transaction-level advisory lock
+named after the module that owns the tables (nothing in SQLite, where a schema
+change takes the database's write lock). Table sets that several stores create
+(the change ledger, schedule occurrences, scheduled-run problems, task custody)
+take their own lock after the store's, so locks are always taken in the same
+order. `tests/test_store_schema_setup.py` checks that every module creating
+tables takes the lock, or names why it does not, and opens every store from
+several connections at once against PostgreSQL. Like the write locks, the lock
+covers the whole database, so instances sharing one database set up a store in
+turn.
+
 An Objective change that a tool call or a person's command asked for is
 reported as not saved when the write fails (`ObjectiveSaveFailed` in
 `custom_agents/task_manager_objectives.py`), so the caller never gets back a
@@ -1168,8 +1188,8 @@ its own (coordination plan 7.10, accepted 2026-10-30).
 - **Upgrading in place from 0.9.** `CREATE TABLE IF NOT EXISTS` leaves a
   0.9 ledger table without the `changed_fields` column, and every knowledge
   page save would then fail. Opening the ledger adds the column
-  (`storage.table_columns.ensure_column`: a read on later opens, and an
-  addition that processes starting together can both run). 0.9 entries did not record their fields, so they default to
+  (`storage.table_columns.ensure_column` under the ledger tables' setup lock:
+  a read on later opens). 0.9 entries did not record their fields, so they default to
   every field (`*`): a request that saw one leaves an overlapping change to
   the person rather than overwriting it. The new review and case tables are
   created as usual.
@@ -3961,13 +3981,23 @@ the desktop app never offers an older version.
 - **Stores** add a new column to a table an earlier release created when they
   open, because `CREATE TABLE IF NOT EXISTS` never changes an existing table.
   Every store calls `storage.table_columns.ensure_column`, which reads the
-  table's columns first (so later opens take no table lock), adds a missing one
-  in a form processes starting together can both run (`ADD COLUMN IF NOT
-  EXISTS` on PostgreSQL, a re-read after "duplicate column" on SQLite) and logs
-  `event=storage_column_added`. PostgreSQL finds the table through the search
-  path, as the store's own statements do, so an instance kept in its own schema
-  works. The default keeps older rows correct, as the change ledger's `*` does
-  (see "Upgrading in place from 0.9" above).
+  table's columns first, so a later open does not take the exclusive lock
+  `ALTER TABLE` takes even when the column exists. It adds a missing one and
+  logs `event=storage_column_added`. Processes opening one store at once take
+  turns through the store's setup lock (`storage.schema_setup`), so each column
+  is added and logged once. The line is written inside the setup transaction:
+  if that transaction fails, the store's start fails with the error and the
+  next start adds the column again. A new install's `CREATE TABLE` statements
+  carry every column, so it logs no additions. Without the lock, a caller
+  still does not fail on a column added after its read (`ADD COLUMN IF NOT
+  EXISTS` on PostgreSQL, a re-read after "duplicate column" on SQLite). SQLite
+  catches the connection's own `OperationalError`, because the `pysqlite3`
+  driver used by memory graphs on macOS has a separate exception class from
+  the standard-library driver. Columns come before the indexes, which may name
+  them. PostgreSQL finds the table through the search path, as the store's own
+  statements do, so an instance kept in its own schema works. The default
+  keeps older rows correct, as the change ledger's `*` does (see "Upgrading in
+  place from 0.9" above).
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the

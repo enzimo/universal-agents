@@ -25,6 +25,7 @@ from custom_messages.contracts.access_workflow_v2 import (
 )
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 
@@ -47,6 +48,7 @@ class AccessWorkflowRepository:
             raise ValueError("Workflow persistence requires SQLite or PostgreSQL.")
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(f"""CREATE TABLE IF NOT EXISTS {WORKFLOW_TABLE} (
                 workflow_id TEXT PRIMARY KEY,
                 owner_id TEXT NOT NULL,

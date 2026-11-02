@@ -388,7 +388,8 @@ def ensure_sqlite_column(
     """Add a SQLite column an earlier release's table lacks, tolerating a concurrent process that added it first.
 
     Stores on either backend call ``storage.table_columns.ensure_column``,
-    which uses this for SQLite.
+    which uses this for SQLite. Catch the connection's own error class:
+    pysqlite3's OperationalError does not inherit from the stdlib driver's.
     """
 
     if column_name in sqlite_column_names(conn, table_name):
@@ -396,7 +397,7 @@ def ensure_sqlite_column(
     try:
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
         log_added_column(logger, "SQLite", table_name, column_name)
-    except sqlite3.OperationalError as exc:
+    except conn.OperationalError as exc:
         message = str(exc).lower()
         if ("duplicate column" in message or "already exists" in message) and column_name in sqlite_column_names(
             conn,

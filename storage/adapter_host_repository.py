@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 
 import logging
@@ -79,6 +80,7 @@ class _RelationalAdapterHostRepository(AdapterHostRepository):
     def _init_schema(self) -> None:
         ensure_storage_parent_dir(self._db_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gateway_adapter_registrations (

@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Iterable, Optional
 
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SqlDialect
 
 CUSTODY_TABLE = "runtime_task_custody"
@@ -141,6 +142,7 @@ class TaskCustodyTakeover:
 
 
 def ensure_schema(conn: Any) -> None:
+    begin_schema_setup(conn, __name__)
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CUSTODY_TABLE} (

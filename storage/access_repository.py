@@ -116,6 +116,7 @@ from custom_messages.contracts.person_settings_v1 import PersonSettingsV1
 from id_generation import new_id
 from storage.config import StorageSettings
 from storage.postgres_connection import ACCESS_STORE_WRITE_LOCK_KEY, connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 from storage.table_columns import ensure_column, table_column_names
@@ -285,6 +286,7 @@ class AccessRepository:
             return
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             # approval_id copies GrantV1.approval_id (the request whose
             # decision stored the grant) so a decision's grants are found by
             # index; stores from before 2026-10-17 get it from

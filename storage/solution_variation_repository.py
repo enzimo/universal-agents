@@ -27,6 +27,7 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 
 
@@ -189,6 +190,7 @@ class _RelationalSolutionVariationRepository:
             raise
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
+        begin_schema_setup(conn, __name__)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS solution_variation_runs (

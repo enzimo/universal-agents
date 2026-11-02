@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from access_control.identity import DEFAULT_CONTEXT_LIFETIME
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import SqlDialect
 
 # Receipt states whose run may still be working (a merged fire follows its run).
@@ -15,6 +16,7 @@ UNFINISHED_RUN_STATES = frozenset({"admitted", "coalesced"})
 
 
 def ensure_occurrence_schema(conn: Any) -> None:
+    begin_schema_setup(conn, __name__)
     conn.execute("""CREATE TABLE IF NOT EXISTS schedule_occurrences (
         occurrence_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL,
         task_id TEXT NOT NULL UNIQUE, team_id TEXT NOT NULL,

@@ -6,7 +6,12 @@ the store opens (AGENTS.md, "Change-specific requirements"). Stores call
 ``ensure_column`` from their schema setup on either backend; the connection's
 ``dialect`` picks the implementation. The column type carries the default that
 keeps older rows correct. Each addition is logged (``event=storage_column_added``),
-so an upgrade leaves a record of what it changed.
+so an upgrade leaves a record of what it changed. The store's setup lock
+(``storage.schema_setup``) makes processes opening one store at once add each
+column in turn, so the log names only columns this process added. The line is
+written when the statement runs, inside the setup transaction: if that
+transaction then fails, the store's start fails with the error, and the next
+start adds the column again.
 """
 
 from __future__ import annotations
@@ -77,9 +82,11 @@ def ensure_postgres_column(
     """Add a PostgreSQL column an earlier release's table lacks.
 
     The read first keeps later opens from taking the table's exclusive lock,
-    which ``ALTER TABLE`` takes even when the column exists. ``ADD COLUMN IF
-    NOT EXISTS`` lets processes starting together both run it: an error would
-    abort the transaction and discard the schema statements before it.
+    which ``ALTER TABLE`` takes even when the column exists. Under the store's
+    setup lock the read is exact. ``ADD COLUMN IF NOT EXISTS`` keeps a caller
+    without that lock from failing when another process adds the column after
+    the read: an error would abort the transaction and discard the schema
+    statements before it.
     """
 
     if column_name in postgres_column_names(conn, table_name):
