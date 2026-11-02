@@ -19,7 +19,7 @@ from assistant_gateway.adapter_host.domain import (
     AdapterRegistrationRecord,
     AdapterUploadRecord,
 )
-from assistant_gateway.adapter_host.repository import AdapterHostRepository
+from assistant_gateway.adapter_host.repository import AdapterHostRepository, AdapterHostRepositoryConflict
 from assistant_gateway.contracts.adapter_host_v1 import (
     ADAPTER_HOST_PROTOCOL_VERSION,
     AdapterAttachmentUploadAcceptedV1,
@@ -42,7 +42,6 @@ from assistant_gateway.contracts.adapter_host_v1 import (
     encode_adapter_host_message_v1,
 )
 from id_generation import new_id
-from storage.adapter_host_repository import AdapterHostRepositoryConflict
 
 
 LOGGER = logging.getLogger(__name__)

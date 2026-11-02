@@ -102,8 +102,15 @@ def _imports(path: Path) -> list[str]:
     return imported
 
 
-def _runtime_imports(path: Path) -> list[str]:
-    """Collect imports that execute at runtime, excluding TYPE_CHECKING blocks."""
+def _runtime_imports(
+    path: Path, *, package: str | None = None, deferred: bool = True
+) -> list[str]:
+    """Collect imports that execute at runtime, excluding TYPE_CHECKING blocks.
+
+    With ``package`` (the importing module's package), relative imports are
+    resolved against it. Without ``deferred``, imports inside functions (a
+    package's lazy ``__getattr__``) are left out.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     imported: list[str] = []
 
@@ -116,7 +123,15 @@ def _runtime_imports(path: Path) -> list[str]:
             for child in node.orelse:
                 visit(child)
             return
-        if isinstance(node, ast.ImportFrom) and node.module:
+        if not deferred and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return
+        if isinstance(node, ast.ImportFrom) and node.level and package is not None:
+            base = package.rsplit(".", node.level - 1)[0] if node.level > 1 else package
+            if node.module:
+                imported.append(f"{base}.{node.module}")
+            else:
+                imported.extend(f"{base}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             imported.append(node.module)
         elif isinstance(node, ast.Import):
             imported.extend(alias.name for alias in node.names)
@@ -165,7 +180,14 @@ def _runtime_module_graph() -> dict[str, set[str]]:
     }
     graph = {module: set() for module in modules}
     for module, path in modules.items():
-        for imported in _runtime_imports(path):
+        is_package = path.name == "__init__.py"
+        # A package's __init__ runs when any of its submodules is imported,
+        # and then only what is outside its functions.
+        for imported in _runtime_imports(
+            path,
+            package=module if is_package else module.rpartition(".")[0],
+            deferred=not is_package,
+        ):
             target = max(
                 (
                     candidate
@@ -177,7 +199,20 @@ def _runtime_module_graph() -> dict[str, set[str]]:
             )
             if target and target != module:
                 graph[module].add(target)
+                # Importing a.b.c first runs a/__init__ and a/b/__init__, unless
+                # they already ran because the importer is inside them. A
+                # storage module importing a gateway package's domain module
+                # ran that package's __init__, which loaded a service that
+                # imported the storage module back.
+                graph[module].update(
+                    _parent_packages(target, modules) - _parent_packages(module, modules) - {module}
+                )
     return graph
+
+
+def _parent_packages(module: str, modules: dict[str, Path]) -> set[str]:
+    parts = module.split(".")
+    return {".".join(parts[:end]) for end in range(1, len(parts))} & modules.keys()
 
 
 def _strongly_connected_components(
@@ -244,6 +279,7 @@ def _has_dependency_path(graph: dict[str, set[str]], source: str, target: str) -
         ),
         ("secure_tool_broker.xurl_executor", "secure_tool_broker.hub_cli_executor"),
         ("custom_agents.runtime_setting_registry", "custom_agents.runtime_settings_service"),
+        ("assistant_gateway.adapter_host.service", "storage.adapter_host_repository"),
     ),
 )
 def test_resolved_runtime_import_cycles_cannot_return(
@@ -256,6 +292,20 @@ def test_resolved_runtime_import_cycles_cannot_return(
 
 def test_production_runtime_import_graph_is_acyclic() -> None:
     assert _strongly_connected_components(_runtime_module_graph()) == []
+
+
+def test_the_adapter_host_store_imports_before_the_gateway_package() -> None:
+    """It failed with a circular import when nothing had loaded ``assistant_gateway.adapter_host`` yet."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import storage.adapter_host_repository"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize(

@@ -25,8 +25,6 @@ from uuid import uuid4
 
 import pytest
 
-# storage.adapter_host_repository cannot be the first of the two to load (they import each other).
-import assistant_gateway.adapter_host  # noqa: F401
 from storage.access_repository import AccessRepository
 from storage.access_workflow_repository import AccessWorkflowRepository
 from storage.activity_collector_repository import create_activity_collector_repository
