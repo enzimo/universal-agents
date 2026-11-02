@@ -693,22 +693,54 @@ frame names its agent's session ("Who sent it"). Edge deliveries and the team se
 inbox stay in `UA1_WORK`, read through grants on their exact consumers, so agent hosts reach
 neither.
 
-Credentials follow placement. A host gets a new NATS credential when it gains or loses an
-agent or pool. Work queued for an agent stays in that agent's consumer, and the host it
-moves to reads it with its new credential. A credential grows with the agents its host
-runs: each hosted agent adds four subjects (its consumer's info, next-message and
-acknowledgement subjects, and its control address), 862 bytes of permission JSON with
-64-character team and agent ids, which a NATS user JWT's base64url encoding turns into
-about 1,150 bytes. Each worker pool adds three subjects, 709 bytes.
-`tests/test_message_contract.py` recomputes these figures from the generated templates.
-NATS reads a user JWT in the client's `CONNECT` line, which the server's
-`max_control_line` limits (4,096 bytes unless configured), so an installation's servers set
-that limit from the largest number of agent sessions a host certificate allows.
+**Credentials follow placement.** A host's NATS credential names the agents and pools it
+runs, so it changes when the host gains or loses one. NATS checks a user's permissions only
+when it connects, and acknowledgements are not signed, so a credential that names an agent
+must stop working before another host reads that agent's queue. An agent moves in this
+order:
+1. The old host stops pulling the agent's queue and answering its control address. It
+   finishes, or hands back with `task.handback`, every task it admitted, and acknowledges
+   their messages while its credential still names the agent; the handover sends the
+   agent's ledger to the team services ("Custody windows").
+2. The old host renews (`host.renew`) and connects with the credential of the reply, which
+   no longer names the agent. The installation authority then revokes every credential for
+   the host's NATS key issued before that one: the NATS account's revocation list names the
+   key with the new credential's issue time, which also closes any connection still using
+   an old credential.
+3. Only then do the team services write the new placement, and the new host gets a
+   credential that names the agent. Work queued for the agent stays in the agent's
+   consumer, and the new host reads it.
 
-Before installing permissions, trusted membership code fills `{team}` with each team the
-host serves, `{self}` with its runtime id, and repeats each subject for every `{agent}` and
-`{pool}` the host runs and every `{edge}` it serves; these placeholders never become
-wildcards. Clients use `_INBOX.<runtime>` as their inbox prefix. Hosts cannot read streams
+A host that is cut off or retired cannot take step 1. The authority revokes its credential
+first (with its certificate, when an administrator retires it), and the work it admitted
+without acknowledging comes back to the agent's queue after `ack_wait_seconds`, where the
+new host takes it; its custody moves by the rules of "Custody windows". A credential never
+outlives the certificate it comes with: a join or renewal reply whose `connection` ends
+after its certificate is refused (`invalid_body` at `/body/connection/expires_at`).
+
+**Credential size.** A credential grows with the agents its host runs: each hosted agent
+adds four subjects (its consumer's info, next-message and acknowledgement subjects, and its
+control address), 862 bytes of permission JSON with 64-character team and agent ids, which
+a NATS user JWT's base64url encoding turns into about 1,150 bytes. Each worker pool adds
+three subjects, 709 bytes. `tests/test_message_contract.py` recomputes these figures from
+the generated templates. A credential is at most `max_credential_bytes` (65,536 bytes,
+`transport.yaml`), the `jwt` field's limit, so the authority places no more agents and
+pools on one host than its credential can name; a certificate's `session_limit` does not
+lift that limit. NATS reads a user JWT in the client's `CONNECT` line, which the server's
+`max_control_line` limits (4,096 bytes unless configured), so an installation's servers set
+`max_control_line` above `max_credential_bytes` plus the rest of the `CONNECT` line.
+
+**Filling the templates.** Before installing permissions, trusted membership code fills
+each role's templates for the host (`custom_messages.wire.permissions.host_permissions`):
+- `{self}` becomes its runtime id;
+- a subject that names `{agent}`, `{pool}` or `{edge}` is repeated for each agent and pool
+  the host runs and each edge it serves, with `{team}` set to that agent's, pool's or
+  edge's own team. A host that serves two teams and runs team A's `researcher` therefore
+  gets no grant on team B's `researcher`;
+- any other subject with `{team}` is repeated for each team the host serves.
+
+These placeholders never become wildcards. Clients use `_INBOX.<runtime>` as their inbox
+prefix. Hosts cannot read streams
 directly or reach another host's, another team's or another role's consumers, and only the
 two roles below create, change or delete JetStream objects or messages. The live
 conformance tests prove both allowed and refused operations.
@@ -886,8 +918,8 @@ file. It uses public fixture signing keys and no operator credentials.
     reply from its bootstrap records;
   - dead-letter raw copies and notices stored under the receiver's own id;
   - separate consumers for ids that an `_` separator would have merged;
-  - the topology owner creating, changing and deleting streams and consumers with its own
-    grants, and the team services withdrawing a queued message by its sequence;
+  - the topology owner creating and changing streams, and creating and deleting consumers,
+    with its own grants, and the team services withdrawing a queued message by its sequence;
   - a full-size frame stored with the largest headers senders may set;
   - refusals of: an outside agent's adapter publishing into a worker pool; fetches and
     acknowledgements on another host's agent consumer, another team's stream or the team

@@ -22,9 +22,11 @@ installation_scope: _install
 # so no role hears requests it does not answer.
 
 # Receivers' grants name exact ids: trusted membership code fills each {agent}, {pool} and
-# {edge} with the ids a host runs or serves, never with a wildcard. A host reads only the
-# queues and control requests of its own agents and pools, and gets a new credential when
-# it gains or loses one (README, "Grants for the agents a host runs").
+# {edge} with the ids a host runs or serves, never with a wildcard, and {team} in the same
+# subject with that agent's, pool's or edge's own team (custom_messages.wire.permissions).
+# A host reads only the queues and control requests of its own agents and pools, and gets a
+# new credential when it gains or loses one, after its old one stops working (README,
+# "Grants for the agents a host runs").
 
 # Which host roles serve each audience target. A role receives a kind's address, and
 # gets its subscription or consumer grants, only when it is one of the kind's receivers
@@ -53,6 +55,7 @@ limits:
   max_frame_bytes: 262144      # larger content goes to the object store by reference
   max_header_bytes: 1024       # a frame's NATS headers: the largest block the contract allows is 891 bytes (README, "NATS headers")
   nats_max_payload_bytes: 1048576
+  max_credential_bytes: 65536  # a host's NATS user JWT, which grows with the agents and pools it runs; servers' max_control_line fits it
 
 classes:
   durable:

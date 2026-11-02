@@ -1136,6 +1136,10 @@ def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, 
     for name, stream in transport["streams"].items():
         if stream.get("max_message_bytes") != message:
             raise ContractError(f"transport.yaml: stream {name}'s max_message_bytes is max_frame_bytes plus max_header_bytes")
+    credential = schemas["common.schema.json"]["$defs"]["connection_credential"]["properties"]["jwt"]["maxLength"]
+    if limits.get("max_credential_bytes") != credential:
+        raise ContractError("transport.yaml: max_credential_bytes is the connection credential's jwt maxLength in "
+                            "common.schema.json")
 
 
 def check_stream_management(registry: dict[str, Any], transport: dict[str, Any]) -> None:

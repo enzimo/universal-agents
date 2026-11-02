@@ -32,6 +32,7 @@ import pytest
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
 
 from custom_messages.wire.kinds import KINDS
+from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
@@ -61,27 +62,14 @@ HOSTS = {
 BOOTSTRAP_RECORDS = {"certificates/authority-1.json", "revocations/install_example.json"}
 
 
-def expand(template: str, bindings: dict[str, list[str]]) -> list[str]:
-    """Fill each {placeholder} with every value bound to it; identities never become wildcards."""
-
-    subjects = [template]
-    for name, values in bindings.items():
-        subjects = [subject.replace("{" + name + "}", value) for subject in subjects for value in values] \
-            if "{" + name + "}" in template else subjects
-    leftover = [subject for subject in subjects if re.search(r"\{[a-z_]+\}", subject)]
-    assert not leftover, f"unbound placeholders in {leftover}"
-    return subjects
-
-
 def permissions(user: str) -> dict:
+    """The host's generated permissions filled as membership code fills them (README, "Filling the templates")."""
+
     host = HOSTS[user]
     document = json.loads((CONTRACT / "generated/permissions" / f"{host['role']}.json").read_text())
-    bindings = {"team": [TEAM], "self": [host["runtime"]], "agent": host["agents"], "pool": host["pools"], "edge": host["edges"]}
-    granted = {action: sorted({subject for template in document[action] for subject in expand(template, bindings)})
-               for action in ("publish", "subscribe")}
-    if "allow_responses" in document:
-        granted["allow_responses"] = document["allow_responses"]
-    return granted
+    placement = HostPlacement(host["runtime"], (TEAM,), agents={TEAM: tuple(host["agents"])},
+                              pools={TEAM: tuple(host["pools"])}, edges={TEAM: tuple(host["edges"])})
+    return host_permissions(document, placement)
 
 
 def consumer_name(template: str, **ids: str) -> str:

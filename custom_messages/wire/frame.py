@@ -886,6 +886,7 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
     certificate grants at most the teams, roles, agent types, sessions and tools it asked
     for, with the connection class it asked for. A renewal's has a higher membership
     epoch than the certificate it replaces and keeps its connection class and tools.
+    The connection credential that comes with it ends no later than it does.
     """
 
     document = _pointed(raw, ISSUED_CERTIFICATE_AT)
@@ -909,6 +910,12 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
         _verify_renewed_certificate(issued, answering, asked, trust, refuse)
     else:
         _verify_joined_certificate(issued, asked, refuse)
+    # NATS checks a credential only when the host connects, so it must not outlive the
+    # certificate that says the host may serve (README, "Grants for the agents a host runs").
+    connection = raw["body"].get("connection")
+    if isinstance(connection, Mapping) and parse_timestamp(str(connection["expires_at"])) > issued.expires_at:
+        raise FrameRefused("invalid_body", "the connection credential ends after the certificate it comes with",
+                           at="/body/connection/expires_at")
 
 
 def _verify_joined_certificate(issued: HostCertificate, asked: Mapping[str, Any],

@@ -146,6 +146,7 @@
     }
   },
   "limits": {
+    "max_credential_bytes": 65536,
     "max_frame_bytes": 262144,
     "max_header_bytes": 1024,
     "nats_max_payload_bytes": 1048576

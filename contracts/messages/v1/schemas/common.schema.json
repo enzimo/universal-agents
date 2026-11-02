@@ -1684,15 +1684,16 @@
     },
     "connection_credential": {
       "type": "object",
-      "description": "The credential a host connects to NATS with. Never logged.",
+      "description": "The credential a host connects to NATS with, naming the agents and pools it runs; it ends no later than the certificate it comes with. Never logged.",
       "properties": {
         "type": {
           "const": "nats_user_jwt"
         },
         "jwt": {
           "type": "string",
+          "description": "At most transport.yaml max_credential_bytes: the generator keeps the two equal.",
           "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
-          "maxLength": 16384
+          "maxLength": 65536
         },
         "expires_at": {
           "$ref": "#/$defs/timestamp"

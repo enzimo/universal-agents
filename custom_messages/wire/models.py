@@ -580,10 +580,10 @@ class CertificateRef(WireModel):
 
 
 class ConnectionCredential(WireModel):
-    "The credential a host connects to NATS with. Never logged."
+    "The credential a host connects to NATS with, naming the agents and pools it runs; it ends no later than the certificate it comes with. Never logged."
 
     type: Literal['nats_user_jwt']
-    jwt: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$', max_length=16384)]
+    jwt: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$', max_length=65536)]
     expires_at: Timestamp
 
 

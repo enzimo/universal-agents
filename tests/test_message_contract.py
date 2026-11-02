@@ -45,6 +45,7 @@ from custom_messages.wire.frame import (
     signing_bytes,
     verify_frame,
 )
+from custom_messages.wire.permissions import HostPlacement, host_permissions, host_subjects
 from custom_messages.wire.trust import TrustStore, ed25519_public_key, sign_state, state_signing_bytes
 from custom_messages.wire.values import parse_timestamp
 from tests import message_contract_support as fixtures
@@ -475,19 +476,19 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
 
 
-def expanded(role: str, **ids: list[str]) -> set[str]:
-    """A role's permission subjects filled for one host: the teams it serves and the ids it runs or serves."""
+def expanded(role: str, placement: HostPlacement | None = None, **ids: list[str]) -> set[str]:
+    """A role's permission subjects filled for one host, as membership code fills them (README, "Filling the templates").
+
+    Without ``placement``, the host serves team_example and runs or serves ``ids``
+    (``agent``, ``pool`` and ``edge`` lists) there.
+    """
 
     document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
-    bindings = {"team": ["team_example"], "self": [f"{role}-1"], "agent": [], "pool": [], "edge": [], **ids}
-    subjects = set()
-    for template in document["publish"] + document["subscribe"]:
-        filled = [template]
-        for name, values in bindings.items():
-            if "{" + name + "}" in template:
-                filled = [subject.replace("{" + name + "}", value) for subject in filled for value in values]
-        subjects |= set(filled)
-    return subjects
+    if placement is None:
+        placement = HostPlacement(f"{role}-1", ("team_example",),
+                                  **{f"{name}s": {"team_example": tuple(values)} for name, values in ids.items()})
+    filled = host_permissions(document, placement)
+    return set(filled["publish"]) | set(filled["subscribe"])
 
 
 def test_a_host_holds_no_grant_on_another_hosts_agents() -> None:
@@ -504,6 +505,48 @@ def test_a_host_holds_no_grant_on_another_hosts_agents() -> None:
     # Gaining an agent is a new credential, with that agent's subjects added.
     moved = expanded("worker_host", agent=["researcher-2", "lead"], pool=["researcher"])
     assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{lead}" in moved - worker
+
+
+def test_a_host_serving_two_teams_gets_grants_only_on_each_agents_own_team() -> None:
+    """Team A's researcher and team B's researcher are different agents; a host running one never reaches the other."""
+
+    placement = HostPlacement("worker-host-1", ("team_a", "team_b"),
+                              agents={"team_a": ("researcher",)}, pools={"team_b": ("writer",)})
+    subjects = expanded("worker_host", placement)
+    inbox = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_a", agent="researcher")
+    assert f"$JS.API.CONSUMER.MSG.NEXT.UA1_AGENT_WORK_team_a.{inbox}" in subjects
+    assert "ua.v1.team_a.*.ctl.agent.researcher" in subjects
+    assert not {subject for subject in subjects if "researcher" in subject and "team_b" in subject}
+    assert not {subject for subject in subjects if "writer" in subject and "team_a" in subject}
+    # A subject that names no agent, pool or edge serves every team of the host.
+    assert {subject for subject in subjects if subject.startswith("ua.v1.team_b.worker-host-1.")}
+
+
+@pytest.mark.parametrize("role", sorted(path.stem for path in (CONTRACT / "generated" / "permissions").glob("*.json")))
+def test_every_roles_templates_fill_to_exact_ids(role: str) -> None:
+    placement = HostPlacement(f"{role}-1", ("team_a", "team_b"), agents={"team_a": ("lead",), "team_b": ("lead",)},
+                              pools={"team_a": ("researcher",)}, edges={"team_b": ("web",)})
+    subjects = expanded(role, placement)
+    assert subjects and not {subject for subject in subjects if "{" in subject}
+
+
+def test_a_credential_fits_the_limit_servers_read_and_the_jwt_field_allows() -> None:
+    """README, "Credential size": max_credential_bytes and the jwt field's maxLength are one limit."""
+
+    schemas = EXPORT.load_schemas()
+    jwt = schemas["common.schema.json"]["$defs"]["connection_credential"]["properties"]["jwt"]
+    assert jwt["maxLength"] == TRANSPORT["limits"]["max_credential_bytes"] == 65536
+    transport = copy.deepcopy(TRANSPORT)
+    transport["limits"]["max_credential_bytes"] = 16384
+    with pytest.raises(EXPORT.ContractError, match="max_credential_bytes"):
+        EXPORT.check_message_sizes(transport, schemas)
+
+
+def test_a_placement_names_only_teams_its_host_serves() -> None:
+    with pytest.raises(ValueError, match="teams the host does not serve"):
+        HostPlacement("worker-host-1", ("team_a",), agents={"team_b": ("researcher",)})
+    with pytest.raises(ValueError, match="cannot fill"):
+        host_subjects("ua.v1.{team}.{installation}.x", HostPlacement("worker-host-1", ("team_a",)))
 
 
 def credential_growth(role: str, placeholder: str) -> int:
@@ -1692,9 +1735,11 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
 
 
 # Body fields a receiver checks against its trust store or the request a reply answers:
-# a reply's certificate (its signature, single validity window and what it certifies)
-# and a key rotation's new key id and proof (README, "Installation traffic").
-RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/application_key_rotation/(key/key_id|proof)")
+# a reply's certificate (its signature, single validity window and what it certifies) and
+# the end of the credential that comes with it, and a key rotation's new key id, public
+# key and proof (README, "Installation traffic").
+RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/connection/expires_at"
+                              r"|/body/application_key_rotation/(key/key_id|key/public_key|proof)")
 ROTATION_PROOF_AT = "/body/application_key_rotation/proof"
 
 
