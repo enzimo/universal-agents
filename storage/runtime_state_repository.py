@@ -1103,11 +1103,6 @@ class SqliteRuntimeStateRepository(_RelationalRuntimeStateRepository):
         conn.execute("BEGIN IMMEDIATE")
 
 
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
-        return {str(row[1]) for row in rows}
-
-
 class PostgresRuntimeStateRepository(_RelationalRuntimeStateRepository):
     """Postgres implementation for runtime snapshot persistence."""
 
@@ -1129,11 +1124,6 @@ class PostgresRuntimeStateRepository(_RelationalRuntimeStateRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'\n                SELECT column_name\n                FROM information_schema.columns\n                WHERE table_name = {self._dialect.bind}\n                ', (table_name,)).fetchall()
-        return {str(row[0]) for row in rows}
 
 
 def create_runtime_state_repository(

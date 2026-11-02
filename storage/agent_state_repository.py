@@ -342,11 +342,6 @@ class SqliteAgentStateRepository(_RelationalAgentStateRepository):
         return connect_sqlite(self._db_path, logger=self._logger)
 
 
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
-        return {str(row[1]) for row in rows}
-
-
 class PostgresAgentStateRepository(_RelationalAgentStateRepository):
     """Postgres implementation of the agent-state repository."""
 
@@ -361,10 +356,6 @@ class PostgresAgentStateRepository(_RelationalAgentStateRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'\n                SELECT column_name\n                FROM information_schema.columns\n                WHERE table_name = {self._dialect.bind}\n                ', (table_name,)).fetchall()
-        return {str(row[0]) for row in rows}
 
 
 def create_agent_state_repository(

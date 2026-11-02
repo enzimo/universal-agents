@@ -65,6 +65,7 @@ from storage.postgres_connection import connect_postgres, ensure_storage_parent_
 from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
+from storage.table_columns import table_column_names
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +136,8 @@ class PersonDepartureRepository:
         self.dialect = POSTGRES if settings.postgres_dsn else SQLITE
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS person_departures (
             begin_schema_setup(conn, __name__)
+            conn.execute("""CREATE TABLE IF NOT EXISTS person_departures (
                 team_id TEXT NOT NULL, person_id TEXT NOT NULL,
                 removed_at TEXT NOT NULL, hold_until TEXT NOT NULL,
                 restored_at TEXT, purged_at TEXT,
@@ -230,16 +231,6 @@ class PersonDepartureRepository:
         else:
             sql = f"SELECT 1 FROM sqlite_master WHERE type='table' AND name={p}"
         return conn.execute(sql, (table,)).fetchone() is not None
-
-    def _columns(self, conn: Any, table: str) -> set[str]:
-        if self.dialect is POSTGRES:
-            rows = conn.execute(
-                f"""SELECT attname FROM pg_catalog.pg_attribute
-                    WHERE attrelid=to_regclass({self.dialect.bind}) AND attnum > 0 AND NOT attisdropped""",
-                (table,),
-            ).fetchall()
-            return {str(row[0]) for row in rows}
-        return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
     def _ids(self, conn: Any, table: str, id_column: str, owner_column: str, person_id: str) -> tuple[str, ...]:
         if not self._table_exists(conn, table):
@@ -442,7 +433,7 @@ class PersonDepartureRepository:
                 table,
             )
             return 0
-        known = columns_by_table.setdefault(table, self._columns(conn, table))
+        known = columns_by_table.setdefault(table, table_column_names(conn, table))
         names = [name for name in row if name in known and _IDENTIFIER.fullmatch(name)]
         dropped = sorted(set(row) - set(names))
         if dropped:

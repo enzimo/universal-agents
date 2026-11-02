@@ -12,6 +12,7 @@ from knowledge_base.service import DraftInput, KnowledgeService
 from runtime_settings.knowledge import KnowledgeSettings
 from storage.knowledge_repository import create_knowledge_repository
 from storage.postgres_connection import connect_postgres
+from storage.table_columns import table_column_names
 from tests.knowledge_support import BACKENDS, NOW, agent, knowledge_storage
 
 
@@ -102,7 +103,7 @@ def test_departure_deletes_only_the_departing_persons_review_receipts(storage, u
     if unrelated_schema:
         with departures._connect() as conn:
             assert not departures._table_exists(conn, "objectives")
-            assert "elsewhere_only_column" not in departures._columns(conn, "knowledge_pages")
+            assert "elsewhere_only_column" not in table_column_names(conn, "knowledge_pages")
             assert conn.execute(f"SELECT COUNT(*) FROM {unrelated_schema}.objectives").fetchone()[0] == 1
 
 

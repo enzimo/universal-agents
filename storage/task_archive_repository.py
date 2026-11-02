@@ -362,11 +362,6 @@ class SqliteTaskArchiveRepository(_RelationalTaskArchiveRepository):
         return archived_tasks
 
 
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
-        return {str(row[1]) for row in rows}
-
-
 class PostgresTaskArchiveRepository(_RelationalTaskArchiveRepository):
     """Postgres implementation for archived task persistence."""
 
@@ -531,11 +526,6 @@ class PostgresTaskArchiveRepository(_RelationalTaskArchiveRepository):
                 )
             )
         return archived_tasks
-
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'\n                SELECT column_name\n                FROM information_schema.columns\n                WHERE table_name = {self._dialect.bind}\n                ', (table_name,)).fetchall()
-        return {str(row[0]) for row in rows}
 
 
 def create_task_archive_repository(
