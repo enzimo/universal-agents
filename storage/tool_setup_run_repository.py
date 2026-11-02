@@ -17,6 +17,7 @@ from custom_agents.tool_setup_runs import ToolSetupRunV1
 from custom_messages.contracts.access_workflow_v2 import utc_now
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 
@@ -35,6 +36,7 @@ class ToolSetupRunRepository:
             raise ValueError("Tool setup runs need SQLite or PostgreSQL.")
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(f"""CREATE TABLE IF NOT EXISTS {RUN_TABLE} (
                 run_id TEXT PRIMARY KEY,
                 team_id TEXT NOT NULL,

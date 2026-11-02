@@ -20,6 +20,7 @@ from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 from storage.runtime_snapshot_layout import assemble_snapshot
+from storage.schema_setup import begin_schema_setup
 from storage.sqlite_connection import connect_sqlite
 from storage.task_custody_repository import CUSTODY_TABLE, release_owners
 
@@ -212,6 +213,7 @@ def retire_runtime_snapshots(
             raise ValueError(
                 "Every selected owner must have an unsupported snapshot in the selected team. Run --dry-run again."
             )
+        begin_schema_setup(conn, __name__)
         conn.execute(f"""CREATE TABLE IF NOT EXISTS {ARCHIVE_TABLE} (
             archive_id TEXT PRIMARY KEY,
             owner_agent_id TEXT NOT NULL, owner_agent_name TEXT, team_id TEXT,

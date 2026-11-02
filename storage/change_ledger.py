@@ -97,12 +97,9 @@ from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal, ProgressState
 from knowledge_base.sensitive_content import SensitiveContentRules
 from storage.config import StorageSettings
-from storage.postgres_connection import (
-    CHANGE_LEDGER_SCHEMA_LOCK_KEY,
-    connect_postgres,
-    ensure_storage_parent_dir,
-)
+from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
 from storage.read_only import repositories_are_read_only
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 from storage.sqlite_connection import connect_sqlite
 from storage.table_columns import ensure_column
@@ -281,7 +278,7 @@ class _CountedChange:
 
 
 def ledger_table_statements(dialect: SqlDialect) -> list[str]:
-    """``CREATE ... IF NOT EXISTS`` for the ledger tables; run with ``CHANGE_LEDGER_SCHEMA_LOCK_KEY`` held."""
+    """``CREATE ... IF NOT EXISTS`` for the ledger tables; run by ``ensure_ledger_tables``, which takes their setup lock."""
 
     integer = "BIGINT" if dialect is POSTGRES else "INTEGER"
     return [
@@ -360,10 +357,13 @@ def ledger_table_statements(dialect: SqlDialect) -> list[str]:
 
 
 def ensure_ledger_tables(conn: Any, dialect: SqlDialect) -> None:
-    """Create the ledger tables on an open connection (the caller commits)."""
+    """Create the ledger tables on an open connection (the caller commits).
 
-    if dialect is POSTGRES:
-        conn.execute("SELECT pg_advisory_xact_lock(%s)", (CHANGE_LEDGER_SCHEMA_LOCK_KEY,))
+    Several stores create them inside their own setup, so they take their own
+    setup lock (``storage.schema_setup``) after the store's.
+    """
+
+    begin_schema_setup(conn, __name__)
     for statement in ledger_table_statements(dialect):
         conn.execute(statement)
     _add_changed_fields(conn)

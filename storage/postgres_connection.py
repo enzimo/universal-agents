@@ -17,10 +17,9 @@ from .sql_dialect import POSTGRES
 # exact when its writers take turns; PostgreSQL's default READ COMMITTED
 # isolation does not make them take turns. Each store has its own key, so
 # unrelated stores never wait for each other. Keys must stay distinct.
+# Schema setup uses named locks instead (storage.schema_setup).
 KNOWLEDGE_WRITE_LOCK_KEY = 7_302_211_551
 ACCESS_STORE_WRITE_LOCK_KEY = 7_302_211_552
-# Creating the change ledger's tables (storage.change_ledger), from every store that uses them.
-CHANGE_LEDGER_SCHEMA_LOCK_KEY = 7_302_211_553
 # Team and personal memory facts (storage.pinned_memory_repository).
 PINNED_MEMORY_WRITE_LOCK_KEY = 7_302_211_554
 

@@ -68,7 +68,7 @@ def test_postgres_takes_no_table_lock_when_the_column_exists():
     assert not any(statement.startswith("ALTER") for statement in conn.statements)
 
 
-def test_postgres_adds_a_missing_column_in_a_form_concurrent_starts_both_run(caplog):
+def test_postgres_adds_a_missing_column_in_a_form_a_later_concurrent_addition_does_not_fail(caplog):
     conn = _FakePostgres({"entity_id"})
 
     with caplog.at_level(logging.INFO, logger=LOGGER.name):

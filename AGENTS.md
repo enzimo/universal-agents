@@ -234,7 +234,7 @@ For each change, define a verification plan that matches that strategy. Generate
 
 ### Change-specific requirements
 - If you change SQLite-backed stores, persisted schemas, or DB-owned models, update the affected tests and fixtures in the same change so validation exercises the real schema.
-- A change to a table an earlier release created brings its upgrade step in the same change, because `CREATE TABLE IF NOT EXISTS` never changes an existing table: a new column is added and logged when the store opens (`storage.table_columns.ensure_column`, for both backends), with a default that keeps older rows correct, and a test starts from the previous release's table. Before pushing, compare the `CREATE TABLE` statements with the last release tag.
+- A change to a table an earlier release created brings its upgrade step in the same change, because `CREATE TABLE IF NOT EXISTS` never changes an existing table: a new column is added and logged when the store opens (`storage.table_columns.ensure_column`, for both backends), with a default that keeps older rows correct, and a test starts from the previous release's table. Put new columns in `CREATE TABLE` too, add columns before indexes, and start a store's setup with `storage.schema_setup.begin_schema_setup` so processes opening it at once take turns on PostgreSQL. Before pushing, compare the `CREATE TABLE` statements with the last release tag.
 
 ## 3. What Belongs Where
 - Keep this file focused on cross-project behavior and repo-level operating rules.

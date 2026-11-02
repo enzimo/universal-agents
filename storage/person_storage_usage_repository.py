@@ -40,6 +40,7 @@ from typing import Any, Iterable, Mapping
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
 from storage.read_only import repositories_are_read_only
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 
@@ -113,6 +114,7 @@ class PersonStorageUsageRepository:
             return
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             # BIGINT: sizes pass 2 GB, the limit of PostgreSQL's INTEGER.
             conn.execute(f"""CREATE TABLE IF NOT EXISTS {PERSON_STORAGE_USAGE_TABLE} (
                 schema_version INTEGER NOT NULL CHECK (schema_version = {PERSON_STORAGE_USAGE_SCHEMA_VERSION}),

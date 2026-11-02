@@ -26,6 +26,7 @@ from custom_messages.contracts.schedule_worker_v1 import (
 )
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 from storage.sqlite_connection import connect_sqlite
 from storage.database_clock import database_now
@@ -146,6 +147,7 @@ class ScheduleWorkerRepository:
             return
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute("""CREATE TABLE IF NOT EXISTS schedule_worker_bindings (
                 schedule_id TEXT PRIMARY KEY, team_id TEXT NOT NULL,
                 owner_id TEXT NOT NULL, revision INTEGER NOT NULL,

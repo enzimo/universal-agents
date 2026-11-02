@@ -62,6 +62,7 @@ from storage.change_ledger import (
 from storage.config import StorageSettings
 from storage.pinned_memory_repository import USERMEM_BANK
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 
@@ -135,6 +136,7 @@ class PersonDepartureRepository:
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
             conn.execute("""CREATE TABLE IF NOT EXISTS person_departures (
+            begin_schema_setup(conn, __name__)
                 team_id TEXT NOT NULL, person_id TEXT NOT NULL,
                 removed_at TEXT NOT NULL, hold_until TEXT NOT NULL,
                 restored_at TEXT, purged_at TEXT,

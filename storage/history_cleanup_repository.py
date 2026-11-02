@@ -49,6 +49,7 @@ from access_control.safe_open import UnsafePath
 
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 
@@ -334,6 +335,7 @@ class HistoryCleanupRepository:
         self.dialect = POSTGRES if settings.postgres_dsn else SQLITE
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(f"""CREATE TABLE IF NOT EXISTS {ORDERS_TABLE} (
                 order_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, person_id TEXT NOT NULL,
                 status TEXT NOT NULL, plan_digest TEXT NOT NULL, plan_json TEXT NOT NULL,

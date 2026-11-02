@@ -41,6 +41,7 @@ from .runtime_custody import (
     CustodyStore, DeferredMessageClaim, RuntimeCustodyLost, RuntimeRecoveryConflict,
     check_deferred_message, deferred_message_id,
 )
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
 
@@ -303,6 +304,7 @@ class _RelationalRuntimeStateRepository:
         try:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 ensure_ledger_tables(conn, self._dialect)
                 ensure_occurrence_schema(conn)
                 ScheduledRunProblems.ensure_schema(conn)

@@ -24,6 +24,7 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
 
@@ -168,6 +169,7 @@ class SqliteActivityCollectorRepository(_RelationalActivityCollectorRepository):
         try:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS activity_events (
@@ -297,6 +299,7 @@ class PostgresActivityCollectorRepository(_RelationalActivityCollectorRepository
         storage_target = redact_postgres_dsn(self._dsn)
         try:
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS activity_events (
