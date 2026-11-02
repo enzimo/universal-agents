@@ -26,7 +26,9 @@ from .postgres_connection import (
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
 from .runtime_custody import DeferredMessageClaim, check_deferred_message
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 # Every column of a schedule row; a locked write (``write_locked``) names only these.
@@ -246,6 +248,7 @@ class _RelationalScheduleRepository:
             if backend_name != "Postgres":
                 ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS scheduled_messages (
@@ -278,7 +281,7 @@ class _RelationalScheduleRepository:
                     )
                     """
                 )
-                self._ensure_schedule_columns(conn, backend_name)
+                self._ensure_schedule_columns(conn)
                 ensure_occurrence_schema(conn)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_scheduled_messages_objective_id ON scheduled_messages(objective_id)"
@@ -311,52 +314,9 @@ class _RelationalScheduleRepository:
             self._logger.error(f"Failed to initialize {backend_name} schedule repository: {exc}")
             raise
 
-    def _ensure_schedule_columns(self, conn: Any, backend_name: str) -> None:
-        if backend_name == "Postgres":
-            existing = {
-                str(row["column_name"] if "column_name" in row else row[0])
-                for row in conn.execute(
-                    """
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public'
-                      AND table_name = 'scheduled_messages'
-                    """
-                ).fetchall()
-            }
-        else:
-            existing = {
-                str(row[1])
-                for row in conn.execute("PRAGMA table_info(scheduled_messages)").fetchall()
-                if row and len(row) > 1
-            }
+    def _ensure_schedule_columns(self, conn: Any) -> None:
         for column_name, column_type in _SCHEDULE_COLUMN_MIGRATIONS.items():
-            if column_name in existing:
-                continue
-            self._add_schedule_column_if_missing(conn, backend_name, column_name, column_type)
-
-    def _add_schedule_column_if_missing(
-        self,
-        conn: Any,
-        backend_name: str,
-        column_name: str,
-        column_type: str,
-    ) -> None:
-        if backend_name == "Postgres":
-            conn.execute(f"ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS {column_name} {column_type}")
-            return
-        try:
-            conn.execute(f"ALTER TABLE scheduled_messages ADD COLUMN {column_name} {column_type}")
-        except sqlite3.OperationalError as exc:
-            message = str(exc).lower()
-            if "duplicate column" in message or "already exists" in message:
-                self._logger.debug(
-                    "Schedule column %s already existed during concurrent schema migration.",
-                    column_name,
-                )
-                return
-            raise
-
+            ensure_column(conn, "scheduled_messages", column_name, column_type, logger=self._logger)
 
     def write_locked(
         self, schedule_id: str, decide: RowDecision,

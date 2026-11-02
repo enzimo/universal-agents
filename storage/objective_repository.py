@@ -43,7 +43,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .schema_setup import begin_schema_setup
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 @dataclass(frozen=True)
@@ -205,6 +207,7 @@ class _RelationalObjectiveRepository:
             raise
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
+        begin_schema_setup(conn, __name__)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS objectives (
@@ -229,11 +232,12 @@ class _RelationalObjectiveRepository:
             )
             """
         )
-        self._ensure_column(
+        ensure_column(
             conn,
             "objectives",
             "owner_canonical_user_id",
             "TEXT",
+            logger=self._logger,
         )
         self._backfill_canonical_owners(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_objectives_objective_id ON objectives(objective_id)")
@@ -698,10 +702,6 @@ class SqliteObjectiveRepository(_RelationalObjectiveRepository):
         return connect_sqlite(self._db_path, logger=self._logger)
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
 class PostgresObjectiveRepository(_RelationalObjectiveRepository):
     """Postgres implementation for durable objective persistence."""
 
@@ -716,11 +716,6 @@ class PostgresObjectiveRepository(_RelationalObjectiveRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
 
 
 def create_objective_repository(

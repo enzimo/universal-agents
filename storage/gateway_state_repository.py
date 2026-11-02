@@ -85,7 +85,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .schema_setup import begin_schema_setup
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 def utc_now_iso() -> str:
@@ -1014,6 +1016,7 @@ class _RelationalGatewayStateRepository:
             return
         ensure_storage_parent_dir(self._db_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gateway_sessions (
@@ -1034,12 +1037,14 @@ class _RelationalGatewayStateRepository:
                 )
                 """
             )
-            self._ensure_column(
-                conn, "gateway_sessions", "owner_canonical_user_id", "TEXT"
+            ensure_column(
+                conn, "gateway_sessions", "owner_canonical_user_id", "TEXT",
+                logger=self._logger,
             )
             # Web Chat's Run concurrently setting (SessionRecord.parallel_thread).
-            self._ensure_column(
-                conn, "gateway_sessions", "parallel_thread", "INTEGER NOT NULL DEFAULT 0"
+            ensure_column(
+                conn, "gateway_sessions", "parallel_thread", "INTEGER NOT NULL DEFAULT 0",
+                logger=self._logger,
             )
             conn.execute(
                 """
@@ -1053,8 +1058,9 @@ class _RelationalGatewayStateRepository:
                 )
                 """
             )
-            self._ensure_column(
-                conn, "gateway_session_conversations", "owner_canonical_user_id", "TEXT"
+            ensure_column(
+                conn, "gateway_session_conversations", "owner_canonical_user_id", "TEXT",
+                logger=self._logger,
             )
             conn.execute(
                 """
@@ -1068,15 +1074,17 @@ class _RelationalGatewayStateRepository:
                     active_task_id TEXT,
                     owner_canonical_user_id TEXT,
                     created_at TEXT NOT NULL,
-                    status TEXT NOT NULL
+                    status TEXT NOT NULL,
+                    run_state TEXT
                 )
                 """
             )
-            self._ensure_column(
-                conn, "gateway_requests", "owner_canonical_user_id", "TEXT"
+            ensure_column(
+                conn, "gateway_requests", "owner_canonical_user_id", "TEXT",
+                logger=self._logger,
             )
-            self._ensure_column(conn, "gateway_requests", "active_task_id", "TEXT")
-            self._ensure_column(conn, "gateway_requests", "run_state", "TEXT")
+            ensure_column(conn, "gateway_requests", "active_task_id", "TEXT", logger=self._logger)
+            ensure_column(conn, "gateway_requests", "run_state", "TEXT", logger=self._logger)
             # Pending upload removals and original counts survive the same
             # commit that removes their attachment/transcript records.
             conn.execute("""CREATE TABLE IF NOT EXISTS gateway_history_cleanups (
@@ -1156,8 +1164,9 @@ class _RelationalGatewayStateRepository:
                 )
                 """
             )
-            self._ensure_column(
-                conn, "gateway_deliveries", "owner_canonical_user_id", "TEXT"
+            ensure_column(
+                conn, "gateway_deliveries", "owner_canonical_user_id", "TEXT",
+                logger=self._logger,
             )
             conn.execute(
                 """
@@ -1180,8 +1189,9 @@ class _RelationalGatewayStateRepository:
                 )
                 """
             )
-            self._ensure_column(
-                conn, "gateway_attachments", "owner_canonical_user_id", "TEXT"
+            ensure_column(
+                conn, "gateway_attachments", "owner_canonical_user_id", "TEXT",
+                logger=self._logger,
             )
             conn.execute(
                 """
@@ -1349,8 +1359,9 @@ class _RelationalGatewayStateRepository:
                 )
                 """
             )
-            self._ensure_column(
-                conn, "gateway_scheduled_targets", "owner_canonical_user_id", "TEXT"
+            ensure_column(
+                conn, "gateway_scheduled_targets", "owner_canonical_user_id", "TEXT",
+                logger=self._logger,
             )
             conn.execute(
                 """
@@ -5167,9 +5178,6 @@ class SqliteGatewayStateRepository(_RelationalGatewayStateRepository):
         )
 
 
-    def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
     @staticmethod
     def _is_integrity_error(exc: Exception) -> bool:
         return isinstance(exc, sqlite3.IntegrityError)
@@ -5196,10 +5204,6 @@ class PostgresGatewayStateRepository(_RelationalGatewayStateRepository):
     def _open_connection(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
 
-
-    def _ensure_column(self, conn: Any, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
 
     @staticmethod
     def _is_integrity_error(exc: Exception) -> bool:

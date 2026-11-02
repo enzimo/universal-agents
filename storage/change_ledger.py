@@ -97,14 +97,12 @@ from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal, ProgressState
 from knowledge_base.sensitive_content import SensitiveContentRules
 from storage.config import StorageSettings
-from storage.postgres_connection import (
-    CHANGE_LEDGER_SCHEMA_LOCK_KEY,
-    connect_postgres,
-    ensure_storage_parent_dir,
-)
+from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
 from storage.read_only import repositories_are_read_only
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
-from storage.sqlite_connection import connect_sqlite, ensure_sqlite_column, sqlite_column_names
+from storage.sqlite_connection import connect_sqlite
+from storage.table_columns import ensure_column
 from storage.backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 
 logger = logging.getLogger(__name__)
@@ -280,7 +278,7 @@ class _CountedChange:
 
 
 def ledger_table_statements(dialect: SqlDialect) -> list[str]:
-    """``CREATE ... IF NOT EXISTS`` for the ledger tables; run with ``CHANGE_LEDGER_SCHEMA_LOCK_KEY`` held."""
+    """``CREATE ... IF NOT EXISTS`` for the ledger tables; run by ``ensure_ledger_tables``, which takes their setup lock."""
 
     integer = "BIGINT" if dialect is POSTGRES else "INTEGER"
     return [
@@ -359,16 +357,19 @@ def ledger_table_statements(dialect: SqlDialect) -> list[str]:
 
 
 def ensure_ledger_tables(conn: Any, dialect: SqlDialect) -> None:
-    """Create the ledger tables on an open connection (the caller commits)."""
+    """Create the ledger tables on an open connection (the caller commits).
 
-    if dialect is POSTGRES:
-        conn.execute("SELECT pg_advisory_xact_lock(%s)", (CHANGE_LEDGER_SCHEMA_LOCK_KEY,))
+    Several stores create them inside their own setup, so they take their own
+    setup lock (``storage.schema_setup``) after the store's.
+    """
+
+    begin_schema_setup(conn, __name__)
     for statement in ledger_table_statements(dialect):
         conn.execute(statement)
-    _add_changed_fields(conn, dialect)
+    _add_changed_fields(conn)
 
 
-def _add_changed_fields(conn: Any, dialect: SqlDialect) -> None:
+def _add_changed_fields(conn: Any) -> None:
     """Give a 0.9 ledger table the ``changed_fields`` column, so 0.10 starts on an older instance's database.
 
     ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it was, and
@@ -379,33 +380,8 @@ def _add_changed_fields(conn: Any, dialect: SqlDialect) -> None:
     are never read for fields. Later opens find the column with a read.
     """
 
-    if _has_column(conn, dialect, CHANGE_LEDGER_TABLE, CHANGED_FIELDS_COLUMN):
-        return
     column_type = f"TEXT NOT NULL DEFAULT '{OLDER_ENTRY_FIELDS}'"
-    if dialect is POSTGRES:
-        # The schema lock taken above keeps two processes from both adding it.
-        conn.execute(f"ALTER TABLE {CHANGE_LEDGER_TABLE} ADD COLUMN {CHANGED_FIELDS_COLUMN} {column_type}")
-    else:
-        # Not every caller holds the SQLite write lock here; this tolerates a
-        # process that added the column first.
-        ensure_sqlite_column(conn, CHANGE_LEDGER_TABLE, CHANGED_FIELDS_COLUMN, column_type, logger=logger)
-    logger.info(
-        "Added the changed fields column to a ledger table from an older version; its entries count as "
-        "changing every field. event=change_ledger_column_added table=%s column=%s",
-        CHANGE_LEDGER_TABLE,
-        CHANGED_FIELDS_COLUMN,
-    )
-
-
-def _has_column(conn: Any, dialect: SqlDialect, table: str, column: str) -> bool:
-    if dialect is POSTGRES:
-        row = conn.execute(
-            "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
-            "AND table_name = %s AND column_name = %s",
-            (table, column),
-        ).fetchone()
-        return row is not None
-    return column in sqlite_column_names(conn, table)
+    ensure_column(conn, CHANGE_LEDGER_TABLE, CHANGED_FIELDS_COLUMN, column_type, logger=logger)
 
 
 def current_position(conn: Any, dialect: SqlDialect, team_id: str) -> int:

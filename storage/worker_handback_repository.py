@@ -15,6 +15,7 @@ from typing import Any
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 
@@ -50,6 +51,7 @@ class WorkerHandbackRepository:
             raise ValueError("Worker handback records require configured storage.")
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute("""CREATE TABLE IF NOT EXISTS worker_task_handbacks (
                 handback_id TEXT PRIMARY KEY, team_id TEXT NOT NULL,
                 task_id TEXT NOT NULL, worker_agent_id TEXT NOT NULL,

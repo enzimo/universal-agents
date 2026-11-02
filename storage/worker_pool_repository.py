@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
 
@@ -116,6 +117,7 @@ class WorkerPoolRepository:
             raise ValueError("Worker pool records require configured storage.")
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute("""CREATE TABLE IF NOT EXISTS worker_pool_limits (
                 team_id TEXT NOT NULL, scope TEXT NOT NULL,
                 updated_at TEXT NOT NULL, payload_json TEXT NOT NULL,

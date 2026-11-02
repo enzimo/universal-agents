@@ -22,7 +22,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .schema_setup import begin_schema_setup
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,7 @@ class _RelationalPlanRepository:
             raise
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
+        begin_schema_setup(conn, __name__)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS plans (
@@ -124,11 +127,11 @@ class _RelationalPlanRepository:
             )
             """
         )
-        self._ensure_column(conn, "plans", "team_id", "TEXT")
-        self._ensure_column(conn, "plans", "owner_named_agent_type", "TEXT")
-        self._ensure_column(conn, "plans", "root_conversation_id", "TEXT")
-        self._ensure_column(conn, "plans", "objective_id", "TEXT")
-        self._ensure_column(conn, "plans", "objective_title", "TEXT")
+        ensure_column(conn, "plans", "team_id", "TEXT", logger=self._logger)
+        ensure_column(conn, "plans", "owner_named_agent_type", "TEXT", logger=self._logger)
+        ensure_column(conn, "plans", "root_conversation_id", "TEXT", logger=self._logger)
+        ensure_column(conn, "plans", "objective_id", "TEXT", logger=self._logger)
+        ensure_column(conn, "plans", "objective_title", "TEXT", logger=self._logger)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_plan_id ON plans(plan_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_root_task ON plans(root_task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_plans_objective_id ON plans(objective_id)")
@@ -314,15 +317,6 @@ class SqlitePlanRepository(_RelationalPlanRepository):
         return connect_sqlite(self._db_path, logger=self._logger)
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
-        return {str(row[1]) for row in rows}
-
-
 class PostgresPlanRepository(_RelationalPlanRepository):
     """Postgres implementation for durable plan persistence."""
 
@@ -338,15 +332,6 @@ class PostgresPlanRepository(_RelationalPlanRepository):
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
 
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
-
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'\n                SELECT column_name\n                FROM information_schema.columns\n                WHERE table_name = {self._dialect.bind}\n                ', (table_name,)).fetchall()
-        return {str(row[0]) for row in rows}
 
 def create_plan_repository(
     storage_settings: StorageSettings,

@@ -35,7 +35,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .schema_setup import begin_schema_setup
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 class AfterActionReportRepository(Protocol):
@@ -197,6 +199,7 @@ class _RelationalAfterActionReportRepository:
         try:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS after_action_report_reviews (
@@ -224,11 +227,12 @@ class _RelationalAfterActionReportRepository:
                     )
                     """
                 )
-                self._ensure_column(conn, "after_action_report_reviews", "batch_id", "TEXT")
-                self._ensure_column(conn, "after_action_report_reviews", "stale_reason", "TEXT")
-                self._ensure_column(conn, "after_action_report_reviews", "person_id", "TEXT")
-                self._ensure_column(
-                    conn, "after_action_report_reviews", "identity_verified", "INTEGER NOT NULL DEFAULT 0"
+                ensure_column(conn, "after_action_report_reviews", "batch_id", "TEXT", logger=self._logger)
+                ensure_column(conn, "after_action_report_reviews", "stale_reason", "TEXT", logger=self._logger)
+                ensure_column(conn, "after_action_report_reviews", "person_id", "TEXT", logger=self._logger)
+                ensure_column(
+                    conn, "after_action_report_reviews", "identity_verified", "INTEGER NOT NULL DEFAULT 0",
+                    logger=self._logger,
                 )
                 conn.execute(
                     """
@@ -258,10 +262,11 @@ class _RelationalAfterActionReportRepository:
                     )
                     """
                 )
-                self._ensure_column(conn, "after_action_report_review_batches", "scheduled_review_task_id", "TEXT")
-                self._ensure_column(conn, "after_action_report_review_batches", "person_id", "TEXT")
-                self._ensure_column(
-                    conn, "after_action_report_review_batches", "identity_verified", "INTEGER NOT NULL DEFAULT 0"
+                ensure_column(conn, "after_action_report_review_batches", "scheduled_review_task_id", "TEXT", logger=self._logger)
+                ensure_column(conn, "after_action_report_review_batches", "person_id", "TEXT", logger=self._logger)
+                ensure_column(
+                    conn, "after_action_report_review_batches", "identity_verified", "INTEGER NOT NULL DEFAULT 0",
+                    logger=self._logger,
                 )
                 # A model may reuse a report id in another person's work.
                 # Null-person work needs its own index because SQL uniqueness
@@ -804,10 +809,6 @@ class SqliteAfterActionReportRepository(_RelationalAfterActionReportRepository):
         return connect_sqlite(self._db_path, logger=self._logger)
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
 class PostgresAfterActionReportRepository(_RelationalAfterActionReportRepository):
     """Postgres implementation for manager-owned AAR review state."""
 
@@ -822,11 +823,6 @@ class PostgresAfterActionReportRepository(_RelationalAfterActionReportRepository
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
 
 
 def create_after_action_report_repository(

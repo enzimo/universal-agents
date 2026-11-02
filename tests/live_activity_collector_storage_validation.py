@@ -19,6 +19,7 @@ from live_storage_utils import reset_postgres_storage, resolve_live_storage_sett
 from storage.activity_collector_repository import create_activity_collector_repository
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres, redact_postgres_dsn
+from storage.table_columns import table_column_names
 
 try:
     from dotenv import load_dotenv
@@ -89,18 +90,9 @@ def _create_legacy_activity_table(settings: StorageSettings) -> None:
 def _table_columns(settings: StorageSettings) -> set[str]:
     if settings.backend == "postgres":
         with connect_postgres(settings.postgres_dsn or "") as conn:
-            rows = conn.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND table_name = 'activity_events'
-                """
-            ).fetchall()
-        return {str(row[0]) for row in rows}
-
+            return table_column_names(conn, "activity_events")
     with sqlite3.connect(settings.sqlite_path or "") as conn:
-        return {row[1] for row in conn.execute("PRAGMA table_info(activity_events)").fetchall()}
+        return table_column_names(conn, "activity_events")
 
 
 def run_validation(*, config_path: str | None = None) -> dict[str, Any]:

@@ -75,6 +75,8 @@ def test_ensure_sqlite_column_reraises_duplicate_when_column_is_still_absent():
             return []
 
     class _Connection:
+        OperationalError = sqlite3.OperationalError
+
         def execute(self, statement: str):
             if statement.startswith("PRAGMA table_info"):
                 return _Cursor()
@@ -89,6 +91,48 @@ def test_ensure_sqlite_column_reraises_duplicate_when_column_is_still_absent():
             "owner_canonical_user_id",
             "TEXT",
         )
+
+
+class _DriverOperationalError(Exception):
+    """A driver's own error class, unrelated to the standard library's, as ``pysqlite3``'s is."""
+
+
+def test_a_column_another_process_added_first_is_kept_when_the_driver_has_its_own_error_class(caplog):
+    """Memory graphs on macOS use ``pysqlite3``, whose ``OperationalError`` is not ``sqlite3.OperationalError``.
+
+    Catching the standard library's class let the duplicate column error of a
+    process that lost the race stop its start. CI has no ``pysqlite3``, so this
+    driver is a stand-in.
+    """
+
+    class _Rows:
+        def __init__(self, names: list[str]):
+            self._rows = [(position, name) for position, name in enumerate(names)]
+
+        def fetchall(self):
+            return self._rows
+
+    class _Connection:
+        OperationalError = _DriverOperationalError
+
+        def __init__(self):
+            self.columns = ["conversation_id"]
+
+        def execute(self, statement: str):
+            if statement.startswith("PRAGMA table_info"):
+                return _Rows(self.columns)
+            if statement.startswith("ALTER TABLE"):
+                self.columns.append("owner_canonical_user_id")  # Another process added it after the read.
+                raise _DriverOperationalError("duplicate column name: owner_canonical_user_id")
+            raise AssertionError(f"unexpected statement: {statement}")
+
+    assert not issubclass(_DriverOperationalError, sqlite3.Error)
+    logger = logging.getLogger("test.sqlite_columns")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        ensure_sqlite_column(_Connection(), "conversation_threads", "owner_canonical_user_id", "TEXT", logger=logger)
+
+    assert "added concurrently" in caplog.text
+    assert "event=storage_column_added" not in caplog.text
 
 
 # -- lock contention and WAL handling -----------------------------------------------------

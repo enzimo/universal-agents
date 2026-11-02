@@ -8,6 +8,8 @@ import pytest
 
 from storage.postgres_connection import connect_postgres
 from storage.sqlite_connection import connect_sqlite
+from storage import table_columns
+from storage.table_columns import ensure_column
 
 
 @pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
@@ -41,17 +43,21 @@ def test_iteration_retains_transaction_and_does_not_limit_candidates(connection)
 
 @pytest.mark.live
 @pytest.mark.postgres
-def test_postgres_idempotent_column_add_preserves_prior_transaction_work():
-    from storage.memory_graph_repository import PostgresMemoryGraphRepository
+def test_postgres_idempotent_column_add_preserves_prior_transaction_work(monkeypatch):
+    """A column added after the read (by a caller without the setup lock) does not abort the transaction.
+
+    The read finds the column on later opens, so the stale read is simulated
+    to reach the statement itself on a real server.
+    """
 
     dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip("LIVE_TEST_POSTGRES_DSN required")
-    repo = PostgresMemoryGraphRepository.__new__(PostgresMemoryGraphRepository)
+    monkeypatch.setattr(table_columns, "postgres_column_names", lambda _conn, _table: set())
     with connect_postgres(dsn) as conn:
         conn.execute("CREATE TEMP TABLE schema_work (value TEXT)")
         conn.execute("INSERT INTO schema_work VALUES ('retained')")
-        repo._ensure_column(conn, "schema_work", "value", "TEXT")
+        ensure_column(conn, "schema_work", "value", "TEXT")
         assert conn.execute("SELECT value FROM schema_work").fetchone()[0] == "retained"
 
 

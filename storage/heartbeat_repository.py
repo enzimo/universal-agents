@@ -41,7 +41,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
+from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 @dataclass
@@ -225,6 +227,7 @@ class _RelationalHeartbeatRepository(ABC):
             if backend_name != "Postgres":
                 ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS heartbeat_sources (
@@ -257,22 +260,16 @@ class _RelationalHeartbeatRepository(ABC):
                     )
                     """
                 )
+                # Columns an earlier release's table lacks come before the
+                # indexes that name them.
+                ensure_column(conn, "heartbeat_items", "source_key", "TEXT", logger=self._logger)
+                ensure_column(conn, "heartbeat_items", "objective_id", "TEXT", logger=self._logger)
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_heartbeat_items_source ON heartbeat_items(source_id, enabled, updated_at DESC)"
                 )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_heartbeat_items_objective_id ON heartbeat_items(objective_id)"
                 )
-                if backend_name == "Postgres":
-                    conn.execute("ALTER TABLE heartbeat_items ADD COLUMN IF NOT EXISTS source_key TEXT")
-                else:
-                    columns = {
-                        row[1]
-                        for row in conn.execute("PRAGMA table_info(heartbeat_items)").fetchall()
-                        if row and len(row) > 1
-                    }
-                    if "source_key" not in columns:
-                        conn.execute("ALTER TABLE heartbeat_items ADD COLUMN source_key TEXT")
                 conn.execute(
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_heartbeat_items_source_key
@@ -280,19 +277,6 @@ class _RelationalHeartbeatRepository(ABC):
                     WHERE source_key IS NOT NULL AND source_key != ''
                     """
                 )
-                if backend_name == "Postgres":
-                    # Not a lookup in information_schema for 'public': an
-                    # instance in its own schema found no column there and
-                    # failed to add the one it had.
-                    conn.execute("ALTER TABLE heartbeat_items ADD COLUMN IF NOT EXISTS objective_id TEXT")
-                else:
-                    columns = {
-                        row[1]
-                        for row in conn.execute("PRAGMA table_info(heartbeat_items)").fetchall()
-                        if row and len(row) > 1
-                    }
-                    if "objective_id" not in columns:
-                        conn.execute("ALTER TABLE heartbeat_items ADD COLUMN objective_id TEXT")
                 conn.commit()
             self._logger.info(f"{backend_name} heartbeat repository initialized at {storage_target}")
         except Exception as exc:

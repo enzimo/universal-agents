@@ -116,8 +116,10 @@ from custom_messages.contracts.person_settings_v1 import PersonSettingsV1
 from id_generation import new_id
 from storage.config import StorageSettings
 from storage.postgres_connection import ACCESS_STORE_WRITE_LOCK_KEY, connect_postgres, ensure_storage_parent_dir
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
+from storage.table_columns import ensure_column, table_column_names
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +286,7 @@ class AccessRepository:
             return
         ensure_storage_parent_dir(settings.sqlite_path)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             # approval_id copies GrantV1.approval_id (the request whose
             # decision stored the grant) so a decision's grants are found by
             # index; stores from before 2026-10-17 get it from
@@ -472,16 +475,6 @@ class AccessRepository:
             return
         action()
 
-    def _column_exists(self, conn: Any, table: str, column: str) -> bool:
-        if self.dialect is POSTGRES:
-            row = conn.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
-                "AND table_name = %s AND column_name = %s",
-                (table, column),
-            ).fetchone()
-            return row is not None
-        return any(str(row[1]) == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
-
     def _approval_id_column(self) -> None:
         """Give stores from before 2026-10-17 the indexed ``approval_id`` column, filled from each grant's record.
 
@@ -493,12 +486,12 @@ class AccessRepository:
         """
 
         with self._connect() as conn:
-            if self._column_exists(conn, "access_grants", "approval_id") and self._index_exists(conn, APPROVAL_ID_INDEX):
+            if "approval_id" in table_column_names(conn, "access_grants") and self._index_exists(conn, APPROVAL_ID_INDEX):
                 return
         with self._connect() as conn:
             conn.begin_write()
-            if not self._column_exists(conn, "access_grants", "approval_id"):
-                conn.execute("ALTER TABLE access_grants ADD COLUMN approval_id TEXT")
+            if "approval_id" not in table_column_names(conn, "access_grants"):
+                ensure_column(conn, "access_grants", "approval_id", "TEXT", logger=logger)
                 approval = (
                     "payload_json::jsonb ->> 'approval_id'"
                     if self.dialect is POSTGRES

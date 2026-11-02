@@ -189,7 +189,7 @@ def test_an_entry_from_0_9_counts_as_changing_every_field_after_the_upgrade(tmp_
                 conn.begin_write()
                 ensure_ledger_tables(conn, SQLITE)
                 conn.commit()
-    assert caplog.text.count("event=change_ledger_column_added") == 1
+    assert caplog.text.count("event=storage_column_added backend=SQLite table=change_ledger column=changed_fields") == 1
     with connect_sqlite(path) as conn:
         assert json.loads(conn.execute("SELECT changed_fields FROM change_ledger").fetchone()[0]) == [ALL_FIELDS]
 

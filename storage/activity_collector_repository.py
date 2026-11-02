@@ -24,7 +24,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column, sqlite_column_names
+from .schema_setup import begin_schema_setup
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 _ACTIVITY_EVENT_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -159,16 +161,15 @@ class SqliteActivityCollectorRepository(_RelationalActivityCollectorRepository):
 
 
     def _ensure_activity_event_columns(self, conn: sqlite3.Connection) -> None:
-        columns = sqlite_column_names(conn, "activity_events")
         for column_name, column_type in _ACTIVITY_EVENT_COLUMNS:
-            if column_name not in columns:
-                ensure_sqlite_column(conn, "activity_events", column_name, column_type, logger=self._logger)
+            ensure_column(conn, "activity_events", column_name, column_type, logger=self._logger)
 
 
     def _init_schema(self) -> None:
         try:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS activity_events (
@@ -291,23 +292,14 @@ class PostgresActivityCollectorRepository(_RelationalActivityCollectorRepository
         return connect_postgres(self._dsn)
 
     def _ensure_activity_event_columns(self, conn: PostgresConnection) -> None:
-        rows = conn.execute(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name = 'activity_events'
-            """
-        ).fetchall()
-        columns = {str(row[0]) for row in rows}
         for column_name, column_type in _ACTIVITY_EVENT_COLUMNS:
-            if column_name not in columns:
-                conn.execute(f"ALTER TABLE activity_events ADD COLUMN {column_name} {column_type}")
+            ensure_column(conn, "activity_events", column_name, column_type, logger=self._logger)
 
     def _init_schema(self) -> None:
         storage_target = redact_postgres_dsn(self._dsn)
         try:
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS activity_events (

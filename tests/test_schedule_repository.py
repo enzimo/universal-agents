@@ -90,23 +90,28 @@ def test_schedule_repository_tolerates_concurrent_duplicate_column_migration() -
             return self._rows
 
     class _RaceConn:
+        """Another process adds ``claim_expires_at`` just before this one does."""
+
+        OperationalError = sqlite3.OperationalError
+
         def __init__(self) -> None:
             self.statements: list[str] = []
+            self.columns = [
+                "objective_id",
+                "claim_team_id",
+                "claim_named_agent_type",
+                "claim_agent_id",
+                "claimed_by_agent_id",
+                "claim_token",
+                "claimed_at",
+            ]
 
         def execute(self, statement: str):
             self.statements.append(statement)
             if statement.startswith("PRAGMA table_info"):
-                columns = [
-                    "objective_id",
-                    "claim_team_id",
-                    "claim_named_agent_type",
-                    "claim_agent_id",
-                    "claimed_by_agent_id",
-                    "claim_token",
-                    "claimed_at",
-                ]
-                return _Rows([(index, column_name) for index, column_name in enumerate(columns)])
+                return _Rows([(index, column_name) for index, column_name in enumerate(self.columns)])
             if "ADD COLUMN claim_expires_at" in statement:
+                self.columns.append("claim_expires_at")
                 raise sqlite3.OperationalError("duplicate column name: claim_expires_at")
             return _Rows([])
 
@@ -114,7 +119,7 @@ def test_schedule_repository_tolerates_concurrent_duplicate_column_migration() -
     repo._logger = logging.getLogger("test")
     conn = _RaceConn()
 
-    repo._ensure_schedule_columns(conn, "SQLite")
+    repo._ensure_schedule_columns(conn)
 
     assert any("ADD COLUMN claim_expires_at" in statement for statement in conn.statements)
     assert any("ADD COLUMN expires_at_utc" in statement for statement in conn.statements)

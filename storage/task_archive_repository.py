@@ -21,7 +21,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .schema_setup import begin_schema_setup
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,7 @@ class _RelationalTaskArchiveRepository:
         try:
             ensure_storage_parent_dir(self._db_path)
             with self._connect() as conn:
+                begin_schema_setup(conn, __name__)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS completed_tasks (
@@ -156,8 +159,8 @@ class _RelationalTaskArchiveRepository:
                     )
                     """
                 )
-                self._ensure_column(conn, "completed_tasks", "team_id", "TEXT")
-                self._ensure_column(conn, "completed_tasks", "owner_canonical_user_id", "TEXT")
+                ensure_column(conn, "completed_tasks", "team_id", "TEXT", logger=self._logger)
+                ensure_column(conn, "completed_tasks", "owner_canonical_user_id", "TEXT", logger=self._logger)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_completed_tasks_task_id ON completed_tasks(task_id)")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_completed_tasks_owner_agent ON completed_tasks(owner_agent_id, timestamp DESC)"
@@ -359,15 +362,6 @@ class SqliteTaskArchiveRepository(_RelationalTaskArchiveRepository):
         return archived_tasks
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'PRAGMA table_info({table_name})').fetchall()
-        return {str(row[1]) for row in rows}
-
-
 class PostgresTaskArchiveRepository(_RelationalTaskArchiveRepository):
     """Postgres implementation for archived task persistence."""
 
@@ -532,16 +526,6 @@ class PostgresTaskArchiveRepository(_RelationalTaskArchiveRepository):
                 )
             )
         return archived_tasks
-
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
-
-
-    def _column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        rows = conn.execute(f'\n                SELECT column_name\n                FROM information_schema.columns\n                WHERE table_name = {self._dialect.bind}\n                ', (table_name,)).fetchall()
-        return {str(row[0]) for row in rows}
 
 
 def create_task_archive_repository(

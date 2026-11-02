@@ -26,7 +26,9 @@ from .postgres_connection import (
     validate_postgres_connection,
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .schema_setup import begin_schema_setup
+from .sqlite_connection import connect_sqlite
+from .table_columns import ensure_column
 
 
 def utc_now_iso() -> str:
@@ -478,6 +480,7 @@ class _RelationalConversationRepository:
         ensure_storage_parent_dir(self._db_path)
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            begin_schema_setup(conn, __name__)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_threads (
@@ -505,10 +508,10 @@ class _RelationalConversationRepository:
                 )
                 """
             )
-            self._ensure_column(conn, "conversation_threads", "team_id", "TEXT")
-            self._ensure_column(conn, "conversation_threads", "owner_canonical_user_id", "TEXT")
+            ensure_column(conn, "conversation_threads", "team_id", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_threads", "owner_canonical_user_id", "TEXT", logger=self._logger)
             conn.execute(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS conversation_task_links (
                     conversation_id TEXT NOT NULL,
                     task_id TEXT NOT NULL,
@@ -541,29 +544,35 @@ class _RelationalConversationRepository:
                     gateway_context_json TEXT,
                     created_at TEXT,
                     updated_at TEXT,
+                    memory_review_status TEXT NOT NULL DEFAULT '{TURN_MEMORY_REVIEW_UNREVIEWED}',
+                    memory_review_job_id TEXT,
+                    memory_review_queued_at_utc TEXT,
+                    memory_reviewed_at_utc TEXT,
+                    memory_reviewed_by_agent_id TEXT,
                     PRIMARY KEY (conversation_id, task_id)
                 )
                 """
             )
-            self._ensure_column(conn, "conversation_task_links", "owner_canonical_user_id", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "owner_named_agent_type", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "user_request_summary", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "assistant_response_summary", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "context_summary_text", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "artifact_summary_json", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "summary_generator", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "summary_generated_at", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "gateway_context_json", "TEXT")
-            self._ensure_column(
+            ensure_column(conn, "conversation_task_links", "owner_canonical_user_id", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "owner_named_agent_type", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "user_request_summary", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "assistant_response_summary", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "context_summary_text", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "artifact_summary_json", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "summary_generator", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "summary_generated_at", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "gateway_context_json", "TEXT", logger=self._logger)
+            ensure_column(
                 conn,
                 "conversation_task_links",
                 "memory_review_status",
                 f"TEXT NOT NULL DEFAULT '{TURN_MEMORY_REVIEW_UNREVIEWED}'",
+                logger=self._logger,
             )
-            self._ensure_column(conn, "conversation_task_links", "memory_review_job_id", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "memory_review_queued_at_utc", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "memory_reviewed_at_utc", "TEXT")
-            self._ensure_column(conn, "conversation_task_links", "memory_reviewed_by_agent_id", "TEXT")
+            ensure_column(conn, "conversation_task_links", "memory_review_job_id", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "memory_review_queued_at_utc", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "memory_reviewed_at_utc", "TEXT", logger=self._logger)
+            ensure_column(conn, "conversation_task_links", "memory_reviewed_by_agent_id", "TEXT", logger=self._logger)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_artifacts (
@@ -610,7 +619,7 @@ class _RelationalConversationRepository:
                 )
                 """
             )
-            self._ensure_column(conn, "conversation_context_epochs", "owner_canonical_user_id", "TEXT")
+            ensure_column(conn, "conversation_context_epochs", "owner_canonical_user_id", "TEXT", logger=self._logger)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_thread_tags (
@@ -2211,10 +2220,6 @@ class SqliteConversationRepository(_RelationalConversationRepository):
         return connect_sqlite(self._db_path, logger=self._logger, row_factory=sqlite3.Row)
 
 
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
-
-
 class PostgresConversationRepository(_RelationalConversationRepository):
     """Postgres implementation for durable conversation-thread persistence."""
 
@@ -2236,11 +2241,6 @@ class PostgresConversationRepository(_RelationalConversationRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
-
-
-    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
-        conn.execute(f'ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {column_name} {column_type}')
-        return
 
 
 def create_conversation_repository(
