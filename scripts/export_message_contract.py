@@ -1001,13 +1001,21 @@ def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topo
                        schemas: dict[str, dict[str, Any]]) -> None:
     """Lists the schemas repeat must match the registry and topologies they come from."""
 
-    refusals = {item["code"] for item in registry["verification_refusals"]}
+    for item in registry["verification_refusals"]:
+        if not set(item) <= {"code", "meaning", "temporary"} or item.get("temporary", True) is not True:
+            raise ContractError(f"registry.yaml: refusal {item.get('code')} has a code, a meaning and optionally temporary: true")
+    # A temporary refusal waits for what the receiver lacks, so no message is set aside for it.
+    refusals = {item["code"] for item in registry["verification_refusals"] if not item.get("temporary")}
+    temporary = {item["code"] for item in registry["verification_refusals"] if item.get("temporary")}
     for entry in registry["kinds"].values():
         if entry["class"] == "dead_letter":
             reasons = set(schemas[entry["body"]]["properties"]["reason"]["enum"])
             if not refusals <= reasons:
                 raise ContractError(f"{entry['body']}: a notice's reason names every verification refusal; missing "
                                     f"{sorted(refusals - reasons)}")
+            if reasons & temporary:
+                raise ContractError(f"{entry['body']}: a notice's reason names no temporary refusal; remove "
+                                    f"{sorted(reasons & temporary)}")
 
     common = schemas["common.schema.json"]["$defs"]
     if set(common["host_role"]["enum"]) != set(registry["host_roles"]):
@@ -1751,6 +1759,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"INSTALLATION_ADDRESS_PREFIX = {INSTALLATION_ADDRESS!r}\n"
         f"BETWEEN_INSTALLATIONS = frozenset({between!r})\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
+        f"TEMPORARY_REFUSALS = frozenset({sorted(item['code'] for item in registry['verification_refusals'] if item.get('temporary'))!r})\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
         f"COVERED_RECORD_KINDS = {tuple(registry['covered_record_kinds'])!r}\n"
         f"RETRY_OUTCOMES = frozenset({sorted(registry['retry_outcomes'])!r})\n"

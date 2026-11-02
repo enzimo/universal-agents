@@ -75,6 +75,9 @@ certificate_overlap_seconds: 300      # a replaced certificate still signs new f
 # Refusals a receiver gives before any handler runs, in the order it checks them.
 # "The issuer's certificate" is the host certificate the receiver's trust store holds
 # for the issuer's installation, runtime and membership epoch (README, "Who sent it").
+# A temporary refusal names something the receiver lacks rather than a defect of the frame:
+# the receiver answers a request with it, but never sets queued work aside for it, so it is
+# no dead-letter reason.
 verification_refusals:
   - code: too_large
     meaning: the serialized frame is larger than max_frame_bytes
@@ -87,9 +90,12 @@ verification_refusals:
   - code: bad_digest
     meaning: the body digest does not match the body
   - code: revoked
-    meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, by its id or by its runtime and key id, whenever it was revoked and whenever the frame says it was issued
+    meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, by its id, by its runtime and key id, or by its public key (a listed certificate's public key revokes every certificate of the installation that holds it), whenever it was revoked and whenever the frame says it was issued
   - code: revocations_not_current
-    meaning: the receiver holds no revocations record of the issuer's installation that is current at its clock (none, or only an expired one), and the issuer is not a host of the receiver's own installation authority
+    meaning: the receiver holds no revocations record of the issuer's installation that is current at its clock (none, or only an expired one), and the frame is not installation traffic from the receiver's own installation authority
+    # The receiver lacks a record, not the frame a defect: it waits for a current record and
+    # never sets the frame aside (README, "Who sent it").
+    temporary: true
   - code: epoch_too_old
     meaning: the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation (request/reply and events only; queued work is judged by the certificate valid when it was issued, and a join by the key it presents)
   - code: wrong_issuer
@@ -182,7 +188,7 @@ state_records:
     writers: [installation_authority, edge_adapter]
     body: state/revocations.schema.json
     max_lifetime_seconds: 86400     # 24 hours; the authority signs it again at least every 6 hours
-    write_rule: signed again with the next sequence at least every 6 hours and at once on each revocation; the revocation epoch only grows; an entry may leave once its certificate's expiry plus the longest frame lifetime and the clock tolerance have passed; receivers keep the newest record they verified, also across restarts, and never forget it
+    write_rule: signed again at least every 6 hours and at once on each revocation, with a sequence above the highest in the bucket and at least its issue time in milliseconds since 1970, so an authority restored from a backup never writes a lower one; the revocation epoch only grows; an entry names when the last certificate with its key ends (key_expires_at) and may leave once that time plus replay_ledger_retention_seconds and the clock tolerance have passed; the authority issues no certificate for a revoked key; receivers keep the newest record they verified, also across restarts, never forget it, and keep an entry a newer record leaves out early
   agent_session:
     description: An agent session certificate, issued by the team services that place the agent.
     bucket: UA1_CERTS
@@ -249,7 +255,7 @@ state_records:
     body: state/block_list.schema.json
     max_lifetime_seconds: 604800    # 7 days: a cut-off host keeps using its newest list for its custody window
     fresh_seconds: 900              # 15 minutes: a fresh_check tool runs only with a list signed this recently
-    write_rule: signed again with the next sequence at least every fresh_seconds, even when nothing changed, and at once on each change; states its expiry, at most max_lifetime_seconds after it is written; a newer list may hold fewer entries; every host of the team reads it, and keeps the highest sequence it has seen, also across restarts
+    write_rule: signed again at least every fresh_seconds, even when nothing changed, and at once on each change, with a sequence above the highest in the bucket and at least its issue time in milliseconds since 1970; states its expiry, at most max_lifetime_seconds after it is written; a newer list may hold fewer entries; every host of the team reads it, and keeps the highest sequence it has seen, also across restarts
 
 kinds:
   task.stop:

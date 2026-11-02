@@ -17,6 +17,7 @@
         "certificate_id": "cert_old_host",
         "runtime": "old-host-1",
         "key_id": "test-old-host-key-1",
+        "key_expires_at": "2026-11-20T12:00:00.000Z",
         "membership_epoch": 1,
         "revoked_at": "2026-10-21T12:00:00.000Z",
         "reason": "decommissioned"
@@ -25,6 +26,7 @@
         "certificate_id": "cert_lead_host_1",
         "runtime": "lead-host-1",
         "key_id": "test-lead-key-1",
+        "key_expires_at": "2026-11-21T04:30:00.000Z",
         "membership_epoch": 3,
         "revoked_at": "2026-10-22T04:30:00.500Z",
         "reason": "compromised"
@@ -33,6 +35,6 @@
     "expires_at": "2026-10-23T04:30:00.500Z"
   },
   "algorithm": "ed25519",
-  "body_digest": "40t0uwiTeQ5Nqsp6ExHxsURGV_XieBDM959y2OnL_Rw",
-  "signature": "84mO-sLz2YY1g2EPDx_W4kbhs7zvaunJ2z1Qwv1Cr6Ogqqh0piVfaw7iHPue3gsDSPVNUZ20g9D-b77NN_LtCA"
+  "body_digest": "psMQtygOzJ7RWsfX4e1FPEzT-1hx62bjRsFLPWqa-h0",
+  "signature": "aIOlExbpWS9sCM4HmvYzZ0JVQpuo_JuZOWDf7TytUMWKKYvrsgKYD435fOlqalmQYelBcmhL_eeQnrRoWJeBAQ"
 }

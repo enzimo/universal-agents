@@ -704,6 +704,16 @@ def drop_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None
     schemas["bodies/dlq.notice.schema.json"]["properties"]["reason"]["enum"].remove("bad_authority")
 
 
+def add_temporary_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None:
+    schemas["bodies/dlq.notice.schema.json"]["properties"]["reason"]["enum"].append("revocations_not_current")
+
+
+def temporary_flag(value: object):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["verification_refusals"][0]["temporary"] = value
+    return change
+
+
 def host_ttl(ttl: int | None):
     def change(registry: dict, _transport: dict, _schemas: dict) -> None:
         registry["state_records"]["host"].pop("ttl_seconds")
@@ -734,6 +744,8 @@ def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
 
 @pytest.mark.parametrize(("change", "problem"), [
     (drop_notice_reason, "names every verification refusal"),
+    (add_temporary_notice_reason, "names no temporary refusal"),
+    (temporary_flag(False), "optionally temporary: true"),
     (host_ttl(None), "ttl_seconds is its bucket's"),
     (host_ttl(30), "ttl_seconds is its bucket's"),
     (proof_of_possession_on("agent.pause"), "proves possession"),
@@ -1801,32 +1813,97 @@ def test_a_session_signed_by_a_host_without_team_services_is_refused() -> None:
     assert (refused.value.code, refused.value.at) == ("wrong_issuer", "/writer")
 
 
-def test_a_newer_revocations_record_may_list_fewer_entries_and_an_older_one_never_returns() -> None:
-    """README, "Trust over time": an entry leaves once its certificate can sign nothing; the epoch never falls."""
+def pruned_revocations(sequence: int, issued_at, revocation_epoch: int = 2) -> bytes:
+    """The record that revoked the lead, written again at ``issued_at`` without the lead's entry."""
 
-    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"])
-    lead = store.host_certificate("install_example", "lead-host-1", 3)
-    assert lead is not None and store.revoked(lead)
+    document = json.loads((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_text())
+    document["sequence"], document["issued_at"] = sequence, format_timestamp(issued_at)
+    document["body"]["revocation_epoch"] = revocation_epoch
+    document["body"]["entries"] = [entry for entry in document["body"]["entries"] if entry["certificate_id"] != "cert_lead_host_1"]
+    document["body"]["expires_at"] = format_timestamp(issued_at + timedelta(hours=6))
+    return signed_state(document)
+
+
+def test_an_entry_leaves_the_revocations_record_only_once_every_certificate_with_its_key_ended(caplog) -> None:
+    """README, "Trust over time": an entry stays until its key_expires_at plus the replay retention; the epoch never falls.
+
+    The lead's renewal kept the revoked key and ends after the lead's own certificate, so
+    an entry that left with the lead's own end would let the renewal sign again.
+    """
+
+    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"],
+                                 extra_documents=[renewed_lead_certificate(key_id="test-lead-key-1")])
+    lead, renewal = (store.host_certificate("install_example", "lead-host-1", epoch) for epoch in (3, 4))
+    assert lead is not None and renewal is not None and store.revoked(lead) and store.revoked(renewal)
+    entry = next(item for item in json.loads((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json")
+                                             .read_text())["body"]["entries"] if item["certificate_id"] == "cert_lead_host_1")
+    assert parse_timestamp(entry["key_expires_at"]) == renewal.expires_at > lead.expires_at
+    # A restarted host adds its stored record first, so an older copy written back to the bucket is ignored.
     assert store.add((EXAMPLES / "trust" / "revocations" / "install_example.json").read_bytes(), now=fixtures.NOW) is False
-    assert store.revoked(lead)
-    pruned = json.loads((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_text())
-    pruned["sequence"] = 9
-    pruned["body"]["entries"] = pruned["body"]["entries"][:1]
-    assert store.add(signed_state(pruned), now=fixtures.NOW) is True
-    assert not store.revoked(lead)
-    lower = copy.deepcopy(pruned)
-    lower["sequence"], lower["body"]["revocation_epoch"] = 10, 1
+    early = lead.expires_at + wire_trust.RETENTION + SKEW
+    assert store.add(pruned_revocations(9, early), now=early) is True
+    assert store.revoked(renewal) and store.revoked(lead)
+    assert "left out entry cert_lead_host_1" in caplog.text
+    late = renewal.expires_at + wire_trust.RETENTION + SKEW
+    assert store.add(pruned_revocations(10, late), now=late) is True
+    assert not store.revoked(renewal) and not store.revoked(lead)
+    assert store.add((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_bytes(), now=late) is False
     with pytest.raises(FrameRefused) as refused:
-        store.add(signed_state(lower), now=fixtures.NOW)
+        store.add(pruned_revocations(11, late, revocation_epoch=1), now=late)
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/revocation_epoch")
 
 
-def test_a_restarted_host_adds_its_stored_record_first_so_an_older_copy_is_ignored() -> None:
-    stored = (EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_bytes()
-    restarted = fixtures.trust_store(remove=["revocations/install_example.json"], extra_documents=[stored])
-    assert restarted.add((EXAMPLES / "trust" / "revocations" / "install_example.json").read_bytes(), now=fixtures.NOW) is False
-    lead = restarted.host_certificate("install_example", "lead-host-1", 3)
-    assert lead is not None and restarted.revoked(lead)
+def relabelled_certificate(runtime: str, key_id: str, public_key_of: str, epoch: int = 1) -> bytes:
+    """A certificate for ``runtime`` that names ``key_id`` but holds ``public_key_of``'s public key."""
+
+    document = json.loads(certificate_record(runtime, roles=("worker_host",), epoch=epoch))
+    document["body"]["application_key"] = {"key_id": key_id, "public_key": fixtures.KEYS[public_key_of]["public_key"]}
+    return signed_state({key: value for key, value in document.items() if key not in {"algorithm", "body_digest", "signature"}})
+
+
+def test_a_revoked_public_key_stays_revoked_under_another_key_id_or_runtime() -> None:
+    """README, "Trust over time": a key id is a label, so revoking a certificate revokes its public key everywhere."""
+
+    relabelled = relabelled_certificate("worker-host-9", "relabelled-key-1", "test-lead-key-1")
+    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"], extra_documents=[relabelled])
+    certificate = store.host_certificate("install_example", "worker-host-9", 1)
+    assert certificate is not None and store.revoked(certificate)
+    assert not fixtures.trust_store(extra_documents=[relabelled]).revoked(certificate)
+    # A join presenting the revoked public key under a new key id is refused too.
+    document = join_frame(key_id="relabelled-key-2", public_key_of="test-lead-key-1")
+    data = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    refused = refusal(data, document, {"trust": {"add": ["extra/lead-host-revoked-after-issue.json"]}})
+    assert (refused.code, refused.at) == ("revoked", "/body/application_key/public_key")
+    fixtures.verify(data, document, trust=without_lead_host())
+
+
+def test_a_rotation_to_a_public_key_another_certificate_holds_is_refused() -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    document["body"]["application_key_rotation"]["key"] = {"key_id": "fresh-key-1",
+                                                           "public_key": fixtures.KEYS["test-worker-key-1"]["public_key"]}
+    document["body"]["application_key_rotation"] = wire_frame.sign_renew_key_proof(
+        document, fixtures.private_key("test-worker-key-1"))["body"]["application_key_rotation"]
+    document["idempotency_key"] = registry_key(document)
+    signed = sign_frame(document, fixtures.private_key("test-lead-key-1"))
+    refused = refusal(json.dumps(signed).encode(), signed)
+    assert (refused.code, refused.at) == ("invalid_body", "/body/application_key_rotation/key/public_key")
+
+
+def test_a_join_is_refused_for_a_listed_key_without_its_certificate_or_without_a_current_record() -> None:
+    """The join's own revocation checks: a listed key id whose certificate the store never held, and the current record."""
+
+    document = join_frame()
+    data = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    listed = json.loads((EXAMPLES / "trust" / "extra" / "lead-host-key-revoked.json").read_text())
+    assert {(entry["runtime"], entry["key_id"]) for entry in listed["body"]["entries"]} >= {("lead-host-1", "test-lead-key-1")}
+    store = fixtures.trust_store(remove=["certificates/lead-host-1.json", "sessions/lead.json"],
+                                 add=["extra/lead-host-key-revoked.json"])
+    assert store.certificates_with_key("install_example", "test-lead-key-1") == []
+    refused = refusal(data, document, trust=store)
+    assert (refused.code, refused.at) == ("revoked", "/issuer/key_id")
+    stale = fixtures.trust_store(remove=["certificates/lead-host-1.json", "sessions/lead.json", "revocations/install_example.json"])
+    refused = refusal(data, document, trust=stale)
+    assert (refused.code, refused.at) == ("revocations_not_current", "/issuer/installation")
 
 
 def test_revoking_a_certificate_revokes_every_certificate_of_its_runtime_with_its_key() -> None:
@@ -1863,6 +1940,42 @@ def test_a_receiver_without_a_current_revocations_record_refuses_every_host_but_
     fixtures.verify(data, frame, trust=fixtures.trust_store(now=ends + SKEW,
                                                             extra_documents=[fixtures.current_revocations(ends + SKEW)]),
                     context={"now": format_timestamp(ends + SKEW)})
+
+
+def test_only_installation_traffic_from_the_receivers_own_authority_needs_no_current_record() -> None:
+    """README, "Who sent it", step 4: the exception covers join and renewal replies, not every frame of an authority host."""
+
+    store = fixtures.trust_store(remove=["revocations/install_example.json"])
+    authority, = store.certificates_with_key("install_example", "test-authority-host-key-1")
+    store.require_current_revocations(authority, fixtures.NOW, at="/issuer/installation", installation_traffic=True)
+    with pytest.raises(FrameRefused) as refused:
+        store.require_current_revocations(authority, fixtures.NOW, at="/issuer/installation")
+    assert (refused.value.code, refused.value.at) == ("revocations_not_current", "/issuer/installation")
+    # Another installation's host in the authority role gets no exception, even for installation traffic.
+    peer_store = fixtures.trust_store(remove=["revocations/install_peer.json"])
+    peer_host, = peer_store.certificates_with_key("install_peer", "test-peer-lead-key-1")
+    peer_authority = dataclasses.replace(peer_host, roles=frozenset({"installation_authority"}))
+    with pytest.raises(FrameRefused) as refused:
+        peer_store.require_current_revocations(peer_authority, fixtures.NOW, at="/issuer/installation",
+                                               installation_traffic=True)
+    assert refused.value.code == "revocations_not_current"
+
+
+def test_a_frame_from_another_installation_needs_a_current_record_of_that_installation() -> None:
+    frame = fixtures.example_frame("task.stop", "from-peer")
+    data = json.dumps(frame).encode()
+    fixtures.verify(data, frame)
+    refused = refusal(data, frame, trust=fixtures.trust_store(remove=["revocations/install_peer.json"]))
+    assert (refused.code, refused.at) == ("revocations_not_current", "/issuer/installation")
+
+
+def test_a_temporary_refusal_is_no_dead_letter_reason() -> None:
+    """README, "Who sent it" and "Dead letters": a receiver waits for a current record and sets nothing aside for it."""
+
+    assert kinds.TEMPORARY_REFUSALS == frozenset({"revocations_not_current"})
+    reasons = set(json.loads((CONTRACT / "schemas/bodies/dlq.notice.schema.json").read_text())["properties"]["reason"]["enum"])
+    assert set(kinds.VERIFICATION_REFUSALS) - kinds.TEMPORARY_REFUSALS <= reasons
+    assert not reasons & kinds.TEMPORARY_REFUSALS
 
 
 def test_the_revocations_record_is_never_forgotten() -> None:

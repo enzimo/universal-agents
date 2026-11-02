@@ -785,13 +785,14 @@ class RevocationsStateEntriesItem(WireModel):
     certificate_id: RecordId
     runtime: RuntimeId
     key_id: KeyId
+    key_expires_at: Timestamp
     membership_epoch: Epoch
     revoked_at: Timestamp
     reason: Literal['compromised', 'decommissioned', 'quarantined']
 
 
 class RevocationsState(WireModel):
-    "An installation's revoked host certificates and their keys. A listed certificate, and every certificate of the same runtime with the same key id, stops every frame and record that relies on it and was not already admitted, whenever that frame or record says it was issued. The authority signs the record again at least every 6 hours, and it lasts at most a day (registry max_lifetime_seconds); a receiver without a current record refuses other hosts' frames (README, \"Who sent it\")."
+    "An installation's revoked host certificates and their keys. A listed certificate, every certificate of the same runtime with the same key id, and every certificate of the installation with the same public key stop every frame and record that relies on them and was not already admitted, whenever that frame or record says it was issued. The authority signs the record again at least every 6 hours, and it lasts at most a day (registry max_lifetime_seconds); a receiver without a current record refuses other hosts' frames (README, \"Who sent it\")."
 
     installation: InstallationId
     revocation_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
@@ -1468,7 +1469,7 @@ class DlqNoticeBody(WireModel):
     "A receiver set a message aside; the exact bytes are at dlq.raw.<copy>, and the notice holds identifiers only."
 
     copy_id: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
-    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'revocations_not_current', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
+    reason: Literal['too_large', 'malformed', 'unknown_key', 'bad_signature', 'bad_digest', 'revoked', 'epoch_too_old', 'wrong_issuer', 'wrong_sender', 'wrong_team', 'wrong_audience', 'subject_mismatch', 'expired', 'not_yet_valid', 'replayed', 'unknown_kind', 'invalid_body', 'bad_authority', 'access_denied', 'handler_failed', 'delivery_limit', 'upgrade_drain']
     pointer: Union[Annotated[str, StringConstraints(pattern='^(/[a-z0-9_]{1,64}){0,16}$')], MISSING] = Field(default=MISSING)
     original: DlqNoticeBodyOriginal
     claimed: Union[DlqNoticeBodyClaimed, MISSING] = Field(default=MISSING)

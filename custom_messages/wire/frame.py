@@ -364,8 +364,8 @@ def _verify_signature(raw: Mapping[str, Any], frame: Frame, public_key: Ed25519P
 def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore, now: datetime) -> None:
     """A join speaks for its own new host only (README, "Installation traffic").
 
-    Its key must not be revoked, and the receiver needs a current revocations record to
-    know that. It names the installation scope, no agent, epoch zero and an unreserved
+    Its key must not be revoked, by its key id or by its public key under any key id,
+    and the receiver needs a current revocations record to know that. It names the installation scope, no agent, epoch zero and an unreserved
     runtime id; its body asks for that runtime in that installation, and only for roles a
     joining host may hold (the kind's senders, which the receiver cannot check against a
     certificate the host does not have yet).
@@ -375,6 +375,10 @@ def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: Tr
     if trust.key_revoked(issuer.installation, issuer.runtime, issuer.key_id) or any(
             trust.revoked(certificate) for certificate in trust.certificates_with_key(issuer.installation, issuer.key_id)):
         raise FrameRefused("revoked", "the presented key's certificate is revoked", at="/issuer/key_id")
+    # A key id is only a label: the revoked key itself stays refused under a new one.
+    if trust.public_key_revoked(issuer.installation, ed25519_public_key(raw["body"]["application_key"]["public_key"])):
+        raise FrameRefused("revoked", "the presented public key belongs to a revoked certificate",
+                           at="/body/application_key/public_key")
     if not trust.revocations_current(issuer.installation, now):
         raise FrameRefused("revocations_not_current", "no current revocations record of this installation",
                            at="/issuer/installation")
@@ -408,20 +412,23 @@ def _session(frame: Frame, trust: TrustStore) -> Optional[AgentSession]:
     return trust.agent_session(frame.issuer.installation, frame.issuer.team, frame.issuer.session)
 
 
-def _verify_revocation(certificate: HostCertificate, session: Optional[AgentSession], trust: TrustStore,
+def _verify_revocation(frame: Frame, certificate: HostCertificate, session: Optional[AgentSession], trust: TrustStore,
                        now: datetime) -> None:
     """Neither certificate is revoked, and the receiver's revocations record of the issuer's installation is current.
 
     A revoked certificate, or key, stops every frame not yet admitted, whatever issue
     time the frame gives: the sender chooses that time. The session's signer belongs to
-    the issuer's installation, so one current record covers both.
+    the issuer's installation, so one current record covers both. Only installation
+    traffic (the installation scope) from the receiver's own authority needs no current
+    record, so a host whose record expired can still renew.
     """
 
     if trust.revoked(certificate):
         raise FrameRefused("revoked", "the issuer's certificate is revoked", at="/issuer/key_id")
     if session is not None and trust.revoked(session.signer):
         raise FrameRefused("revoked", "the certificate that signed the agent session is revoked", at="/issuer/session")
-    trust.require_current_revocations(certificate, now, at="/issuer/installation")
+    trust.require_current_revocations(certificate, now, at="/issuer/installation",
+                                      installation_traffic=frame.issuer.team == INSTALLATION_SCOPE)
 
 
 def _verify_epochs(certificate: HostCertificate, spec: Optional[KindSpec], trust: TrustStore) -> None:
@@ -632,9 +639,11 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
     """A renewal that rotates keys names a new key id and proves possession of that key over the whole renewal.
 
     The key id is new to the installation: not the signing certificate's, not another
-    host's, not an authority key. The one exception is the key of the certificate that
-    already replaced the signing one, with the same public key: what a retry after a lost
-    reply names. The authority answers it with that certificate.
+    host's, not an authority key. So is the public key: no held certificate holds it
+    under another key id, so a revoked key cannot return under a new label. The one
+    exception is the key of the certificate that already replaced the signing one, with
+    the same public key: what a retry after a lost reply names. The authority answers it
+    with that certificate.
     """
 
     if raw["kind"] != _HOST_RENEW or _KEY_ROTATION not in raw["body"]:
@@ -654,6 +663,13 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
                 or (used and not retried)):
             raise FrameRefused("invalid_body", "a rotation names a key id the installation does not use yet",
                                at=f"/body/{_KEY_ROTATION}/key/key_id")
+        try:
+            held = trust.certificates_with_public_key(certificate.installation, ed25519_public_key(str(key.get("public_key"))))
+        except ValueError:
+            held = []  # the proof check below refuses a key that is not one
+        if any(other.key_id != key_id for other in held):
+            raise FrameRefused("invalid_body", "a rotation names a public key the installation does not use yet",
+                               at=f"/body/{_KEY_ROTATION}/key/public_key")
     try:
         public_key = ed25519_public_key(rotation["key"]["public_key"])
         public_key.verify(b64url_decode(rotation["proof"]), renew_key_proof_bytes(raw))
@@ -987,7 +1003,7 @@ def verify_frame(
         _verify_join(raw, frame, spec, trust, now)
     else:
         session = _session(frame, trust)
-        _verify_revocation(certificate, session, trust, now)
+        _verify_revocation(frame, certificate, session, trust, now)
         _verify_epochs(certificate, spec, trust)
         _verify_issuer(frame, spec, certificate, session, issued_at, is_reply, answering)
         if not is_reply:

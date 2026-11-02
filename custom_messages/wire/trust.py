@@ -48,8 +48,9 @@ when that is. ``TrustStore.held`` counts what the store holds, for health checks
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Mapping, NamedTuple, Optional
 
@@ -79,6 +80,8 @@ from custom_messages.wire.refusals import FrameRefused, refused_by
 from custom_messages.wire.spec import StateSpec, newer_minor, prune
 from custom_messages.wire.values import parse_timestamp
 
+logger = logging.getLogger(__name__)
+
 SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
 OVERLAP = timedelta(seconds=CERTIFICATE_OVERLAP_SECONDS)
 # Longer than any frame lasts (transport.yaml replay_ledger_retention_seconds): once a
@@ -100,8 +103,8 @@ HOST, AGENT, PLACEMENT, TEAM_VIEW, BLOCK_LIST = "host", "agent", "placement", "t
 TRUST_RECORDS = frozenset({CERTIFICATE, REVOCATIONS, AGENT_SESSION, AGREEMENT})
 WRITER_AUTHORITY = "authority"
 # The installation authority's host role: it issues certificates and the revocations
-# record, so its frames are accepted without a current record, and a host whose record
-# expired can still renew and reconnect.
+# record, so its installation traffic (join and renewal replies) is accepted without a
+# current record, and a host whose record expired can still renew and reconnect.
 AUTHORITY_HOST_ROLE = "installation_authority"
 
 
@@ -248,13 +251,35 @@ class VerifiedRecord:
 
 
 @dataclass(frozen=True)
+class _RevokedEntry:
+    """One listed certificate: revoking it revokes its key, so the entry stays until every certificate with that key ended."""
+
+    certificate_id: str
+    runtime: str
+    key_id: str
+    # When the last certificate with this key ends (README, "Trust over time").
+    key_expires_at: datetime
+
+    def needed_at(self, moment: datetime) -> bool:
+        """Whether a frame its key signed could still be accepted at ``moment``, so the entry may not leave yet."""
+
+        return moment - self.key_expires_at < RETENTION + SKEW
+
+
+@dataclass(frozen=True)
 class _Revocations:
     revocation_epoch: int
-    certificate_ids: frozenset[str]
-    # (runtime, key id) of every listed certificate: revoking a certificate revokes its key.
-    keys: frozenset[tuple[str, str]]
+    entries: frozenset[_RevokedEntry]
     issued_at: datetime
     expires_at: datetime
+    # Looked up for every frame, so worked out once from the entries.
+    certificate_ids: frozenset[str] = field(init=False)
+    # (runtime, key id) of every listed certificate: revoking a certificate revokes its key.
+    keys: frozenset[tuple[str, str]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "certificate_ids", frozenset(entry.certificate_id for entry in self.entries))
+        object.__setattr__(self, "keys", frozenset((entry.runtime, entry.key_id) for entry in self.entries))
 
 
 class _Held(NamedTuple):
@@ -288,6 +313,8 @@ class TrustStore:
         self._replacements: dict[tuple[str, str, str], datetime] = {}
         # The latest time ``forget`` was given: records it would forget are not added again.
         self._forgotten_at: Optional[datetime] = None
+        # Public keys of listed certificates, by installation; rebuilt after certificates or revocations change.
+        self._revoked_public_keys: dict[str, frozenset[bytes]] = {}
 
     # -- lookups ---------------------------------------------------------------------------------
 
@@ -320,9 +347,33 @@ class TrustStore:
         return agreement is not None and key_id in agreement.authority_keys
 
     def revoked(self, certificate: HostCertificate) -> bool:
-        """Whether its installation's revocations list the certificate, or another certificate of its runtime with its key."""
+        """Whether its installation's revocations list the certificate or its key.
 
-        return self._listed(certificate.installation, certificate.certificate_id, certificate.runtime, certificate.key_id)
+        Its key is revoked when a listed certificate of its runtime has its key id, or
+        when a listed certificate the store holds has its public key under any key id
+        or runtime: a key id is only a label, so a new label does not free a revoked key.
+        """
+
+        return (self._listed(certificate.installation, certificate.certificate_id, certificate.runtime, certificate.key_id)
+                or self.public_key_revoked(certificate.installation, certificate.public_key))
+
+    def public_key_revoked(self, installation: str, public_key: Ed25519PublicKey) -> bool:
+        """Whether a listed certificate of the installation that the store holds has this public key."""
+
+        keys = self._revoked_public_keys.get(installation)
+        if keys is None:
+            keys = self._revoked_public_keys[installation] = frozenset(
+                other.public_key.public_bytes_raw() for other in self._certificates.values()
+                if other.installation == installation
+                and self._listed(other.installation, other.certificate_id, other.runtime, other.key_id))
+        return public_key.public_bytes_raw() in keys
+
+    def certificates_with_public_key(self, installation: str, public_key: Ed25519PublicKey) -> list[HostCertificate]:
+        """Every held certificate of the installation that holds this public key, under any key id."""
+
+        raw = public_key.public_bytes_raw()
+        return [self._with_replacement(certificate) for certificate in self._certificates.values()
+                if certificate.installation == installation and certificate.public_key.public_bytes_raw() == raw]
 
     def key_revoked(self, installation: str, runtime: str, key_id: str) -> bool:
         """Whether a listed certificate of this runtime had this key, so every certificate with it is revoked."""
@@ -341,14 +392,20 @@ class TrustStore:
         revocations = self._revocations.get(installation)
         return revocations is not None and within(revocations.issued_at, revocations.expires_at, now)
 
-    def require_current_revocations(self, certificate: HostCertificate, now: datetime, at: str) -> None:
+    def require_current_revocations(self, certificate: HostCertificate, now: datetime, at: str, *,
+                                    installation_traffic: bool = False) -> None:
         """Refuse a host's frame or report as ``revocations_not_current`` unless the record of its installation is current.
 
-        The receiver's own installation authority is the exception: it writes the
-        record, and a host whose record expired needs its replies to renew.
+        The one exception is installation traffic (``installation_traffic``: join and
+        renewal replies, in the installation scope) from the receiver's own installation
+        authority: it writes the record, and a host whose record expired needs those
+        replies to renew. The authority's other frames and reports need a current record
+        like anyone's. The refusal is temporary: the receiver waits for a current record
+        and sets nothing aside for it (README, "Who sent it").
         """
 
-        if certificate.installation == self.installation and AUTHORITY_HOST_ROLE in certificate.roles:
+        if (installation_traffic and certificate.installation == self.installation
+                and AUTHORITY_HOST_ROLE in certificate.roles):
             return
         if not self.revocations_current(certificate.installation, now):
             raise FrameRefused("revocations_not_current",
@@ -562,13 +619,16 @@ class TrustStore:
         held_sequence, held_digest = (held.sequence, held.digest) if held else (0, "")
         if held_sequence == document.sequence and held_digest != record.digest:
             raise FrameRefused("replayed", "the writer used this sequence for other content", at="/sequence")
-        revoked = document.record == CERTIFICATE and self._listed(
+        revoked = document.record == CERTIFICATE and (self._listed(
             record.body.installation, record.body.certificate_id, record.body.runtime, record.body.application_key.key_id)
+            or self.public_key_revoked(record.body.installation, _public_key(record.body.application_key.public_key,
+                                                                             "/body/application_key/public_key")))
         if held_sequence >= document.sequence or (held is None and not revoked and self._forgettable(document.record, issued_at)):
             return False
         keeper = {CERTIFICATE: self._keep_certificate, REVOCATIONS: self._keep_revocations,
                   AGENT_SESSION: self._keep_session, AGREEMENT: self._keep_agreement}[document.record]
         entry = keeper(document, record.body, record.signer)
+        self._revoked_public_keys.clear()
         latest = issued_at if held is None else max(issued_at, held.issued_at)
         self._sequences[slot] = _Held(document.sequence, record.digest, latest, entry)
         return True
@@ -598,6 +658,7 @@ class TrustStore:
                                               AGREEMENT: self._agreements}
         for slot in forgotten:
             del lookups[slot[0]][self._sequences.pop(slot).entry]
+        self._revoked_public_keys.clear()
         # A replacement still shortens the replaced certificate's overlap while either is held.
         needed = {(certificate.installation, certificate.runtime, certificate.certificate_id)
                   for certificate in self._certificates.values()}
@@ -760,18 +821,32 @@ class TrustStore:
         return entry
 
     def _keep_revocations(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> str:
-        """Keep a newer revocations record. It may list fewer entries: one leaves once its certificate can sign nothing."""
+        """Keep a newer revocations record. It may list fewer entries: one leaves once nothing its key signed can be accepted.
+
+        An entry the newer record leaves out before its ``key_expires_at`` plus the replay
+        retention and the clock tolerance is kept, with a warning: a certificate with that
+        key could otherwise sign again (README, "Trust over time").
+        """
 
         self._same_installation(document, body.installation)
         self._expect_key(document, f"revocations.{body.installation}")
         held = self._revocations.get(body.installation)
         if held is not None and body.revocation_epoch < held.revocation_epoch:
             raise FrameRefused("invalid_body", "the revocation epoch only grows", at="/body/revocation_epoch")
+        issued_at = parse_timestamp(document.issued_at)
+        entries = {_RevokedEntry(entry.certificate_id, entry.runtime, entry.key_id, parse_timestamp(entry.key_expires_at))
+                   for entry in body.entries}
+        listed = {(entry.certificate_id, entry.runtime, entry.key_id) for entry in entries}
+        early = {entry for entry in (held.entries if held else ())
+                 if (entry.certificate_id, entry.runtime, entry.key_id) not in listed and entry.needed_at(issued_at)}
+        for entry in sorted(early, key=lambda item: item.certificate_id):
+            logger.warning("revocations record %s of %s left out entry %s (runtime %s, key %s) before its key's certificates "
+                           "can sign nothing; keeping it until %s plus the replay retention",
+                           document.sequence, body.installation, entry.certificate_id, entry.runtime, entry.key_id,
+                           entry.key_expires_at.isoformat())
         self._revocations[body.installation] = _Revocations(
-            revocation_epoch=body.revocation_epoch,
-            certificate_ids=frozenset(entry.certificate_id for entry in body.entries),
-            keys=frozenset((entry.runtime, entry.key_id) for entry in body.entries),
-            issued_at=parse_timestamp(document.issued_at), expires_at=parse_timestamp(body.expires_at))
+            revocation_epoch=body.revocation_epoch, entries=frozenset(entries | early),
+            issued_at=issued_at, expires_at=parse_timestamp(body.expires_at))
         return str(body.installation)
 
     def _keep_session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> tuple[str, str, str]:

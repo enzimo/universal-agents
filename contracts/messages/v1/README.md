@@ -326,15 +326,24 @@ frame it checks, in the registry's order:
    Another installation needs an agreement.
 2. **Signature and digest** with that certificate's key.
 3. **Revocation (`revoked`):** neither the certificate nor the one that signed the
-   frame's agent session is revoked, by its id or by its runtime and key id, whenever it
-   was revoked and whatever issue time the frame gives: a revoked key still stops queued
-   work, because the sender chooses that time.
+   frame's agent session is revoked, by its id, by its runtime and key id, or by its public
+   key, whenever it was revoked and whatever issue time the frame gives: a revoked key
+   still stops queued work, because the sender chooses that time.
 4. **Current revocations (`revocations_not_current`):** the receiver holds a revocations
    record of the issuer's installation that is current at its clock, within the clock
    tolerance. With none, or only an expired one, it cannot know what was revoked lately,
-   so it refuses frames from every host except its own installation authority, whose
-   replies a host needs to renew its certificate. A host that reconnects reads the current
-   record first ("Trust over time").
+   so it refuses every frame except installation traffic (join and renewal replies) from
+   its own installation authority, which a host needs to renew its certificate. A host
+   that reconnects reads the current record first ("Trust over time").
+
+   This refusal is temporary (`temporary` in the registry): the receiver lacks a record,
+   and the frame may be valid. It answers a request with it, and never sets queued work
+   aside for it, so `revocations_not_current` is no dead-letter reason. A host without a
+   current record of its own installation stops pulling queued work until it reads one;
+   what it already pulled stays unacknowledged and comes back when it pulls again. A frame
+   from another installation whose record is not current is left unacknowledged with a
+   negative acknowledgement and a delay of at least a minute, and is set aside only when it
+   reaches the consumer's delivery limit (`delivery_limit`).
 5. **Epochs (`epoch_too_old`):** for request/reply messages and events, the certificate's
    epochs meet the receiver's minimum for that runtime and installation. Queued work
    (durable and dead-letter frames) is judged by the certificate valid when it was issued
@@ -894,9 +903,10 @@ A team `config.yaml` or `debug.env` cannot supply this isolated authorization fi
 
 A queued message can wait days, for example while a host is cut off.
 - **Certificate at issue time.** Receivers verify every frame and state record with the writer's certificate that was valid when it was issued, even if that certificate has expired since.
-- **Revocation.** A certificate on the installation's revocations record, and every other certificate of its runtime with its key id, refuses all of its frames and records, whenever it was revoked: revoking a certificate revokes its key.
-- **The revocations record expires.** The installation authority signs it again with the next sequence at least every 6 hours and at once on each revocation, and each version is current for at most 24 hours (registry `max_lifetime_seconds`; its body's `expires_at`). A receiver without a current record of an installation refuses that installation's hosts, except its own installation authority (`revocations_not_current`). Hosts store the newest record they verified and never accept a lower sequence, also after a restart: a restarted host adds its stored record before any it reads from `UA1_CERTS`, so an older copy written back to the bucket is ignored. The edge adapter copies another installation's record, which that installation's authority signs again on the same schedule.
-- **Entries leave the record.** An entry may leave once the revoked certificate's own expiry plus the longest frame lifetime (30 days, a dead-letter notice's) and the clock tolerance have passed: by then nothing it signed can still be accepted. Receivers accept a newer record with fewer entries; the revocation epoch still never falls.
+- **Revocation.** A certificate on the installation's revocations record refuses all of its frames and records, whenever it was revoked, and so does every other certificate with its key: of its runtime with its key id, or of its installation with its public key under any key id or runtime. Revoking a certificate revokes its key. The authority issues no certificate for a revoked key, so the certificates that hold it are known when it is revoked.
+- **The revocations record expires.** The installation authority signs it again with the next sequence at least every 6 hours and at once on each revocation, and each version is current for at most 24 hours (registry `max_lifetime_seconds`; its body's `expires_at`). A receiver without a current record of an installation refuses that installation's hosts, except installation traffic from its own installation authority, and waits for a current record (`revocations_not_current`, "Who sent it"). Hosts store the newest record they verified and never accept a lower sequence, also after a restart: a restarted host adds its stored record before any it reads from `UA1_CERTS`, so an older copy written back to the bucket is ignored. The edge adapter copies another installation's record, which that installation's authority signs again on the same schedule.
+- **Entries leave the record.** Each entry names `key_expires_at`: when the last certificate with its key ends, its own or a renewal's that kept the key. An entry may leave once that time plus `replay_ledger_retention_seconds` (30 days and a minute, longer than any frame lasts) and the clock tolerance have passed: by then nothing its key signed can still be accepted. An entry that left with only its own certificate's end would let a renewal with the same key and a later end sign again. Receivers accept a newer record with fewer entries; the revocation epoch still never falls. A receiver that holds an entry a newer record leaves out earlier keeps it until that time and logs a warning (`TrustStore.add`).
+- **Sequences never go back.** Readers keep the highest sequence of the revocations record and of the block list, also across restarts. A writer therefore takes each new sequence above the highest it finds in the record's bucket and at least the record's `issued_at` in milliseconds since 1970. An installation authority or team services host restored from a backup, or rebuilt with empty storage, then still writes above every record it wrote before, and receivers do not refuse its records as `replayed` until the record they hold expires.
 - **Epochs.** The receiver's minimum membership and revocation epochs apply to certificate-authenticated request/reply messages and events only. Queued work is never refused for an old epoch. Joining proves key possession without a certificate, so a join's epoch zero is accepted on retries after the key becomes known; revocation still refuses the key.
 - **Renewed certificates.** Every renewal, with or without a new key, gets a certificate at a higher membership epoch that names the old one in `replaces`. The old certificate stays in `UA1_CERTS` for queued work, but signs new frames only until `certificate_overlap_seconds` (5 minutes) after its replacement was issued, so frames already on their way when a host renews are still accepted. A receiver that wants the old epoch gone for requests and events sooner raises its minimum epoch.
 - **Expiry.** Each delivery class has an expiry in `transport.yaml`. Receivers keep their replay record at least as long as the longest expiry.
@@ -916,7 +926,7 @@ Joining an installation and renewing a certificate use the address `ua.v1._insta
 
 **Joining.** A new host has no certificate yet. It signs `host.join` with the key the request presents; the registry marks this as `verification: proof_of_possession`, and it applies to that one operation only. A receiver checks:
 - the join comes from the receiver's own installation and names, as its issuer's key, the key its body presents, which is not an authority key (`unknown_key`);
-- a key id the trust store already knows keeps its public key (`unknown_key`), and a revoked one stops the join (`revoked`);
+- a key id the trust store already knows keeps its public key (`unknown_key`), and a revoked one stops the join (`revoked`), as does a public key that a revoked certificate holds under any key id (`revoked`, at `/body/application_key/public_key`);
 - the issuer names `_install`, no agent, epoch zero and a runtime id that does not start with `x-` or `_`, and the body asks for that runtime in that installation (`wrong_issuer`);
 - the body asks only for roles among the kind's senders, never the installation authority's (`wrong_sender`).
 
@@ -947,7 +957,10 @@ The host then keeps the certificate with `TrustStore.add`. Later requests are ve
 (an application key) and `proof` (an Ed25519 signature). Omitting the object keeps
 the application key. The new key needs a key id the installation does not use yet: not
 the host's current key id, another host's, or an authority key's (`invalid_body` at
-`/body/application_key_rotation/key/key_id`). The one exception is a retry after a lost
+`/body/application_key_rotation/key/key_id`). Its public key is new too: no certificate the
+receiver holds has it under another key id (`invalid_body` at
+`/body/application_key_rotation/key/public_key`), so a revoked key cannot come back under a
+new key id. The one exception is a retry after a lost
 reply: the key id of the certificate that already replaced the signing one, with the same
 public key, which is what a retry after a lost reply names; the authority answers it with
 that certificate. The renewed certificate has a higher membership epoch, like every renewal.
@@ -977,7 +990,7 @@ Hosts, agents, placements, the team view and the block list are key-value record
 - the body, its digest and an Ed25519 signature over the domain prefix `universal-agents/state-record/v1` and a newline, followed by the RFC 8785 canonical JSON of the document without its signature.
 
 The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), its body schema, for records that end how long after it is written a record may end (`max_lifetime_seconds`, "Trust over time"), and for records that readers judge by age how long one counts as fresh (`fresh_seconds`). The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
-- **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. The reader holds a current revocations record of the writer's installation, unless the writer is its own installation authority (`revocations_not_current`). Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
+- **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. The reader holds a current revocations record of the writer's installation (`revocations_not_current`), whoever the writer is: only the authority's installation traffic needs none. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
 - **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current. A report with a longest lifetime (the block list, 7 days) states its expiry, within that lifetime of being written (`invalid_body` at `/expires_at`).
 - **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
@@ -1006,7 +1019,7 @@ What each record says, and what `TrustStore.verify` checks about it:
 A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in `UA1_DLQ` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
 - **The notice holds identifiers only:**
   - the copy id, which its subject also names;
-  - the reason: a verification refusal code, or `handler_failed`, `delivery_limit` or `upgrade_drain` (the generator checks that the list names every refusal code);
+  - the reason: a verification refusal code, or `handler_failed`, `delivery_limit` or `upgrade_drain` (the generator checks that the list names every refusal code except the temporary `revocations_not_current`, for which nothing is set aside);
   - the refusal's JSON pointer, up to the last field the receiver's schema knows (`FrameRefused.known_at`): an unknown field is named by the object that holds it, so a name the sender chose never reaches the notice;
   - where the message sat in its stream;
   - the set-aside message's own unverified claims: kind, message id, issuer team and runtime, protocol;

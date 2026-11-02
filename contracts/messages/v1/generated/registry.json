@@ -5774,7 +5774,7 @@
       "signer_roles": [
         "team_services"
       ],
-      "write_rule": "signed again with the next sequence at least every fresh_seconds, even when nothing changed, and at once on each change; states its expiry, at most max_lifetime_seconds after it is written; a newer list may hold fewer entries; every host of the team reads it, and keeps the highest sequence it has seen, also across restarts",
+      "write_rule": "signed again at least every fresh_seconds, even when nothing changed, and at once on each change, with a sequence above the highest in the bucket and at least its issue time in milliseconds since 1970; states its expiry, at most max_lifetime_seconds after it is written; a newer list may hold fewer entries; every host of the team reads it, and keeps the highest sequence it has seen, also across restarts",
       "writers": [
         "team_services"
       ]
@@ -5840,7 +5840,7 @@
       "key": "revocations.<installation>",
       "max_lifetime_seconds": 86400,
       "signer": "authority",
-      "write_rule": "signed again with the next sequence at least every 6 hours and at once on each revocation; the revocation epoch only grows; an entry may leave once its certificate's expiry plus the longest frame lifetime and the clock tolerance have passed; receivers keep the newest record they verified, also across restarts, and never forget it",
+      "write_rule": "signed again at least every 6 hours and at once on each revocation, with a sequence above the highest in the bucket and at least its issue time in milliseconds since 1970, so an authority restored from a backup never writes a lower one; the revocation epoch only grows; an entry names when the last certificate with its key ends (key_expires_at) and may leave once that time plus replay_ledger_retention_seconds and the clock tolerance have passed; the authority issues no certificate for a revoked key; receivers keep the newest record they verified, also across restarts, never forget it, and keep an entry a newer record leaves out early",
       "writers": [
         "installation_authority",
         "edge_adapter"
@@ -5886,11 +5886,12 @@
     },
     {
       "code": "revoked",
-      "meaning": "the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, by its id or by its runtime and key id, whenever it was revoked and whenever the frame says it was issued"
+      "meaning": "the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, by its id, by its runtime and key id, or by its public key (a listed certificate's public key revokes every certificate of the installation that holds it), whenever it was revoked and whenever the frame says it was issued"
     },
     {
       "code": "revocations_not_current",
-      "meaning": "the receiver holds no revocations record of the issuer's installation that is current at its clock (none, or only an expired one), and the issuer is not a host of the receiver's own installation authority"
+      "meaning": "the receiver holds no revocations record of the issuer's installation that is current at its clock (none, or only an expired one), and the frame is not installation traffic from the receiver's own installation authority",
+      "temporary": true
     },
     {
       "code": "epoch_too_old",
