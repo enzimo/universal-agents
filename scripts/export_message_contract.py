@@ -103,6 +103,8 @@ AGENT_HOSTS = {"lead_host", "worker_host"}
 # scheduler answers run_context.sign at svc.scheduler) never reads copies.
 COPY_READERS = {"team_services": ["team_services"]}
 # The token type bound to one command; its binding always names the command id (`at`).
+# The host role that speaks for outside agents (README, "On behalf of a person").
+OUTSIDE_SPEAKER = "edge_adapter"
 COMMAND_BINDING = "command"
 # The permission set of a host that has not joined yet (it holds no role): it only sends
 # its own join request and reads its own reply inbox (README, "Installation traffic").
@@ -491,6 +493,11 @@ def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str
     for binding in bindings:
         check_binding_parameters(where, entry, schemas, binding)
     check_binding_presenters(where, entry, bindings)
+    # Outside agents never hold a person's token, so the role that speaks for them presents none.
+    if OUTSIDE_SPEAKER in entry["senders"] and any(OUTSIDE_SPEAKER in binding.get("senders", entry["senders"])
+                                                   for binding in bindings):
+        raise ContractError(f"{where}: the {OUTSIDE_SPEAKER} speaks for outside agents and presents no token; leave it "
+                            "out of the binding's senders")
 
 
 def check_binding_parameters(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]],

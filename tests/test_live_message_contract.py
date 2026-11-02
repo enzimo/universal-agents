@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import re
 import secrets
@@ -594,6 +595,10 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         received, = await pool.fetch(1, timeout=2)
         task = fixtures.verify(received.data, run, arrived(run, received))
         assert task.authority is None  # every host running the pool reads its queue
+        # The stream's own time for the frame, which the server sets: a receiver judges a
+        # queued token by it (verify_frame(stored_at=), README "On behalf of a person").
+        stored = received.metadata.timestamp
+        assert stored.tzinfo is not None and abs(datetime.now(timezone.utc) - stored) < timedelta(minutes=1)
         await received.ack_sync(timeout=2)
         confirmed = fixtures.example_frame("custody.confirmed", "claim-with-token")
         await services.nc.jetstream().publish(confirmed["subject"], json.dumps(confirmed).encode(), headers=headers(confirmed))

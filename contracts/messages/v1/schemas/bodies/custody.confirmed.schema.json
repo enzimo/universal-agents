@@ -12,13 +12,13 @@
       "$ref": "../common.schema.json#/$defs/custody_token"
     },
     "sequence": {
-      "description": "The team services number their confirmations for each task from 1, across custody tokens; the holder applies a confirmation only when its sequence is higher than the last one it applied.",
+      "description": "The team services number their confirmations and moves (custody.moved) for each task from 1, across custody tokens; the holder applies a confirmation only when its sequence is higher than the last confirmation or move it applied, so a confirmation delivered after its task moved is ignored.",
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991
     },
     "reason": {
-      "description": "Why it was sent: a claim was recorded, the task was reassigned to this holder, a lapsed or ending window is renewed after the host reconnected, or the task's access list changed.",
+      "description": "Why it was sent: a claim was recorded, the task was reassigned to this holder, a lapsed or ending window is renewed after the host reconnected, or the task's access list changed. Only claimed and reassigned carry the task's authority token, and never to an outside agent.",
       "type": "string",
       "enum": [
         "claimed",

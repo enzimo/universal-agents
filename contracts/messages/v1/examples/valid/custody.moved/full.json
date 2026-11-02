@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "custody.moved",
   "message_id": "01928f3a-7b2c-7113-8000-000000000113",
-  "idempotency_key": "custody.moved:vG24yIZaZstbAz54zGNEU3Sqf0b3qtnF8UuazYKvbOE",
+  "idempotency_key": "custody.moved:xTr7YWVQxTbfJtNCLK_2J9RZZnN4iTa2Np0kGyhTH-U",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -24,8 +24,9 @@
   "body": {
     "task_id": "task_sub_1",
     "custody_token": 4,
+    "sequence": 3,
     "reason": "reassigned"
   },
-  "body_digest": "2uVr4p2ahGTeIMhf8Q6QuX6NZLZQrgeSoLDU2EMJHcA",
-  "signature": "0e5tLuWtEomQxws8qhfXxS7FLroAotBhmLathPlyJlg1o8J9SL-ES78ATttL3ZAQUcKa8MBwiKTgj5OkvA1pAg"
+  "body_digest": "eT2wAvvXMCMzsB4wTfUPY1-rHap3xjXYUhVM0w823NY",
+  "signature": "7yuW00DXztSp7GzP6nq30VH-8GBS954zqfz-BsiJpK_trZ5OMXdkoiOgcUL7X9XLozxw0MC1l19y2eA5agGfDg"
 }

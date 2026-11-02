@@ -2,27 +2,37 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/custody.moved.schema.json",
   "title": "custody.moved body",
-  "description": "Tells a former holder that its task moved; later results are kept as late work.",
+  "description": "Tells a former holder that its task moved, or a later claimant that another claim was recorded first; later results are kept as late work.",
   "type": "object",
   "properties": {
     "task_id": {
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "custody_token": {
-      "$ref": "../common.schema.json#/$defs/custody_token"
+      "$ref": "../common.schema.json#/$defs/custody_token",
+      "description": "The custody token the receiver held or claimed under; a later claimant gets the token of the claim recorded first."
+    },
+    "sequence": {
+      "description": "The next number in the task's numbering of confirmations and moves (custody.confirmed's sequence): the receiver applies no confirmation numbered below it.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
     },
     "reason": {
       "type": "string",
       "enum": [
         "reassigned",
         "adopted_elsewhere",
-        "cancelled"
-      ]
+        "cancelled",
+        "claimed_elsewhere"
+      ],
+      "description": "reassigned: custody.decide moved it; adopted_elsewhere: another holder took it over; cancelled: the request stopped; claimed_elsewhere: another claim for the task was recorded first, so this claimant stops and sends no result (README, \"Custody windows\")."
     }
   },
   "required": [
     "task_id",
     "custody_token",
+    "sequence",
     "reason"
   ],
   "additionalProperties": false

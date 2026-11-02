@@ -1392,11 +1392,12 @@ class CustodyDecideReplyNotAllowed(WireModel):
 
 
 class CustodyMovedBody(WireModel):
-    "Tells a former holder that its task moved; later results are kept as late work."
+    "Tells a former holder that its task moved, or a later claimant that another claim was recorded first; later results are kept as late work."
 
     task_id: RecordId
     custody_token: CustodyToken
-    reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled']
+    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled', 'claimed_elsewhere']
 
 
 class DebugDumpBody(WireModel):

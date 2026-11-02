@@ -392,10 +392,17 @@ An authority token (`authority` in the frame) proves that work acts for a person
 - It reaches only the task's holder, in the holder's own inbox. A worker pool's queue is
   read by every host that runs the pool, so a `task.request` to a pool carries no token
   (registry `authority_by_address`); its copy to the team services does. When an agent
-  claims the task, or `custody.decide` reassigns it, the team services record the custody
-  and send the holder `custody.confirmed` at `work.agent.<agent>`: the task id, its
-  custody token and custody window ("Custody windows"), and the task's authority token
-  when the work has one.
+  claims the task and the team services count the claim ("Claims"), or `custody.decide`
+  reassigns it, they record the custody and send the holder `custody.confirmed` at
+  `work.agent.<agent>`: the task id, its custody token and custody window ("Custody
+  windows"), and the task's authority token when the work has one. Only these
+  confirmations, reason `claimed` or `reassigned`, carry the token; a renewed window or a
+  new access list (`renewed`, `access_changed`) carries none, so a window can be renewed
+  after the token has ended.
+- It never reaches an outside agent. An outside agent's adapter receives
+  `custody.confirmed` at `work.edge.<edge>` without the token, refuses any frame that
+  carries one (`bad_authority`), and presents none itself: no binding lists the
+  `edge_adapter` role among its senders, which the generator checks.
 - It is bound to one root task, one command, or one access request (a person's decision
   on it), and lasts at most `authority_token_max_seconds`. A command token lasts at most
   `command_token_max_seconds` (300 seconds): the gateway signs one for each command, and
@@ -418,9 +425,13 @@ scheduler certificate serving its audience team and known to be unrevoked (the r
 holds a current revocations record), names a schedule without a
 scheduler's signature, names neither a person nor a schedule, names another team than the
 frame's issuer, lasts longer than its limit, or was not valid when the frame was issued.
-It also refuses a token that is not valid when the frame is received, by the receiver's
-clock within the clock tolerance: a durable frame dated back cannot carry a token that
-had already expired.
+It also refuses a token that was not valid when the frame reached it, within the clock
+tolerance: for queued work, when the stream stored the frame (`verify_frame(stored_at=)`,
+JetStream's message timestamp, which the server sets and the sender cannot); for
+requests and events, and for a frame read from storage without that time, by the
+receiver's clock. A durable frame dated back therefore cannot carry a token that had
+already expired when it was sent, while a person's decision, a stop or a custody
+confirmation that waits in a queue past its token's end is still accepted.
 
 **Who may present a token.** A receiver accepts an authority token only from the current
 holder of the task the token is bound to, or of a task under that root task, and a
@@ -551,7 +562,27 @@ gateway checks the same before it sends.
 **After a move.** The former holder gets `custody.moved`. Whatever it sends later is kept as
 late work, which the gateway and the team services recognise by its custody token and the
 team view. With these rules, two holders act outside the team at the same time only after a
-person's override.
+person's override. `custody.moved` carries the next `sequence` of the task's confirmations,
+so a confirmation for the old custody that is delivered after the move, a renewal sent just
+before it for example, has a lower sequence and is ignored.
+
+**Claims.** A claim (`task.claimed`, with its copy to the team services) asks for custody;
+custody, and with it the person's token, come only from the team services' answer. They
+count a claim only when:
+1. its frame's agent session places the claiming agent on the sending host (`verify_frame`
+   checks this);
+2. the task is one they hold a copy of, sent to that agent or to a worker pool that the
+   agent's host runs by the team's placements;
+3. no other claim for the task's current dispatch is recorded. The first recorded claim
+   wins.
+
+A later claimant, for example a second host that received the same pool task after an
+acknowledgement deadline passed, gets `custody.moved` with reason `claimed_elsewhere` and
+the winner's custody token; it stops the task and sends no result. A claim that does not
+count gets no confirmation, and the team services record why. A claim whose task copy has
+not been recorded yet stays unacknowledged and is taken again after `ack_wait_seconds`; the
+sender publishes the copy first ("Durable copies"), so this happens only when the copy's own
+handling failed.
 
 ## Access on remote hosts
 
@@ -817,7 +848,8 @@ absent optional field is `null`. For example `task.stop` lists `[/body/task_id,
   results on in their own numbering. A refusal's key names its sender, because several
   receivers can refuse one frame. The team services send several custody confirmations
   for one custody token (a renewed window, a new access list), so a confirmation's key
-  names its sequence too.
+  names its sequence too. A move's key names the task and the same sequence, since two
+  claimants that lost can be told under one custody token.
 
 The Python helper is `custom_messages.wire.frame.idempotency_key(kind, *values)`. A
 receiver recomputes the key after checking the body and refuses a different one as
@@ -838,7 +870,10 @@ cannot read the requester's inbox; a kind's `copy_to` addresses get a second fra
   stream drops a repeated `Nats-Msg-Id` on any of its subjects within its duplicate
   window, and an edge delivery and its copy share `UA1_WORK`, so a copy with its
   original's key would be lost;
-- saved before publishing and retried unchanged, like any durable frame.
+- saved before publishing and retried unchanged, like any durable frame;
+- published before the frame for the agent, pool or edge, which the sender publishes only
+  after the stream acknowledged the copy, so the team services hold a task before anyone
+  can claim it ("Claims").
 
 The team services read it there, and no other role does: the scheduler serves the same
 target only to answer `run_context.sign`. A copy's reader does not become a receiver of the
@@ -870,8 +905,8 @@ Each file in `examples/invalid/` describes one refusal:
   `record_signing: before` keeps the signature of a state record the body carries
   (a reply's certificate); `after_signing` respells a value with the same bytes;
 - `text_changes` and `pad_to_bytes`: edits to the serialized text;
-- `context`: `receiver` fields, `now`, `arrived_on`, `headers`, `replay` (`digest` held
-  for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`; the
+- `context`: `receiver` fields, `now`, `stored_at` (when a stream stored a queued frame),
+  `arrived_on`, `headers`, `replay` (`digest` held for the frame's key), `trust` (`add` and `remove`, relative to `examples/trust/`; the
   receiver keeps its records at `now`), `minimum_epochs` and `answering` (a valid example,
   or null for none);
 - `frame_text`: the frame exactly as received, written by the script.

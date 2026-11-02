@@ -744,6 +744,9 @@
         "credential_form_request": {
           "$ref": "#/components/messages/credential_form_request"
         },
+        "custody_confirmed": {
+          "$ref": "#/components/messages/custody_confirmed"
+        },
         "custody_moved": {
           "$ref": "#/components/messages/custody_moved"
         },
@@ -1222,7 +1225,7 @@
             }
           ]
         },
-        "summary": "Tells a task's holder that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list, and with the task's authority token when the work has one."
+        "summary": "Tells a task's holder, an agent or an outside agent's adapter, that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list. A confirmation that gives custody (claimed, reassigned) carries the task's authority token when the work has one, except to an outside agent; renewals and new lists carry none."
       },
       "custody_decide": {
         "name": "custody.decide",
@@ -1287,7 +1290,7 @@
             }
           ]
         },
-        "summary": "Tells a former holder that its task moved; later results are kept as late work."
+        "summary": "Tells a former holder that its task moved, or a later claimant that another claim was recorded first; later results are kept as late work."
       },
       "debug_dump": {
         "name": "debug.dump",
@@ -5574,6 +5577,17 @@
         }
       ]
     },
+    "receive_custody_confirmed_edge": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/custody_confirmed"
+        }
+      ]
+    },
     "receive_custody_decide_team_services": {
       "action": "receive",
       "channel": {
@@ -8094,6 +8108,17 @@
       "messages": [
         {
           "$ref": "#/channels/work_agent/messages/custody_confirmed"
+        }
+      ]
+    },
+    "send_custody_confirmed_edge": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/work_edge"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_edge/messages/custody_confirmed"
         }
       ]
     },

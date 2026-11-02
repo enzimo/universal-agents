@@ -1,0 +1,36 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "custody.confirmed",
+  "message_id": "01928f3a-7b2c-7113-8000-000000000214",
+  "idempotency_key": "custody.confirmed:QY-dI1Ia3OP0jktmxQ4Zs9GXeYEcHqKFHPSEaAAqyvo",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "edge",
+    "id": "a2a_partner"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.edge.a2a_partner",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "task_id": "task_outside_1",
+    "custody_token": 1,
+    "sequence": 1,
+    "reason": "claimed",
+    "custody_window": {
+      "renewed_by": "host_record",
+      "seconds": 300
+    }
+  },
+  "body_digest": "JZjQyuinr3nJ7d5pQibdKviiqDRNW7G8A3a8ITslajo",
+  "signature": "JehMlNwuHJYD4cLUevoREFwDTEH0SEQ_y3I5ytDbvkmAXQIhqOHg8qhlupdI7prFeQlqRC2YD5cva5I5ySvSAQ"
+}

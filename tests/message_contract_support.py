@@ -4,7 +4,7 @@ Shared by the contract tests and the live NATS contract tests. A receiver of the
 examples starts from ``examples/trust/anchors.json`` and every record under
 ``examples/trust`` except ``extra/``; an example's context adds or removes records,
 sets minimum epochs, and replaces the receiver, time, arrival subject, NATS headers,
-replay record or answered request.
+replay record or answered request, or says when a stream stored the frame.
 """
 
 from __future__ import annotations
@@ -154,6 +154,7 @@ def verify(data: bytes, frame: Mapping[str, Any], context: Optional[Mapping[str,
         replay=replay_holding(digest),
         headers=context.get("headers"),
         answering=answered_request(frame, context.get("answering", _UNSET)),
+        stored_at=parse_timestamp(context["stored_at"]) if "stored_at" in context else None,
     )
 
 

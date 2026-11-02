@@ -1025,7 +1025,7 @@ def test_every_token_an_example_body_carries_verifies() -> None:
 
 
 def test_a_token_is_valid_when_the_frame_is_received_within_the_clock_tolerance() -> None:
-    """README, "On behalf of a person": a durable frame dated back cannot carry a token that has expired since."""
+    """README, "On behalf of a person": without a stored time, a frame's token must still be valid by the receiver's clock."""
 
     frame = fixtures.example_frame("access.resolved", "full")
     data = json.dumps(frame).encode()
@@ -1034,6 +1034,57 @@ def test_a_token_is_valid_when_the_frame_is_received_within_the_clock_tolerance(
     fixtures.verify(data, frame, {"now": format_timestamp(token_end + SKEW - timedelta(milliseconds=1))})
     refused = refusal(data, frame, {"now": format_timestamp(token_end + SKEW)})
     assert (refused.code, refused.at) == ("bad_authority", "/authority/expires_at")
+
+
+def test_queued_works_token_is_judged_when_the_stream_stored_it() -> None:
+    """A person's decision that waits in the queue past its token's end is accepted; one stored after the end is not.
+
+    The stream's timestamp is set by the server, so a sender cannot date a frame back to
+    use a token that had already expired. A request is still judged on arrival.
+    """
+
+    frame = fixtures.example_frame("access.resolved", "full")
+    data = json.dumps(frame).encode()
+    token_end = parse_timestamp(frame["authority"]["expires_at"])
+    later = format_timestamp(token_end + timedelta(hours=1))  # still within the example revocations record
+    fixtures.verify(data, frame, {"now": later, "stored_at": format_timestamp(token_end + SKEW - timedelta(milliseconds=1))})
+    refused = refusal(data, frame, {"now": later, "stored_at": format_timestamp(token_end + SKEW)})
+    assert (refused.code, refused.at) == ("bad_authority", "/authority/expires_at")
+    # A request is no queued work: a stored time, even one after its token's end, does not count.
+    command = fixtures.example_frame("tasks.cancel", "by-all")
+    command_end = parse_timestamp(command["authority"]["expires_at"])
+    fixtures.verify(json.dumps(command).encode(), command, {"stored_at": format_timestamp(command_end + timedelta(hours=1))})
+    with pytest.raises(ValueError, match="time zone"):
+        wire_frame.verify_frame(data, trust=fixtures.trust_store(), receiver=fixtures.default_receiver(frame),
+                                arrived_on=frame["subject"], now=fixtures.NOW, replay=fixtures.replay_holding(),
+                                stored_at=fixtures.NOW.replace(tzinfo=None))
+
+
+def test_the_edge_adapter_neither_presents_nor_receives_a_persons_token() -> None:
+    """README, "On behalf of a person": outside agents never hold a person's token, in either direction."""
+
+    answer = fixtures.example_frame("task.answer", "from-outside-agent")
+    answer["authority"] = fixtures.example_frame("custody.confirmed", "claim-with-token")["authority"]
+    refused = refusal(fixtures.resign(answer), answer)
+    assert (refused.code, refused.at) == ("bad_authority", "/authority/bound_to/type")
+    for kind, entry in REGISTRY["kinds"].items():
+        if "edge_adapter" in entry["senders"] and entry.get("authority", "none") != "none":
+            bindings = entry["authority_binding"] if isinstance(entry["authority_binding"], list) else [entry["authority_binding"]]
+            assert all("edge_adapter" not in binding.get("senders", entry["senders"]) for binding in bindings), kind
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["task.answer"]["authority_binding"] = {"type": "root_task"}
+    with pytest.raises(EXPORT.ContractError, match="presents no token"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_a_move_and_the_confirmations_share_one_numbering_per_task() -> None:
+    """README, "After a move" and "Claims": two claimants that lost are told apart, and an older confirmation is ignored."""
+
+    assert REGISTRY["kinds"]["custody.moved"]["idempotency"] == ["/body/task_id", "/body/sequence"]
+    moved = fixtures.example_frame("custody.moved", "claimed-elsewhere")
+    claim = fixtures.example_frame("custody.confirmed", "claim-with-token")
+    assert (moved["body"]["task_id"], moved["body"]["custody_token"]) == (claim["body"]["task_id"], claim["body"]["custody_token"])
+    assert moved["body"]["sequence"] > claim["body"]["sequence"] and moved["body"]["reason"] == "claimed_elsewhere"
 
 
 def test_tasks_for_a_worker_pool_carry_no_token_and_their_copies_do() -> None:

@@ -119,7 +119,7 @@ verification_refusals:
   - code: invalid_body
     meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, "Installation traffic")
   - code: bad_authority
-    meaning: the frame carries an authority token its kind does not take at the frame's address (registry authority_by_address) or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation known to be unrevoked (with a current revocations record), names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued or is not valid when it is received, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds
+    meaning: the frame carries an authority token its kind does not take at the frame's address (registry authority_by_address) or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation known to be unrevoked (with a current revocations record), names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued or when it reached the receiver (for queued work, when the stream stored it; otherwise when it is received), reaches an outside agent's adapter, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds
   - code: access_denied
     meaning: the receiver's access decision refused the sender
 # Refusals of a change to a covered store record. Each covered operation offers those that
@@ -333,7 +333,8 @@ kinds:
     # for the holder's custody.confirmed; the copy to the team services carries it.
     authority_by_address:
       work.pool.{pool}: none
-    authority_binding: {type: root_task, at: /body/work/root_task_id}
+    # The edge adapter speaks for outside agents, which never hold a person's token.
+    authority_binding: {type: root_task, at: /body/work/root_task_id, senders: [gateway, lead_host, scheduler, team_services]}
     idempotency: [/body/task_id, /message_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
     routing: named
@@ -408,7 +409,8 @@ kinds:
     receivers: [lead_host, worker_host, edge_adapter]
     expiry_seconds: 604800
     authority: optional
-    authority_binding: {type: root_task}
+    # The edge adapter speaks for outside agents, which never hold a person's token.
+    authority_binding: {type: root_task, senders: [gateway, lead_host, team_services, worker_host]}
     idempotency: [/body/question_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: high}
     routing: named
@@ -529,7 +531,7 @@ kinds:
     rendering: full
 
   custody.moved:
-    description: Tells a former holder that its task moved; later results are kept as late work.
+    description: Tells a former holder that its task moved, or a later claimant that another claim was recorded first; later results are kept as late work.
     class: durable
     address: ["work.agent.{agent}", "work.edge.{edge}"]
     body: bodies/custody.moved.schema.json
@@ -537,7 +539,7 @@ kinds:
     receivers: [worker_host, lead_host, edge_adapter]
     expiry_seconds: 604800
     authority: none
-    idempotency: [/body/task_id, /body/custody_token]
+    idempotency: [/body/task_id, /body/sequence]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: none
@@ -546,9 +548,9 @@ kinds:
     rendering: none
 
   custody.confirmed:
-    description: Tells a task's holder that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list, and with the task's authority token when the work has one.
+    description: Tells a task's holder, an agent or an outside agent's adapter, that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list. A confirmation that gives custody (claimed, reassigned) carries the task's authority token when the work has one, except to an outside agent; renewals and new lists carry none.
     class: durable
-    address: work.agent.{agent}
+    address: ["work.agent.{agent}", "work.edge.{edge}"]
     body: bodies/custody.confirmed.schema.json
     body_rules:
       - {ends_within: /body/custody_window/ends_at, of: /issued_at, seconds: 604800}
@@ -556,7 +558,7 @@ kinds:
       - {unique: /body/access_list/tools, by: tool_id}
       - {unique: /body/access_list/one_time, by: approval_id}
     senders: [team_services]
-    receivers: [lead_host, worker_host]
+    receivers: [lead_host, worker_host, edge_adapter]
     expiry_seconds: 604800
     authority: optional
     authority_binding: {type: root_task}
