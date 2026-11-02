@@ -353,6 +353,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         where = f"registry.yaml kinds.{name}"
         check_entry_fields(where, name, entry, registry, transport, schemas)
         check_entry_addresses(where, name, entry, transport)
+        check_agent_queue(where, entry, transport)
         check_agent_addressed_edges(where, entry)
         check_idempotency(where, name, entry, schemas, registry["frame_schema"])
         check_body_rules(where, entry, schemas, registry["frame_schema"])
@@ -423,6 +424,32 @@ def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
     check_wakes(where, entry["wakes_model"])
     if set(entry["admission"]) != {"execution_slot", "accepted_while_paused", "priority"}:
         raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
+
+
+def check_agent_queue(where: str, entry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """A kind sent to an agent waits in its inbox only when it needs a free slot (README, "An agent's two queues").
+
+    The host reads the inbox only while the agent can start more work, so a message the
+    host could act on at once would wait there behind tasks it cannot start yet: a stop
+    or a custody renewal for the very task that holds the slot. The control queue is read
+    whenever the host runs the agent, paused or not, so everything on it is taken at once.
+    """
+
+    queues = transport["agent_queues"]
+    admission = entry["admission"]
+    for address in own_addresses(entry):
+        if address == queues["inbox"] and not admission["execution_slot"]:
+            raise ContractError(f"{where}: it needs no execution slot, so it goes to the agent's control queue "
+                                f"({queues['control']}), where it never waits behind new work")
+        if address == queues["inbox"] and admission["accepted_while_paused"]:
+            raise ContractError(f"{where}: a paused agent's host does not read its inbox, so a kind sent there is not "
+                                "accepted while paused")
+        if address == queues["control"] and admission["execution_slot"]:
+            raise ContractError(f"{where}: it needs an execution slot, so it waits in the agent's inbox "
+                                f"({queues['inbox']}): the host reads the control queue even when no slot is free")
+        if address == queues["control"] and not admission["accepted_while_paused"]:
+            raise ContractError(f"{where}: the host reads the control queue while the agent is paused, so a kind sent "
+                                "there is accepted while paused")
 
 
 def check_agent_addressed_edges(where: str, entry: dict[str, Any]) -> None:
@@ -1129,6 +1156,25 @@ def check_transport(transport: dict[str, Any]) -> None:
             raise ContractError(f"transport.yaml: class {name} states between_installations")
         check_class_streams(name, spec, transport, skew)
     check_stream_subjects(transport)
+    check_agent_queues(transport)
+
+
+def check_agent_queues(transport: dict[str, Any]) -> None:
+    """An agent's queued messages go to one of its two queues, each with its own consumer (README, "An agent's two queues")."""
+
+    queues = transport.get("agent_queues")
+    durable = [address for address in transport["classes"]["durable"]["addresses"] if audience_target(address) == "agent"]
+    if not isinstance(queues, dict) or set(queues) != {"inbox", "control"} or sorted(queues.values()) != sorted(durable) \
+            or len(durable) != 2:
+        raise ContractError("transport.yaml: agent_queues names the inbox and the control queue, the durable class's "
+                            "two agent addresses")
+    prefix = transport["subject_prefix"].replace("{sender}", "*") + "."
+    filters = [consumer["filter"] for consumer in transport["consumers"].values()]
+    for queue, address in queues.items():
+        if filters.count(prefix + address) != 1:
+            name = "control queue" if queue == "control" else queue
+            raise ContractError(f"transport.yaml: the agent's {name} ({address}) has exactly one consumer, so the host "
+                                "reads it on its own")
 
 
 def largest_header_block(schemas: dict[str, dict[str, Any]]) -> int:

@@ -1,4 +1,8 @@
 {
+  "agent_queues": {
+    "control": "work.control.{agent}",
+    "inbox": "work.agent.{agent}"
+  },
   "audience_targets": {
     "agent": [
       "lead_host",
@@ -45,6 +49,7 @@
     "durable": {
       "addresses": [
         "work.agent.{agent}",
+        "work.control.{agent}",
         "work.pool.{pool}",
         "work.edge.{edge}",
         "work.team"
@@ -81,6 +86,15 @@
   },
   "clock_skew_seconds": 8,
   "consumers": {
+    "agent_control": {
+      "ack": "explicit",
+      "ack_wait_seconds": 60,
+      "filter": "ua.v1.{team}.*.work.control.{agent}",
+      "max_deliveries": 20,
+      "mode": "pull",
+      "name": "control~{team}~{agent}",
+      "stream": "UA1_AGENT_WORK_{team}"
+    },
     "agent_inbox": {
       "ack": "explicit",
       "ack_wait_seconds": 60,
@@ -175,6 +189,7 @@
       "storage": "file",
       "subjects": [
         "ua.v1.{team}.*.work.agent.*",
+        "ua.v1.{team}.*.work.control.*",
         "ua.v1.{team}.*.work.pool.*"
       ]
     },

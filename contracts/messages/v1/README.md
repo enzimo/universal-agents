@@ -405,16 +405,16 @@ An authority token (`authority` in the frame) proves that work acts for a person
 - It names its audience: the installation and team the person asked. Only that team
   presents it, copied unchanged down a delegation tree, and only inside frames of the
   token's own installation.
-- It reaches only the task's holder, in the holder's own inbox. A worker pool's queue is
+- It reaches only the task's holder, in the holder's own queue. A worker pool's queue is
   read by every host that runs the pool, so a `task.request` to a pool carries no token
   (registry `authority_by_address`); its copy to the team services does. When an agent
   claims the task and the team services count the claim ("Claims"), or `custody.decide`
-  reassigns it, they record the custody and send the holder `custody.confirmed` at
-  `work.agent.<agent>`: the task id, its custody token and custody window ("Custody
-  windows"), and the task's authority token when the work has one. Only these
-  confirmations, reason `claimed` or `reassigned`, carry the token; a renewed window or a
-  new access list (`renewed`, `access_changed`) carries none, so a window can be renewed
-  after the token has ended.
+  reassigns it, they record the custody and send the holder `custody.confirmed` on its
+  control queue, `work.control.<agent>` ("An agent's two queues"): the task id, its custody
+  token and custody window ("Custody windows"), and the task's authority token when the
+  work has one. Only these confirmations, reason `claimed` or `reassigned`, carry the
+  token; a renewed window or a new access list (`renewed`, `access_changed`) carries none,
+  so a window can be renewed after the token has ended.
 - It never reaches an outside agent. An outside agent's adapter receives
   `custody.confirmed` at `work.edge.<edge>` without the token, refuses any frame that
   carries one (`bad_authority`), and presents none itself: no binding lists the
@@ -549,7 +549,10 @@ task the holder still holds and only if the task has not moved:
 - for a `reconnection` window, also before it ends while the host's record stays current, so
   an intermittent host that stays online does not lose its window.
 
-They never renew a window while the holder's host has no current host record.
+They never renew a window while the holder's host has no current host record. Confirmations
+and moves reach an agent on its control queue, which its host reads even while every slot is
+busy ("An agent's two queues"), so a renewal never waits behind work the agent cannot start
+yet.
 
 **Moving a task.** The requester (the lead's model through `custody.decide`, or a team rule)
 moves a task to another holder only:
@@ -731,8 +734,9 @@ pool inboxes the same kind also uses.
 work only for the agents and pools it runs:
 - it subscribes to `ua.v1.<team>.*.ctl.agent.<agent>` for each agent it runs, and its
   permission names exactly those agents;
-- agent inboxes and worker pools live in a stream per team, `UA1_AGENT_WORK_<team>`, and
-  the host may read and acknowledge only its own agents' and pools' consumers there.
+- agent inboxes, agent control queues and worker pools live in a stream per team,
+  `UA1_AGENT_WORK_<team>`, and the host may read and acknowledge only its own agents' and
+  pools' consumers there.
 
 A broken-into host therefore cannot read, take or acknowledge work queued for agents on
 other hosts, or hear their control requests, and it cannot sign as them either, since every
@@ -740,15 +744,53 @@ frame names its agent's session ("Who sent it"). Edge deliveries and the team se
 inbox stay in `UA1_WORK`, read through grants on their exact consumers, so agent hosts reach
 neither.
 
+**An agent's two queues.** A host asks for queued work only while it can act on it: it
+pulls from an agent's inbox only while the agent can take more work, and stops while the
+agent's local waiting list is full or the agent is paused. A message about work the agent
+already holds must not wait there behind tasks it cannot start yet: a stop or a hold for
+the task that holds the slot, the renewal of its custody window, a smaller access list, or
+the access decision one of its steps waits for. So each agent has two queues
+(`agent_queues` in `transport.yaml`), each with its own consumer in
+`UA1_AGENT_WORK_<team>`:
+- the **inbox**, `work.agent.<agent>`, holds the kinds that need an execution slot: new
+  tasks, results, questions, answers, closed questions, and credential form and tool setup
+  results;
+- the **control queue**, `work.control.<agent>`, holds every other kind sent to an agent:
+  stops, steering, custody moves and confirmations, progress, claims, handbacks, hold
+  accounts, reports, access decisions, refusals and ledger facts.
+
+The host reads the control queue whenever it runs the agent, paused or not, and admits each
+message at once, since none needs a slot. Like all queued work, it waits only while the
+host has no current revocations record of its own installation ("Who sent it"). A paused
+agent acts on what it admitted when it resumes, and keeps the work queued in its inbox
+(`agent.pause`). The registry's admission follows from this: a kind sent to the inbox needs
+an execution slot and is not accepted while paused, and a kind sent to the control queue
+needs no slot and is accepted while paused. The generator refuses any other combination,
+and each queue refuses the other's kinds (`subject_mismatch`).
+
+The two queues keep no order between them. Messages about one task carry their own sequence
+numbers ("Custody windows", "Idempotency keys"), and a redelivered message can arrive after
+later ones anyway. When a host starts reading an agent, after a restart or a move, it reads
+the control queue until nothing is pending there before it pulls from the inbox, so it
+records the facts about tasks the agent holds or delegated before the work that follows
+them. A stop, a steer or a confirmation can also come before its task: a task reassigned to
+an agent is confirmed to it at once, while its `task.request` may still wait in the inbox.
+The host records such a message under its task id and applies it when the task arrives, so
+a task stopped before it started never starts; it forgets the message once the message's
+own lifetime ends. Worker pools need no second queue, since a pool receives only new tasks.
+An edge's reader, a gateway route or an outside agent's adapter, passes each message on and
+runs no task itself, so it reads its one queue whenever it runs.
+
 **Credentials follow placement.** A host's NATS credential names the agents and pools it
 runs, so it changes when the host gains or loses one. NATS checks a user's permissions only
 when it connects, and acknowledgements are not signed, so a credential that names an agent
 must stop working before another host reads that agent's queue. An agent moves in this
 order:
-1. The old host stops pulling the agent's queue and answering its control address. It
-   finishes, or hands back with `task.handback`, every task it admitted, and acknowledges
-   their messages while its credential still names the agent; the handover sends the
-   agent's ledger to the team services ("Custody windows").
+1. The old host stops pulling the agent's inbox and answering its control address. It
+   keeps reading the agent's control queue while it finishes, or hands back with
+   `task.handback`, every task it admitted, and acknowledges their messages while its
+   credential still names the agent; then it stops reading the control queue too. The
+   handover sends the agent's ledger to the team services ("Custody windows").
 2. The old host renews (`host.renew`) and connects with the credential of the reply, which
    no longer names the agent. The installation authority then revokes every credential for
    the host's NATS key issued before that one: the NATS account's revocation list names the
@@ -756,26 +798,28 @@ order:
    an old credential.
 3. Only then do the team services write the new placement, and the new host gets a
    credential that names the agent. Work queued for the agent stays in the agent's
-   consumer, and the new host reads it.
+   consumers, and the new host reads it.
 
 A host that is cut off or retired cannot take step 1. The authority revokes its credential
 first (with its certificate, when an administrator retires it), and the work it admitted
-without acknowledging comes back to the agent's queue after `ack_wait_seconds`, where the
+without acknowledging comes back to the agent's queues after `ack_wait_seconds`, where the
 new host takes it; its custody moves by the rules of "Custody windows". A credential never
 outlives the certificate it comes with: a join or renewal reply whose `connection` ends
 after its certificate is refused (`invalid_body` at `/body/connection/expires_at`).
 
 **Credential size.** A credential grows with the agents its host runs: each hosted agent
-adds four subjects (its consumer's info, next-message and acknowledgement subjects, and its
-control address), 862 bytes of permission JSON with 64-character team and agent ids, which
-a NATS user JWT's base64url encoding turns into about 1,150 bytes. Each worker pool adds
-three subjects, 709 bytes. `tests/test_message_contract.py` recomputes these figures from
-the generated templates. A credential is at most `max_credential_bytes` (65,536 bytes,
-`transport.yaml`), the `jwt` field's limit, so the authority places no more agents and
-pools on one host than its credential can name; a certificate's `session_limit` does not
-lift that limit. NATS reads a user JWT in the client's `CONNECT` line, which the server's
-`max_control_line` limits (4,096 bytes unless configured), so an installation's servers set
-`max_control_line` above `max_credential_bytes` plus the rest of the `CONNECT` line.
+adds seven subjects (the info, next-message and acknowledgement subjects of its inbox's and
+its control queue's consumers, and its control address), 1580 bytes of permission JSON with
+64-character team and agent ids, which a NATS user JWT's base64url encoding turns into
+about 2,107 bytes. Each worker pool adds three subjects, 709 bytes.
+`tests/test_message_contract.py` recomputes these figures from the generated templates. A
+credential is at most `max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt`
+field's limit, so the authority places no more agents and pools on one host than its
+credential can name: about 30 agents with the longest ids, or about 85 with team and agent
+ids of a dozen characters. A certificate's `session_limit` does not lift that limit. NATS
+reads a user JWT in the client's `CONNECT` line, which the server's `max_control_line`
+limits (4,096 bytes unless configured), so an installation's servers set `max_control_line`
+above `max_credential_bytes` plus the rest of the `CONNECT` line.
 
 **Filling the templates.** Before installing permissions, trusted membership code fills
 each role's templates for the host (`custom_messages.wire.permissions.host_permissions`):
@@ -978,6 +1022,8 @@ file. It uses public fixture signing keys and no operator credentials.
   - real publish, pull, acknowledgement and signed inbox replies;
   - a host pulling and acknowledging only its own agents' queues, and reading work queued
     before an agent moved to it once it holds the credential that names that agent;
+  - a custody confirmation read from the agent's control queue while new tasks wait unread
+    in its inbox;
   - a relayed queue request sent straight to an agent by the gateway: NATS delivers it,
     and the agent's host refuses it as `wrong_sender`;
   - a result and its team-services copy both stored and pulled by their own readers;
@@ -987,8 +1033,8 @@ file. It uses public fixture signing keys and no operator credentials.
   - dead-letter raw copies and notices stored under the receiver's own id;
   - separate consumers for ids that an `_` separator would have merged;
   - the topology owner creating and changing streams, and creating and deleting consumers,
-    with its own grants, and the team services finding a queued message in their own team's
-    stream by its message id and withdrawing it;
+    with its own grants, and the team services finding a queued task in their own team's
+    stream by its task id and withdrawing it;
   - a full-size frame stored with the largest headers senders may set;
   - refusals of: another host reading or deleting in the team's stream, and the team
     services deleting in the shared `UA1_WORK`; an outside agent's adapter publishing into a

@@ -665,11 +665,45 @@
     "work_agent": {
       "address": "ua.v1.{team}.{sender}.work.agent.{agent}",
       "messages": {
-        "access_decision": {
-          "$ref": "#/components/messages/access_decision"
-        },
         "credential_form_result": {
           "$ref": "#/components/messages/credential_form_result"
+        },
+        "question_closed": {
+          "$ref": "#/components/messages/question_closed"
+        },
+        "task_answer": {
+          "$ref": "#/components/messages/task_answer"
+        },
+        "task_question": {
+          "$ref": "#/components/messages/task_question"
+        },
+        "task_request": {
+          "$ref": "#/components/messages/task_request"
+        },
+        "task_result": {
+          "$ref": "#/components/messages/task_result"
+        },
+        "tool_setup_result": {
+          "$ref": "#/components/messages/tool_setup_result"
+        }
+      },
+      "parameters": {
+        "agent": {
+          "description": "The agent subject token."
+        },
+        "sender": {
+          "description": "The sender subject token."
+        },
+        "team": {
+          "description": "The team subject token."
+        }
+      }
+    },
+    "work_control": {
+      "address": "ua.v1.{team}.{sender}.work.control.{agent}",
+      "messages": {
+        "access_decision": {
+          "$ref": "#/components/messages/access_decision"
         },
         "custody_confirmed": {
           "$ref": "#/components/messages/custody_confirmed"
@@ -683,14 +717,8 @@
         "ledger_fact": {
           "$ref": "#/components/messages/ledger_fact"
         },
-        "question_closed": {
-          "$ref": "#/components/messages/question_closed"
-        },
         "task_account": {
           "$ref": "#/components/messages/task_account"
-        },
-        "task_answer": {
-          "$ref": "#/components/messages/task_answer"
         },
         "task_claimed": {
           "$ref": "#/components/messages/task_claimed"
@@ -701,26 +729,14 @@
         "task_progress": {
           "$ref": "#/components/messages/task_progress"
         },
-        "task_question": {
-          "$ref": "#/components/messages/task_question"
-        },
         "task_report": {
           "$ref": "#/components/messages/task_report"
-        },
-        "task_request": {
-          "$ref": "#/components/messages/task_request"
-        },
-        "task_result": {
-          "$ref": "#/components/messages/task_result"
         },
         "task_steer": {
           "$ref": "#/components/messages/task_steer"
         },
         "task_stop": {
           "$ref": "#/components/messages/task_stop"
-        },
-        "tool_setup_result": {
-          "$ref": "#/components/messages/tool_setup_result"
         }
       },
       "parameters": {
@@ -5398,11 +5414,11 @@
     "receive_access_decision_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/access_decision"
+          "$ref": "#/channels/work_control/messages/access_decision"
         }
       ]
     },
@@ -5569,11 +5585,11 @@
     "receive_custody_confirmed_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/custody_confirmed"
+          "$ref": "#/channels/work_control/messages/custody_confirmed"
         }
       ]
     },
@@ -5612,11 +5628,11 @@
     "receive_custody_moved_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/custody_moved"
+          "$ref": "#/channels/work_control/messages/custody_moved"
         }
       ]
     },
@@ -5687,11 +5703,11 @@
     "receive_delivery_refused_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/delivery_refused"
+          "$ref": "#/channels/work_control/messages/delivery_refused"
         }
       ]
     },
@@ -6277,11 +6293,11 @@
     "receive_ledger_fact_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/ledger_fact"
+          "$ref": "#/channels/work_control/messages/ledger_fact"
         }
       ]
     },
@@ -7277,11 +7293,11 @@
     "receive_task_account_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_account"
+          "$ref": "#/channels/work_control/messages/task_account"
         }
       ]
     },
@@ -7323,11 +7339,11 @@
     "receive_task_claimed_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_claimed"
+          "$ref": "#/channels/work_control/messages/task_claimed"
         }
       ]
     },
@@ -7347,11 +7363,11 @@
     "receive_task_handback_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_handback"
+          "$ref": "#/channels/work_control/messages/task_handback"
         }
       ]
     },
@@ -7392,11 +7408,11 @@
     "receive_task_progress_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_progress"
+          "$ref": "#/channels/work_control/messages/task_progress"
         }
       ]
     },
@@ -7438,11 +7454,11 @@
     "receive_task_report_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_report"
+          "$ref": "#/channels/work_control/messages/task_report"
         }
       ]
     },
@@ -7530,11 +7546,11 @@
     "receive_task_steer_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_steer"
+          "$ref": "#/channels/work_control/messages/task_steer"
         }
       ]
     },
@@ -7552,11 +7568,11 @@
     "receive_task_stop_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_stop"
+          "$ref": "#/channels/work_control/messages/task_stop"
         }
       ]
     },
@@ -7932,11 +7948,11 @@
     "send_access_decision_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/access_decision"
+          "$ref": "#/channels/work_control/messages/access_decision"
         }
       ]
     },
@@ -8103,11 +8119,11 @@
     "send_custody_confirmed_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/custody_confirmed"
+          "$ref": "#/channels/work_control/messages/custody_confirmed"
         }
       ]
     },
@@ -8146,11 +8162,11 @@
     "send_custody_moved_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/custody_moved"
+          "$ref": "#/channels/work_control/messages/custody_moved"
         }
       ]
     },
@@ -8221,11 +8237,11 @@
     "send_delivery_refused_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/delivery_refused"
+          "$ref": "#/channels/work_control/messages/delivery_refused"
         }
       ]
     },
@@ -8811,11 +8827,11 @@
     "send_ledger_fact_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/ledger_fact"
+          "$ref": "#/channels/work_control/messages/ledger_fact"
         }
       ]
     },
@@ -9811,11 +9827,11 @@
     "send_task_account_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_account"
+          "$ref": "#/channels/work_control/messages/task_account"
         }
       ]
     },
@@ -9857,11 +9873,11 @@
     "send_task_claimed_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_claimed"
+          "$ref": "#/channels/work_control/messages/task_claimed"
         }
       ]
     },
@@ -9881,11 +9897,11 @@
     "send_task_handback_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_handback"
+          "$ref": "#/channels/work_control/messages/task_handback"
         }
       ]
     },
@@ -9926,11 +9942,11 @@
     "send_task_progress_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_progress"
+          "$ref": "#/channels/work_control/messages/task_progress"
         }
       ]
     },
@@ -9972,11 +9988,11 @@
     "send_task_report_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_report"
+          "$ref": "#/channels/work_control/messages/task_report"
         }
       ]
     },
@@ -10064,11 +10080,11 @@
     "send_task_steer_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_steer"
+          "$ref": "#/channels/work_control/messages/task_steer"
         }
       ]
     },
@@ -10086,11 +10102,11 @@
     "send_task_stop_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/task_stop"
+          "$ref": "#/channels/work_control/messages/task_stop"
         }
       ]
     },

@@ -40,7 +40,10 @@
 #   idempotency    JSON pointers into the frame whose values make the idempotency key:
 #                  <kind>:<unpadded base64url SHA-256 of the RFC 8785 array of the values>
 #                  (README, "Idempotency keys")
-#   admission      execution_slot (needs a free slot), accepted_while_paused, priority
+#   admission      execution_slot (needs a free slot), accepted_while_paused, priority. A kind sent to an
+#                  agent goes to its inbox when it needs a slot, and is then not accepted while paused;
+#                  otherwise to its control queue, and is then accepted while paused (transport.yaml
+#                  agent_queues; README, "An agent's two queues")
 #   routing        requester | holder | team | person | named | broadcast | sender (README, "Replies")
 #   topology_edge  the edges an agent may send it on: up | down | person | sideways | out, or none
 #                  when it is not a topology check: sent to the team services, only by hosts, or
@@ -261,7 +264,7 @@ kinds:
   task.stop:
     description: Stop one task. Sent only to the task's current holder.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}"]
+    address: ["work.control.{agent}", "work.edge.{edge}"]
     body: bodies/task.stop.schema.json
     senders: [lead_host, team_services]
     senders_by_address:
@@ -422,7 +425,7 @@ kinds:
   task.progress:
     description: Where a task stands, from its holder to its requester.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.progress.schema.json
     senders: [worker_host, lead_host, edge_adapter]
@@ -440,7 +443,7 @@ kinds:
   task.steer:
     description: Steering for the holder of one named task.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}"]
+    address: ["work.control.{agent}", "work.edge.{edge}"]
     body: bodies/task.steer.schema.json
     senders: [lead_host, team_services]
     senders_by_address:
@@ -462,7 +465,7 @@ kinds:
   task.account:
     description: A held holder's account of where its task stopped.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.account.schema.json
     senders: [worker_host, lead_host]
@@ -480,7 +483,7 @@ kinds:
   task.claimed:
     description: A holder took a task.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.claimed.schema.json
     senders: [worker_host, lead_host, edge_adapter]
@@ -488,7 +491,7 @@ kinds:
     expiry_seconds: 604800
     authority: none
     idempotency: [/body/claim_id]
-    admission: {execution_slot: false, accepted_while_paused: false, priority: normal}
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: requester
     topology_edge: [up]
     ledger: standin_holder
@@ -498,7 +501,7 @@ kinds:
   task.handback:
     description: A holder returns a task it will not finish, so the task can move before the holder's custody window ends.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.handback.schema.json
     senders: [worker_host, lead_host]
@@ -516,14 +519,14 @@ kinds:
   task.report:
     description: A report from a holder to its requester; the lead decides whether a person sees it.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     body: bodies/task.report.schema.json
     senders: [worker_host, lead_host]
     receivers: [lead_host]
     expiry_seconds: 604800
     authority: none
     idempotency: [/body/report_id]
-    admission: {execution_slot: false, accepted_while_paused: false, priority: high}
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: requester
     topology_edge: [up]
     ledger: report_received
@@ -533,7 +536,7 @@ kinds:
   custody.moved:
     description: Tells a former holder that its task moved, or a later claimant that another claim was recorded first; later results are kept as late work.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}"]
+    address: ["work.control.{agent}", "work.edge.{edge}"]
     body: bodies/custody.moved.schema.json
     senders: [team_services]
     receivers: [worker_host, lead_host, edge_adapter]
@@ -550,7 +553,7 @@ kinds:
   custody.confirmed:
     description: Tells a task's holder, an agent or an outside agent's adapter, that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list. A confirmation that gives custody (claimed, reassigned) carries the task's authority token when the work has one, except to an outside agent; renewals and new lists carry none.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}"]
+    address: ["work.control.{agent}", "work.edge.{edge}"]
     body: bodies/custody.confirmed.schema.json
     body_rules:
       - {ends_within: /body/custody_window/ends_at, of: /issued_at, seconds: 604800}
@@ -595,7 +598,7 @@ kinds:
   access.decision:
     description: What became of an access request or a change review, sent to the waiting task.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     body: bodies/access.decision.schema.json
     body_rules:
       - {requires: /body/status/expires_at, when: [{at: /body/status/state, is: granted}, {at: /body/status/lifetime, is: until}]}
@@ -607,7 +610,7 @@ kinds:
     expiry_seconds: 604800
     authority: none
     idempotency: [/body/request_id, /body/status/state]
-    admission: {execution_slot: false, accepted_while_paused: false, priority: high}
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: none
     ledger: access_wait_closed
@@ -709,7 +712,7 @@ kinds:
   delivery.refused:
     description: A receiver refused a message; sent back to its sender.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}", work.team]
+    address: ["work.control.{agent}", "work.edge.{edge}", work.team]
     body: bodies/delivery.refused.schema.json
     senders: [lead_host, worker_host, team_services, gateway, edge_adapter]
     senders_by_address:
@@ -798,7 +801,7 @@ kinds:
   ledger.fact:
     description: A fact for an agent's work ledger from the team services.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     body: bodies/ledger.fact.schema.json
     senders: [team_services]
     receivers: [lead_host, worker_host]

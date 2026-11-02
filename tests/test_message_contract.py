@@ -404,6 +404,14 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
          "starts ua.v1.{team}."),
         (lambda t: t["streams"].update({"UA1_{team}_{edge}": {"subjects": ["ua.v1.{team}.*.spare"]}}), "may name only"),
         (lambda t: t["consumers"]["edge"].update(stream="UA1_AGENT_WORK_{team}"), "stores its filter's subjects"),
+        # An agent's control queue is read on its own, with its own consumer.
+        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].remove("ua.v1.{team}.*.work.control.*"),
+         "work.control.{agent} is stored in exactly one"),
+        (lambda t: t.pop("agent_queues"), "agent_queues names the inbox and the control queue"),
+        (lambda t: t["agent_queues"].update(control="work.agent.{agent}"), "agent_queues names the inbox and the control queue"),
+        (lambda t: t["consumers"].pop("agent_control"), "has exactly one consumer"),
+        (lambda t: t["consumers"]["agent_control"].update(filter=t["consumers"]["agent_inbox"]["filter"]),
+         "has exactly one consumer, so the host reads it on its own"),
     ],
 )
 def test_streams_store_each_queued_address_once_and_nothing_else(change, problem) -> None:
@@ -628,7 +636,56 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
 def test_outside_agents_cannot_publish_into_worker_pools() -> None:
     edge = json.loads((CONTRACT / "generated" / "permissions" / "edge_adapter.json").read_text(encoding="utf-8"))
     assert "ua.v1.{team}.{self}.work.pool.*" not in edge["publish"]
-    assert "ua.v1.{team}.{self}.work.agent.*" in edge["publish"]
+    # Tasks, results and answers to an agent's inbox; claims and progress to its control queue.
+    assert {"ua.v1.{team}.{self}.work.agent.*", "ua.v1.{team}.{self}.work.control.*"} <= set(edge["publish"])
+
+
+# README, "An agent's two queues": the inbox holds what needs a free slot, the control queue the rest.
+INBOX_KINDS = {"task.request", "task.result", "task.question", "task.answer", "question.closed", "credential.form.result",
+               "tool.setup.result"}
+CONTROL_KINDS = {"task.stop", "task.steer", "custody.moved", "custody.confirmed", "access.decision", "task.progress",
+                 "task.claimed", "task.handback", "task.account", "task.report", "delivery.refused", "ledger.fact"}
+
+
+def test_an_agents_control_queue_holds_every_kind_its_host_takes_at_once() -> None:
+    """A stop, a steer, a custody renewal or an access decision never waits behind work the agent cannot start yet."""
+
+    queues = TRANSPORT["agent_queues"]
+    assert queues == {"inbox": "work.agent.{agent}", "control": "work.control.{agent}"}
+    queued = {name: spec.addresses["agent"] for name, spec in kinds.KINDS.items() if "agent" in spec.addresses}
+    assert {name for name, address in queued.items() if address == queues["inbox"]} == INBOX_KINDS
+    assert {name for name, address in queued.items() if address == queues["control"]} == CONTROL_KINDS
+    for name in INBOX_KINDS:
+        assert kinds.KINDS[name].execution_slot and not kinds.KINDS[name].accepted_while_paused, name
+    for name in CONTROL_KINDS:
+        assert not kinds.KINDS[name].execution_slot and kinds.KINDS[name].accepted_while_paused, name
+    # Each queue has its own consumer, and an agent's host may read both.
+    for role in ("lead_host", "worker_host"):
+        publish = role_permissions(role)["publish"]
+        for consumer in ("agent_inbox", "agent_control"):
+            spec = TRANSPORT["consumers"][consumer]
+            assert f"$JS.API.CONSUMER.MSG.NEXT.{spec['stream']}.{spec['name']}" in publish
+            assert f"$JS.ACK.{spec['stream']}.{spec['name']}.>" in publish
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        # In the inbox a custody renewal for the task holding the slot could wait behind new tasks.
+        (lambda r: r["kinds"]["custody.confirmed"].update(address=["work.agent.{agent}", "work.edge.{edge}"]),
+         "goes to the agent's control queue"),
+        # On the control queue a new task would be taken while no slot is free.
+        (lambda r: r["kinds"]["task.answer"].update(address=["work.control.{agent}", "work.edge.{edge}"]),
+         "waits in the agent's inbox"),
+        (lambda r: r["kinds"]["task.stop"]["admission"].update(accepted_while_paused=False), "accepted while paused"),
+        (lambda r: r["kinds"]["task.answer"]["admission"].update(accepted_while_paused=True), "does not read its inbox"),
+    ],
+)
+def test_a_kind_sent_to_an_agent_waits_in_its_inbox_only_when_it_needs_a_free_slot(change, problem) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    change(registry)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
 def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
@@ -2192,7 +2249,7 @@ def test_a_host_that_joins_later_is_trusted_once_its_certificate_arrives() -> No
     frame = signed_example()
     frame["issuer"] = {"installation": "install_example", "team": "team_example", "runtime": "lead-host-2",
                        "membership_epoch": 1, "revocation_epoch": 1, "key_id": "test-gateway-key-1"}
-    frame["subject"] = "ua.v1.team_example.lead-host-2.work.agent.researcher-2"
+    frame["subject"] = "ua.v1.team_example.lead-host-2.work.control.researcher-2"
     data = json.dumps(sign_frame(frame, fixtures.private_key("test-gateway-key-1"))).encode()
     assert refusal(data, frame, trust=store).code == "unknown_key"
     store.add(certificate_record("lead-host-2", roles=("lead_host",), key_id="test-gateway-key-1"), now=fixtures.NOW)
@@ -2473,7 +2530,7 @@ def test_timestamp_extremes_do_not_overflow_lifetime_checks() -> None:
     frame = signed_example()
     frame["issuer"] = {"installation": "install_example", "team": "team_example", "runtime": "far-host", "membership_epoch": 1,
                        "revocation_epoch": 1, "key_id": "test-worker-key-1"}
-    frame["subject"] = "ua.v1.team_example.far-host.work.agent.researcher-2"
+    frame["subject"] = "ua.v1.team_example.far-host.work.control.researcher-2"
     frame["issued_at"] = "9999-12-31T23:59:59.998Z"
     frame["expires_at"] = "9999-12-31T23:59:59.999Z"
     data = json.dumps(sign_frame(frame, fixtures.private_key("test-worker-key-1"))).encode()

@@ -7,6 +7,7 @@
     "ua.v1.{team}.{self}.dlq.notice.*",
     "ua.v1.{team}.{self}.dlq.raw.*",
     "ua.v1.{team}.{self}.work.agent.*",
+    "ua.v1.{team}.{self}.work.control.*",
     "ua.v1.{team}.{self}.work.team"
   ],
   "role": "edge_adapter",

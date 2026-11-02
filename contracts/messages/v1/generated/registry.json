@@ -46,9 +46,9 @@
   },
   "kinds": {
     "access.decision": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
-        "accepted_while_paused": false,
+        "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
@@ -563,7 +563,7 @@
     },
     "custody.confirmed": {
       "address": [
-        "work.agent.{agent}",
+        "work.control.{agent}",
         "work.edge.{edge}"
       ],
       "admission": {
@@ -675,7 +675,7 @@
     },
     "custody.moved": {
       "address": [
-        "work.agent.{agent}",
+        "work.control.{agent}",
         "work.edge.{edge}"
       ],
       "admission": {
@@ -786,7 +786,7 @@
     },
     "delivery.refused": {
       "address": [
-        "work.agent.{agent}",
+        "work.control.{agent}",
         "work.edge.{edge}",
         "work.team"
       ],
@@ -2218,7 +2218,7 @@
       "wakes_model": "never"
     },
     "ledger.fact": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4590,7 +4590,7 @@
       "wakes_model": "never"
     },
     "task.account": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4692,9 +4692,9 @@
       "wakes_model": "always"
     },
     "task.claimed": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
-        "accepted_while_paused": false,
+        "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "normal"
       },
@@ -4726,7 +4726,7 @@
       "wakes_model": "never"
     },
     "task.handback": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4792,7 +4792,7 @@
       "wakes_model": "never"
     },
     "task.progress": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
         "accepted_while_paused": true,
         "execution_slot": false,
@@ -4891,9 +4891,9 @@
       "wakes_model": "next_turn"
     },
     "task.report": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
-        "accepted_while_paused": false,
+        "accepted_while_paused": true,
         "execution_slot": false,
         "priority": "high"
       },
@@ -5053,7 +5053,7 @@
     },
     "task.steer": {
       "address": [
-        "work.agent.{agent}",
+        "work.control.{agent}",
         "work.edge.{edge}"
       ],
       "admission": {
@@ -5106,7 +5106,7 @@
     },
     "task.stop": {
       "address": [
-        "work.agent.{agent}",
+        "work.control.{agent}",
         "work.edge.{edge}"
       ],
       "admission": {

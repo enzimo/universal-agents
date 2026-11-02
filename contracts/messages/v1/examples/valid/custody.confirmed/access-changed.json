@@ -17,7 +17,7 @@
     "target": "agent",
     "id": "surveyor-1"
   },
-  "subject": "ua.v1.team_example.team-services-1.work.agent.surveyor-1",
+  "subject": "ua.v1.team_example.team-services-1.work.control.surveyor-1",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-23T04:30:00.000Z",
   "algorithm": "ed25519",
@@ -67,5 +67,5 @@
     }
   },
   "body_digest": "0ipILqhEXrvc0U5pjUv_B8d_4qnhw0YPOSrfp3riexE",
-  "signature": "S6OiHxbAVZvljTdhx8HVYlOJgWl0wGYDvjv6x2rmS27NyNkg1eLCeCTt_yRzkTuM5cGEeDK-n9YC0w2gk_QwCg"
+  "signature": "hIqafha1p1XNArG3yWYzR10zf2uVnIqnAYaH0OgYK4vqxDJmkxNU944IscOoD7O6kMDCrTNQ00UpZ2evkGpUDw"
 }

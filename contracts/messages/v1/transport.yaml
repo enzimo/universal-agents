@@ -64,6 +64,7 @@ classes:
     streams: ["UA1_AGENT_WORK_{team}", UA1_WORK]
     addresses:
       - work.agent.{agent}
+      - work.control.{agent}
       - work.pool.{pool}
       - work.edge.{edge}
       - work.team
@@ -93,19 +94,28 @@ classes:
       - dlq.notice.{copy}
     max_expiry_seconds: 2592000
 
+# An agent has two queues (README, "An agent's two queues"). Its host reads the inbox only
+# while the agent can start more work, and the control queue whenever it runs the agent,
+# paused or not. A kind sent to an agent that needs an execution slot waits in the inbox;
+# every other one goes to the control queue, so a stop, a steer, a custody renewal or an
+# access decision for work the agent already holds never waits behind new work.
+agent_queues:
+  inbox: work.agent.{agent}
+  control: work.control.{agent}
+
 # A stream whose name holds {team} exists once per team; the topology owner creates it with
 # the team. Each durable or dead-letter address is stored in exactly one of its class's
 # streams.
 streams:
   UA1_AGENT_WORK_{team}:
-    # One team's agent inboxes and worker pools; each host reads only its own agents' and
-    # pools' consumers here.
-    subjects: ["ua.v1.{team}.*.work.agent.*", "ua.v1.{team}.*.work.pool.*"]
+    # One team's agent inboxes, agent control queues and worker pools; each host reads only
+    # its own agents' and pools' consumers here.
+    subjects: ["ua.v1.{team}.*.work.agent.*", "ua.v1.{team}.*.work.control.*", "ua.v1.{team}.*.work.pool.*"]
     retention: workqueue
     storage: file
     max_age_seconds: 604860     # the durable class's longest expiry plus a minute (more than the clock tolerance): no receiver could still accept older work
     duplicate_window_seconds: 120
-    max_consumers: 4096         # agents and pools of one team; NATS 2.15 defaults to 1,000 per stream
+    max_consumers: 4096         # two per agent (inbox and control queue) and one per pool of one team; NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 263168   # max_frame_bytes plus max_header_bytes: JetStream counts headers in a message's size
   UA1_WORK:
     # Edge deliveries and the team services' inbox, read through exact consumer grants.
@@ -132,6 +142,14 @@ consumers:
     stream: UA1_AGENT_WORK_{team}
     name: agent~{team}~{agent}
     filter: ua.v1.{team}.*.work.agent.{agent}
+    mode: pull
+    ack: explicit
+    ack_wait_seconds: 60
+    max_deliveries: 20
+  agent_control:
+    stream: UA1_AGENT_WORK_{team}
+    name: control~{team}~{agent}
+    filter: ua.v1.{team}.*.work.control.{agent}
     mode: pull
     ack: explicit
     ack_wait_seconds: 60

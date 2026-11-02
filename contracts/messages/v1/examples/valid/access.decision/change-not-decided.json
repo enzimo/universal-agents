@@ -17,7 +17,7 @@
     "target": "agent",
     "id": "researcher-2"
   },
-  "subject": "ua.v1.team_example.team-services-1.work.agent.researcher-2",
+  "subject": "ua.v1.team_example.team-services-1.work.control.researcher-2",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-23T04:30:00.000Z",
   "algorithm": "ed25519",
@@ -29,5 +29,5 @@
     }
   },
   "body_digest": "iQHBekuPQds3ViVstCL-c3gi2Q6OZQY_FpZZ9OyLjIE",
-  "signature": "3148gR_b9LyzNJKjJ5TLEMgId_aVp1x6Uc8K-sqsJf0hGjzXVbROE43Z8V4UCJ4Oea2Dggf9K7iIc5WzGEqpDQ"
+  "signature": "BrKtY-9W1xGG-nDiPeD63qM_-N9NGFP-pXzNBQbbLG8wtcE_tepDgvlMoKH7I3E_6aIxDG7V_piEOEX_dgYkCA"
 }

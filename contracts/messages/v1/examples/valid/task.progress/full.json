@@ -19,7 +19,7 @@
     "target": "agent",
     "id": "lead"
   },
-  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "subject": "ua.v1.team_example.worker-host-1.work.control.lead",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-23T04:30:00.000Z",
   "algorithm": "ed25519",
@@ -55,5 +55,5 @@
     "steering_seen": "steer_1"
   },
   "body_digest": "K-gZe9hZ2d0kIbOPC5sNn5qtQ3Ljxns-7Eaqce01_A4",
-  "signature": "PaHrQ3J-T3uNvc0E_6z0azZ4elWg1WZfvC9NjC5klSIvPd4RnCXIyuaUNsAWX312bMhEJQ1Rffk7YhAnrim7Aw"
+  "signature": "bMRoEc_NJ0iR7U_O_er1sZ52gZ9AeqAwoPJYRK2ipMPKaDM0ztv1tOqFEhFxjshyrVKBVQ2B9ib34lUVa2hPCg"
 }
