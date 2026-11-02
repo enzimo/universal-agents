@@ -180,6 +180,38 @@ def test_generated_files_are_current() -> None:
     assert EXPORT.stale(EXPORT.render()) == []
 
 
+def test_the_digest_covers_only_the_contracts_sources(tmp_path: Path) -> None:
+    """README, "Versions": hidden files and other kinds of file never change the contract digest."""
+
+    for name in ("README.md", "registry.yaml", "schemas/frame.schema.json", "generated/registry.json"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    digest = EXPORT.contract_sha256({}, root=tmp_path)
+    for name in (".DS_Store", "registry.yaml~", "notes.txt", ".editor/settings.json", "schemas/.frame.schema.json.swp"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("stray", encoding="utf-8")
+    assert [path.relative_to(tmp_path).as_posix() for path in EXPORT.contract_sources(tmp_path)] == [
+        "README.md", "registry.yaml", "schemas/frame.schema.json"]
+    assert EXPORT.contract_sha256({}, root=tmp_path) == digest
+    (tmp_path / "registry.yaml").write_text("registry.yaml\n", encoding="utf-8")
+    assert EXPORT.contract_sha256({}, root=tmp_path) != digest
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "contracts/messages/v1/** text eol=lf" in attributes
+
+
+def test_the_seven_day_cut_off_and_the_one_day_revocations_record_are_pinned() -> None:
+    """Owner decision 45 and the revocations record's day: a changed lifetime fails here instead of passing silently."""
+
+    week, day = 7 * 24 * 3600, 24 * 3600
+    assert TRANSPORT["classes"]["durable"]["max_expiry_seconds"] == week
+    assert {entry["expiry_seconds"] for entry in REGISTRY["kinds"].values() if entry["class"] == "durable"} == {week}
+    assert REGISTRY["authority_token_max_seconds"] == week
+    records = REGISTRY["state_records"]
+    assert (records["agent_session"]["max_lifetime_seconds"], records["block_list"]["max_lifetime_seconds"],
+            records["revocations"]["max_lifetime_seconds"]) == (week, week, day)
+    assert kinds.STATE_RECORDS["revocations"].max_lifetime_seconds == day
+
+
 def test_the_compatibility_record_names_the_contract_by_its_digest() -> None:
     """README, "Versions": the SHA-256 of every source path and its bytes, in path order; peers compare it while -pre."""
 
@@ -785,6 +817,10 @@ def scope_pattern(_registry: dict, _transport: dict, schemas: dict) -> None:
     schemas["common.schema.json"]["$defs"]["scope_id"]["pattern"] = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 
 
+def pool_token(registry: dict, _transport: dict, _schemas: dict) -> None:
+    del registry["kinds"]["task.request"]["authority_by_address"]
+
+
 def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
     registry["kinds"]["dlq.notice"]["receivers"] = ["team_services", "installation_authority"]
 
@@ -800,6 +836,7 @@ def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
     (overlap(86400), "certificate_overlap_seconds"),
     (scope_pattern, "scope_id must allow"),
     (notice_reader, "serve none of its addresses"),
+    (pool_token, "carries no authority token"),
 ])
 def test_the_generator_refuses_records_and_notices_that_break_the_contract(change, problem: str) -> None:
     registry, transport, schemas = (copy.deepcopy(EXPORT.load_yaml("registry.yaml")), copy.deepcopy(TRANSPORT),

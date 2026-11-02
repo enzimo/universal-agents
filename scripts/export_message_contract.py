@@ -402,6 +402,7 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
     if "reply" in entry and entry["reply"]["body"] not in schemas:
         raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
     check_authority_by_address(where, entry)
+    check_pool_tokens(where, entry)
     check_authority_binding(where, entry, schemas)
     if entry.get("verification", "standard") not in VERIFICATION:
         raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
@@ -469,6 +470,15 @@ def token_bindings(entry: dict[str, Any]) -> list[dict[str, Any]]:
     if binding is None:
         return []
     return list(binding) if isinstance(binding, list) else [binding]
+
+
+def check_pool_tokens(where: str, entry: dict[str, Any]) -> None:
+    """Every host that runs a worker pool reads its queue, so no kind carries a token into one (README, "On behalf of a person")."""
+
+    for address in own_addresses(entry):
+        if audience_target(address) == "pool" and address_authority(entry, address) != "none":
+            raise ContractError(f"{where}: every host running a pool reads its queue, so {address} carries no authority "
+                                "token: set its authority_by_address to none")
 
 
 def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
@@ -1477,8 +1487,26 @@ def address_operations(key: str, entry: dict[str, Any], address: str, channel_id
     return operations
 
 
-def contract_sha256(files: dict[Path, str]) -> str:
-    """The digest of the contract's sources (README, "Versions"): every file under the contract folder but generated/.
+# The kinds of file the contract's sources are; the digest covers only these (README, "Versions").
+SOURCE_SUFFIXES = frozenset({".md", ".yaml", ".json"})
+
+
+def contract_sources(root: Path = CONTRACT) -> list[Path]:
+    """The contract's source files under ``root``: its Markdown, YAML and JSON files outside generated/.
+
+    A hidden file or folder (a name starting with ".") and any other kind of file, such
+    as an editor's backup or a desktop's folder index, is no source, so it never
+    changes the digest.
+    """
+
+    generated = root / GENERATED.relative_to(CONTRACT)
+    return sorted(path for path in root.rglob("*")
+                  if path.is_file() and path.suffix in SOURCE_SUFFIXES and generated not in path.parents
+                  and not any(part.startswith(".") for part in path.relative_to(root).parts))
+
+
+def contract_sha256(files: dict[Path, str], root: Path = CONTRACT) -> str:
+    """The digest of the contract's sources (README, "Versions"): its source files, see ``contract_sources``.
 
     In order of their paths relative to the folder, compared as UTF-8 bytes, it hashes
     each path in UTF-8, a zero byte, the file's size in decimal digits, a zero byte and
@@ -1486,12 +1514,13 @@ def contract_sha256(files: dict[Path, str]) -> str:
     never depends on a stale signature.
     """
 
-    paths = {path for path in CONTRACT.rglob("*") if path.is_file() and GENERATED not in path.parents}
-    paths |= {path for path in files if CONTRACT in path.parents and GENERATED not in path.parents}
+    generated = root / GENERATED.relative_to(CONTRACT)
+    paths = set(contract_sources(root))
+    paths |= {path for path in files if root in path.parents and generated not in path.parents}
     digest = hashlib.sha256()
-    for path in sorted(paths, key=lambda item: item.relative_to(CONTRACT).as_posix().encode("utf-8")):
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix().encode("utf-8")):
         data = files[path].encode("utf-8") if path in files else path.read_bytes()
-        digest.update(path.relative_to(CONTRACT).as_posix().encode("utf-8") + b"\0" + str(len(data)).encode("ascii")
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0" + str(len(data)).encode("ascii")
                       + b"\0" + data)
     return digest.hexdigest()
 
@@ -1811,7 +1840,7 @@ def render() -> dict[Path, str]:
     # contract digest and the manifest record them as rendered.
     files.update(render_examples(registry))
     files[GENERATED / "compatibility.json"] = json_text(compatibility(registry, contract_sha256(files)))
-    sources = sorted(path for path in CONTRACT.rglob("*") if path.is_file() and GENERATED not in path.parents)
+    sources = contract_sources()
     entries = {path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
     entries.update({path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(text.encode("utf-8")).hexdigest()
                     for path, text in files.items()})

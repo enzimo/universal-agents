@@ -588,8 +588,9 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
     """The scheduler's task names the person's gateway route as its reply target (README, "Replies").
 
     Each host publishes and pulls with its own generated grants: the scheduler puts
-    the run into the worker pool without its token, the team services hand the
-    token to the worker that claimed the run in its own inbox (custody.confirmed),
+    the run into the worker pool without its token, the worker claims it, the team
+    services read the claim's copy and hand the token to that worker in its own inbox
+    (custody.confirmed),
     the worker sends its result to the route the task names, and the gateway reads it
     with the delivery reference it needs.
     """
@@ -616,6 +617,18 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         stored = received.metadata.timestamp
         assert stored.tzinfo is not None and abs(datetime.now(timezone.utc) - stored) < timedelta(minutes=1)
         await received.ack_sync(timeout=2)
+        # The worker claims the run. A scheduled run's requester is the person's route, so the
+        # claim goes only to its copy; the team services read it and answer with custody.
+        claim = fixtures.example_frame("task.claimed", "scheduled-run-copy-to-team-services")
+        assert claim["body"]["task_id"] == task.body.task_id
+        await worker.nc.jetstream().publish(claim["subject"], json.dumps(claim).encode(), headers=headers(claim))
+        await js.add_consumer("UA1_WORK", config=consumer_config("team_services"))
+        team_inbox = await services.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK",
+                                                                       consumer=consumer_name("team_services"))
+        delivered_claim, = await team_inbox.fetch(1, timeout=2)
+        claimed = fixtures.verify(delivered_claim.data, claim, arrived(claim, delivered_claim))
+        assert (claimed.frame.issuer.agent, claimed.body.task_id) == ("researcher-2", task.body.task_id)
+        await delivered_claim.ack_sync(timeout=2)
         confirmed = fixtures.example_frame("custody.confirmed", "claim-with-token")
         await services.nc.jetstream().publish(confirmed["subject"], json.dumps(confirmed).encode(), headers=headers(confirmed))
         inbox = await worker.nc.jetstream().pull_subscribe_bind(stream=AGENT_STREAM,

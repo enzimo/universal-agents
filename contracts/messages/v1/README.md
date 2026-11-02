@@ -11,7 +11,8 @@ installation or an outside agent can implement them without reading UA's Python 
 
 The protocol is labelled `1.0-pre` while the messages are being moved onto it. It becomes
 `1.0` when the last kind is live. Until then a fix may change these files under the same
-label, so hosts refuse peers whose label or contract digest differs ("Versions").
+label. Hosts refuse peers whose label differs, and are to refuse peers whose contract digest
+differs once joins and host records carry it; no message carries it yet ("Versions").
 
 ## Layout
 
@@ -1111,7 +1112,7 @@ What each record says, and what `TrustStore.verify` checks about it:
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 
-**Not generated yet.** The NATS permissions for the key-value buckets, the object store and reading the dead-letter stream come with the services that use them. Until then the registry's `writers` say who may store each record, its `write_rule` says who reads it where only some hosts may (every host of a team reads the team's block list), and the readers' checks above do not depend on who stored it.
+**Not generated yet.** The NATS permissions for the key-value buckets, the object store and reading the dead-letter stream, and deleting a departed person's raw copies there ("Dead letters"), come with the services that use them. Until then the registry's `writers` say who may store each record, its `write_rule` says who reads it where only some hosts may (every host of a team reads the team's block list), and the readers' checks above do not depend on who stored it.
 
 ## Dead letters
 
@@ -1144,14 +1145,20 @@ Receivers recompute keys, so a kind's key parts and copies are fixed for the maj
 minor never adds, removes or reorders them.
 
 **The contract digest.** The compatibility record (`generated/compatibility.json`) names
-the contract in `contract_sha256`: the lowercase hexadecimal SHA-256 over every file under
-`contracts/messages/v1/` except `generated/`, this README and the examples included. The
+the contract in `contract_sha256`: the lowercase hexadecimal SHA-256 over every Markdown,
+YAML and JSON file under `contracts/messages/v1/` except `generated/`, this README and the
+examples included. Hidden files and folders (a name starting with `.`) and other kinds of
+file, such as an editor's backup, are no sources and do not count. The repository's
+`.gitattributes` checks the sources out with LF line endings on every system, so a Windows
+checkout hashes the same bytes. The
 files go in order of their paths relative to that folder, with `/` between folders,
 compared as UTF-8 bytes. For each file the digest takes its relative path in UTF-8, a zero
 byte, the file's size in bytes as decimal digits, a zero byte, and the file's bytes. While
 the label ends in `-pre`, a fix may change the contract without changing the label, so
-hosts refuse a peer whose digest differs from their own. `--check` regenerates the record,
-so a changed source with a stale digest fails it.
+hosts are to refuse a peer whose digest differs from their own. No message carries the
+digest yet: the join and the host record gain it in a later change, and until then hosts
+compare only the label. `--check` regenerates the record, so a changed source with a stale
+digest fails it.
 
 ## Operation inputs and outcomes
 

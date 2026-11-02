@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "b377739624d53f83e21e07b7301ba8a2aeb041471493a1363b99c4f50a16335f",
+    "contracts/messages/v1/README.md": "a04b3441a3acc55fb5a52531734432822490b504801fa363b37a1f61c1e3934f",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-on-a-denial.json": "086245c49861abf44ed45802297eefa9495a224097af7f625810a61d199a71fb",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-over-seven-days.json": "c032c37f1081bb05ccdd4543ee7d381d63059d90947fc17d6372dadcf2cfc63b",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-tool-twice.json": "8d2840a15f298b67dbc632ced98943abd187e1c94888742fe7e9312464186792",
@@ -1421,6 +1421,7 @@
     "contracts/messages/v1/examples/valid/task.answer/full.json": "eea56df16870a7444282e3f97f5c2581e7b096fbd38524cfd690f6a6c31c201e",
     "contracts/messages/v1/examples/valid/task.answer/to-outside-agent.json": "b8b596080f742cefe45c75ae5c76493c3f7d2f854a1fbee468fee920dc980227",
     "contracts/messages/v1/examples/valid/task.claimed/full.json": "bbb8412af5ba4f8b0c810b89bdf4c9454d694d05804614b5c3e0d44ccfb8dc13",
+    "contracts/messages/v1/examples/valid/task.claimed/scheduled-run-copy-to-team-services.json": "9aac5f9f32785bdd26a74c1b7dde6f9a47db229506deb13bb7d5ad07f5c91a09",
     "contracts/messages/v1/examples/valid/task.handback/full.json": "ac44b32fde45ad53f70c8da33ca2c67a68fc1f2c9e0e43e4e1913bd4cba652a0",
     "contracts/messages/v1/examples/valid/task.probe.reply/ok.json": "c13b5b1c2af794865d860574c45fcdd67a298d09c2b02489d54071858ab75c08",
     "contracts/messages/v1/examples/valid/task.probe/full.json": "9eb38bec5e9e9606f8624dbf6d4ccf1e458607eab978dc2404ac65fa546fccca",
@@ -1541,7 +1542,7 @@
     "contracts/messages/v1/examples/valid/topics.tag_thread.reply/runtime_error.json": "0c324a22bad004546048e0c4e2f1384e225cd9a197426a951e92df6053df6894",
     "contracts/messages/v1/examples/valid/topics.tag_thread/full.json": "840cd671121bc748986675be9422ec9df8a8b0c622e0a00e72ffd0052adf379e",
     "contracts/messages/v1/generated/asyncapi.json": "139b2902498ce268a64af83dbbec436cf3a3fdaa4ad26de9477c8a82f38c3ff8",
-    "contracts/messages/v1/generated/compatibility.json": "3933dce954e01279fb9668666320e2102ace385343d38c90e896d1d711e8c075",
+    "contracts/messages/v1/generated/compatibility.json": "e738e49a6ad0ca78471dc031de79c7ff10fb8536eb6dc829703a20c08ea39c32",
     "contracts/messages/v1/generated/permissions/edge_adapter.json": "d8e4177e5f9ab2f7df6335afc7f15975bdae1d976f1c72ace5049978d6a1e861",
     "contracts/messages/v1/generated/permissions/gateway.json": "06a065cc8b80607312bd125f6301ac6f1bbd0eace66109714886887c9ffabc36",
     "contracts/messages/v1/generated/permissions/installation_authority.json": "848932162920d74ca0d25779683c601e995b55a9fccb201bc2c71681dbccdf85",
