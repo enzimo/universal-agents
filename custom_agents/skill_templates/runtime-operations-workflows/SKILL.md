@@ -332,7 +332,9 @@ user guide: a release upgrades the instance in place from earlier releases of
 its own minor version and the previous one, so install the new release over
 the old one on the same data folder and settings (with the installer, the
 original install command with all its options plus `--replace`), after reading
-the skipped releases' Breaking Changes. The stores add what they need on the
+the skipped releases' Breaking Changes and the page's limits (from 0.9.3 or
+earlier the team transfer is the way; from 0.9.6 or earlier, schedule changes
+waiting in the Inbox are decided first). The stores add what they need on the
 first start.
 
 To move the team to another machine or a fresh instance, or across a longer

@@ -11,8 +11,8 @@ by running its test suite with ``--capture-schema``, then:
     scripts/upgrade_schema_fixture.py diff tests/fixtures/upgrade/0.9-sqlite.sql 0.10.sql
 
 ``merge`` keeps, for each table, the form of the oldest capture that created
-it (list captures oldest first), with the columns that release added when a
-store opened. ``diff`` lists what a newer capture adds, drops or changes in
+it, with the columns that release added when a store opened. Each capture
+names its release; list them oldest first, or ``merge`` refuses. ``diff`` lists what a newer capture adds, drops or changes in
 those tables. ``CREATE ... IF NOT EXISTS`` creates a missing table, index or
 trigger but never changes or removes one an older database already has, so
 every other line ``diff`` prints needs an upgrade step (a new column:
@@ -45,12 +45,13 @@ from storage.sqlite_vec_support import load_sqlite_vec  # noqa: E402
 HEADER = """-- Oldest form of every table, index and trigger the {label} releases created (SQLite),
 -- with the columns they added when a store opened, for tests that start from an
 -- earlier release's database (--upgrade-from, tests/upgrade_schemas.py). Built by
--- scripts/upgrade_schema_fixture.py merge from --capture-schema runs of: {sources}.
+-- scripts/upgrade_schema_fixture.py merge from --capture-schema runs of {sources}.
 """
 VECTOR_NOTE = """-- vec0 takes each instance's embedding dimension; this is the first one a test created.
 -- The general upgrade run leaves vec0 tables out, and a dedicated test loads them with a
 -- stored embedding (tests/test_upgrade_schemas.py).
 """
+RELEASE = "-- release: "
 SKIPPED = "-- skipped: "
 _ADD_COLUMN = re.compile(r"ALTER\s+TABLE\s+\S+\s+ADD\s", re.IGNORECASE)
 
@@ -65,6 +66,22 @@ def skipped_tests(path: Path) -> list[str]:
 
     lines = path.read_text(encoding="utf-8").splitlines()
     return [line.removeprefix(SKIPPED) for line in lines if line.startswith(SKIPPED)]
+
+
+def release_of(path: Path) -> str:
+    """The release a capture records (tests/upgrade_schemas.py writes it first)."""
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(RELEASE):
+            return line.removeprefix(RELEASE).strip()
+    raise SystemExit(f"{path}: no '{RELEASE.strip()}' line; record it with --capture-schema (tests/upgrade_schemas.py)")
+
+
+def _version(release: str) -> tuple[int, ...]:
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", release)
+    if match is None:
+        raise SystemExit(f"{release!r} is not a MAJOR.MINOR.PATCH release")
+    return tuple(int(part) for part in match.groups())
 
 
 def is_added_column(statement: str) -> bool:
@@ -164,7 +181,15 @@ def _same_statement(old: str, new: str) -> bool:
     return normal(old) == normal(new)
 
 
-def merge(out: Path, captures: list[Path], label: str) -> None:
+def merge(out: Path, captures: list[Path], label: str | None = None) -> None:
+    # The first capture to create a table gives its form, so an older release
+    # listed after a newer one would hide the older form.
+    releases = [release_of(capture) for capture in captures]
+    for older, newer in zip(releases, releases[1:]):
+        if _version(newer) < _version(older):
+            raise SystemExit(f"List captures oldest first: {older} comes before {newer}.")
+    if label is None:
+        label = ", ".join(sorted({".".join(map(str, _version(release)[:2])) for release in releases}))
     merged: dict[str, dict[str, Any]] = {}
     for capture in captures:
         skipped = skipped_tests(capture)
@@ -177,7 +202,7 @@ def merge(out: Path, captures: list[Path], label: str) -> None:
         with closing(build(read_statements(capture))) as conn:
             for name, table in tables(conn).items():
                 merged.setdefault(name, table)
-    lines = [HEADER.format(label=label, sources=", ".join(capture.name for capture in captures))]
+    lines = [HEADER.format(label=label, sources=", ".join(releases))]
     for name in sorted(merged):
         if is_vector_table(merged[name]["sql"]):
             lines.append(VECTOR_NOTE)
@@ -240,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     merge_cmd = commands.add_parser("merge", help="build the fixture from captures, oldest first")
     merge_cmd.add_argument("out", type=Path)
     merge_cmd.add_argument("captures", type=Path, nargs="+")
-    merge_cmd.add_argument("--label", default="previous minor version's", help="releases named in the header")
+    merge_cmd.add_argument("--label", help="releases named in the header (default: their minor versions)")
     diff_cmd = commands.add_parser("diff", help="list what a newer capture changes in the fixture's tables")
     diff_cmd.add_argument("fixture", type=Path)
     diff_cmd.add_argument("capture", type=Path)

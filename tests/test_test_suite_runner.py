@@ -10,6 +10,7 @@ import pytest
 
 from live_provider_safety import sanitize_provider_failure
 from conftest import pytest_runtest_makereport
+from tests.upgrade_schemas import previous_minor_fixture
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,10 @@ def _run_profile(tmp_path: Path, *arguments: str) -> tuple[subprocess.CompletedP
         (("fast", "-q"), ["-m", "not live and not external", "-q"]),
         (
             ("upgrade", "-q"),
-            ["-m", "not live and not external", "--upgrade-from", "tests/fixtures/upgrade/0.9-sqlite.sql", "-q"],
+            [
+                "-m", "not live and not external",
+                "--upgrade-from", str(previous_minor_fixture().relative_to(PROJECT_ROOT)), "-q",
+            ],
         ),
         (("live",), ["-m", "live and not external"]),
         (("live-nats",), ["-m", "live and nats and not external"]),

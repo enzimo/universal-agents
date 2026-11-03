@@ -10,7 +10,6 @@ import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Barrier
 from types import ModuleType, SimpleNamespace
 
@@ -20,12 +19,13 @@ from scripts.upgrade_schema_fixture import is_vector_table
 from storage.config import resolve_storage_settings
 from storage.sqlite_vec_support import load_sqlite_vec, serialize_float32
 from tests import upgrade_schemas
-from tests.upgrade_schemas import _Schemas, read_schema_statements
+from tests.upgrade_schemas import _Schemas, previous_minor_fixture, read_schema_statements
 
-FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-sqlite.sql"
+FIXTURE = previous_minor_fixture()
 
 
 def test_the_previous_minor_versions_tables_load_into_an_empty_database():
+    # What it checks is 0.9's; it changes when UPGRADE_FROM moves to 0.10.
     statements = read_schema_statements(FIXTURE)
     from storage.memory_graph_repository import sqlite3 as driver
 
@@ -72,6 +72,41 @@ def test_databases_stores_create_start_with_the_older_tables_and_tests_own_do_no
     assert _tables(sqlite3.connect(":memory:")) == set()
 
 
+def test_a_store_opened_through_a_tests_connect_wrapper_still_starts_with_the_older_tables(tmp_path, monkeypatch):
+    from storage.heartbeat_repository import create_heartbeat_repository
+    from tests.loop_storage_support import record_loop_opens
+
+    schemas = _Schemas(seed=("CREATE TABLE older (value TEXT)",), capture=None)
+    monkeypatch.setattr(sqlite3, "connect", schemas.connect)
+    store_path = tmp_path / "heartbeat.db"
+    settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(store_path)}})
+    with record_loop_opens(monkeypatch):  # Wraps sqlite3.connect; the store still decides.
+        create_heartbeat_repository(settings, logger=logging.getLogger("test"))
+
+    with upgrade_schemas._original_connect(str(store_path)) as conn:
+        assert {"older", "heartbeat_items"} <= _tables(conn)
+
+
+def test_a_seeding_failure_fails_the_run_even_when_product_code_catches_it(tmp_path, monkeypatch):
+    schemas = _Schemas(seed=("CREATE TABLE broken (",), capture=None)
+    schemas.test = "tests/test_status.py::catches_everything"
+    monkeypatch.setattr(schemas, "_product_caller", lambda: True)
+    try:  # As product code that logs every error and carries on.
+        schemas.connect(str(tmp_path / "store.db"))
+    except Exception:
+        pass
+    session = SimpleNamespace(exitstatus=pytest.ExitCode.OK)
+    schemas.pytest_sessionfinish(session=session, exitstatus=0)
+
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+    lines: list[str] = []
+    schemas.pytest_terminal_summary(SimpleNamespace(write_line=lambda line, **markup: lines.append(line)))
+    assert lines == [
+        "--upgrade-from failed 1 time(s); the first: tests/test_status.py::catches_everything: "
+        f"--upgrade-from could not create its tables in {str(tmp_path / 'store.db')!r}: incomplete input"
+    ]
+
+
 def _tables(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
@@ -113,6 +148,7 @@ def test_capture_records_the_columns_an_upgrade_step_adds(tmp_path, monkeypatch)
     # Replayed after the release's own CREATE TABLE, it gives the table the
     # form a real database of that release has (scripts/upgrade_schema_fixture.py).
     assert read_schema_statements(capture) == ("ALTER TABLE older ADD COLUMN added TEXT",)
+    assert capture.read_text().startswith("-- release: ")
 
 
 def _report(nodeid: str, outcome: str) -> SimpleNamespace:
@@ -132,7 +168,7 @@ def test_capture_from_a_run_that_did_not_pass_is_not_saved(tmp_path, reports, ex
     schemas._captured["CREATE TABLE IF NOT EXISTS kept (value TEXT)"] = None
     for nodeid, outcome in reports:
         schemas.pytest_runtest_logreport(_report(nodeid, outcome))
-    schemas.pytest_sessionfinish(exitstatus=exitstatus)
+    schemas.pytest_sessionfinish(session=SimpleNamespace(exitstatus=exitstatus), exitstatus=exitstatus)
 
     assert not capture.exists()
     lines: list[tuple[str, dict]] = []
@@ -152,7 +188,7 @@ def test_capture_lists_the_tests_its_run_skipped(tmp_path):
     expected_failure = _report("tests/a.py::xfail", "skipped")
     expected_failure.wasxfail = "known"  # It ran.
     schemas.pytest_runtest_logreport(expected_failure)
-    schemas.pytest_sessionfinish(exitstatus=0)
+    schemas.pytest_sessionfinish(session=SimpleNamespace(exitstatus=0), exitstatus=0)
 
     assert skipped_tests(capture) == ["tests/test_module_skip.py", "tests/a.py::needs_cedar"]
     assert read_schema_statements(capture) == ("CREATE TABLE IF NOT EXISTS kept (value TEXT)",)
@@ -235,7 +271,7 @@ def test_configured_alternate_driver_seeds_and_captures_the_real_memory_store(tm
             assert "older" in _tables(conn)
     finally:
         upgrade_schemas.pytest_unconfigure(config)
-    plugins[0].pytest_sessionfinish(exitstatus=0)
+    plugins[0].pytest_sessionfinish(session=SimpleNamespace(exitstatus=0), exitstatus=0)
     assert any("CREATE TABLE IF NOT EXISTS memory_entities" in statement for statement in read_schema_statements(capture))
     assert driver.connect is upgrade_schemas._original_connect
 

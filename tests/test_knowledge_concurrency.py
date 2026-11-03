@@ -19,6 +19,7 @@ from runtime_settings.knowledge import KnowledgeSettings, KnowledgeWriteLimits
 from storage.config import StorageSettings
 from storage.knowledge_repository import create_knowledge_repository
 from tests.knowledge_support import BACKENDS, agent, knowledge_storage, person
+from tests.upgrade_schemas import connection_hooks_active
 
 pytestmark = pytest.mark.integration
 
@@ -80,10 +81,12 @@ def _propose_archives(settings: StorageSettings, worker: int) -> int:
 @pytest.fixture(params=BACKENDS)
 def settings(request, tmp_path):
     with knowledge_storage(request.param, tmp_path) as storage_settings:
-        # Spawn starts a fresh interpreter, without pytest's connection hooks.
-        # Prepare the shared store here so child-only writes use the historical
-        # tables in upgrade mode, and schema capture includes this store.
-        create_knowledge_repository(storage_settings)
+        if connection_hooks_active(request.config):
+            # Spawn starts a fresh interpreter, without pytest's connection
+            # hooks: prepare the shared store here so workers reopen the older
+            # tables (--upgrade-from) and the capture includes it. Otherwise the
+            # workers create it, which checks processes setting it up at once.
+            create_knowledge_repository(storage_settings)
         yield storage_settings
 
 

@@ -5,13 +5,20 @@ memory, knowledge, schedules and history stay where they are.
 
 ## Which versions upgrade in place
 
-A release upgrades an instance from any earlier release of its own minor
-version and of the previous one: 0.10.x opens what any 0.9.x saved. Upgrades
-only go forward. Going back to an earlier release is not supported, because it
-may not read what a newer one saved.
+A release upgrades an instance in place from earlier releases of its own
+minor version and of the previous one: 0.10.x opens what 0.9.4 and later
+saved. Upgrades only go forward. Going back to an earlier release is not
+supported, because it may not read what a newer one saved.
 
-For a longer jump, upgrade to a release in between first, or move the team to
-a fresh instance with the [team transfer](team-transfer.md).
+- **From 0.9.3 or earlier, or 0.8 or earlier:** move the team to a fresh
+  instance with the [team transfer](team-transfer.md). Upgrades from these
+  releases are not checked, and 0.9 itself moved teams only that way.
+- **From 0.9.6 or earlier:** approve or decline the schedule changes waiting
+  in the Inbox first. A waiting schedule change saved by those releases
+  cannot be read after the upgrade.
+- **PostgreSQL:** an instance that keeps its data in PostgreSQL gets the same
+  upgrade steps, but release tests check them on SQLite only. Back up the
+  database first.
 
 ## Before you upgrade
 
@@ -21,7 +28,8 @@ a fresh instance with the [team transfer](team-transfer.md).
    switches versions.
 2. **Finish or stop work in progress** when the notes ask you to.
 3. **Back up the data folder**: the one you installed with
-   (`--data-dir`), `~/.universal-agents/data` by default.
+   (`--data-dir`), `~/.universal-agents/data` by default. If the instance
+   keeps its data in PostgreSQL, back up that database too.
 
 ## Upgrade
 

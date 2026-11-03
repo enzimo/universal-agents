@@ -257,12 +257,14 @@ def test_evidence_storage_cannot_skip_tests_or_hide_verification_failures() -> N
     assert tests["run"] == './scripts/run_tests.sh "${{ matrix.profile }}" -q -x --tb=short --durations=20'
     for verification in (canary, tests):
         assert "continue-on-error" not in verification
-        assert "if" not in verification
         assert steps.index(verification) < steps.index(upload)
+    assert "if" not in tests
+    # The canary calls GitHub and does not depend on the database: once, in the fast profile.
+    assert canary["if"] == "matrix.profile == 'fast'"
     assert upload["continue-on-error"] == "true"
-    assert upload["if"] == "always()"
+    assert upload["if"] == "always() && matrix.profile == 'fast'"
     assert upload["with"]["retention-days"] == "7"
-    assert upload["with"]["name"].endswith("-${{ matrix.profile }}")
+    assert upload["with"]["name"] == "skill-installation-canary-evidence"
     assert warning["if"] == "always() && steps.canary-evidence.outcome == 'failure'"
     assert "::warning::" in warning["run"]
 
@@ -333,3 +335,17 @@ def test_every_postgres_test_is_marked_for_the_postgres_job() -> None:
                 unmarked.append(f"{path.name}:{node.lineno} {node.name}")
 
     assert unmarked == []
+
+
+def test_the_upgrade_profile_runs_only_what_depends_on_the_database() -> None:
+    steps = _workflow("tests.yml")["jobs"]["fast"]["steps"]
+    once = {
+        "Validate the shipped access policies",
+        "Install and smoke-test isolated SkillSpector",
+        "Run reviewed GitHub skill-installation canary",
+        "Test runner resource lifecycle",
+    }
+
+    assert {step["name"] for step in steps if step.get("if") == "matrix.profile == 'fast'"} == once
+    # Both profiles build the Cedar evaluator: the access tests need it.
+    assert "if" not in next(step for step in steps if step.get("name") == "Build Cedar evaluator")

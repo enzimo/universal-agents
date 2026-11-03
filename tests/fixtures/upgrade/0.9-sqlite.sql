@@ -1,7 +1,7 @@
 -- Oldest form of every table, index and trigger the 0.9 releases created (SQLite),
 -- with the columns they added when a store opened, for tests that start from an
 -- earlier release's database (--upgrade-from, tests/upgrade_schemas.py). Built by
--- scripts/upgrade_schema_fixture.py merge from --capture-schema runs of: v0.9.4.sql, v0.9.11.sql.
+-- scripts/upgrade_schema_fixture.py merge from --capture-schema runs of 0.9.4, 0.9.11.
 CREATE TABLE access_account_links ( link_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, tool_id TEXT NOT NULL, owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, status TEXT NOT NULL, revoked_at TEXT, revoked_by_json TEXT, payload_json TEXT NOT NULL, created_at TEXT NOT NULL );
 CREATE INDEX access_account_links_owner ON access_account_links(team_id, tool_id, owner_kind, owner_id, status);
 CREATE TABLE access_account_sharing ( team_id TEXT NOT NULL, subject TEXT NOT NULL, payload_json TEXT NOT NULL, changed_at TEXT NOT NULL, PRIMARY KEY (team_id, subject) );

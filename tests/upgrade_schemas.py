@@ -9,8 +9,9 @@ release created, so a store that misses an upgrade step fails the tests that
 use it. Dimension-specific vec0 tables are checked separately with a stored
 embedding and the complete historical fixture (tests/test_upgrade_schemas.py).
 Both stdlib sqlite3 and the memory store's macOS pysqlite3 driver are hooked.
-Tests that spawn workers prepare their shared store in the parent first:
-spawned interpreters do not inherit pytest's hooks. Databases a test creates itself keep the tables the test builds, and
+Tests that spawn workers prepare their shared store in the parent first when
+these hooks are on (``connection_hooks_active``): spawned interpreters do not
+inherit pytest's hooks. Databases a test creates itself keep the tables the test builds, and
 so do all databases of a test marked ``own_database``. Release candidates run the suite this way (``scripts/run_tests.sh
 upgrade``).
 
@@ -18,17 +19,21 @@ upgrade``).
 code creates while the suite runs, and the columns it adds to existing tables,
 one statement per line; tests' own tables are left out. A capture is saved
 only from a run that passed, because tables only failed or unrun tests create
-would be missing from it, and it lists the tests the run skipped first: their
-tables are missing too (the access tests skip until the Cedar authorizer is
-built). ``scripts/upgrade_schema_fixture.py`` merges the captures of a minor
-version's releases into the fixture and lists what a newer release changes in
-them.
+would be missing from it. It starts with the release it records (``VERSION``)
+and the tests the run skipped: their tables are missing too (the access tests
+skip until the Cedar authorizer is built). ``scripts/upgrade_schema_fixture.py``
+merges the captures of a minor version's releases into the fixture and lists
+what a newer release changes in them.
+
+Product code that catches every error could hide a failure to create the older
+tables, so such a failure also fails the run, after the test that met it.
 """
 
 from __future__ import annotations
 
 import os
 import importlib
+import re
 import sqlite3
 import sys
 import threading
@@ -39,7 +44,7 @@ from typing import Any
 
 import pytest
 
-from scripts.upgrade_schema_fixture import SKIPPED, is_added_column, is_vector_table
+from scripts.upgrade_schema_fixture import RELEASE, SKIPPED, is_added_column, is_vector_table
 
 _REPO = Path(__file__).resolve().parents[1]
 _TESTS = str(_REPO / "tests") + os.sep
@@ -97,6 +102,27 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     schemas = item.config.stash.get(_SCHEMAS, None)
     if schemas is not None:
         schemas.paused = item.get_closest_marker("own_database") is not None
+        schemas.test = item.nodeid
+
+
+def connection_hooks_active(config: pytest.Config) -> bool:
+    """Whether new SQLite connections are seeded or recorded (--upgrade-from, --capture-schema).
+
+    Spawned interpreters do not inherit these hooks, so a store that only
+    worker processes would create is prepared in the parent while they are on.
+    """
+
+    return config.stash.get(_SCHEMAS, None) is not None
+
+
+def previous_minor_fixture() -> Path:
+    """The fixture the upgrade run starts from: ``UPGRADE_FROM`` in scripts/run_tests.sh, the one place it is named."""
+
+    script = (_REPO / "scripts" / "run_tests.sh").read_text(encoding="utf-8")
+    match = re.search(r'^UPGRADE_FROM="([^"]+)"$', script, re.MULTILINE)
+    if match is None:
+        raise RuntimeError("scripts/run_tests.sh no longer sets UPGRADE_FROM")
+    return _REPO / match.group(1)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -126,7 +152,9 @@ class _Schemas:
         self._lock = threading.Lock()
         self._failed: dict[str, None] = {}
         self._skipped: dict[str, None] = {}
-        self._outcome: tuple[str, str] | None = None  # The capture's result for the terminal summary.
+        self._seed_errors: list[str] = []
+        self._outcome: list[tuple[str, str]] = []  # Lines for the terminal summary.
+        self.test = ""  # The running test, named in a seeding failure.
         # Set for a test marked own_database, which builds an older instance's
         # database through a store and must keep exactly what it builds.
         self.paused = False
@@ -163,7 +191,10 @@ class _Schemas:
         except driver.Error as exc:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
-            raise pytest.UsageError(f"--upgrade-from could not create its tables in {target!r}: {exc}") from exc
+            message = f"--upgrade-from could not create its tables in {target!r}: {exc}"
+            with self._lock:
+                self._seed_errors.append(f"{self.test or 'outside a test'}: {message}")
+            raise pytest.UsageError(message) from exc
         finally:
             conn.isolation_level = isolation
 
@@ -206,12 +237,17 @@ class _Schemas:
         elif report.skipped and not hasattr(report, "wasxfail"):
             self._skipped.setdefault(report.nodeid, None)
 
-    def pytest_sessionfinish(self, exitstatus: int) -> None:
-        self.finish(passed=exitstatus == 0 and not self._failed)
+    def pytest_sessionfinish(self, session: pytest.Session, exitstatus: int) -> None:
+        if self._seed_errors:
+            # The test may still have passed, if product code caught the error.
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+            self._outcome.append(
+                ("red", f"--upgrade-from failed {len(self._seed_errors)} time(s); the first: {self._seed_errors[0]}")
+            )
+        self.finish(passed=exitstatus == 0 and not self._failed and not self._seed_errors)
 
     def pytest_terminal_summary(self, terminalreporter: Any) -> None:
-        if self._outcome is not None:
-            color, message = self._outcome
+        for color, message in self._outcome:
             terminalreporter.write_line(message, **{color: True, "bold": True})
 
     def finish(self, *, passed: bool) -> None:
@@ -222,22 +258,23 @@ class _Schemas:
         if not passed:
             failed = list(self._failed)
             reason = f"{len(failed)} failed, the first {failed[0]}" if failed else "it stopped early"
-            self._outcome = (
+            self._outcome.append((
                 "red",
                 f"--capture-schema: not saved, because the run did not pass ({reason}). "
                 "Tables only the failed or unrun tests create would be missing from it.",
-            )
+            ))
             return
         with self._lock:
             statements = "".join(f"{statement};\n" for statement in self._captured)
+        release = (_REPO / "VERSION").read_text(encoding="utf-8").strip()
         skipped = "".join(f"{SKIPPED}{nodeid}\n" for nodeid in self._skipped)
-        self._capture.write_text(skipped + statements, encoding="utf-8")
+        self._capture.write_text(f"{RELEASE}{release}\n" + skipped + statements, encoding="utf-8")
         if self._skipped:
-            self._outcome = (
+            self._outcome.append((
                 "yellow",
                 f"--capture-schema: {len(self._skipped)} skipped test(s) are listed at the top of {self._capture}. "
                 "Tables only they create are missing from it.",
-            )
+            ))
 
 
 _PRODUCT, _TEST, _OTHER = "product", "test", "other"
@@ -248,6 +285,9 @@ _CONNECTION_MODULES = {
     str(_REPO / "storage" / "sqlite_connection.py"),
     str(_REPO / "storage" / "postgres_connection.py"),
     str(_REPO / "scripts" / "upgrade_schema_fixture.py"),
+    # Wraps sqlite3.connect to find opens on the event loop; the store that
+    # called it decides, or seeding would silently skip its databases.
+    str(_REPO / "tests" / "loop_storage_support.py"),
 }
 
 

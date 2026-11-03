@@ -4035,11 +4035,16 @@ the desktop app never offers an older version.
   a dedicated test loads the complete fixture with a stored embedding and
   proves it remains searchable without recreating that table. It is separate
   because other tests use different embedding dimensions. Both SQLite drivers
-  (`sqlite3` and macOS's `pysqlite3`) are intercepted. Tests that spawn worker
-  processes initialize the shared store in the parent fixture first, so the
-  workers reopen historical tables and capture includes their schema.
-  Normal and upgrade CI profiles run as separate matrix jobs, each with its
-  own 75-minute budget. PostgreSQL stores run the same steps
+  (`sqlite3` and macOS's `pysqlite3`) are intercepted, and a test helper that
+  wraps `connect` leaves the decision to the store that called it. A failure to
+  create the older tables fails the run even when product code catches the
+  error. In upgrade and capture runs, tests that spawn worker processes
+  initialize the shared store in the parent fixture first, so the workers
+  reopen historical tables and capture includes their schema; normal runs
+  leave its creation to the workers. Normal and upgrade CI profiles run as
+  separate matrix jobs, each with its own 75-minute budget; checks that do not
+  depend on the database (access-policy validation, SkillSpector, the GitHub
+  skill-installation canary, runner tests) run only in the normal job. PostgreSQL stores run the same steps
   through `ensure_column`; the option covers SQLite only, and a one-off
   comparison of PostgreSQL tables from the same releases (2026-11-01) found
   the same changes. Tables first created in the current minor version's
