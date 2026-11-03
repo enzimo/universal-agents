@@ -1981,6 +1981,7 @@ def _prepare_launch(tmp_path: Path, monkeypatch, *, team_id: str, env: Mapping[s
         "ensure_openshell_sandbox": lambda _config, env: None,
         "validate_memory_graph_embedding_preflight": lambda *_args, **_kwargs: None,
         "start_installation_authority": lambda *_args, **_kwargs: _StandInProcess(),
+        "start_team_services": lambda *_args, **_kwargs: _StandInProcess(),
     }.items():
         monkeypatch.setattr(lh, name, replacement)
     monkeypatch.setattr(lh.signal, "signal", lambda *_args: None)
@@ -2027,17 +2028,32 @@ def test_the_installation_authority_starts_after_the_streams_and_is_watched_with
         steps.append(("authority", (layout, command, env)))
         return authority
 
+    team_services = _StandInProcess()
+
+    def start_team_services(command, env, *, cwd):
+        steps.append(("team services", (command, env)))
+        return team_services
+
     monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: steps.append(("streams", env)))
     monkeypatch.setattr(lh, "start_installation_authority", start)
+    monkeypatch.setattr(lh, "start_team_services", start_team_services)
     monkeypatch.setattr(lh, "run_supervised", lambda **kwargs: steps.append(("services", kwargs)) or 0)
 
     assert lh.main() == 0
-    assert [name for name, _ in steps] == ["streams", "authority", "services"]
+    assert [name for name, _ in steps] == ["streams", "authority", "team services", "services"]
     layout, command, env = steps[1][1]
     assert layout.trust_bootstrap_path.exists() and command[-3:] == ["run-installation-authority", "--config",
                                                                     str(config_path)]
     assert env["NATS_PASSWORD"] == "nats" and "SECURE_TOOL_BROKER_TOKEN" not in env
-    assert ("installation authority", authority) in steps[2][1]["external_processes"]
+    command, env = steps[2][1]
+    assert command[-3:] == ["run-team-services", "--config", str(config_path)] and env["NATS_PASSWORD"] == "nats"
+    assert "SECURE_TOOL_BROKER_TOKEN" not in env
+    # The team services are a host the authority approves without asking anyone.
+    from installation_authority.expected_hosts import read_expected_hosts
+
+    assert read_expected_hosts(layout.trust_expected_hosts_path)["team-services"].roles == {"team_services", "scheduler"}
+    external = steps[3][1]["external_processes"]
+    assert ("installation authority", authority) in external and ("team services", team_services) in external
     assert PROCESS_INSTALLATION_AUTHORITY == "installation_authority"
 
 

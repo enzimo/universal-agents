@@ -103,8 +103,11 @@ from custom_agents.memory_graph_embedding_profile_runtime import (
 )
 from docker.message_hosts import (
     build_installation_authority_command,
+    build_team_services_command,
+    expected_host,
     prepare_message_host_trust,
     start_installation_authority,
+    start_team_services,
 )
 from env_secrets import (
     PROCESS_ACTIVITY_COLLECTOR,
@@ -119,11 +122,13 @@ from env_secrets import (
     PROCESS_OPENSHELL_GATEWAY,
     PROCESS_SEALBOX,
     PROCESS_SECURE_BROKER,
+    PROCESS_TEAM_SERVICES,
     environment_for,
     materialize_secret_file_envs,
     withheld_names,
 )
 from runtime_settings.secret_names import configured_secret_names
+from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
 from secure_tool_broker.credential_state import resolve_broker_credentials_dir
 from secure_tool_broker.defaults import resolve_secure_tool_broker_internal_base_url
 from secure_tool_broker.sealbox_runtime import (
@@ -2776,7 +2781,10 @@ def main() -> int:
     # The message hosts' keys and their installation authority, before any host starts
     # (docker.message_hosts).
     try:
-        prepare_message_host_trust(config.layout)
+        prepare_message_host_trust(
+            config.layout,
+            {TEAM_SERVICES_RUNTIME: expected_host(config.layout, team_services_profile(config.manager.team_id))},
+        )
         authority_process = start_installation_authority(
             config.layout,
             build_installation_authority_command(config_path, repo_root=REPO_ROOT),
@@ -2792,6 +2800,13 @@ def main() -> int:
         )
         return 2
     external_processes = (*external_processes, ("installation authority", authority_process))
+    # The team services join as soon as the authority answers (team_services.process).
+    team_services_command = build_team_services_command(config_path, repo_root=REPO_ROOT)
+    LOGGER.info("Starting the team services: %s", " ".join(team_services_command))
+    team_services_process = start_team_services(
+        team_services_command, environment_for(PROCESS_TEAM_SERVICES, inherited_env), cwd=REPO_ROOT
+    )
+    external_processes = (*external_processes, ("team services", team_services_process))
 
     return run_supervised(
         manager_command=manager_command,

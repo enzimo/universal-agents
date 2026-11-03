@@ -4236,6 +4236,36 @@ Hosts join with `custom_transport.protocol1.joining`, which waits for an authori
 is still starting and checks the returned certificate against the bundle's authority
 keys. The hosts still share one NATS login, so a join returns no NATS credential.
 
+**Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
+reads the authority's newest revocations record at start and every half hour, renews its
+certificate when two thirds of its life are gone, and writes its own liveness record
+(`UA1_HOSTS`) every 20 seconds, expiring within 60, so a stopped host shows as gone within
+a minute and nothing moves because of it. When a frame or record names a certificate or
+an agent session this host does not hold yet, it reads it from `UA1_CERTS`, where the
+authority and the team services publish them, verifies it, and checks the frame again,
+once.
+
+**The team services** (`team_services`, `assistant_cli run-team-services`) run as host
+`team-services` with the `team_services` and `scheduler` roles (plan decisions 44 and 58),
+started by the launcher right after the authority. One instance serves a team at a time:
+it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, holding a
+30-second lease renewed every 10 seconds. The lock names the process instance, not only
+the runtime, so a second copy of the same host, or a restart while the old process still
+runs, waits as a standby, logs which instance serves, and takes over when the lease runs
+out or the first releases it on a clean stop. An instance that loses the lock stops at
+once. They serve the team's address (`svc.team`) and answer, so far:
+
+- `sessions.open`: the host's certificate must allow the agent's type and have room under
+  its session limit, and the agent must not run on another host (agents stay on their
+  host; `already_placed` names it). The placement is written with compare-and-set; the
+  session, naming the placement's revision, is signed into `UA1_CERTS`. Only the team
+  lead's type on a lead host gets the `lead` role;
+- `sessions.renew` and `sessions.close`, for sessions on the asking host; a close removes
+  the placement unless the agent is handed over.
+
+Every other operation is answered `unsupported` at once; today's team operations still
+run in the team lead's process and move here one at a time.
+
 ## Certificate trust
 
 Certificate trust spans independent stores. Python certifi and uv use their

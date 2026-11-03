@@ -29,6 +29,7 @@ from typing import Mapping, Optional
 
 from custom_transport.protocol1.bootstrap import BootstrapBundle, BootstrapError, read_bundle, write_bundle
 from custom_transport.protocol1.host_keys import AUTHORITY_KEY_FILENAME, ensure_authority_keys, ensure_host_keys, load_authority_keys
+from custom_transport.protocol1.joining import HostProfile
 from installation_authority.expected_hosts import ExpectedHost, write_expected_hosts
 from installation_authority.service import AUTHORITY_RUNTIME
 from runtime_settings.instance_layout import InstanceLayout
@@ -70,6 +71,19 @@ def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, Expec
                      BootstrapBundle(installation, keys, existing.records if existing and existing.installation == installation
                                      else ()))
     return installation
+
+
+def expected_host(layout: InstanceLayout, profile: HostProfile) -> ExpectedHost:
+    """The approval entry of a host the launcher starts, with its key made when missing."""
+
+    keys, _ = ensure_host_keys(layout, profile.runtime)
+    return ExpectedHost(profile.runtime, keys.key_id, keys.public_key_text, frozenset(profile.roles),
+                        frozenset(profile.teams), frozenset(profile.agent_types), profile.session_limit)
+
+
+def build_team_services_command(config_path: Path, *, repo_root: Path, python_executable: str | None = None) -> list[str]:
+    return [python_executable or sys.executable, "-u", str(repo_root / "assistant_cli.py"), "run-team-services",
+            "--config", str(config_path)]
 
 
 def build_installation_authority_command(config_path: Path, *, repo_root: Path,
@@ -116,3 +130,9 @@ def start_installation_authority(layout: InstanceLayout, command: list[str], env
         time.sleep(0.2)
     LOGGER.info("The installation authority is ready. event=installation_authority_started")
     return process
+
+
+def start_team_services(command: list[str], env: Mapping[str, str], *, cwd: Path) -> subprocess.Popen[bytes]:
+    """Start the team services; they join and take the team's lock on their own, so nothing waits here."""
+
+    return subprocess.Popen(command, cwd=cwd, env=dict(env))

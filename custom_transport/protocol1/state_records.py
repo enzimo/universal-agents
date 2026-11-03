@@ -18,12 +18,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncIterator, Mapping, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
 
 from nats.js.errors import KeyNotFoundError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import PROTOCOL, STATE_RECORDS
+from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import VerifiedRecord, sign_state
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.trust_state import PersistentTrustStore
@@ -40,10 +41,13 @@ class StoredRecord:
 class StateRecords:
     """One host's reads and writes of signed records in the key-value buckets."""
 
-    def __init__(self, js: Any, identity: HostIdentity, trust: PersistentTrustStore) -> None:
+    def __init__(self, js: Any, identity: HostIdentity, trust: PersistentTrustStore, *,
+                 fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> None:
         self._js = js
         self._identity = identity
         self._trust = trust
+        # Reads a writer's certificate this host does not hold yet (``MessageHost.fetch_trust``).
+        self._fetch_trust = fetch_trust
 
     def signed(self, record: str, key: str, body: Mapping[str, Any], *, sequence: int, issued_at: datetime,
                expires_at: Optional[datetime] = None) -> dict[str, Any]:
@@ -89,7 +93,13 @@ class StateRecords:
         entry = await self._get(record, key)
         if entry is None:
             return None
-        return StoredRecord(int(entry.revision), self._trust.store.verify(entry.value, record=record, now=now, held=held))
+        try:
+            verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        except FrameRefused as refused:
+            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
+                raise
+            verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        return StoredRecord(int(entry.revision), verified)
 
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
         """Read one trust record (certificate, revocations, session, agreement) into the trust store.

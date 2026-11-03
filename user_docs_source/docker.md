@@ -562,6 +562,7 @@ The processes named in the tables:
 | `adapter_host` | The external adapter host for chat channels. |
 | `consumer_check` | The NATS consumer check run before agents start. |
 | `installation_authority` | The installation authority, which signs the message hosts' certificates. |
+| `team_services` | The team services, which place agents, sign their sessions and answer the team's operations. |
 | `openshell_gateway` | The managed openshell-gateway for sandboxes. |
 | `nats` | The local nats-server; it receives no listed variable. |
 | `openshell_cli` | The openshell command the supervisor runs; it receives no listed variable. |
@@ -577,8 +578,8 @@ ending in `*` covers every variable that starts with the text before it.
 
 | Variable | Processes that receive it | Secret file | What it is |
 | --- | --- | --- | --- |
-| `NATS_USER` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check`, `installation_authority` | contents | User name for the NATS message broker; every process that sends or receives team messages. |
-| `NATS_PASSWORD` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check`, `installation_authority` | contents | Password for the NATS message broker; every process that sends or receives team messages. |
+| `NATS_USER` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check`, `installation_authority`, `team_services` | contents | User name for the NATS message broker; every process that sends or receives team messages. |
+| `NATS_PASSWORD` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check`, `installation_authority`, `team_services` | contents | Password for the NATS message broker; every process that sends or receives team messages. |
 | `POSTGRES_DSN` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check` | contents | PostgreSQL connection string, including its password; every process that stores team records. |
 
 #### Model providers and embeddings

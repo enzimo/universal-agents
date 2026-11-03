@@ -60,6 +60,11 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 
 _SUBJECT_ROOT = SUBJECT_PREFIX.split("{team}", 1)[0]
 Handler = Callable[[VerifiedFrame], Awaitable[Mapping[str, Any]]]
+# Reads the certificate or session a frame names from UA1_CERTS into the trust store;
+# returns whether it took anything new (README "Who sent it": receivers look records up).
+TrustFetcher = Callable[[bytes], Awaitable[bool]]
+# Refusals another record could cure: a certificate or session this receiver does not hold yet.
+_CURABLE = frozenset({"unknown_key", "wrong_issuer"})
 
 
 class ServiceUnavailable(RuntimeError):
@@ -183,8 +188,20 @@ class LiveHost:
     clock: Callable[[], datetime] = utc_now
     logger: logging.Logger = logging.getLogger(__name__)
 
+    fetch_trust: Optional[TrustFetcher] = None
+
     def __post_init__(self) -> None:
         self.replay = LiveReplayRecord()
+
+    async def verify(self, data: bytes, **checks: Any) -> VerifiedFrame:
+        """``verify_frame``, reading once from the buckets a certificate or session this host does not hold yet."""
+
+        try:
+            return verify_frame(data, trust=self.trust.store, **checks)
+        except FrameRefused as refused:
+            if refused.code not in _CURABLE or self.fetch_trust is None or not await self.fetch_trust(data):
+                raise
+            return verify_frame(data, trust=self.trust.store, **checks)
 
     # -- signing --------------------------------------------------------------------------------
 
@@ -237,9 +254,9 @@ class LiveHost:
         raise_if_refused(kind, frame["subject"], message, self.logger)
         request = Frame.model_validate(frame)
         now = self.clock()
-        verified = verify_frame(message.data, trust=self.trust.store, receiver=self.reply_receiver(request),
-                                arrived_on=message.subject, now=now, replay=self.replay.lookup,
-                                headers=answer_headers(message), answering=request)
+        verified = await self.verify(message.data, receiver=self.reply_receiver(request), arrived_on=message.subject,
+                                     now=now, replay=self.replay.lookup, headers=answer_headers(message),
+                                     answering=request)
         self.replay.admit(verified, now)
         return verified
 
@@ -264,8 +281,8 @@ class LiveHost:
     async def _answer(self, message: Any, receiver: Receiver, handler: Handler, agent: Optional[str]) -> None:
         now = self.clock()
         try:
-            verified = verify_frame(message.data, trust=self.trust.store, receiver=receiver, arrived_on=message.subject,
-                                    now=now, replay=self.replay.lookup, headers=dict(message.headers or {}))
+            verified = await self.verify(message.data, receiver=receiver, arrived_on=message.subject, now=now,
+                                         replay=self.replay.lookup, headers=dict(message.headers or {}))
         except FrameRefused as refused:
             self.logger.warning("A request was refused. event=protocol1_frame_refused subject=%s code=%s at=%s detail=%s",
                                 message.subject, refused.code, refused.known_at, refused.detail)
