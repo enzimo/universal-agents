@@ -260,8 +260,15 @@ class LiveHost:
         if not message.reply:
             return
         team = INSTALLATION_SCOPE if frame.issuer.team == INSTALLATION_SCOPE else receiver.team
-        reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=agent,
-                          subject=message.reply, answering=frame)
+        try:
+            reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=agent,
+                              subject=message.reply, answering=frame)
+        except Exception:
+            # A reply the schema refuses is this host's defect; the requester still stops waiting.
+            self.logger.exception("A reply could not be built. event=protocol1_reply_failed kind=%s message_id=%s",
+                                  frame.kind, frame.message_id)
+            await self._refuse(message, FrameRefused(HANDLER_FAILED))
+            return
         data, headers = self.encode(reply)
         await self.nc.publish(message.reply, data, headers=headers)
 
