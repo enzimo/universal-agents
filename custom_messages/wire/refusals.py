@@ -29,8 +29,9 @@ class FrameRefused(ValueError):
 # the last field the receiver knows. The requester only stops waiting on it.
 REFUSAL_HEADER, REFUSAL_AT_HEADER = "UA-Refused", "UA-Refused-At"
 # The code a receiver answers with for a request kind it does not know from a newer
-# minor, or for which it runs no handler (README, "Versions").
-UNSUPPORTED = "unsupported"
+# minor, or for which it runs no handler (README, "Versions"), and the one for a
+# handler that failed before it could answer (also a dead-letter reason).
+UNSUPPORTED, HANDLER_FAILED = "unsupported", "handler_failed"
 
 
 def refusal_headers(refused: FrameRefused) -> dict[str, str]:

@@ -555,7 +555,31 @@ def _verify_outside_boundary(frame: Frame, roles: frozenset[str] | set[str], ses
         raise FrameRefused("wrong_sender", "only the lead or the team services contact an outside agent", at="/issuer")
 
 
-def _verify_audience(frame: Frame, receiver: Receiver) -> None:
+def reply_audience(request: Frame) -> dict[str, str]:
+    """Whom the reply to ``request`` names (README, "Replies"): the requester as it receives.
+
+    The agent, when the request names one; the requesting runtime as the installation
+    service's caller, for an installation operation; otherwise the requesting host
+    itself. The reply goes to that runtime's inbox in every case.
+    """
+
+    issuer = request.issuer
+    base = {"installation": issuer.installation, "team": issuer.team, "runtime": issuer.runtime}
+    if issuer.agent is not MISSING:
+        return {**base, "target": "agent", "id": str(issuer.agent)}
+    if issuer.team == INSTALLATION_SCOPE:
+        return {**base, "target": "installation_service", "id": issuer.runtime}
+    return {**base, "target": HOST_TARGET, "id": issuer.runtime}
+
+
+def _verify_audience(frame: Frame, receiver: Receiver, answering: Optional[Frame] = None) -> None:
+    if answering is not None:
+        expected = reply_audience(answering)
+        named = frame.audience
+        for field_name in ("target", "id", "runtime"):
+            if getattr(named, field_name) != expected[field_name]:
+                raise FrameRefused("wrong_audience", "a reply names its requester as it receives (README, \"Replies\")",
+                                   at=f"/audience/{field_name}")
     audience = frame.audience
     if audience.installation != receiver.installation:
         raise FrameRefused("wrong_team", "the frame is for another installation", at="/audience/installation")
@@ -1079,7 +1103,7 @@ def verify_frame(
         if not is_reply:
             _verify_renewal(raw, frame, certificate)
         _verify_sender(frame, certificate, session, spec, is_reply, trust, issued_at, receiver)
-    _verify_audience(frame, receiver)
+    _verify_audience(frame, receiver, answering if is_reply else None)
     _verify_subject(raw, frame, spec, is_reply, arrived_on, headers)
     _verify_time(frame, spec, now, issued_at)
     replay_key = ReplayKey(frame.issuer.installation, frame.issuer.runtime, frame.issuer.membership_epoch, frame.message_id)

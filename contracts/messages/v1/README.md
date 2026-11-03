@@ -92,11 +92,18 @@ progress, claims and reports go to (registry routing `requester`).
 The reply target is part of the signed frame, so no reply needs a lookup, a broadcast or
 a fallback.
 
-A host that asks for itself, for no agent (`sessions.open`, `.renew` and `.close`), gets its
-reply addressed to the host: audience target `host`, with its runtime id as both the
-audience id and the audience runtime. Only replies name that target; a request addressed
-to a host is refused (`subject_mismatch`), and so is a host reply whose id is not its
-runtime.
+**Whom a reply names.** A reply names its requester as the requester receives it, so the
+replier needs nothing beyond the request (`custom_messages.wire.frame.reply_audience`):
+- the agent, when the request names one (target `agent`, the agent's id);
+- for an installation operation (joining, renewing), the requesting runtime (target
+  `installation_service`, its runtime id);
+- otherwise the requesting host itself (target `host`, its runtime id): a gateway, the team
+  services or the scheduler asking for itself, or a host asking for its agents' sessions.
+
+The audience runtime is always the requester's runtime, whose inbox the reply goes to. A
+reply that names anything else is refused as `wrong_audience`. Only replies name the `host`
+target; a request addressed to a host is refused (`subject_mismatch`), and so is a host
+reply whose id is not its runtime.
 
 ## Who may talk to whom
 
@@ -916,7 +923,8 @@ storage is verified without headers.
 its kind, answers at once, so the requester need not wait out the frame's expiry. The
 answer is an empty message on the request's reply subject with two headers:
 `UA-Refused`, the refusal code (or `unsupported` for a kind it does not know from a newer
-minor, or does not serve), and `UA-Refused-At`, the refusal's pointer up to the last field
+minor, or does not serve, and `handler_failed` when its handler failed before it could
+answer), and `UA-Refused-At`, the refusal's pointer up to the last field
 the receiver's schema knows (`FrameRefused.known_at`), so a name the sender chose never
 comes back. It carries no detail and is not signed: the requester takes it only as a
 reason to stop waiting and logs the code; it never treats it as a decision. NATS lets only

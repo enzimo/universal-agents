@@ -1,6 +1,6 @@
 {
-  "description": "A reply to a host names that host as its audience id and runtime.",
-  "refusal": "subject_mismatch",
+  "description": "A reply to a host names that host as its audience id and runtime (README, \"Replies\").",
+  "refusal": "wrong_audience",
   "at": "/audience/id",
   "base": "sessions.open.reply/ok.json",
   "changes": [
