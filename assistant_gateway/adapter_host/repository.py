@@ -14,6 +14,27 @@ from assistant_gateway.adapter_host.domain import (
 )
 
 
+class AdapterHostRepositoryConflict(RuntimeError):
+    """A write the stored state refuses (a stale registration, a sequence gap, a full outbox); the service maps it to a protocol error.
+
+    Part of the port, so the service catches it without importing a storage
+    implementation: ``storage.adapter_host_repository`` imports this package,
+    and the package's ``__init__`` loads the service.
+    """
+
+    def __init__(
+        self,
+        error_code: str,
+        detail: str,
+        *,
+        expected_stream_position: int | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.error_code = error_code
+        self.detail = detail
+        self.expected_stream_position = expected_stream_position
+
+
 @runtime_checkable
 class AdapterHostRepository(Protocol):
     """Persist registrations, ordered inbox/outbox ledgers, and upload tickets."""

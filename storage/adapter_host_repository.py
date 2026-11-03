@@ -20,7 +20,7 @@ from assistant_gateway.adapter_host.domain import (
     AdapterStreamRecord,
     AdapterUploadRecord,
 )
-from assistant_gateway.adapter_host.repository import AdapterHostRepository
+from assistant_gateway.adapter_host.repository import AdapterHostRepository, AdapterHostRepositoryConflict
 from storage.backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 from storage.config import StorageSettings
 from storage.postgres_connection import (
@@ -35,22 +35,6 @@ from storage.sqlite_connection import connect_sqlite
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-class AdapterHostRepositoryConflict(RuntimeError):
-    """Stable storage-level conflict that the application maps to protocol errors."""
-
-    def __init__(
-        self,
-        error_code: str,
-        detail: str,
-        *,
-        expected_stream_position: int | None = None,
-    ) -> None:
-        super().__init__(detail)
-        self.error_code = error_code
-        self.detail = detail
-        self.expected_stream_position = expected_stream_position
 
 
 _RecordT = TypeVar("_RecordT")
@@ -1068,7 +1052,6 @@ def create_adapter_host_repository(
 
 
 __all__ = [
-    "AdapterHostRepositoryConflict",
     "PostgresAdapterHostRepository",
     "SqliteAdapterHostRepository",
     "create_adapter_host_repository",
