@@ -50,6 +50,15 @@ agent can reach:
     state (``mcp-hosting/``), installed permission definitions
     (``installed-permissions/``) and reviewed skill installs
     (``skill-installation/``).
+``trust/``
+    The keys and trust records of the instance's message hosts
+    (``custom_transport.protocol1``): the installation authority's key
+    (``authority/``), each host's own keys and the newest revocations record
+    it verified (``hosts/<runtime>/``), the bootstrap bundle every host starts
+    from (``bootstrap.json``) and the hosts the launcher started
+    (``expected-hosts.json``). Only the launcher and each host process touch
+    them; each process is given only its own key folder. A team transfer never
+    carries them: a new instance makes its own.
 
 Tools the team adds (web API tools and installed command-line tools) are
 control files: ``control/access/tools``.
@@ -95,6 +104,13 @@ GENERATED_AGENT_BUNDLES_DIRNAME = "team_lead_generated"
 SKILLS_DIRNAME = "skills"
 OBJECTIVE_PROFILES_DIRNAME = "objective_execution_profiles"
 TASK_DATABASE_FILENAME = "task_history.db"
+TRUST_DIRNAME = "trust"
+TRUST_AUTHORITY_DIRNAME = "authority"
+TRUST_HOSTS_DIRNAME = "hosts"
+TRUST_BOOTSTRAP_FILENAME = "bootstrap.json"
+TRUST_EXPECTED_HOSTS_FILENAME = "expected-hosts.json"
+# A host's runtime id names its key folder: one subject token, so it can never climb out.
+_RUNTIME_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 # Long tool output offloaded from conversation turns (not chat messages); each
 # file belongs to a row of the task database (its full path is stored there),
 # so it lives beside it in dbs/.
@@ -347,6 +363,36 @@ class InstanceLayout:
         """Records trusted services keep while the team runs (see module docstring)."""
 
         return self.root / RUNTIME_DIRNAME
+
+    # Message hosts' keys and trust records (see module docstring)
+    @property
+    def trust_dir(self) -> Path:
+        return self.root / TRUST_DIRNAME
+
+    @property
+    def trust_authority_dir(self) -> Path:
+        """The installation authority's private key; only the authority process reads it."""
+
+        return self.trust_dir / TRUST_AUTHORITY_DIRNAME
+
+    @property
+    def trust_bootstrap_path(self) -> Path:
+        """The bootstrap bundle every host starts from: the installation's authority keys and records."""
+
+        return self.trust_dir / TRUST_BOOTSTRAP_FILENAME
+
+    @property
+    def trust_expected_hosts_path(self) -> Path:
+        """The hosts the launcher started and their public keys; the authority approves their joins."""
+
+        return self.trust_dir / TRUST_EXPECTED_HOSTS_FILENAME
+
+    def host_trust_dir(self, runtime: str) -> Path:
+        """One host's keys and the trust records it keeps across restarts."""
+
+        if not _RUNTIME_ID.fullmatch(runtime) or runtime.startswith(("x-", "_")):
+            raise ValueError(f"Not a host runtime id: {runtime!r}")
+        return self.trust_dir / TRUST_HOSTS_DIRNAME / runtime
 
     @property
     def environment_overrides_path(self) -> Path:

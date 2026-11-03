@@ -4182,6 +4182,37 @@ and Sealbox acceptance require those services; file-store tests do not prove
 their deployment behavior. Browser checks cover unsaved edits, confirmation
 invalidation, selection changes and the validate/import sequence.
 
+## Message hosts and their trust
+
+The message contract (`contracts/messages/v1`) has every process that sends its
+messages sign them as a host, with a key of its own, and every receiver check who
+signed against records that chain to the installation's authority keys.
+`custom_transport.protocol1` is what a running host needs for that:
+
+- **Keys** (`host_keys`): each host's Ed25519 application key and NATS user key, and
+  the installation authority's key, in the instance's `trust/` folder
+  (`InstanceLayout.trust_dir`), written whole, readable only by their owner and
+  created exclusively. The launcher creates missing keys; each process loads only its
+  own. All processes run as one operating-system user, so this keeps keys apart by
+  path, not by permission: a broken-into process could read another host's key file.
+  Remote hosts keep their keys on their own machines.
+- **The bootstrap bundle** (`bootstrap`): the authority public keys and the records a
+  new host needs before it has a certificate. Readers verify every record, so the file
+  grants nothing by itself.
+- **Kept trust records** (`trust_state`): the newest revocations record and the
+  highest block-list sequence survive a restart, as the contract requires, so a host
+  restarted from an older bundle never trusts a revoked key again.
+- **Live messages** (`live`): signed requests and replies over NATS with the host's
+  own reply inbox (`NatsTransportConfig.reply_inbox_runtime`), every received frame
+  checked by `custom_messages.wire.frame.verify_frame` before a handler sees it, a
+  replay record for live frames, and refused requests answered at once with only the
+  refusal's code and known pointer.
+- **Signed records** (`state_records`): records in the key-value buckets, signed by
+  their writer, with compare-and-set for placements, and verified on every read.
+
+The kernel runs nowhere yet; the installation authority and team services processes
+use it first.
+
 ## Certificate trust
 
 Certificate trust spans independent stores. Python certifi and uv use their

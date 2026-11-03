@@ -830,8 +830,11 @@ def test_large_facades_cannot_grow(
 
 # ADR-019: durable work is pulled, never pushed. Only the transport adapter
 # subscribes to NATS, and nothing creates a deliver group (the push consumer
-# shape that handed work to busy agents).
-NATS_SUBSCRIBERS = {"custom_transport/nats_adapter.py", "custom_transport/nats_pull.py"}
+# shape that handed work to busy agents). Protocol 1's live module subscribes only
+# to request/reply addresses (custom_transport.protocol1.live.serve), which hold no
+# queued work; its queued kinds are pulled like today's.
+NATS_SUBSCRIBERS = {"custom_transport/nats_adapter.py", "custom_transport/nats_pull.py",
+                    "custom_transport/protocol1/live.py"}
 NATS_CLIENT_NAMES = ("_js", "js", "jetstream", "_nc", "nc", "nats_client")
 
 
