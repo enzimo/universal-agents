@@ -47,6 +47,10 @@ def _run_profile(tmp_path: Path, *arguments: str) -> tuple[subprocess.CompletedP
     [
         ((), ["-m", "not live and not external"]),
         (("fast", "-q"), ["-m", "not live and not external", "-q"]),
+        (
+            ("upgrade", "-q"),
+            ["-m", "not live and not external", "--upgrade-from", "tests/fixtures/upgrade/0.9-sqlite.sql", "-q"],
+        ),
         (("live",), ["-m", "live and not external"]),
         (("live-nats",), ["-m", "live and nats and not external"]),
         (
@@ -70,7 +74,15 @@ def test_test_suite_runner_selects_expected_pytest_arguments(
     assert completed.returncode == 0, completed.stderr
     assert captured == expected
     profile = arguments[0] if arguments else "fast"
-    assert completed.stdout.strip() == ("true" if profile in {"fast", "collect"} else "false")
+    assert completed.stdout.strip() == ("true" if profile in {"fast", "upgrade", "collect"} else "false")
+
+
+def test_upgrade_profile_starts_from_a_fixture_that_exists(tmp_path: Path) -> None:
+    completed, captured = _run_profile(tmp_path, "upgrade")
+
+    assert completed.returncode == 0, completed.stderr
+    fixture = captured[captured.index("--upgrade-from") + 1]
+    assert (PROJECT_ROOT / fixture).is_file()
 
 
 def test_test_suite_runner_rejects_unknown_profile(tmp_path: Path) -> None:

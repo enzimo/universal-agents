@@ -20,16 +20,23 @@ a fresh instance with the [team transfer](team-transfer.md).
    first. The desktop app shows these notes and asks you to confirm before it
    switches versions.
 2. **Finish or stop work in progress** when the notes ask you to.
-3. **Back up the data folder** (`~/.universal-agents/data` with the
-   installer).
+3. **Back up the data folder**: the one you installed with
+   (`--data-dir`), `~/.universal-agents/data` by default.
 
 ## Upgrade
 
 - **Desktop app:** open **Updates**, read the notes, confirm and choose
   **Switch and restart**.
-- **Installer:** run the new version's install command from the
-  [Quickstart](quickstart.md) with `--replace` added, which recreates the
-  container on the same data folder.
+- **Installer:** download the new version's `install.sh` as the
+  [Quickstart](quickstart.md) shows, then run it with every option you first
+  installed with (such as `--data-dir`, `--container-name`, `--bind-host`,
+  `--web-port`, `--broker-port` or `--public-origin`), the new version's
+  `--image`, and `--replace`. The installer does not remember earlier options:
+  without `--data-dir` it uses `~/.universal-agents/data`, so an instance kept
+  in another folder would start empty, as a new install, on the default one.
+  Your data stays in its folder; run the command again with its options. If
+  you installed with the HTML setup guide, enter the same choices there to get
+  your command.
 - **Other Docker setups:** start the new image with the same data folder and
   configuration.
 

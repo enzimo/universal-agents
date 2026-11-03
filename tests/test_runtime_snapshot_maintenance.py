@@ -109,6 +109,19 @@ def raw_rows(settings, table):
         ]
 
 
+def archive_rows(settings):
+    """The archive table's rows, or None when it does not exist.
+
+    A new database has none until something is archived; one an earlier release
+    created already has the table (scripts/run_tests.sh upgrade).
+    """
+
+    with maintenance._connection(settings) as conn:
+        if not maintenance._has_table(conn, maintenance.ARCHIVE_TABLE, postgres=settings.backend == "postgres"):
+            return None
+    return raw_rows(settings, maintenance.ARCHIVE_TABLE)
+
+
 def seed_old_creation_result(settings, repo):
     """Reproduce a record the current contract rejects inside a supported storage layout.
 
@@ -331,6 +344,7 @@ def test_failure_after_first_removal_rolls_back_whole_retirement(
     settings, _ = seeded_store
     before = raw_rows(settings, "active_task_runtime")
     records = raw_rows(settings, "active_task_runtime_records")
+    archived = archive_rows(settings)
     archive = maintenance._archive_row
 
     def fail_second(conn, row, **kwargs):
@@ -348,11 +362,7 @@ def test_failure_after_first_removal_rolls_back_whole_retirement(
         )
     assert raw_rows(settings, "active_task_runtime") == before
     assert raw_rows(settings, "active_task_runtime_records") == records
-    with maintenance._connection(settings) as conn:
-        # Nothing archived: the table is absent, or empty on a database an
-        # earlier release created (scripts/run_tests.sh upgrade).
-        if maintenance._has_table(conn, maintenance.ARCHIVE_TABLE, postgres=settings.backend == "postgres"):
-            assert conn.execute(f"SELECT COUNT(*) FROM {maintenance.ARCHIVE_TABLE}").fetchone()[0] == 0
+    assert archive_rows(settings) == archived
 
 
 def test_upgrade_before_record_table_bootstrap(seeded_store):
