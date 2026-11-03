@@ -38,6 +38,7 @@ audience_targets:
   team_services: [team_services, scheduler]   # the scheduler answers only run_context.sign, which signs a run's token, at svc.scheduler
   team: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
   installation_service: [installation_authority]
+  host: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]   # only replies name it: a reply to a request a host sent for no agent (sessions.*)
 
 # How far apart two hosts' clocks may be. Receivers apply it at both ends of every
 # time window: a frame's issue, not-before and expiry times, and the validity of the
@@ -88,7 +89,7 @@ classes:
   dead_letter:
     description: set-aside copies and notices, under the receiving runtime's id
     between_installations: false
-    streams: [UA1_DLQ]
+    streams: ["UA1_DLQ_{team}"]
     addresses:
       - dlq.raw.{copy}
       - dlq.notice.{copy}
@@ -126,12 +127,14 @@ streams:
     duplicate_window_seconds: 120
     max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}
-  UA1_DLQ:
-    subjects: [ua.v1.*.*.dlq.>]
+  UA1_DLQ_{team}:
+    # One team's set-aside copies and notices; only its team services read and delete here.
+    subjects: ["ua.v1.{team}.*.dlq.>"]
     retention: limits
     storage: file
     max_age_seconds: 2592060    # the dead-letter class's expiry plus a minute
     max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}; a raw copy keeps at most max_frame_bytes of the refused message, and a larger message gets a notice with raw.stored false
+    max_consumers: 16           # the team services' notice consumer, and a few for an administrator's inspection
 
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
 # team "team_example" with agent "researcher-2" and team "team" with agent
@@ -178,6 +181,15 @@ consumers:
     ack: explicit
     ack_wait_seconds: 60
     max_deliveries: 20
+  dead_letters:
+    # The team services read their team's notices; raw copies are read by sequence (dead_letter_custody).
+    stream: UA1_DLQ_{team}
+    name: dlq~{team}
+    filter: ua.v1.{team}.*.dlq.notice.*
+    mode: pull
+    ack: explicit
+    ack_wait_seconds: 60
+    max_deliveries: 20
 
 # Who manages the JetStream objects above (README, "Who sets up the streams"). The
 # topology owner creates and updates every stream and consumer: the installation authority,
@@ -189,26 +201,72 @@ topology_owner: installation_authority
 withdrawal:
   role: team_services
   streams: ["UA1_AGENT_WORK_{team}"]
+# The dead-letter custody role reads a raw copy by the sequence its notice names, and deletes the
+# raw copies that name a departed person (README, "Dead letters"); only per-team streams, so the
+# grant reaches no other team's copies.
+dead_letter_custody:
+  role: team_services
+  streams: ["UA1_DLQ_{team}"]
 
+# Key-value buckets. readers are the roles that read a bucket (generated grants: direct and
+# last-message reads, watches through their own inbox, and the bucket's stream information);
+# writers name, per role, the keys it may write, as templates that membership code fills like
+# subjects ({self} its runtime id, {team} each team it serves, {agent} each agent it runs; README,
+# "Key-value grants"). A record's writers in registry state_records are among its bucket's writers.
+# The topology owner creates every bucket. Where a record is stored adds no trust: readers verify
+# each record's signature.
 key_value:
   UA1_CERTS:
     description: host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket
     per_key_ttl_seconds: 0
+    readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    writers:
+      installation_authority: ["host.>", "revocations.*", "agreement.*"]
+      team_services: ["session.*.{team}.*"]
+      edge_adapter: ["host.>", "revocations.*", "session.>"]   # unchanged copies of a peer's records under the peer's installation id
   UA1_HOSTS:
     description: one record per runtime host; written every 20 s, expires after 60 s (each record also states its expiry)
     per_key_ttl_seconds: 60
+    readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    writers:
+      gateway: ["{self}"]
+      lead_host: ["{self}"]
+      worker_host: ["{self}"]
+      team_services: ["{self}"]
+      edge_adapter: ["{self}"]
+      installation_authority: ["{self}"]
+      scheduler: ["{self}"]
   UA1_AGENTS:
     description: one record per agent (availability, busy, idle, paused, exiting), written only on change
     per_key_ttl_seconds: 0
+    readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    writers:
+      lead_host: ["{team}.{agent}"]
+      worker_host: ["{team}.{agent}"]
   UA1_PLACEMENT:
     description: which host runs an agent and that host's epoch; the record's signed sequence is the fencing token
     per_key_ttl_seconds: 0
+    readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
+    writers:
+      team_services: ["{team}.*"]
   UA1_TEAM_VIEW:
     description: the team's shared view of open work
     per_key_ttl_seconds: 0
+    readers: [gateway, lead_host, worker_host, team_services]
+    writers:
+      team_services: ["{team}.>"]
   UA1_BLOCK_LIST:
     description: one block list per team, written by the team services and read by every host of the team; each record states its own expiry
     per_key_ttl_seconds: 0
+    readers: [lead_host, worker_host, team_services]
+    writers:
+      team_services: ["{team}"]
+  UA1_LOCKS:
+    description: "the team services' single-instance lock, one key per team (team_services.<team>): the holder's runtime id and the lease's end, written with compare-and-set and renewed before the lease ends; a second instance refuses to serve while the lease holds"
+    per_key_ttl_seconds: 0
+    readers: [team_services]
+    writers:
+      team_services: ["team_services.{team}"]
 
 object_store:
   UA1_BLOBS:

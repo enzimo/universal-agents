@@ -2478,6 +2478,66 @@ kinds:
     wakes_model: never
     rendering: none
 
+  sessions.open:
+    description: A host asks the team services to place an agent on it and sign the agent's session; the reply carries the signed session (README, "Agent sessions").
+    class: request_reply
+    address: svc.team
+    body: bodies/sessions.open.schema.json
+    reply:
+      body: bodies/sessions.open.reply.schema.json
+      errors: [not_allowed, already_placed, limit_reached, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  sessions.renew:
+    description: A host renews one of its agents' sessions while it is connected.
+    class: request_reply
+    address: svc.team
+    body: bodies/sessions.renew.schema.json
+    reply:
+      body: bodies/sessions.renew.reply.schema.json
+      errors: [not_found, not_allowed, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  sessions.close:
+    description: A host reports that one of its agents' sessions ended.
+    class: request_reply
+    address: svc.team
+    body: bodies/sessions.close.schema.json
+    reply:
+      body: bodies/sessions.close.reply.schema.json
+      errors: [not_found, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
   heartbeat_items.add:
     description: The lead adds a heartbeat item.
     class: request_reply

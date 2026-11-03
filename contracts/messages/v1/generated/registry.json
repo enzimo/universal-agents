@@ -4467,6 +4467,117 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "sessions.close": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/sessions.close.schema.json",
+      "class": "request_reply",
+      "description": "A host reports that one of its agents' sessions ended.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/issuer/runtime",
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/sessions.close.reply.schema.json",
+        "errors": [
+          "not_found",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "sessions.open": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/sessions.open.schema.json",
+      "class": "request_reply",
+      "description": "A host asks the team services to place an agent on it and sign the agent's session; the reply carries the signed session (README, \"Agent sessions\").",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/issuer/runtime",
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/sessions.open.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "already_placed",
+          "limit_reached",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "sessions.renew": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/sessions.renew.schema.json",
+      "class": "request_reply",
+      "description": "A host renews one of its agents' sessions while it is connected.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/issuer/runtime",
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/sessions.renew.reply.schema.json",
+        "errors": [
+          "not_found",
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "shared_work.check": {
       "address": "svc.team",
       "admission": {

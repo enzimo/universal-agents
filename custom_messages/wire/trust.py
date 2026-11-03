@@ -850,6 +850,14 @@ class TrustStore:
         return str(body.installation)
 
     def _keep_session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> tuple[str, str, str]:
+        session = self._session(document, body, signer)
+        entry = (session.installation, session.team, session.session)
+        self._sessions[entry] = session
+        return entry
+
+    def _session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> AgentSession:
+        """A checked session record: signed by a team services host of its own team, under its own key."""
+
         assert signer is not None  # sessions are host-signed (registry signer: host)
         self._same_installation(document, body.installation)
         if body.team not in signer.teams:
@@ -859,13 +867,24 @@ class TrustStore:
         started_at, ends_at = parse_timestamp(body.started_at), parse_timestamp(body.ends_at)
         if ends_at <= started_at:
             raise FrameRefused("invalid_body", "a session must end after it starts", at="/body/ends_at")
-        entry = (body.installation, body.team, body.session)
-        self._sessions[entry] = AgentSession(
+        return AgentSession(
             session=body.session, installation=body.installation, team=body.team, agent=body.agent,
             agent_type=body.agent_type, agent_role=body.agent_role, runtime=body.runtime,
             placement_revision=body.placement_revision, started_at=started_at, ends_at=ends_at, signer=signer,
         )
-        return entry
+
+    def issued_session(self, raw: Mapping[str, Any]) -> AgentSession:
+        """Verify a session record carried in a sessions.open or sessions.renew reply, without keeping it.
+
+        ``raw`` is the record's JSON object as received inside the frame, which its
+        signature covers. The host that asked keeps it afterwards with ``add``, so it can
+        sign frames for the agent.
+        """
+
+        if raw.get("record") != AGENT_SESSION:
+            raise FrameRefused("invalid_body", "a session reply returns an agent session record", at="/record")
+        record = self._checked(raw)
+        return self._session(record.document, record.body, record.signer)
 
     def _keep_agreement(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> str:
         if body.installation != self.installation or body.peer == self.installation:

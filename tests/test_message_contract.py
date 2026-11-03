@@ -489,11 +489,12 @@ def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own
     folder = CONTRACT / "generated" / "permissions"
     assert "team_grants" not in TRANSPORT
     management = EXPORT.stream_management_grants(TRANSPORT)
+    buckets = EXPORT.key_value_grants(TRANSPORT)
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
-        grants = consumer_grants() | management.get(role, set())
+        grants = consumer_grants() | management.get(role, set()) | buckets.get(role, set())
         for subject in document["publish"]:
-            if subject.startswith("$JS."):
+            if subject.startswith(("$JS.", "$KV.")):
                 assert subject in grants, (role, subject)
             else:
                 assert subject.startswith(("ua.v1.{team}.{self}.", "ua.v1._install.{self}.")), (role, subject)
@@ -541,7 +542,8 @@ def test_a_host_holds_no_grant_on_another_hosts_agents() -> None:
     assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{own}" in worker
     assert "ua.v1.team_example.*.ctl.agent.researcher-2" in worker
     assert not {subject for subject in worker if lead in subject or subject.endswith(".ctl.agent.lead")}
-    assert not {subject for subject in worker if subject.endswith(".*") and "CONSUMER" in subject}
+    # Bucket watches read their own consumers' information by any name; no queue consumer is a wildcard.
+    assert not {subject for subject in worker if subject.endswith(".*") and "CONSUMER" in subject and ".KV_" not in subject}
     # Gaining an agent is a new credential, with that agent's subjects added.
     moved = expanded("worker_host", agent=["researcher-2", "lead"], pool=["researcher"])
     assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{lead}" in moved - worker
@@ -642,31 +644,35 @@ def test_a_credential_names_about_fifty_agents_beside_ten_pools_with_the_longest
     fixed = permission_bytes([s for s in subjects if not re.search(r"\{(agent|pool|edge)\}", s)])
     agent, pool = credential_growth("lead_host", "agent"), credential_growth("lead_host", "pool")
     room = TRANSPORT["limits"]["max_credential_bytes"] * 3 // 4 - 1024 - fixed - 10 * pool
-    assert room // agent in range(50, 55)
+    assert room // agent in range(45, 50)
     readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
-    assert "about 50 agents beside 10 worker pools" in readme
+    assert "about 45 agents beside 10 worker pools" in readme
 
 
 def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_withdraw_queued_work() -> None:
     """README, "Who sets up the streams" and "Withdrawing queued work"."""
 
     assert (TRANSPORT["topology_owner"], TRANSPORT["withdrawal"]["role"]) == ("installation_authority", "team_services")
+    buckets = EXPORT.key_value_grants(TRANSPORT)
     for role in REGISTRY["host_roles"]:
-        publish = role_permissions(role)["publish"]
+        # Bucket reads and watches are key-value grants (README, "Key-value grants"); the queues are what count here.
+        publish = [subject for subject in role_permissions(role)["publish"] if subject not in buckets.get(role, set())]
         creates = {subject for subject in publish if ".CREATE." in subject or ".UPDATE." in subject or ".DELETE." in subject}
         deletes = {subject for subject in creates if ".MSG.DELETE." in subject}
         reads = {subject for subject in publish if ".MSG.GET." in subject or ".DIRECT.GET." in subject}
         if role == "installation_authority":
             assert "$JS.API.STREAM.CREATE.UA1_AGENT_WORK_{team}" in publish and not deletes and not reads
             assert "$JS.API.CONSUMER.CREATE.UA1_AGENT_WORK_{team}.*.>" in publish
+            assert {f"$JS.API.STREAM.CREATE.KV_{bucket}" for bucket in TRANSPORT["key_value"]} <= set(publish)
         elif role == "team_services":
-            # Their own team's stream only: neither grant reaches the shared UA1_WORK.
-            assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}"}
-            assert reads == {"$JS.API.STREAM.MSG.GET.UA1_AGENT_WORK_{team}"}
+            # Their own team's streams only: no grant reaches the shared UA1_WORK or another team's dead letters.
+            assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}",
+                                          "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
+            assert reads == {"$JS.API.STREAM.MSG.GET.UA1_AGENT_WORK_{team}", "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}"}
         else:
             assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
-                            (lambda t: t["withdrawal"].update(streams=["UA1_DLQ"]), "only from the durable class's streams"),
+                            (lambda t: t["withdrawal"].update(streams=["UA1_DLQ_{team}"]), "only from the durable class's streams"),
                             (lambda t: t["withdrawal"].update(streams=["UA1_WORK"]), "only in per-team streams")):
         transport = copy.deepcopy(TRANSPORT)
         change(transport)
@@ -733,9 +739,12 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
     """team services receive task.request's copy on work.team, not the agent and pool inboxes (README, "Durable copies")."""
 
     services = json.loads((CONTRACT / "generated" / "permissions" / "team_services.json").read_text(encoding="utf-8"))
+    buckets = EXPORT.key_value_grants(TRANSPORT)["team_services"]
     consumers = {subject.split(".")[-1] if not subject.startswith("$JS.ACK.") else subject.split(".")[3]
-                 for subject in services["publish"] if subject.startswith(("$JS.API.CONSUMER.", "$JS.ACK."))}
-    assert consumers == {TRANSPORT["consumers"]["team_services"]["name"]}
+                 for subject in services["publish"] if subject.startswith(("$JS.API.CONSUMER.", "$JS.ACK."))
+                 and subject not in buckets}
+    # Their inbox's copies and their team's dead-letter notices (README, "Dead letters").
+    assert consumers == {TRANSPORT["consumers"]["team_services"]["name"], TRANSPORT["consumers"]["dead_letters"]["name"]}
 
 
 def test_asyncapi_describes_both_operations_for_every_kind_and_destination() -> None:
@@ -1121,12 +1130,95 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
     assert (case["refusal"], case["at"]) == ("wrong_sender", "/kind")
 
 
+def test_key_value_grants_let_a_host_write_only_its_own_records() -> None:
+    """README, "Key-value grants": each writer's keys are filled for one host, never as a wildcard of an id."""
+
+    worker = expanded("worker_host", agent=["researcher-2"], pool=["researcher"])
+    assert "$KV.UA1_HOSTS.worker_host-1" in worker
+    assert "$KV.UA1_AGENTS.team_example.researcher-2" in worker
+    assert not {subject for subject in worker if subject.startswith("$KV.")} - {
+        "$KV.UA1_HOSTS.worker_host-1", "$KV.UA1_AGENTS.team_example.researcher-2"}
+    services = expanded("team_services")
+    assert {"$KV.UA1_PLACEMENT.team_example.*", "$KV.UA1_CERTS.session.*.team_example.*",
+            "$KV.UA1_LOCKS.team_services.team_example", "$KV.UA1_BLOCK_LIST.team_example"} <= services
+    # Only the team services take the single-instance lock, and only they place agents.
+    for role in REGISTRY["host_roles"]:
+        publish = role_permissions(role)["publish"]
+        assert any(subject.startswith("$KV.UA1_LOCKS.") for subject in publish) == (role == "team_services"), role
+        assert any(subject.startswith("$KV.UA1_PLACEMENT.") for subject in publish) == (role == "team_services"), role
+    # Every role that may store a record has a key template for it.
+    for name, record in REGISTRY["state_records"].items():
+        assert set(record["writers"]) <= set(TRANSPORT["key_value"][record["bucket"]]["writers"]), name
+
+
+def test_no_bucket_reader_deletes_another_hosts_watch() -> None:
+    """A watch creates its own consumer and reads its information; no reader deletes a bucket's consumers."""
+
+    for role in REGISTRY["host_roles"]:
+        if role == TRANSPORT["topology_owner"]:
+            continue
+        deletes = [subject for subject in role_permissions(role)["publish"] if subject.startswith("$JS.API.CONSUMER.DELETE.KV_")]
+        assert not deletes, (role, deletes)
+
+
+@pytest.mark.parametrize(("change", "problem"), [
+    (lambda t: t["key_value"]["UA1_CERTS"]["writers"].pop("team_services"), "have no key template"),
+    (lambda t: t["key_value"]["UA1_HOSTS"]["writers"].update(worker_host=["{pool}"]), "uses only"),
+    (lambda t: t["key_value"]["UA1_HOSTS"]["readers"].append("nobody"), "readers are distinct host roles"),
+    (lambda t: t["key_value"]["UA1_LOCKS"].pop("readers"), "fields are"),
+    (lambda t: t["dead_letter_custody"].update(streams=["UA1_WORK"]), "dead_letter class's streams"),
+])
+def test_the_generator_refuses_buckets_and_custody_it_cannot_grant(change, problem: str) -> None:
+    transport = copy.deepcopy(TRANSPORT)
+    change(transport)
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_stream_management(EXPORT.load_yaml("registry.yaml"), transport)
+
+
+def test_only_the_team_services_read_their_teams_dead_letters() -> None:
+    """README, "Dead letters": notices wait in their team's stream, read through the team services' consumer."""
+
+    consumer = TRANSPORT["consumers"]["dead_letters"]
+    assert (consumer["stream"], consumer["name"]) == ("UA1_DLQ_{team}", "dlq~{team}")
+    for role in REGISTRY["host_roles"]:
+        reads = [subject for subject in role_permissions(role)["publish"] if "UA1_DLQ" in subject]
+        if role == "team_services":
+            assert set(reads) == {"$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.dlq~{team}",
+                                  "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_{team}.dlq~{team}", "$JS.ACK.UA1_DLQ_{team}.dlq~{team}.>",
+                                  "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
+        elif role != TRANSPORT["topology_owner"]:
+            assert not reads, (role, reads)
+
+
+def test_a_session_from_a_reply_is_kept_and_lets_its_host_sign_for_the_agent() -> None:
+    """README, "Agent sessions": the host keeps the session it was given, then signs frames for the agent."""
+
+    reply = fixtures.example_frame("sessions.open.reply", "ok")
+    store = fixtures.trust_store()
+    verified = fixtures.verify(json.dumps(reply).encode(), reply, trust=store)
+    assert verified.frame.audience.target == "host"
+    # Before it keeps the session, the host cannot sign for the agent.
+    unplaced = deepcopy(fixtures.example_frame("schedules.get", "agent"))
+    unplaced["issuer"].update(agent="researcher-3", session="s-researcher-3-1")
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify(fixtures.resign(unplaced), unplaced, trust=store)
+    assert refused.value.code == "wrong_issuer"
+    assert store.add(json.dumps(reply["body"]["session"]).encode(), now=fixtures.NOW)
+    status = deepcopy(fixtures.example_frame("schedules.get", "agent"))
+    status["issuer"].update(agent="researcher-3", session="s-researcher-3-1")
+    status["issued_at"], status["expires_at"] = "2026-10-22T04:30:00.500Z", "2026-10-22T04:30:30.000Z"
+    fixtures.verify(fixtures.resign(status), status, trust=store)
+
+
 def test_the_scheduler_answers_only_run_context_sign_and_reads_no_copies() -> None:
     """Only a scheduler signs a run's token (README, "A run's token"); it listens at its own address, never at svc.team."""
 
     scheduler = role_permissions("scheduler")
     assert scheduler["subscribe"] == ["_INBOX.{self}.>", "ua.v1.{team}.*.svc.scheduler"]
-    assert not [subject for subject in scheduler["publish"] if subject.startswith("$JS.")]
+    # It reads the buckets and writes only its own liveness record; it reads no queue.
+    buckets = EXPORT.key_value_grants(TRANSPORT)["scheduler"]
+    assert [subject for subject in scheduler["publish"] if subject.startswith(("$JS.", "$KV."))] == sorted(buckets)
+    assert [subject for subject in buckets if subject.startswith("$KV.")] == ["$KV.UA1_HOSTS.{self}"]
     assert "ua.v1.{team}.*.svc.scheduler" not in role_permissions("team_services")["subscribe"]
     assert [kind for kind, spec in kinds.KINDS.items() if "svc.scheduler" in spec.addresses.values()] == ["run_context.sign"]
 
@@ -1693,7 +1785,7 @@ def test_queued_work_is_judged_by_its_certificate_not_the_epoch_minimum() -> Non
     fixtures.verify(json.dumps(frame).encode(), frame, minimum)
     pause = fixtures.example_frame("agent.pause")
     assert refusal(json.dumps(pause).encode(), pause, minimum).code == "epoch_too_old"
-    # A dead-letter notice waits in UA1_DLQ like queued work.
+    # A dead-letter notice waits in its team's UA1_DLQ_<team> like queued work.
     notice = fixtures.example_frame("dlq.notice", "bad-signature")
     worker_minimum = {"minimum_epochs": [{"installation": "install_example", "runtime": "worker-host-1", "membership": 9}]}
     fixtures.verify(json.dumps(notice).encode(), notice, worker_minimum)
@@ -1953,10 +2045,12 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
 
 # Body fields a receiver checks against its trust store or the request a reply answers:
 # a reply's certificate (its signature, single validity window and what it certifies) and
-# the end of the credential that comes with it, and a key rotation's new key id, public
-# key and proof (README, "Installation traffic").
+# the end of the credential that comes with it, a key rotation's new key id, public key and
+# proof (README, "Installation traffic"), and a session reply's session (its signature,
+# writer and what it places; README, "Agent sessions").
 RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/connection/expires_at"
-                              r"|/body/application_key_rotation/(key/key_id|key/public_key|proof)")
+                              r"|/body/application_key_rotation/(key/key_id|key/public_key|proof)"
+                              r"|/body/session/(signature|writer|body/[a-z_]+)")
 ROTATION_PROOF_AT = "/body/application_key_rotation/proof"
 
 

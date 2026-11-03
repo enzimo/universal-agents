@@ -92,6 +92,12 @@ progress, claims and reports go to (registry routing `requester`).
 The reply target is part of the signed frame, so no reply needs a lookup, a broadcast or
 a fallback.
 
+A host that asks for itself, for no agent (`sessions.open`, `.renew` and `.close`), gets its
+reply addressed to the host: audience target `host`, with its runtime id as both the
+audience id and the audience runtime. Only replies name that target; a request addressed
+to a host is refused (`subject_mismatch`), and so is a host reply whose id is not its
+runtime.
+
 ## Who may talk to whom
 
 `team-topologies.yaml` names the edges a message can travel and, per topology, which edges
@@ -809,16 +815,19 @@ outlives the certificate it comes with: a join or renewal reply whose `connectio
 after its certificate is refused (`invalid_body` at `/body/connection/expires_at`).
 
 **Credential size.** A credential grows with the agents its host runs: each hosted agent
-adds seven subjects (the info, next-message and acknowledgement subjects of its inbox's and
-its control queue's consumers, and its control address), 836 bytes of permission JSON with
-the longest team and agent ids (24 and 32 characters), which a NATS user JWT's base64url
-encoding turns into about 1,115 bytes. Each worker pool adds three subjects, 349 bytes with
-a 24-character agent type. `tests/test_message_contract.py` recomputes these figures from
-the generated templates. A credential is at most `max_credential_bytes` (65,536 bytes,
-`transport.yaml`), the `jwt` field's limit, so the authority places no more agents and
-pools on one host than its credential can name: with the longest ids, about 50 agents
-beside 10 worker pools. The id caps exist for this; with 64-character ids a host held about
-25. A certificate's `session_limit` does not lift that limit. NATS reads a user JWT in the
+adds eight subjects (the info, next-message and acknowledgement subjects of its inbox's and
+its control queue's consumers, its control address, and the key of its agent record),
+911 bytes of permission JSON with the longest team and agent ids (24 and 32 characters),
+which a NATS user JWT's base64url encoding turns into about 1,215 bytes. Each worker pool adds
+three subjects, 349 bytes with a 24-character agent type. `tests/test_message_contract.py`
+recomputes these figures from the generated templates. A credential is at most
+`max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt` field's limit, so the
+authority places no more agents and pools on one host than its credential can name: with
+the longest ids, about 45 agents beside 10 worker pools. The id caps exist for this; with
+64-character ids a host held about 25. A host writes only its own agents' records, rather
+than any agent record of its team: readers would refuse another host's record, but agent
+records are written only when they change, so an overwritten one would stay missing until
+the next change. A certificate's `session_limit` does not lift that limit. NATS reads a user JWT in the
 client's `CONNECT` line, which the server's `max_control_line` limits (4,096 bytes unless
 configured), so an installation's servers set `max_control_line` above
 `max_credential_bytes` plus the rest of the `CONNECT` line.
@@ -841,8 +850,8 @@ objects or messages. The live conformance tests prove both allowed and refused o
 **Who sets up the streams.** The topology owner (`topology_owner` in `transport.yaml`) is
 the installation authority. It already decides which hosts serve which teams, agents and
 pools, since it issues their certificates and credentials, so it knows when a team, agent
-or pool appears or leaves, and it runs no model. It creates a team's stream with the team,
-and each agent's or pool's consumer with the agent or pool. Its generated grants create,
+or pool appears or leaves, and it runs no model. It creates a team's streams with the team (its work stream and its dead-letter stream),
+each agent's or pool's consumer with the agent or pool, and the key-value buckets. Its generated grants create,
 update and inspect every stream, and create, inspect and delete every consumer of them:
 consumer names are a wildcard for it, and membership code fills `{team}` with every team of
 the installation.
@@ -1134,6 +1143,37 @@ renewal with an invalid new-key proof is refused as `invalid_body`.
 `signing-vectors/key-rotation.json` and `examples/valid/host.renew/rotate.json`
 provide the exact bytes, proof and finished frame for other implementations.
 
+## Agent sessions
+
+A host signs frames for an agent only while a session places that agent on it ("Who sent
+it"). It gets each session from its team's services, which place the agent and sign the
+session record:
+- **`sessions.open`** names the agent, its type and the digest of the definition the host
+  will run. The team services check the roster (only the team's designated lead gets the
+  lead role), the host's certificate (its agent types and session limit) and the id limits,
+  write the placement with compare-and-set, store the signed session in `UA1_CERTS` and
+  return it. An agent that runs on another host is refused with `already_placed`, naming
+  that host: agents stay on their host and move only by a handover ("Custody windows").
+  A host that already runs as many agents as its certificate allows gets `limit_reached`.
+- **`sessions.renew`** re-signs one of the host's sessions while the host is connected,
+  with a higher sequence; a session lasts at most 7 days.
+- **`sessions.close`** records a session's actual end when its agent exits, fails or is
+  handed over.
+
+The host asks for itself, so these requests name no agent and carry no token; their
+replies go to the host ("Replies"). Before it keeps a returned session (`TrustStore.add`),
+the host checks it like a join reply's certificate, and refuses the reply as
+`invalid_body` at `/body/session/...` when the session:
+- does not verify against the certificate of the team services host that replied, or that
+  host signed no session (`/body/session/writer`);
+- is for another team than the one asked (`/body/session/body/team`);
+- places the agent on another host (`/body/session/body/runtime`);
+- for an open, names another agent or type than asked (`/body/session/body/agent`,
+  `agent_type`); for a renewal, another session than the one it named
+  (`/body/session/body/session`).
+
+`custom_messages.wire.frame` checks this when it verifies the reply.
+
 ## State records
 
 Hosts, agents, placements, the team view and the block list are key-value records, not messages. Each value is a signed state document (`schemas/state.schema.json`):
@@ -1165,11 +1205,37 @@ What each record says, and what `TrustStore.verify` checks about it:
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 
-**Not generated yet.** The NATS permissions for the key-value buckets, the object store and reading the dead-letter stream, and deleting a departed person's raw copies there ("Dead letters"), come with the services that use them. Until then the registry's `writers` say who may store each record, its `write_rule` says who reads it where only some hosts may (every host of a team reads the team's block list), and the readers' checks above do not depend on who stored it.
+**Key-value grants.** Each bucket in `transport.yaml` names its `readers` and, per writer
+role, the keys that role may write, as templates membership code fills like subjects:
+`{self}` is the host's runtime id, `{team}` each team it serves and `{agent}` each agent it
+runs. The generated permissions follow:
+- a reader gets the bucket's stream information, its direct and last-message reads, and
+  what a watch needs: creating its own ephemeral consumer, whose deliveries arrive on the
+  reader's own inbox, reading that consumer's information, and answering its flow control.
+  No reader may delete a bucket's consumers, so no host ends another host's watch; an idle
+  watch's consumer ends by itself;
+- a writer publishes only its own keys: each host its own liveness record (`UA1_HOSTS`,
+  key its runtime id) and its own agents' records (`UA1_AGENTS`, `<team>.<agent>`); the team
+  services their team's placements, sessions (`UA1_CERTS`, `session.*.<team>.*`), team view,
+  block list and single-instance lock; the installation authority certificates,
+  revocations and agreements;
+- the topology owner creates every bucket.
+
+The generator checks that every role a record's `writers` names has a key template in its
+bucket, and that templates use only those placeholders. Where a record is stored still
+adds no trust: readers verify each record's signature.
+
+**The team services' lock.** `UA1_LOCKS` holds one key per team, `team_services.<team>`:
+the runtime id of the team services instance that serves the team and when its lease ends.
+An instance takes the lock with compare-and-set and renews it before the lease ends; a
+second instance refuses to serve while another holds an unexpired lease, and logs which
+one holds it. Only the team services read or write this bucket.
+
+**Not generated yet.** The object store's grants come with blob owners and retention.
 
 ## Dead letters
 
-A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in `UA1_DLQ` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
+A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in the team's `UA1_DLQ_<team>` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
 - **The notice holds identifiers only:**
   - the copy id, which its subject also names;
   - the reason: a verification refusal code, or `handler_failed`, `delivery_limit` or `upgrade_drain` (the generator checks that the list names every refusal code except the temporary `revocations_not_current`, for which nothing is set aside);
@@ -1180,7 +1246,12 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
 
   It has no free text, because a refusal's details can quote the content.
 - **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes`, which with its headers fits the stream's message limit; for a larger message the notice says `raw.stored: false`.
-- **People's content.** A raw copy can hold a person's message. Only the team services read `UA1_DLQ`; its read grants come with them. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference.
+- **One stream per team.** Notices and raw copies wait in their team's `UA1_DLQ_<team>`.
+  The team services read their team's notices through one consumer (`dead_letters`,
+  `dlq~<team>`), and read a raw copy by the stream sequence its notice names
+  (`dead_letter_custody` in `transport.yaml`); no other role reads the stream, and no grant
+  reaches another team's copies.
+- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference, by their sequence.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 
 ## Versions

@@ -175,7 +175,7 @@
       "additionalProperties": false
     },
     "audience": {
-      "description": "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id.",
+      "description": "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id. A reply to a request a host sent for no agent (sessions.*) names the host: target host, id and runtime its runtime id. No request is delivered to a host target.",
       "type": "object",
       "properties": {
         "installation": {
@@ -192,7 +192,8 @@
             "team_services",
             "team",
             "edge",
-            "installation_service"
+            "installation_service",
+            "host"
           ]
         },
         "id": {

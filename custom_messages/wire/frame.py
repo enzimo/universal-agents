@@ -84,6 +84,9 @@ OUTSIDE_ROLE = "edge_adapter"
 LEAD_ROLE, SERVICES_ROLE = "lead", "team_services"
 # Audience targets an address delivers to as a whole team (audience id is the team id).
 TEAM_WIDE_TARGETS = frozenset({"team", "team_services"})
+# Replies to a request a host sent for no agent (sessions.*) name the host itself: its
+# runtime id is both the audience id and the audience runtime. No request goes to a host.
+HOST_TARGET = "host"
 # NATS headers that copy frame fields (README, "NATS headers").
 HEADER_KIND, HEADER_ID, HEADER_MSG_ID = "UA-Kind", "UA-Id", "Nats-Msg-Id"
 DURABLE = "durable"
@@ -100,6 +103,9 @@ _HOST_RENEW = "host.renew"
 _KEY_ROTATION = "application_key_rotation"
 # Where a join or renewal reply carries the certificate the authority issued.
 ISSUED_CERTIFICATE_AT = "/body/certificate"
+# Where a sessions.open or sessions.renew reply carries the session the team services signed.
+ISSUED_SESSION_AT = "/body/session"
+_SESSIONS_OPEN, _SESSIONS_RENEW = "sessions.open", "sessions.renew"
 
 
 def idempotency_key(kind: str, *parts: str | int | None) -> str:
@@ -583,6 +589,8 @@ def _verify_subject(raw: Mapping[str, Any], frame: Frame, spec: Optional[KindSpe
         inbox = REPLY_INBOX_PREFIX.format(runtime=audience.runtime) + "."
         if audience.runtime is MISSING or frame.causation_id is MISSING or not frame.subject.startswith(inbox):
             raise FrameRefused("subject_mismatch", "a reply names its request and the audience runtime's inbox", at="/subject")
+        if audience.target == HOST_TARGET and audience.id != audience.runtime:
+            raise FrameRefused("subject_mismatch", "a reply to a host names that host as its audience id", at="/audience/id")
     else:
         local = issuer.installation == audience.installation
         slot = issuer.runtime if local else PEER_SENDER_SLOT.format(installation=issuer.installation)
@@ -932,6 +940,43 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
                            at="/body/connection/expires_at")
 
 
+def _verify_issued_session(raw: Mapping[str, Any], frame: Frame, answering: Frame, trust: TrustStore) -> None:
+    """The session a sessions.open or sessions.renew reply carries (README, "Agent sessions").
+
+    It verifies against the replying team services host's certificate, belongs to the
+    team the request was for, and places on the host that asked the agent and type an
+    open asked for, or renews the session a renewal named.
+    """
+
+    document = _pointed(raw, ISSUED_SESSION_AT)
+    if not isinstance(document, Mapping):
+        return  # only success replies carry one, and their schema requires it
+    try:
+        issued = trust.issued_session(document)
+    except FrameRefused as refused:
+        raise FrameRefused("invalid_body", refused.detail, at=ISSUED_SESSION_AT + refused.at,
+                           known_at=ISSUED_SESSION_AT + refused.known_at) from refused
+
+    def refuse(field_name: str, detail: str) -> FrameRefused:
+        return FrameRefused("invalid_body", detail, at=f"{ISSUED_SESSION_AT}/body/{field_name}")
+
+    if issued.signer.runtime != frame.issuer.runtime:
+        raise FrameRefused("invalid_body", "the session is signed by another host than the one that replied",
+                           at=f"{ISSUED_SESSION_AT}/writer/runtime")
+    if issued.team != answering.audience.team:
+        raise refuse("team", "the session is for another team than the one asked")
+    if issued.runtime != answering.issuer.runtime:
+        raise refuse("runtime", "the session places the agent on another host than the one that asked")
+    asked = answering.body
+    if answering.kind == _SESSIONS_OPEN:
+        if issued.agent != asked.get("agent"):
+            raise refuse("agent", "the session is for another agent than the one asked for")
+        if issued.agent_type != asked.get("agent_type"):
+            raise refuse("agent_type", "the session names another agent type than the one asked for")
+    elif issued.session != asked.get("session"):
+        raise refuse("session", "the renewal returned another session than the one it named")
+
+
 def _verify_joined_certificate(issued: HostCertificate, asked: Mapping[str, Any],
                                refuse: Callable[[str, str], FrameRefused]) -> None:
     """A join's certificate names the keys and connection class it presented, and grants at most what it asked for."""
@@ -1064,6 +1109,9 @@ def verify_frame(
     elif _installation_operation(spec) and ISSUED_CERTIFICATE_AT.rsplit("/", 1)[1] in known:
         assert answering is not None  # _verify_issuer refused replies without their request
         _verify_issued_certificate(raw, answering, trust)
+    elif spec.name in {_SESSIONS_OPEN, _SESSIONS_RENEW} and ISSUED_SESSION_AT.rsplit("/", 1)[1] in known:
+        assert answering is not None  # _verify_issuer refused replies without their request
+        _verify_issued_session(raw, frame, answering, trust)
     authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate, receiver, now, stored_at)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

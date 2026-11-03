@@ -557,20 +557,73 @@ async def test_installation_requests_reach_the_authority_and_dead_letters_keep_r
             assert await asyncio.wait_for(received.get(), timeout=2) == operation.encode()
 
         js = admin.nc.jetstream()
-        await js.add_stream(config=stream_config("UA1_DLQ"))
+        dead_letters = f"UA1_DLQ_{TEAM}"
+        await js.add_stream(config=stream_config("UA1_DLQ_{team}"))
         raw = b"{a refused message stays byte-for-byte identical\x00"
         raw_subject = "ua.v1.team_example.worker-host-1.dlq.raw." + "c" * 64
-        await worker.nc.jetstream().publish(raw_subject, raw)
+        stored_raw = await worker.nc.jetstream().publish(raw_subject, raw)
         notice = fixtures.example_frame("dlq.notice", "bad-signature")
         await worker.nc.jetstream().publish(notice["subject"], json.dumps(notice).encode(), headers=headers(notice))
-        assert (await js.get_last_msg("UA1_DLQ", raw_subject)).data == raw
-        stored = await js.get_last_msg("UA1_DLQ", notice["subject"])
+        assert (await js.get_last_msg(dead_letters, raw_subject)).data == raw
+        stored = await js.get_last_msg(dead_letters, notice["subject"])
         fixtures.verify(stored.data, notice)  # a stored frame is verified without its headers
         other = raw_subject.replace("worker-host-1", "another-host")
         await worker.publish_refused(other, raw)
         with pytest.raises(nats.js.errors.NotFoundError):
-            await js.get_last_msg("UA1_DLQ", other)
-        assert worker.errors.empty() and authority.errors.empty()
+            await js.get_last_msg(dead_letters, other)
+        # Only the team services read their team's notices and raw copies, and delete a copy.
+        services = await connect(stack, isolated_broker, "services")
+        dlq = TRANSPORT["consumers"]["dead_letters"]
+        await js.add_consumer(dead_letters, config=ConsumerConfig(
+            durable_name=dlq["name"].format(team=TEAM), filter_subject=dlq["filter"].format(team=TEAM),
+            ack_policy=AckPolicy.EXPLICIT))
+        pulled = await services.nc.jetstream().pull_subscribe_bind(dlq["name"].format(team=TEAM), stream=dead_letters)
+        [message] = await pulled.fetch(1, timeout=2)
+        assert message.subject == notice["subject"]
+        await message.ack()
+        assert (await services.nc.jetstream().get_msg(dead_letters, stored_raw.seq)).data == raw
+        await services.nc.jetstream().delete_msg(dead_letters, stored_raw.seq)
+        with pytest.raises(nats.js.errors.NotFoundError):
+            await js.get_last_msg(dead_letters, raw_subject)
+        await worker.publish_refused(f"$JS.API.STREAM.MSG.GET.{dead_letters}")
+        assert worker.errors.empty() and authority.errors.empty() and services.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_hosts_write_only_their_own_records_and_read_every_bucket(isolated_broker) -> None:
+    """README, "Key-value grants": the topology owner creates the buckets, each writer reaches only its own keys."""
+
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        worker = await connect(stack, isolated_broker, "worker")
+        services = await connect(stack, isolated_broker, "services")
+        for bucket, spec in TRANSPORT["key_value"].items():
+            await authority.nc.jetstream().create_key_value(bucket=bucket, ttl=spec["per_key_ttl_seconds"] or None)
+        hosts = await worker.nc.jetstream().key_value("UA1_HOSTS")
+        watch = await hosts.watch("worker-host-1")
+        await hosts.put("worker-host-1", b"liveness")
+        async def first_value():
+            async for entry in watch:
+                if entry is not None and entry.value:
+                    return entry.value
+        assert await asyncio.wait_for(first_value(), timeout=2) == b"liveness"
+        await watch.stop()
+        agents = await worker.nc.jetstream().key_value("UA1_AGENTS")
+        await agents.put(f"{TEAM}.researcher-2", b"idle")
+        # Another host's liveness, an agent it does not run, a placement and the lock are refused.
+        for subject in ("$KV.UA1_HOSTS.lead-host-1", f"$KV.UA1_AGENTS.{TEAM}.lead", f"$KV.UA1_PLACEMENT.{TEAM}.researcher-2",
+                        f"$KV.UA1_LOCKS.team_services.{TEAM}", f"$KV.UA1_CERTS.session.install_example.{TEAM}.s-1"):
+            await worker.publish_refused(subject)
+        placement = await services.nc.jetstream().key_value("UA1_PLACEMENT")
+        revision = await placement.create(f"{TEAM}.researcher-2", b"placed")
+        await placement.update(f"{TEAM}.researcher-2", b"moved", last=revision)
+        locks = await services.nc.jetstream().key_value("UA1_LOCKS")
+        await locks.create(f"team_services.{TEAM}", b"team-services-1")
+        with pytest.raises(nats.js.errors.KeyWrongLastSequenceError):
+            await locks.create(f"team_services.{TEAM}", b"team-services-2")
+        await services.publish_refused("$KV.UA1_PLACEMENT.another_team.researcher-2")
+        assert (await (await worker.nc.jetstream().key_value("UA1_PLACEMENT")).get(f"{TEAM}.researcher-2")).value == b"moved"
+        assert authority.errors.empty()
 
 
 @pytest.mark.asyncio

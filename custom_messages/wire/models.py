@@ -104,11 +104,11 @@ class Issuer(WireModel):
 
 
 class Audience(WireModel):
-    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id."
+    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id. A reply to a request a host sent for no agent (sessions.*) names the host: target host, id and runtime its runtime id. No request is delivered to a host target."
 
     installation: InstallationId
     team: ScopeId
-    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service']
+    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service', 'host']
     id: TokenId
     runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
@@ -7216,6 +7216,117 @@ class SchedulesUpdateReplyInvalidRequest(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class SessionsCloseBody(WireModel):
+    "A host reports that one of its agents' sessions ended."
+
+    request_id: RecordId
+    session: SessionId
+    reason: Literal['exited', 'failed', 'handed_over']
+
+
+class SessionsCloseReplyOk(WireModel):
+    outcome: Literal['ok']
+    ended_at: Timestamp
+
+
+class SessionsCloseReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsCloseReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenBody(WireModel):
+    "A host asks the team services to place an agent on it and sign the agent's session."
+
+    request_id: RecordId
+    agent: AgentId
+    agent_type: AgentType
+    definition_sha256: Sha256Digest
+
+
+class SessionDocumentWriter(WireModel):
+    "Only a team services host signs a session."
+
+    type: Literal['host']
+    installation: InstallationId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    key_id: KeyId
+
+
+class SessionDocument(WireModel):
+    "The signed state document returned by sessions.open and sessions.renew. Its record is agent_session, its writer the team services host that placed the agent, and its body an agent session. The host that asked verifies its signature with that host's certificate and checks that it places the agent it asked for on itself (README, \"Agent sessions\")."
+
+    record: Literal['agent_session']
+    protocol: ProtocolLabel
+    key: StateKey
+    writer: SessionDocumentWriter
+    sequence: StateSequence
+    issued_at: Timestamp
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    algorithm: Literal['ed25519']
+    body_digest: Sha256Digest
+    body: AgentSessionState
+    signature: Ed25519Signature
+
+
+class SessionsOpenReplyOk(WireModel):
+    outcome: Literal['ok']
+    session: SessionDocument
+
+
+class SessionsOpenReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyAlreadyPlaced(WireModel):
+    outcome: Literal['already_placed']
+    host: RuntimeId
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewBody(WireModel):
+    "A host renews one of its agents' sessions while it is connected."
+
+    request_id: RecordId
+    session: SessionId
+
+
+class SessionsRenewReplyOk(WireModel):
+    outcome: Literal['ok']
+    session: SessionDocument
+
+
+class SessionsRenewReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class SharedWorkCheckBody(WireModel):
     "Live claims on, above or under each resource, the notes left on it, and whether waiting on it is possible."
 
@@ -8801,6 +8912,12 @@ SchedulesSetWorkerBodyAdapter = TypeAdapter(SchedulesSetWorkerBody)
 SchedulesSetWorkerReplyAdapter = TypeAdapter(Annotated[Union[SchedulesSetWorkerReplyOk, SchedulesSetWorkerReplyApprovalRequired, SchedulesSetWorkerReplyNotFound, SchedulesSetWorkerReplyNotAllowed, SchedulesSetWorkerReplyChangedSinceRead, SchedulesSetWorkerReplyChangeConflict, SchedulesSetWorkerReplyRequestClosed, SchedulesSetWorkerReplyNeedsPersonDecision, SchedulesSetWorkerReplyRecordBusy, SchedulesSetWorkerReplyRuntimeError, SchedulesSetWorkerReplyInvalidRequest, SchedulesSetWorkerReplyScheduleWorkerPolicyRevisionConflict], Field(discriminator='outcome')])
 SchedulesUpdateBodyAdapter = TypeAdapter(SchedulesUpdateBody)
 SchedulesUpdateReplyAdapter = TypeAdapter(Annotated[Union[SchedulesUpdateReplyOk, SchedulesUpdateReplyApprovalRequired, SchedulesUpdateReplyNotFound, SchedulesUpdateReplyNotAllowed, SchedulesUpdateReplyChangedSinceRead, SchedulesUpdateReplyChangeConflict, SchedulesUpdateReplyRequestClosed, SchedulesUpdateReplyNeedsPersonDecision, SchedulesUpdateReplyRecordBusy, SchedulesUpdateReplyRuntimeError, SchedulesUpdateReplyInvalidRequest], Field(discriminator='outcome')])
+SessionsCloseBodyAdapter = TypeAdapter(SessionsCloseBody)
+SessionsCloseReplyAdapter = TypeAdapter(Annotated[Union[SessionsCloseReplyOk, SessionsCloseReplyNotFound, SessionsCloseReplyRuntimeError], Field(discriminator='outcome')])
+SessionsOpenBodyAdapter = TypeAdapter(SessionsOpenBody)
+SessionsOpenReplyAdapter = TypeAdapter(Annotated[Union[SessionsOpenReplyOk, SessionsOpenReplyNotAllowed, SessionsOpenReplyAlreadyPlaced, SessionsOpenReplyLimitReached, SessionsOpenReplyRuntimeError], Field(discriminator='outcome')])
+SessionsRenewBodyAdapter = TypeAdapter(SessionsRenewBody)
+SessionsRenewReplyAdapter = TypeAdapter(Annotated[Union[SessionsRenewReplyOk, SessionsRenewReplyNotFound, SessionsRenewReplyNotAllowed, SessionsRenewReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkCheckBodyAdapter = TypeAdapter(SharedWorkCheckBody)
 SharedWorkCheckReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkCheckReplyOk, SharedWorkCheckReplyNotAllowed, SharedWorkCheckReplyInvalidRequest, SharedWorkCheckReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkClaimBodyAdapter = TypeAdapter(SharedWorkClaimBody)

@@ -329,6 +329,15 @@
         "schedules_update_reply": {
           "$ref": "#/components/messages/schedules_update_reply"
         },
+        "sessions_close_reply": {
+          "$ref": "#/components/messages/sessions_close_reply"
+        },
+        "sessions_open_reply": {
+          "$ref": "#/components/messages/sessions_open_reply"
+        },
+        "sessions_renew_reply": {
+          "$ref": "#/components/messages/sessions_renew_reply"
+        },
         "shared_work_check_reply": {
           "$ref": "#/components/messages/shared_work_check_reply"
         },
@@ -633,6 +642,15 @@
         },
         "schedules_update": {
           "$ref": "#/components/messages/schedules_update"
+        },
+        "sessions_close": {
+          "$ref": "#/components/messages/sessions_close"
+        },
+        "sessions_open": {
+          "$ref": "#/components/messages/sessions_open"
+        },
+        "sessions_renew": {
+          "$ref": "#/components/messages/sessions_renew"
         },
         "shared_work_check": {
           "$ref": "#/components/messages/shared_work_check"
@@ -4501,6 +4519,135 @@
           ]
         }
       },
+      "sessions_close": {
+        "name": "sessions.close",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/sessions.close.schema.json"
+                },
+                "kind": {
+                  "const": "sessions.close"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "A host reports that one of its agents' sessions ended."
+      },
+      "sessions_close_reply": {
+        "name": "sessions.close.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/sessions.close.reply.schema.json"
+                },
+                "kind": {
+                  "const": "sessions.close.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "sessions_open": {
+        "name": "sessions.open",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/sessions.open.schema.json"
+                },
+                "kind": {
+                  "const": "sessions.open"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "A host asks the team services to place an agent on it and sign the agent's session; the reply carries the signed session (README, \"Agent sessions\")."
+      },
+      "sessions_open_reply": {
+        "name": "sessions.open.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/sessions.open.reply.schema.json"
+                },
+                "kind": {
+                  "const": "sessions.open.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "sessions_renew": {
+        "name": "sessions.renew",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/sessions.renew.schema.json"
+                },
+                "kind": {
+                  "const": "sessions.renew"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "A host renews one of its agents' sessions while it is connected."
+      },
+      "sessions_renew_reply": {
+        "name": "sessions.renew.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/sessions.renew.reply.schema.json"
+                },
+                "kind": {
+                  "const": "sessions.renew.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
       "shared_work_check": {
         "name": "shared_work.check",
         "payload": {
@@ -7654,6 +7801,69 @@
         ]
       }
     },
+    "receive_sessions_close_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/sessions_close"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/sessions_close_reply"
+          }
+        ]
+      }
+    },
+    "receive_sessions_open_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/sessions_open"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/sessions_open_reply"
+          }
+        ]
+      }
+    },
+    "receive_sessions_renew_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/sessions_renew"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/sessions_renew_reply"
+          }
+        ]
+      }
+    },
     "receive_shared_work_check_team_services": {
       "action": "receive",
       "channel": {
@@ -10363,6 +10573,69 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/schedules_update_reply"
+          }
+        ]
+      }
+    },
+    "send_sessions_close_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/sessions_close"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/sessions_close_reply"
+          }
+        ]
+      }
+    },
+    "send_sessions_open_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/sessions_open"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/sessions_open_reply"
+          }
+        ]
+      }
+    },
+    "send_sessions_renew_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/sessions_renew"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/sessions_renew_reply"
           }
         ]
       }
