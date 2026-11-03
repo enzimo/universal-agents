@@ -187,6 +187,7 @@ def _postgres_schema() -> Iterator[StorageSettings]:
             conn.execute(f"DROP SCHEMA {schema} CASCADE")
 
 
+@pytest.mark.own_database  # A new install's database, which --upgrade-from would fill with older tables.
 def test_a_new_database_has_every_column_without_adding_any(storage_settings, tmp_path, caplog):
     """``CREATE TABLE`` carries every column, so a new install logs no upgrade it never had."""
 

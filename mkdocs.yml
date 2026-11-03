@@ -63,7 +63,8 @@ nav:
   - Docker Runtime: docker.md
   - Reverse Proxy and Docker Swarm: reverse-proxy.md
   - Configuration: configuration.md
-  - Moving a Team to a New Version: team-transfer.md
+  - Upgrading: upgrading.md
+  - Moving a Team to a Fresh Instance: team-transfer.md
   - Access and Approval: permissions.md
   - Interactive App Plugins: interactive-app-plugins.md
   - Channels:

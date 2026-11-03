@@ -327,9 +327,19 @@ operator finish or stop active interactive work and answer or close pending
 questions. Older requests are not inferred into the new running state, and
 the old pending-question table is removed without carrying its rows forward.
 
-When a person asks how to move the team to a new version, or a release needs a
-fresh instance, point the operator to the team transfer ("Moving a team to a new
-version" in the user guide): `assistant_cli team export` on the running old
+When a person asks how to upgrade, point the operator to "Upgrading" in the
+user guide: a release upgrades the instance in place from earlier releases of
+its own minor version and the previous one, so install the new release over
+the old one on the same data folder and settings (with the installer, the
+original install command with all its options plus `--replace`), after reading
+the skipped releases' Breaking Changes and the page's limits (from 0.9.3 or
+earlier the team transfer is the way; from 0.9.6 or earlier, schedule changes
+waiting in the Inbox are decided first). The stores add what they need on the
+first start.
+
+To move the team to another machine or a fresh instance, or across a longer
+jump, point the operator to the team transfer ("Moving a team to a fresh
+instance" in the user guide): `assistant_cli team export` on the running old
 instance, then, simplest, start the new release on an empty data folder, copy
 the export into its `import/` folder and choose **Import a team export** on
 onboarding's Let's Begin step; stored sign-ins and keys move at the first start,

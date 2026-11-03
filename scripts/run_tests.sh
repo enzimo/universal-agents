@@ -5,10 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/run_tests.sh [fast|live|live-nats|external|full|collect] [pytest arguments...]
+Usage: scripts/run_tests.sh [fast|upgrade|live|live-nats|external|full|collect] [pytest arguments...]
 
 Profiles:
   fast       Hermetic tests that do not require live or external services (default).
+  upgrade    The fast tests on databases that start with the previous minor version's
+             tables, as after an in-place upgrade (tests/upgrade_schemas.py).
   live       Live local/service tests, excluding external providers.
   live-nats  Live tests that require NATS/JetStream.
   external   Opt-in tests that call external providers or mutate auth state.
@@ -17,9 +19,12 @@ Profiles:
 EOF
 }
 
+# The previous minor version's tables: releases upgrade in place from it.
+UPGRADE_FROM="tests/fixtures/upgrade/0.9-sqlite.sql"
+
 profile="${1:-fast}"
 profile_args=()
-if [[ "${profile}" == fast || "${profile}" == collect ]]; then
+if [[ "${profile}" == fast || "${profile}" == upgrade || "${profile}" == collect ]]; then
     # Hermetic collection also imports dependency adapters directly.
     export LITELLM_LOCAL_MODEL_COST_MAP=true
 fi
@@ -38,6 +43,9 @@ fi
 case "${profile}" in
     fast)
         profile_args=(-m "not live and not external")
+        ;;
+    upgrade)
+        profile_args=(-m "not live and not external" --upgrade-from "${UPGRADE_FROM}")
         ;;
     live)
         profile_args=(-m "live and not external")

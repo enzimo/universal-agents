@@ -34,6 +34,21 @@ def _task_manager(tmp_path: Path, manager_type: type[TaskManager] = TaskManager)
     return manager
 
 
+def _reconciliation_archive(db_path: str) -> list[tuple] | None:
+    """The owner-scope archive's rows, or None when the table does not exist.
+
+    A new database has none until something is archived; one an earlier release
+    created already has the table (scripts/run_tests.sh upgrade).
+    """
+
+    with connect_sqlite(db_path) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_owner_scope_reconciliation_archive'"
+        ).fetchone():
+            return None
+        return conn.execute("SELECT * FROM durable_owner_scope_reconciliation_archive ORDER BY archive_id").fetchall()
+
+
 def _add_root_task(manager: TaskManager, task_id: str = "task_root") -> Task:
     task = Task(
         task_id=task_id,
@@ -317,6 +332,7 @@ def test_replacement_manager_rejects_ambiguous_duplicate_legacy_plans_atomically
         logger=logging.getLogger("test_ambiguous_legacy_plan"),
         storage_settings=original.storage_settings,
     )
+    archived = _reconciliation_archive(original.storage_settings.sqlite_path or "")
     with pytest.raises(RuntimeError, match="ambiguous legacy snapshots"):
         replacement.set_owner_identity(
             agent_id="manager_after_ambiguous",
@@ -330,18 +346,11 @@ def test_replacement_manager_rejects_ambiguous_duplicate_legacy_plans_atomically
             "SELECT owner_agent_id, status FROM plans WHERE plan_id=? ORDER BY owner_agent_id",
             (plan_id,),
         ).fetchall()
-        archive_table = conn.execute(
-            """
-            SELECT 1 FROM sqlite_master
-            WHERE type='table'
-              AND name='durable_owner_scope_reconciliation_archive'
-            """
-        ).fetchone()
     assert rows == [
         ("agent_id_ambiguous_a", PlanStatus.ACTIVE.value),
         ("agent_id_ambiguous_b", PlanStatus.FAILED.value),
     ]
-    assert archive_table is None
+    assert _reconciliation_archive(original.storage_settings.sqlite_path or "") == archived
 
 
 def test_create_objective_spawn_mode_creates_separate_root_task_and_plan(tmp_path: Path) -> None:

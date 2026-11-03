@@ -66,4 +66,4 @@ docker start universal-agents
 
 Stopping preserves your data. On macOS, start Colima again after restarting the computer. On Windows, start Docker Desktop.
 
-For custom ports and data directories, use the HTML guide. See [model providers](user_docs_source/model-providers.md), [chat channels](user_docs_source/channels/index.md), [Docker and Compose](user_docs_source/docker.md), and [upgrade guidance](user_docs_source/configuration.md#active-runtime-state-and-admission) when you need them.
+For custom ports and data directories, use the HTML guide. See [model providers](user_docs_source/model-providers.md), [chat channels](user_docs_source/channels/index.md), [Docker and Compose](user_docs_source/docker.md), and [upgrading](user_docs_source/upgrading.md) when you need them.

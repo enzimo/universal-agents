@@ -105,6 +105,7 @@ def _import_and_check(tmp_path: Path, out: Path, capsys) -> Any:
     return repo
 
 
+@pytest.mark.own_database  # An instance from before people records existed.
 def test_export_reads_a_main_era_instance_mounted_read_only_elsewhere(tmp_path: Path, capsys, caplog) -> None:
     """Docker: the old /data volume is mounted read-only at /old next to the new instance's /data."""
 

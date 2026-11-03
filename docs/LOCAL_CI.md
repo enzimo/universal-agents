@@ -21,8 +21,11 @@ succeed before deployment; manual runs on other refs test and build the site
 without uploading it. Container builds
 and image publication do not require these stored artifacts.
 
-The fast job allows 75 minutes for setup, the complete hermetic suite, and
-mandatory runner cleanup. A successful suite took 50 minutes on the shared
+The fast job's matrix runs the normal and previous-minor upgrade profiles as
+separate jobs. Each allows 75 minutes for setup, one complete hermetic suite,
+and mandatory runner cleanup. Checks that do not depend on the database
+(access-policy validation, SkillSpector, the GitHub skill-installation canary
+and its evidence, runner tests) run only in the normal profile's job. A successful suite took 50 minutes on the shared
 runner; setup and cleanup brought the job to 63 minutes and exceeded the
 previous one-hour deadline. It stops at the first failure so its traceback is
 reported before a later deadline can hide it, and reports the slowest tests
