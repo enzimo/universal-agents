@@ -14,13 +14,13 @@
           "$ref": "../certificate-document.schema.json"
         },
         "connection": {
+          "description": "The host's NATS connection credential; absent when the installation issues none and its hosts share one NATS login.",
           "$ref": "../common.schema.json#/$defs/connection_credential"
         }
       },
       "required": [
         "outcome",
-        "certificate",
-        "connection"
+        "certificate"
       ],
       "additionalProperties": false
     },
