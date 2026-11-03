@@ -144,6 +144,18 @@ async def test_refused_failed_and_unserved_requests_end_the_wait_at_once(broker:
             await worker.request("sessions.close", {"request_id": "close_1", "session": "s-researcher-2-1",
                                                     "reason": "exited"}, TO_SERVICES, team=TEAM)
         assert refused.value.code == "handler_failed"
+        # A reply the schema refuses is the server's defect; the requester still stops waiting.
+        async def bad_reply(_verified: VerifiedFrame) -> dict[str, Any]:
+            return {"outcome": "ok"}
+
+        broken = await host(stack, broker, identity("team-services-1", "test-services-key-1", 2))
+        await services.nc.drain()
+        await broken.serve("svc.team", SERVICES_RECEIVER, bad_reply)
+        await broken.nc.flush()
+        with pytest.raises(RequestRefused) as refused:
+            await worker.request("sessions.close", {"request_id": "close_5", "session": "s-researcher-2-1",
+                                                    "reason": "exited"}, TO_SERVICES, team=TEAM)
+        assert refused.value.code == "handler_failed"
         # A frame changed after signing is refused with its code and known pointer only; the
         # signature covers the body, so it fails before the body digest (registry order).
         frame = worker.sign("sessions.close", {"request_id": "close_2", "session": "s-researcher-2-1", "reason": "exited"},
