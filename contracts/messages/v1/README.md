@@ -359,7 +359,7 @@ frame it checks, in the registry's order:
    that reconnects reads the current record first ("Trust over time").
 
    This refusal is temporary (`temporary` in the registry): the receiver lacks a record,
-   and the frame may be valid. It answers a request with it, and never sets queued work
+   and the frame may be valid. It answers a request with it ("Refused requests"), and never sets queued work
    aside for it, so `revocations_not_current` is no dead-letter reason. A host without a
    current record of its own installation stops pulling queued work until it reads one;
    what it already pulled stays unacknowledged and comes back when it pulls again. A frame
@@ -909,7 +909,21 @@ frame; a copy that disagrees is refused as `subject_mismatch`. Every publish set
 also set `Nats-Msg-Id` (the idempotency key). `traceparent` and `tracestate` are
 transport controls and are not compared; a sender keeps `tracestate` within 512 characters,
 the length W3C Trace Context asks every system to pass on. Senders set no other header,
-`baggage` included. A frame read from storage is verified without headers.
+`baggage` included, except on the answer to a refused request below. A frame read from
+storage is verified without headers.
+
+**Refused requests.** A receiver that refuses a request/reply frame, or has no handler for
+its kind, answers at once, so the requester need not wait out the frame's expiry. The
+answer is an empty message on the request's reply subject with two headers:
+`UA-Refused`, the refusal code (or `unsupported` for a kind it does not know from a newer
+minor, or does not serve), and `UA-Refused-At`, the refusal's pointer up to the last field
+the receiver's schema knows (`FrameRefused.known_at`), so a name the sender chose never
+comes back. It carries no detail and is not signed: the requester takes it only as a
+reason to stop waiting and logs the code; it never treats it as a decision. NATS lets only
+the receiver of a request answer it, once (`allow_responses`), so no other host can send
+it. A requester that gets no answer within the frame's expiry, or "no responders", treats
+the service as unavailable. Queued work is never answered this way: it is set aside
+("Dead letters") or, for a temporary refusal, left queued.
 
 **Header size.** JetStream counts headers in a stream's maximum message size. The largest
 header block these five headers allow, in NATS's `NATS/1.0` header format, is 891 bytes;

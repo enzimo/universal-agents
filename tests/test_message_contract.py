@@ -1130,6 +1130,20 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
     assert (case["refusal"], case["at"]) == ("wrong_sender", "/kind")
 
 
+def test_a_refused_request_is_answered_with_its_code_and_known_pointer_only() -> None:
+    """README, "Refused requests": an unsigned answer that only stops the requester waiting."""
+
+    from custom_messages.wire.refusals import REFUSAL_AT_HEADER, REFUSAL_HEADER, refusal_headers
+
+    pause = fixtures.example_frame("agent.pause")
+    pause["body"]["dear_bob_my_password_is_hunter2"] = 1
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify(fixtures.resign(pause), pause)
+    assert refusal_headers(refused.value) == {REFUSAL_HEADER: "invalid_body", REFUSAL_AT_HEADER: "/body"}
+    readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
+    assert f"`{REFUSAL_HEADER}`, the refusal code" in readme and f"`{REFUSAL_AT_HEADER}`, the refusal's pointer" in readme
+
+
 def test_key_value_grants_let_a_host_write_only_its_own_records() -> None:
     """README, "Key-value grants": each writer's keys are filled for one host, never as a wildcard of an id."""
 

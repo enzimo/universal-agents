@@ -24,6 +24,21 @@ class FrameRefused(ValueError):
         self.known_at = at if known_at is None else known_at
 
 
+# A refused request is answered at once with an empty, unsigned reply that carries
+# these headers (README, "Refused requests"): the refusal code and the pointer up to
+# the last field the receiver knows. The requester only stops waiting on it.
+REFUSAL_HEADER, REFUSAL_AT_HEADER = "UA-Refused", "UA-Refused-At"
+# The code a receiver answers with for a request kind it does not know from a newer
+# minor, or for which it runs no handler (README, "Versions").
+UNSUPPORTED = "unsupported"
+
+
+def refusal_headers(refused: FrameRefused) -> dict[str, str]:
+    """The headers of the answer to a refused request: the code and the known pointer, never the detail."""
+
+    return {REFUSAL_HEADER: refused.code, REFUSAL_AT_HEADER: refused.known_at}
+
+
 # No shape is known: keep every location item.
 UNKNOWN_SHAPE: Any = object()
 
