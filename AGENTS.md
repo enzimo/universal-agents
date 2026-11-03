@@ -95,6 +95,18 @@ For each change, define a verification plan that matches that strategy. Generate
 - Do not include any extraneous information e.g.:
     - "Generated with Claude Code"
 
+- Give every PR one size label when you open it, and change it when later pushes move
+  the PR into another size. Count lines added plus lines deleted (`gh pr view <n> --json
+  additions,deletions,files`), leaving out files a script writes, such as the message
+  contract's `generated/` files, the generated `custom_messages/wire/` models and lock
+  files:
+    - `size:XS`: under 10 lines
+    - `size:S`: under 50
+    - `size:M`: under 250
+    - `size:L`: under 1,000
+    - `size:XL`: under 2,500
+    - `size:XXL`: 2,500 or more
+
 ### Capture durable lessons in the right place
 - Convert repeated mistakes or tricky repo-specific constraints into documentation, tests, or automation.
 - Prefer reusable system improvements over one-off reminders in task output.
