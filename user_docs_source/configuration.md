@@ -860,6 +860,20 @@ JetStream-backed delivery where configured. Verify:
   and reconcile it.
 - Bundle mode runs the bundled NATS service unless explicitly configured for
   an external NATS deployment.
+- The managed local NATS server writes every confirmed message to disk before
+  it confirms it (`jetstream { sync_interval: always }`), so a power loss does
+  not lose work the runtime already treated as stored, and it accepts the
+  longest client credentials hosts will use (`max_control_line`). Its private
+  configuration file gets both on every start. An external NATS server needs
+  the same two settings, and version 2.15.1 or later; the values are in
+  `contracts/messages/v1/generated/transport.json` (`server` and
+  `limits.max_credential_bytes`, plus 4,096 bytes for the rest of the
+  connection line). The runtime logs an error at start when the bundled server
+  is older than 2.15.1.
+- The runtime's SQLite databases commit with `synchronous=FULL`: every commit
+  is on the disk before it returns, so a power loss cannot undo a task that was
+  saved before its message was acknowledged. On a local SSD this adds a few
+  milliseconds per commit.
 
 Process-scoped consumers use this crash-cleanup delay:
 

@@ -4,9 +4,12 @@ import gc
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
+
+from pathlib import Path
 
 import pytest
 
@@ -550,6 +553,25 @@ def test_synchronous_normal_comes_before_the_wal_switch(tmp_path):
     assert recording.statements.index("PRAGMA synchronous=NORMAL") < recording.statements.index(
         "PRAGMA journal_mode=WAL"
     )
+    # After the switch every commit uses the product's setting (tests use NORMAL; see tests/conftest.py).
+    assert recording.statements[-1] == f"PRAGMA synchronous={sqlite_connection.SQLITE_SYNCHRONOUS}"
+
+
+def test_every_connection_commits_to_the_disk_before_returning(tmp_path, monkeypatch):
+    """A store records before publishing and admits before acknowledging, so no commit may be lost on power loss."""
+
+    # The product's setting, read in a fresh process: tests/conftest.py lowers it for this one.
+    product = subprocess.run(
+        [sys.executable, "-c", "import storage.sqlite_connection as s; print(s.SQLITE_SYNCHRONOUS)"],
+        check=True, capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1],
+    ).stdout.strip()
+    assert product == "FULL"
+    monkeypatch.setattr(sqlite_connection, "SQLITE_SYNCHRONOUS", product)
+    path = str(tmp_path / "dbs" / "any_store.db")
+    os.makedirs(os.path.dirname(path))
+    with sqlite_connection.connect_sqlite(path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
 
 
 def test_a_lock_failure_names_the_process_also_without_a_caller_logger(tmp_path, caplog):

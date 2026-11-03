@@ -8,10 +8,12 @@ connections that do not present the generated credentials.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
 import socket
+import urllib.request
 from pathlib import Path
 
 import nats
@@ -30,7 +32,8 @@ def _free_port() -> int:
 def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatch) -> None:
     port = _free_port()
     monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", port)
-    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", _free_port())
+    monitor_port = _free_port()
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", monitor_port)
     # Like the launcher, pass a full environment without NATS credentials.
     env = {key: value for key, value in os.environ.items() if not key.startswith("NATS_")}
     process = nats_service.start_local_nats(
@@ -56,6 +59,11 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
                 allow_reconnect=False,
             )
             await client.close()
+            # The contract's server settings are in force (docker.nats_service.contract_server_settings).
+            jetstream, control_line, _minimum = nats_service.contract_server_settings()
+            varz = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{monitor_port}/varz", timeout=2).read())
+            assert varz["max_control_line"] == control_line
+            assert varz["jetstream"]["config"]["sync_always"] is (jetstream["sync_interval"] == "always")
 
         asyncio.run(probe())
     finally:

@@ -43,6 +43,15 @@ behaviors made that pattern block callers for seconds:
   the next write. Each connection also sets ``synchronous=NORMAL`` before the
   switch, which saves
   one of its flushes.
+- Every connection then commits with ``synchronous=FULL`` (``SQLITE_SYNCHRONOUS``):
+  a commit reaches the disk before it returns. Stores record a message before
+  it is published and admit work before its delivery is acknowledged, so a
+  commit that a power loss could undo would lose work that NATS already
+  treated as stored or delivered. ``NORMAL`` in WAL mode can lose the last
+  commits on power loss. The setting is per connection, and the task history
+  path is a setting, so it applies to every database this module opens rather
+  than to one file name. Measured on a local disk, about 2.7 ms more per commit
+  (a few per model turn); on a network share, about 0.1 ms.
 - While several processes create their tables at once, a statement can fail
   with "database schema has changed": SQLite retries only once when the schema
   changes while a statement is prepared. Such a statement has not run, so it
@@ -78,6 +87,9 @@ from .read_only import repositories_are_read_only
 
 
 DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 2500
+# How every connection commits once the file is in WAL mode (module docstring):
+# a commit is on the disk before it returns.
+SQLITE_SYNCHRONOUS = "FULL"
 DEFAULT_SQLITE_WAL_INIT_MAX_ATTEMPTS = 5
 DEFAULT_SQLITE_WAL_INIT_RETRY_DELAY_SECONDS = 0.05
 # Size the WAL file is cut back to after a checkpoint lets SQLite reuse it from
@@ -449,7 +461,7 @@ def configure_sqlite_connection(
                 },
             )
             raise RuntimeError(message)
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(f"PRAGMA synchronous={SQLITE_SYNCHRONOUS}")
 
 
 def prepare_sqlite_database(db_path: str, *, logger: logging.Logger | None = None) -> bool:

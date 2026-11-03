@@ -254,7 +254,10 @@ The startup consumer report checks account usage; it does not report this
 per-stream limit.
 
 For an external NATS cluster, follow the
-[NATS 2.15 upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15).
+[NATS 2.15 upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15),
+and give every server `jetstream { sync_interval: always }` and a
+`max_control_line` of at least 69,632 bytes, which the included server gets
+automatically (see "Message Broker" in the configuration guide).
 It recommends upgrading older 2.14 clusters to at least 2.14.7 before 2.15,
 postponing stream and consumer scaling or moves until every node is upgraded,
 and downgrading only to 2.14.7 or later. The included single-server deployment

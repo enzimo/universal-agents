@@ -21,6 +21,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import socket
@@ -39,6 +40,12 @@ NATS_USER_ENV = "NATS_USER"
 NATS_PASSWORD_ENV = "NATS_PASSWORD"
 GENERATED_NATS_USER = "ua-runtime"
 _AUTH_DIR_NAME = "auth"
+# The message contract's server requirements (transport.yaml "server" and "limits"),
+# which the bundled server's generated configuration applies.
+CONTRACT_TRANSPORT_PATH = Path(__file__).resolve().parents[1] / "contracts" / "messages" / "v1" / "generated" / "transport.json"
+# NATS reads a client's credential in its CONNECT line; the rest of that line (name,
+# version, options) needs room beside the largest credential the contract allows.
+CONNECT_LINE_ROOM_BYTES = 4096
 _CREDENTIALS_FILE_NAME = "credentials.json"
 _SERVER_CONFIG_FILE_NAME = "nats-server.conf"
 
@@ -187,19 +194,63 @@ def ensure_local_nats_credentials(
     env[NATS_PASSWORD_ENV] = password
 
 
-def write_local_nats_server_config(service_root: Path, *, user: str, password: str) -> Path:
-    """Write the private server configuration that carries the password."""
+def contract_server_settings(path: Path = CONTRACT_TRANSPORT_PATH) -> tuple[dict[str, object], int, str]:
+    """What the message contract asks of every NATS server: JetStream settings, control line and minimum version.
 
+    ``sync_interval: always`` makes a confirmed JetStream write reach the disk
+    before the server confirms it, so "record before publish" and "admit before
+    acknowledge" hold through a power loss. ``max_control_line`` fits the largest
+    host credential (``max_credential_bytes``) and the rest of the CONNECT line.
+    """
+
+    transport = json.loads(path.read_text(encoding="utf-8"))
+    server = transport["server"]
+    control_line = int(transport["limits"]["max_credential_bytes"]) + CONNECT_LINE_ROOM_BYTES
+    return dict(server["jetstream"]), control_line, str(server["minimum_version"])
+
+
+def write_local_nats_server_config(service_root: Path, *, user: str, password: str) -> Path:
+    """Write the private server configuration: the password and the contract's server settings."""
+
+    jetstream, control_line, _minimum = contract_server_settings()
     config_path = service_root / _AUTH_DIR_NAME / _SERVER_CONFIG_FILE_NAME
-    # JSON string escaping is valid NATS configuration string syntax.
+    # JSON string escaping is valid NATS configuration string syntax. The store
+    # directory stays on the command line (-sd), which the server combines with
+    # this jetstream block.
     _write_private_file(
         config_path,
         "authorization {\n"
         f"  user: {json.dumps(user)}\n"
         f"  password: {json.dumps(password)}\n"
-        "}\n",
+        "}\n"
+        f"max_control_line: {control_line}\n"
+        "jetstream {\n"
+        + "".join(f"  {key}: {json.dumps(value)}\n" for key, value in sorted(jetstream.items()))
+        + "}\n",
     )
     return config_path
+
+
+def _version_tuple(text: str) -> tuple[int, ...] | None:
+    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", text)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def report_server_below_contract(version_output: str, logger: logging.Logger) -> None:
+    """Log an error when the bundled server is older than the contract's minimum, or its version is unreadable.
+
+    The images pin a newer server; this names a hand-installed one that is not.
+    """
+
+    _jetstream, _control_line, minimum = contract_server_settings()
+    found, needed = _version_tuple(version_output), _version_tuple(minimum)
+    if found is None or needed is None or found < needed:
+        logger.error(
+            "The bundled NATS server is older than the message contract requires, or its version could not be read. "
+            "event=nats_server_below_contract_minimum found=%r minimum=%s",
+            version_output,
+            minimum,
+        )
 
 
 def start_local_nats(
@@ -241,6 +292,7 @@ def start_local_nats(
     if version_output:
         log = logger.info if version_check.returncode == 0 else logger.warning
         log("Bundled NATS server version: %s", version_output)
+    report_server_below_contract(version_output, logger)
 
     ensure_local_nats_credentials(env, service_root=root, logger=logger)
     server_config = write_local_nats_server_config(

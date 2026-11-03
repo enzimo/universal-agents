@@ -834,6 +834,24 @@ conversations, memory, authorization records, gateway sessions, and execution
 attempts. Agents still coordinate through NATS rather than polling one
 another's tables.
 
+Every SQLite connection commits with `synchronous=FULL`
+(`storage.sqlite_connection.SQLITE_SYNCHRONOUS`): a commit is on the disk before
+it returns. The runtime records a message before it publishes it and saves a
+task before it acknowledges the message that brought it, and with `NORMAL` a
+power loss could undo those commits while NATS still treats the message as sent
+or delivered. A task save writes its snapshot, the consumed deferred message,
+the schedule-run admission, custody and the change ledger's request row in one
+transaction, and the covered stores write the change ledger inside their own
+transactions, so these tables share `dbs/task_history.db`: SQLite keeps a
+transaction atomic within one file, not across files in WAL mode. The setting
+is per connection and the database path is configurable, so it applies to every
+database the module opens. It costs a few milliseconds per commit on a local
+SSD; the hermetic tests lower it in their own process (`tests/conftest.py`).
+The bundled NATS server matches it: its generated configuration sets
+`jetstream { sync_interval: always }`, so a confirmed JetStream write is on the
+disk too, and a `max_control_line` that fits the largest host credential the
+message contract allows (`docker.nats_service.contract_server_settings`).
+
 A store whose writes read before they write takes turns between writers on
 both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
 PostgreSQL the default READ COMMITTED isolation lets two transactions read the
