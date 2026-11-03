@@ -1,0 +1,69 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.list.reply",
+  "message_id": "01928f3a-7b2c-7c06-8000-000000000c06",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7c05-8000-000000000c05",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "requests": [
+      {
+        "root_task_id": "task_root_8a",
+        "title": "Quarterly report thread",
+        "kind": "parallel_thread",
+        "state": "running",
+        "last_activity": "Moving Q1 and Q2 into archive/",
+        "last_activity_at": "2026-10-22T04:28:00.000Z",
+        "claims": [
+          {
+            "claim_id": "claim_1",
+            "resources": [
+              "file:team/reports/"
+            ],
+            "ends_at": "2026-10-22T04:45:00.000Z",
+            "extensions_left": 2,
+            "reason": "Moving the quarterly reports into archive/."
+          }
+        ],
+        "notes": [
+          {
+            "note_id": "note_3",
+            "resource": "file:team/reports/",
+            "text": "I moved Q1 and Q2 into archive/; Q3 and Q4 are still to do. Don't rename the folder.",
+            "written_at": "2026-10-22T04:20:00.000Z"
+          }
+        ]
+      },
+      {
+        "root_task_id": "run_sched_1_0430",
+        "title": "Morning summary",
+        "kind": "scheduled_run",
+        "state": "waiting_for_request",
+        "last_activity_at": "2026-10-22T04:30:00.000Z",
+        "claims": [],
+        "notes": []
+      }
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-7c05-8000-000000000c05",
+  "idempotency_key": "shared_work.list.reply:vFAeYykvf3VDTX07ZuFoflUB78u3aYxDHRcmTobAGfc",
+  "body_digest": "pu3xorRbnYQ5kwrV5Fp2jJD73qmVSlVbEhgimVG8GDQ",
+  "signature": "EOWN0YnRVXKAn1HNojqMyHzoSz4BZSNNGLgVYoorSmjdd1mkU41MeqdOV9lKiNUd0M-FEH8-1JN_OZvDT20tAg"
+}

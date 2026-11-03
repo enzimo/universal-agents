@@ -1,0 +1,13 @@
+{
+  "description": "shared_work.list acts for a person, so it requires an authority token.",
+  "refusal": "bad_authority",
+  "at": "/authority",
+  "base": "shared_work.list/full.json",
+  "changes": [
+    {
+      "remove": "/authority"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"shared_work.list\", \"message_id\": \"01928f3a-7b2c-7c05-8000-000000000c05\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.lead-host-1.svc.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_root_7f\"}, \"idempotency_key\": \"shared_work.list:iRTEnp3VtnfUhSj4SIgSE_eBncEEGRPEs8OxTdq270Q\", \"body_digest\": \"_Np7UcK0NsD2LDqWdmhjpil-2fW08pNSNIrT12EQOc0\", \"signature\": \"wGB5REmF3fW1EfnIui_4dIkWlify35-Kwac3KAgqKbA3TTvrh7pVoKJEqEtDpBLJq300LUNkrbyz-5FH0ZgbCA\"}"
+}

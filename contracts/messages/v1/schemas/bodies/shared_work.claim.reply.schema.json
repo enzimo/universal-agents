@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.claim.reply.schema.json",
+  "title": "shared_work.claim reply",
+  "description": "Claim up to eight resources for this request, all or none, for one period.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "claim": {
+          "$ref": "../common.schema.json#/$defs/coordination_claim"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/coordination_seen_note"
+          },
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "outcome",
+        "claim",
+        "notes"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "claimed"
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource": {
+                "$ref": "../common.schema.json#/$defs/resource_key"
+              },
+              "claims": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/coordination_seen_claim"
+                },
+                "maxItems": 32
+              },
+              "waiting_requests": {
+                "description": "How many other requests wait for it.",
+                "$ref": "../common.schema.json#/$defs/count"
+              }
+            },
+            "required": [
+              "resource",
+              "claims",
+              "waiting_requests"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "conflicts"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

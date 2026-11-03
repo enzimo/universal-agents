@@ -1,0 +1,56 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.note",
+  "message_id": "01928f3a-7b2c-7c1f-8000-000000000c1f",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.svc.team",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7c1f-9000-000000000c1f",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "Cdfnp3bkC9YnJt-H5ttvKIqiqV6fuB6HwaJyQ8q9v_6t9n6-9jfNtsci2Pd9LwC6zRRuPpgensN7PRTRT2K4Bg"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "note_req_1",
+    "task_id": "task_sub_7f_1",
+    "resource": "file:team/reports/",
+    "text": "I moved Q1 and Q2 into archive/; Q3 and Q4 are still to do. Don't rename the folder."
+  },
+  "idempotency_key": "shared_work.note:l77huCzwWNAsjJhTjlD5YZJi5pb6kp3KeAysN6WmFCw",
+  "body_digest": "2UI49hEeMBjZ0qZ1lIGI93yZ7Stwq46YM9o237Q0838",
+  "signature": "zrlVmq64A_nuOnjSinpZRHPbpXvCa0DXzTA2CD0omVU_KgSA-s0Gr6RF7gyEbZTajUUekq-0hxcNeFBn7XwZBQ"
+}

@@ -683,7 +683,7 @@ def test_outside_agents_cannot_publish_into_worker_pools() -> None:
 
 # README, "An agent's two queues": the inbox holds what needs a free slot, the control queue the rest.
 INBOX_KINDS = {"task.request", "task.result", "task.question", "task.answer", "question.closed", "credential.form.result",
-               "tool.setup.result"}
+               "tool.setup.result", "wait.ended"}
 CONTROL_KINDS = {"task.stop", "task.steer", "custody.moved", "custody.confirmed", "access.decision", "task.progress",
                  "task.claimed", "task.handback", "task.account", "task.report", "delivery.refused", "ledger.fact"}
 

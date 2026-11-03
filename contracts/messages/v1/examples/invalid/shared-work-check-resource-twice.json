@@ -1,0 +1,14 @@
+{
+  "description": "A check names each resource once.",
+  "refusal": "invalid_body",
+  "at": "/body/resources",
+  "base": "shared_work.check/full.json",
+  "changes": [
+    {
+      "set": "/body/resources/1",
+      "to": "file:team/reports/q3.md"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"shared_work.check\", \"message_id\": \"01928f3a-7b2c-7c09-8000-000000000c09\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.svc.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7c09-9000-000000000c09\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"-ZFK1NthH9jIhx9OG-vKmex4Z6cyVVgb_F9iYfz0Ljgrf2sc8moYq3tvctDU_lCrNUajF5N-fLFPKUnXY8LICw\"}, \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_sub_7f_1\", \"resources\": [\"file:team/reports/q3.md\", \"file:team/reports/q3.md\", \"record:memory_fact:usermem:42\", \"record:schedule:sched_1\", \"record:objective:obj_1\", \"record:heartbeat_item:hb_1\", \"account:cli:google:person\"]}, \"idempotency_key\": \"shared_work.check:IMQuGl6hMXPWR2gI0bDtVRByjyio_jmpZcss1JZ4z5E\", \"body_digest\": \"BudZdk3qomMGBt4lORLv0dywgSmV61X8JDpJ3PlyWOA\", \"signature\": \"2CRHPrrM4ec-0bFG2NS43qhUhu7H6m-k9SgFkofncqR_49wvKNM9sOU6vfFcjBKo86-mLvS8c01dBdJiEGziCQ\"}"
+}

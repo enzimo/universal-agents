@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.wait.schema.json",
+  "title": "shared_work.wait request",
+  "description": "Pause this request until a claimed resource or another of the person's requests is free.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The agent's id for this change; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "description": "The task the agent acts for; the team services check that the agent holds it and that the token is bound to its root task.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "on": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "resource"
+            },
+            "resource": {
+              "$ref": "../common.schema.json#/$defs/resource_key"
+            }
+          },
+          "required": [
+            "type",
+            "resource"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "request"
+            },
+            "root_task_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            }
+          },
+          "required": [
+            "type",
+            "root_task_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "on"
+  ],
+  "additionalProperties": false
+}

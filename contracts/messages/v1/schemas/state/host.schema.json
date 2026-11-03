@@ -24,6 +24,10 @@
     "protocol": {
       "$ref": "../common.schema.json#/$defs/protocol_label"
     },
+    "contract_sha256": {
+      "description": "The host's contract digest; while the label is a pre-release, readers send no work to and place no agent on a host whose digest differs from their own.",
+      "$ref": "../common.schema.json#/$defs/contract_sha256"
+    },
     "state": {
       "type": "string",
       "enum": [
@@ -99,6 +103,7 @@
     "session_limit",
     "sessions_active",
     "protocol",
+    "contract_sha256",
     "state",
     "health",
     "components",

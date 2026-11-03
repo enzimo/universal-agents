@@ -754,8 +754,8 @@ the access decision one of its steps waits for. So each agent has two queues
 (`agent_queues` in `transport.yaml`), each with its own consumer in
 `UA1_AGENT_WORK_<team>`:
 - the **inbox**, `work.agent.<agent>`, holds the kinds that need an execution slot: new
-  tasks, results, questions, answers, closed questions, and credential form and tool setup
-  results;
+  tasks, results, questions, answers, closed questions, credential form and tool setup
+  results, and the ends of coordination waits;
 - the **control queue**, `work.control.<agent>`, holds every other kind sent to an agent:
   stops, steering, custody moves and confirmations, progress, claims, handbacks, hold
   accounts, reports, access decisions, refusals and ledger facts.
@@ -969,6 +969,9 @@ on the audience's runtime (or any host when the audience names none), with the a
 its session names when it is an agent; the time is
 `2026-10-22T04:30:01.000Z`; the frame arrived on its own subject without NATS headers; the
 replay record is empty; and a reply answers the valid example whose message id it names.
+Joins, renewals and host records carry the fixed example digest
+`c734d95cdcb5b0081997c039906cf13cf3eeef0e0ef105160fb1138c5f6a2f60`, not the digest of the
+contract they belong to, which would change with them.
 
 Each file in `examples/invalid/` describes one refusal:
 - `refusal` and `at`: the code and the JSON pointer of the field the refusal is about
@@ -1205,10 +1208,19 @@ files go in order of their paths relative to that folder, with `/` between folde
 compared as UTF-8 bytes. For each file the digest takes its relative path in UTF-8, a zero
 byte, the file's size in bytes as decimal digits, a zero byte, and the file's bytes. While
 the label ends in `-pre`, a fix may change the contract without changing the label, so
-hosts are to refuse a peer whose digest differs from their own. No message carries the
-digest yet: the join and the host record gain it in a later change, and until then hosts
-compare only the label. `--check` regenerates the record, so a changed source with a stale
-digest fails it.
+hosts refuse a peer whose digest differs from their own:
+- `host.join` and `host.renew` carry the host's `contract_sha256`. While the label ends in
+  `-pre`, the installation authority answers a join or renewal whose digest differs from its
+  own with `protocol_mismatch`, so a host upgraded in place gets no new certificate until it
+  runs the authority's contract;
+- each host liveness record carries it too. While the label ends in `-pre`, a reader sends no
+  work to a host whose record names another digest and places no agent on it, and logs the
+  host and both digests. The record itself is authentic, so `TrustStore.verify` still accepts
+  it; the comparison is the reader's decision, not a refusal of the record.
+
+A released label (no `-pre`) compares only the label and its minor ("Versions" above), so the
+digest is then informational. `--check` regenerates the record, so a changed source with a
+stale digest fails it.
 
 ## Operation inputs and outcomes
 
@@ -1915,6 +1927,90 @@ attachments. The team services copy the person's stored text, attachments and
 replied message using `person_steering_id`. `type: guidance` with `source: lead`
 carries the lead's own words. This prevents a lead's paraphrase from being sent
 as the person's unchanged steering.
+
+### Coordination between a person's requests
+
+A person's requests can run at once and touch the same files and records. The `shared_work.*`
+operations let an agent on any host see the person's other running requests, reserve what it
+is about to change, leave a note for whoever comes next, and wait for a resource or a request
+instead of working around it. The team services answer them from the registry of running work
+(the change ledger's request rows, claims, notes and waits). Nothing here gives access: the
+team services check every resource against what the task may reach before they read or record
+anything, and answer `not_allowed` otherwise. No runtime sends these operations yet; this
+section fixes their wire form so agents on other hosts can use them once they do.
+
+**Who asks, for whom.** Only lead and worker hosts send these operations, for an agent, with
+the token of the root task it works on (`authority_binding: {type: root_task}`). The body names
+the agent's `task_id`; the team services check that the agent holds that task and that the
+token is bound to its root task (`bad_authority`). The request is the token's root task, and
+the person is the token's person. A request never waits on its own tasks, and a claim belongs
+to the request, so the lead and every worker of one request act under it. System work holds
+claims with no person.
+
+**Same person only.** Titles, states, reasons and note texts reach only the same person's
+requests. Another person's claim is `another_member`, its note shows only that one exists, and
+system work's claim is `team_maintenance`. Counts never include other people's requests.
+
+**Resource keys.** `resource_key` is one string, built by the host's trusted code from what the
+agent named, never free text:
+- `file:<folder target>`, with the folder target grammar of access grants (`team/...`,
+  `agents/...`, `users/<folder>/...`, `data/<name>/...`, no empty, `.` or `..` part). A key
+  ending with `/` is a folder: it conflicts with every key under it, so a claim on
+  `file:team/reports/` conflicts with one on `file:team/reports/q3.md` (`relation` `above`
+  and `below`);
+- `record:knowledge_page:<space>:<page>`, `record:memory_fact:<bank>:<number>`,
+  `record:schedule:<id>`, `record:objective:<id>` and `record:heartbeat_item:<id>`;
+- `account:<tool>:<owner>`, the team's account of a tool or the person's own.
+
+The team services refuse a key that is not in its normal form, for example a folder target
+that is not the way access grants write it, with `invalid_request`.
+
+**The operations.**
+- `shared_work.count` gives the numbers for the line each turn of a person's work shows: the
+  person's other running requests, how many of them are scheduled runs or hold claims, and how
+  many of this request's tasks wait for another request.
+- `shared_work.list` lists the person's other running requests (at most 64), with their kind,
+  state, last activity, claims and notes.
+- `shared_work.check` reports, for up to eight resources, the live claims on, above or under
+  each one, its notes, and whether a wait on it would be accepted now (`can_wait`).
+- `shared_work.claim` claims up to eight resources, all or none, for 15 minutes. It answers
+  `claimed` with every conflict when another request holds a claim on, above or under one of
+  them, or when other requests wait for one after this request's own claim on it ran out. Its
+  answer carries the notes on the resources.
+- `shared_work.extend` adds 10 minutes, at most twice (`limit_reached` after that), so a claim
+  lasts at most 35 minutes. Activity never extends a claim.
+- `shared_work.release` ends a claim now. A claim also ends when its request ends, fails or is
+  stopped, without a message.
+- `shared_work.note` leaves up to 500 characters on one resource, at most three per resource
+  for each request (`limit_reached`). Notes are checked like knowledge pages for credentials and
+  identity numbers (`sensitive_content`), last while their request runs and one day more, and
+  are shown to models as quoted text from another request, never as instructions.
+- `shared_work.wait` waits for a claimed resource or for another of the person's requests. In
+  one serialized step it refuses a wait on the request itself or one that would close a loop
+  (`would_loop`, naming what this request holds that the other one waits for), and answers
+  `nothing_to_wait_for` when the resource has no claim and nobody waits for it. Otherwise it
+  records the wait, answers with the latest time it ends (`ends_by`), and the host ends the
+  turn with a local wait, freeing the agent's slot.
+
+Writes (`claim`, `extend`, `release`, `note`, `wait`) carry the agent's `request_id` as their
+retry key ("Stored outcomes"); `count`, `list` and `check` are reads keyed by the message id.
+
+**The end of a wait.** `wait.ended` is durable work from the team services to the waiting
+task's current holder (`routing: holder`), so it survives restarts and custody moves. It goes to
+the holder's inbox, since it resumes the task and needs an execution slot. It says why the wait
+ended:
+- `claim_granted`: the claim was released or ran out, and the earliest waiter now holds a claim
+  on the resource, with the notes on it. Its 15 minutes start when it is granted;
+- `request_ended`: the request it waited for ended;
+- `limit_reached`: a wait on a request lasts at most 35 minutes; `still` says what the other
+  request is doing, and the model may carry on, wait again or ask the person.
+
+**What the requester hears.** A worker's claims, extensions, releases and notes send nothing to
+its lead. When something happened that the lead may need to plan around, trusted code adds
+`coordination` events to the task's `task.result`: a wait and how it ended, a refused wait, a
+write refused because another request claimed the resource, a claim that ran out after its last
+extension while the work was unfinished, and a note left on a resource. A worker that cannot
+go on asks its lead with `task.question`, like any other blocker.
 
 ## Covered changes
 

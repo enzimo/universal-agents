@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.note.schema.json",
+  "title": "shared_work.note request",
+  "description": "Leave a note on a resource for whoever works on it next.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The agent's id for this change; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "description": "The task the agent acts for; the team services check that the agent holds it and that the token is bound to its root task.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "resource": {
+      "$ref": "../common.schema.json#/$defs/resource_key"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "resource",
+    "text"
+  ],
+  "additionalProperties": false
+}

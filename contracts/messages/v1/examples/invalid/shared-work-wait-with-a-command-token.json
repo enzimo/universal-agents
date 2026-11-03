@@ -1,0 +1,22 @@
+{
+  "description": "Agents act with their root task's token; a person's command token is accepted only from the gateway, and only on operations that take one.",
+  "refusal": "bad_authority",
+  "at": "/authority/bound_to/type",
+  "base": "shared_work.wait/resource.json",
+  "changes": [
+    {
+      "set": "/authority/bound_to/type",
+      "to": "command"
+    },
+    {
+      "set": "/authority/bound_to/id",
+      "to": "cmd_1"
+    },
+    {
+      "set": "/authority/expires_at",
+      "to": "2026-10-22T04:34:00.000Z"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"shared_work.wait\", \"message_id\": \"01928f3a-7b2c-7c27-8000-000000000c27\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.svc.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7c27-9000-000000000c27\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"command\", \"id\": \"cmd_1\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"yCi_LPKWCeoqNKgOvQ7fVUZIqbpMPLsKg5LZjK3f6lfeQXgkIYhVWsSgdsSzI3jNk7THojsgBBwGt9p_SkAXCQ\"}, \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"wait_req_1\", \"task_id\": \"task_sub_7f_1\", \"on\": {\"type\": \"resource\", \"resource\": \"file:team/reports/q3.md\"}}, \"idempotency_key\": \"shared_work.wait:EC8awx9BuDsVpiJfak-vSy2YxAVSxkSErLNxzmtJFtg\", \"body_digest\": \"_GssAkccLpXxozhKU8TmsjKpx_dvUxultq__D52_p10\", \"signature\": \"7a7fpR807gB8ie8WDG4veWH3s23j3lUpDm6vCJU56qJmLn7htYeOyBaanoHRY6gyC3FqEFcK48VPEDyV7gr5Dg\"}"
+}

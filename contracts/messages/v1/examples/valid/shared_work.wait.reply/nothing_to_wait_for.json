@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.wait.reply",
+  "message_id": "01928f3a-7b2c-7c2e-8000-000000000c2e",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7c27-8000-000000000c27",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "nothing_to_wait_for",
+    "message": "Nobody claims team/reports/q3.md now."
+  },
+  "causation_id": "01928f3a-7b2c-7c27-8000-000000000c27",
+  "idempotency_key": "shared_work.wait.reply:zYh37_hOsi0mNOyjbU6Ycg-DS6O-gtA4zVOSAhZBwb8",
+  "body_digest": "YgS20PbBM2whp-U0T0EWU2vRbZNBn117rD1o0Mv-scA",
+  "signature": "uimmMFNbNfDawGcijmvyeXv5QS1ZC8sDx3_3XhPwI5HgxDlceg_CSaguIW-2o4L1wsjKSl5-3YfQZJc6uukPDA"
+}

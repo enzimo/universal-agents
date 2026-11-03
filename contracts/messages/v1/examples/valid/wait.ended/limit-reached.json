@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "wait.ended",
+  "message_id": "01928f3a-7b2c-7c33-8000-000000000c33",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.agent.researcher-2",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "wait_id": "wait_1",
+    "root_task_id": "task_root_7f",
+    "task_id": "task_sub_7f_1",
+    "ended": {
+      "why": "limit_reached",
+      "still": "running"
+    }
+  },
+  "idempotency_key": "wait.ended:uKQfQIjLgFAUQNw-cFCTAHATKkc-2Z_AJN43-wZO3Jo",
+  "body_digest": "wSdbJp918ZdQVHpKQZvl53H-hxUgIVj0ePEsnUfYZKs",
+  "signature": "_ckBksUVwcMRnNXzXMylmukz_465eTNLSLbQI14y-KLgXPPSWhhSB-eyCWcS5cUWRsaQSZDnTQ96h2jjQKz1CA"
+}

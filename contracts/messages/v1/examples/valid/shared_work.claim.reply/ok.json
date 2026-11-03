@@ -1,0 +1,60 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.claim.reply",
+  "message_id": "01928f3a-7b2c-7c0f-8000-000000000c0f",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7c0e-8000-000000000c0e",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "claim": {
+      "claim_id": "claim_1",
+      "resources": [
+        "file:team/reports/",
+        "file:users/person-7c1/notes/archive-plan.md"
+      ],
+      "ends_at": "2026-10-22T04:45:00.000Z",
+      "extensions_left": 2,
+      "reason": "Moving the quarterly reports into archive/."
+    },
+    "notes": [
+      {
+        "whose": "same_person",
+        "note_id": "note_3",
+        "root_task_id": "task_root_8a",
+        "title": "Quarterly report thread",
+        "text": "I moved Q1 and Q2 into archive/; Q3 and Q4 are still to do. Don't rename the folder.",
+        "written_at": "2026-10-22T04:20:00.000Z"
+      },
+      {
+        "whose": "this_request",
+        "note_id": "note_4",
+        "text": "Draft headings are final; only the summary changes.",
+        "written_at": "2026-10-22T04:25:00.000Z"
+      },
+      {
+        "whose": "another_member"
+      }
+    ]
+  },
+  "causation_id": "01928f3a-7b2c-7c0e-8000-000000000c0e",
+  "idempotency_key": "shared_work.claim.reply:CFh0YwbkYagK9pXklM5e_lEOaIxFJn0J6Sbq6QdWsqU",
+  "body_digest": "3kawaufNA5jwYwKo9kNOYEDsfM8JjlemjCXx-Ixceqw",
+  "signature": "8c7qBgK0m4Sq_dbPwrVpxuJguYHK643z-AtQOyrslwsj8nH1UVNk5xt9-SMSnDrFQLN_nsbiAklcCPCZ5v0TAA"
+}

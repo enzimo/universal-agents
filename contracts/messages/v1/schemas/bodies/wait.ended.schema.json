@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/wait.ended.schema.json",
+  "title": "wait.ended body",
+  "description": "A request's wait ended: it now holds the claim, the other request ended, or the wait reached its limit.",
+  "type": "object",
+  "properties": {
+    "wait_id": {
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "root_task_id": {
+      "description": "The waiting request.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "description": "The task that waited; the message goes to its current holder.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "ended": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "why": {
+              "const": "claim_granted"
+            },
+            "claim": {
+              "$ref": "../common.schema.json#/$defs/coordination_claim"
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/coordination_seen_note"
+              },
+              "maxItems": 32
+            }
+          },
+          "required": [
+            "why",
+            "claim",
+            "notes"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "why": {
+              "const": "request_ended"
+            },
+            "other_root_task_id": {
+              "$ref": "../common.schema.json#/$defs/record_id"
+            }
+          },
+          "required": [
+            "why",
+            "other_root_task_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "why": {
+              "const": "limit_reached"
+            },
+            "still": {
+              "type": "string",
+              "enum": [
+                "claimed",
+                "running",
+                "waiting_for_person"
+              ]
+            }
+          },
+          "required": [
+            "why",
+            "still"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "wait_id",
+    "root_task_id",
+    "task_id",
+    "ended"
+  ],
+  "additionalProperties": false
+}

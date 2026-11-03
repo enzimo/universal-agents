@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.claim.reply",
+  "message_id": "01928f3a-7b2c-7c13-8000-000000000c13",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7c0e-8000-000000000c0e",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "request_closed",
+    "message": "This request was stopped."
+  },
+  "causation_id": "01928f3a-7b2c-7c0e-8000-000000000c0e",
+  "idempotency_key": "shared_work.claim.reply:CFh0YwbkYagK9pXklM5e_lEOaIxFJn0J6Sbq6QdWsqU",
+  "body_digest": "7HvPCxOJA9jRo4yYElcd1r1kkoiGVGwby_pgXa3L050",
+  "signature": "WwYhDdjnT0lZ5xyIDxZBaA-pQtjlav5F2QAAfq9HrnhdVo0RzVDb00GcxB0bkk35S808sJ1mfV3qHeF8wnjNAg"
+}

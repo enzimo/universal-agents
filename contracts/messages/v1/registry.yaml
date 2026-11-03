@@ -798,6 +798,23 @@ kinds:
     wakes_model: never
     rendering: summary
 
+  wait.ended:
+    description: A request's wait ended; it now holds the claim, the other request ended, or the wait reached its limit.
+    class: durable
+    address: work.agent.{agent}
+    body: bodies/wait.ended.schema.json
+    senders: [team_services]
+    receivers: [lead_host, worker_host]
+    expiry_seconds: 604800
+    authority: none
+    idempotency: [/body/wait_id]
+    admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
+    routing: holder
+    topology_edge: none
+    ledger: wait_closed
+    wakes_model: never
+    rendering: summary
+
   ledger.fact:
     description: A fact for an agent's work ledger from the team services.
     class: durable
@@ -2277,6 +2294,178 @@ kinds:
       body: bodies/requests.resume.reply.schema.json
       errors: [not_found, request_closed, not_own_request]
     senders: [lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.count:
+    description: The number of the person's other running requests, for the line in each turn.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.count.schema.json
+    reply:
+      body: bodies/shared_work.count.reply.schema.json
+      errors: [not_allowed, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.list:
+    description: The person's other running requests, with their claims and notes.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.list.schema.json
+    reply:
+      body: bodies/shared_work.list.reply.schema.json
+      errors: [not_allowed, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.check:
+    description: Live claims on, above or under each resource, the notes left on it, and whether waiting on it is possible.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.check.schema.json
+    body_rules:
+      - {unique: /body/resources}
+    reply:
+      body: bodies/shared_work.check.reply.schema.json
+      errors: [not_allowed, invalid_request, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/message_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.claim:
+    description: Claim up to eight resources for this request, all or none, for one period.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.claim.schema.json
+    body_rules:
+      - {unique: /body/resources}
+    reply:
+      body: bodies/shared_work.claim.reply.schema.json
+      errors: [not_allowed, invalid_request, claimed, request_closed, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.extend:
+    description: Add ten minutes to one of this request's claims, at most twice.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.extend.schema.json
+    reply:
+      body: bodies/shared_work.extend.reply.schema.json
+      errors: [not_found, limit_reached, request_closed, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.release:
+    description: End one of this request's claims now.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.release.schema.json
+    reply:
+      body: bodies/shared_work.release.reply.schema.json
+      errors: [not_found, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.note:
+    description: Leave a note on a resource for whoever works on it next.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.note.schema.json
+    reply:
+      body: bodies/shared_work.note.reply.schema.json
+      errors: [not_allowed, invalid_request, sensitive_content, limit_reached, request_closed, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: required
+    authority_binding: {type: root_task}
+    idempotency: [/body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  shared_work.wait:
+    description: Pause this request until a claimed resource or another of the person's requests is free.
+    class: request_reply
+    address: svc.team
+    body: bodies/shared_work.wait.schema.json
+    reply:
+      body: bodies/shared_work.wait.reply.schema.json
+      errors: [not_allowed, invalid_request, not_found, nothing_to_wait_for, would_loop, request_closed, runtime_error]
+    senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required

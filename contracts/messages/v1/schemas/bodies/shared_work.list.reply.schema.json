@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.list.reply.schema.json",
+  "title": "shared_work.list reply",
+  "description": "The person's other running requests, with their claims and notes.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "root_task_id": {
+                "$ref": "../common.schema.json#/$defs/record_id"
+              },
+              "title": {
+                "$ref": "../common.schema.json#/$defs/coordination_request_title"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "chat",
+                  "parallel_thread",
+                  "scheduled_run",
+                  "objective_work"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "queued",
+                  "waiting_for_person",
+                  "waiting_for_workers",
+                  "waiting_for_request"
+                ]
+              },
+              "last_activity": {
+                "$ref": "../common.schema.json#/$defs/short_text"
+              },
+              "last_activity_at": {
+                "$ref": "../common.schema.json#/$defs/timestamp"
+              },
+              "claims": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/coordination_claim"
+                },
+                "maxItems": 32
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/coordination_note"
+                },
+                "maxItems": 32
+              }
+            },
+            "required": [
+              "root_task_id",
+              "title",
+              "kind",
+              "state",
+              "last_activity_at",
+              "claims",
+              "notes"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "outcome",
+        "requests"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
