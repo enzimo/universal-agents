@@ -15,10 +15,14 @@ so do all databases of a test marked ``own_database``. Release candidates run th
 upgrade``).
 
 ``--capture-schema PATH`` records the tables, indexes and triggers product
-code creates while the suite runs, one statement per line; tests' own tables
-are left out. ``scripts/upgrade_schema_fixture.py`` merges the captures of a
-minor version's releases into the fixture and lists what a newer release
-changes in them.
+code creates while the suite runs, and the columns it adds to existing tables,
+one statement per line; tests' own tables are left out. A capture is saved
+only from a run that passed, because tables only failed or unrun tests create
+would be missing from it, and it lists the tests the run skipped first: their
+tables are missing too (the access tests skip until the Cedar authorizer is
+built). ``scripts/upgrade_schema_fixture.py`` merges the captures of a minor
+version's releases into the fixture and lists what a newer release changes in
+them.
 """
 
 from __future__ import annotations
@@ -35,7 +39,7 @@ from typing import Any
 
 import pytest
 
-from scripts.upgrade_schema_fixture import is_vector_table
+from scripts.upgrade_schema_fixture import SKIPPED, is_added_column, is_vector_table
 
 _REPO = Path(__file__).resolve().parents[1]
 _TESTS = str(_REPO / "tests") + os.sep
@@ -83,6 +87,8 @@ def pytest_configure(config: pytest.Config) -> None:
         capture=Path(capture_path) if capture_path else None,
     )
     config.stash[_SCHEMAS] = schemas
+    # Its hooks follow the run's outcome, which decides whether the capture is saved.
+    config.pluginmanager.register(schemas, "upgrade_schemas")
     for driver in _DRIVERS:
         driver.connect = partial(schemas.connect, _driver=driver)
 
@@ -99,7 +105,6 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         return
     for driver in _DRIVERS:
         driver.connect = _ORIGINAL_CONNECTS[driver]
-    schemas.finish()
 
 
 def read_schema_statements(path: Path) -> tuple[str, ...]:
@@ -119,6 +124,9 @@ class _Schemas:
         self._captured: dict[str, None] = {}
         self._kinds: dict[str, str] = {}
         self._lock = threading.Lock()
+        self._failed: dict[str, None] = {}
+        self._skipped: dict[str, None] = {}
+        self._outcome: tuple[str, str] | None = None  # The capture's result for the terminal summary.
         # Set for a test marked own_database, which builds an older instance's
         # database through a store and must keep exactly what it builds.
         self.paused = False
@@ -161,7 +169,8 @@ class _Schemas:
 
     def _record(self, statement: str) -> None:
         text = " ".join(statement.split())
-        if not text.upper().startswith(_SCHEMA_PREFIXES) or not self._product_caller():
+        schema = text.upper().startswith(_SCHEMA_PREFIXES) or is_added_column(text)
+        if not schema or not self._product_caller():
             return
         with self._lock:
             self._captured.setdefault(text, None)
@@ -183,12 +192,52 @@ class _Schemas:
             frame = frame.f_back
         return False
 
-    def finish(self) -> None:
+    # pytest hooks, registered in pytest_configure. A test that fails, or never
+    # runs, may be the only one that creates a table.
+    def pytest_collectreport(self, report: pytest.CollectReport) -> None:
+        self._note(report)
+
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        self._note(report)
+
+    def _note(self, report: pytest.CollectReport | pytest.TestReport) -> None:
+        if report.failed:
+            self._failed.setdefault(report.nodeid, None)
+        elif report.skipped and not hasattr(report, "wasxfail"):
+            self._skipped.setdefault(report.nodeid, None)
+
+    def pytest_sessionfinish(self, exitstatus: int) -> None:
+        self.finish(passed=exitstatus == 0 and not self._failed)
+
+    def pytest_terminal_summary(self, terminalreporter: Any) -> None:
+        if self._outcome is not None:
+            color, message = self._outcome
+            terminalreporter.write_line(message, **{color: True, "bold": True})
+
+    def finish(self, *, passed: bool) -> None:
+        """Save the capture from a run that passed, listing the tests it skipped first."""
+
         if self._capture is None:
             return
+        if not passed:
+            failed = list(self._failed)
+            reason = f"{len(failed)} failed, the first {failed[0]}" if failed else "it stopped early"
+            self._outcome = (
+                "red",
+                f"--capture-schema: not saved, because the run did not pass ({reason}). "
+                "Tables only the failed or unrun tests create would be missing from it.",
+            )
+            return
         with self._lock:
-            text = "".join(f"{statement};\n" for statement in self._captured)
-        self._capture.write_text(text, encoding="utf-8")
+            statements = "".join(f"{statement};\n" for statement in self._captured)
+        skipped = "".join(f"{SKIPPED}{nodeid}\n" for nodeid in self._skipped)
+        self._capture.write_text(skipped + statements, encoding="utf-8")
+        if self._skipped:
+            self._outcome = (
+                "yellow",
+                f"--capture-schema: {len(self._skipped)} skipped test(s) are listed at the top of {self._capture}. "
+                "Tables only they create are missing from it.",
+            )
 
 
 _PRODUCT, _TEST, _OTHER = "product", "test", "other"

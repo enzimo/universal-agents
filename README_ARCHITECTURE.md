@@ -4013,14 +4013,24 @@ the desktop app never offers an older version.
 - **Checked on every release candidate.** `scripts/run_tests.sh upgrade` runs
   the hermetic tests with `--upgrade-from` (`tests/upgrade_schemas.py`): every
   new SQLite database a store opens starts with the oldest form of each ordinary table,
-  index and trigger the previous minor version created
+  index and trigger the previous minor version created, with the columns its
+  stores added when they opened
   (`tests/fixtures/upgrade/<version>-sqlite.sql`), so a store that misses an
   upgrade step fails the tests that use it. The fixture comes from the
-  releases' own test suites run with `--capture-schema`, which records only the
-  statements product code runs, and is merged by
-  `scripts/upgrade_schema_fixture.py`, whose `diff` command lists what a newer
-  release changes in those tables. Replay loads sqlite-vec and rejects errors
-  other than duplicate definitions and indexes on later-added columns. The
+  releases' own test suites run with `--capture-schema` (for 0.9: 0.9.4 and
+  0.9.11; 0.9.0 to 0.9.3 predate this repository's history), which records
+  only the statements product code runs (tables, indexes, triggers and added
+  columns).
+  A capture is saved only from a run that passed and lists the tests the run
+  skipped, because tables only failed, unrun or skipped tests create would be
+  missing from it. `scripts/upgrade_schema_fixture.py` merges captures and
+  warns about their skipped tests; its `diff` command lists what a newer
+  release changes in those tables, comparing indexes and triggers by their
+  whole statements, and exits with status 1 when an older database differs in
+  a way `CREATE ... IF NOT EXISTS` does not fix. Replay runs tables first,
+  then added columns, then indexes and triggers; it loads sqlite-vec and
+  rejects errors other than duplicate definitions, columns a table already
+  has and indexes on later-added columns. The
   fixture also retains the dimension-specific `memory_graph_vectors` table:
   a dedicated test loads the complete fixture with a stored embedding and
   proves it remains searchable without recreating that table. It is separate
@@ -4032,7 +4042,10 @@ the desktop app never offers an older version.
   own 75-minute budget. PostgreSQL stores run the same steps
   through `ensure_column`; the option covers SQLite only, and a one-off
   comparison of PostgreSQL tables from the same releases (2026-11-01) found
-  the same changes.
+  the same changes. Tables first created in the current minor version's
+  releases and PostgreSQL-only tables are not covered: a change to them is
+  checked by comparing the `CREATE` statements with the last release tag
+  (AGENTS.md, "Change-specific requirements").
 
 When a minor version ships, the upgrade steps for releases before the previous
 minor version are removed, as the team transfer's conversion steps are.

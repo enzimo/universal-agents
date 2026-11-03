@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -14,6 +16,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from scripts.upgrade_schema_fixture import is_vector_table
 from storage.config import resolve_storage_settings
 from storage.sqlite_vec_support import load_sqlite_vec, serialize_float32
 from tests import upgrade_schemas
@@ -39,6 +42,11 @@ def test_the_previous_minor_versions_tables_load_into_an_empty_database():
     # 0.9 ledger entries had no changed_fields; 0.10 adds it when the ledger opens.
     assert "changed_fields" not in {row[1] for row in conn.execute("PRAGMA table_info(change_ledger)")}
     assert "memory_graph_vectors" in names
+    # Created only by tests that need the Cedar authorizer built.
+    assert "tool_setup_runs" in names
+    # Every 0.9 release added these when its stores opened, so every 0.9 database has them.
+    assert "embedding_profile_id" in {row[1] for row in conn.execute("PRAGMA table_info(memory_entities)")}
+    assert "memory_review_status" in {row[1] for row in conn.execute("PRAGMA table_info(conversation_task_links)")}
     conn.close()
 
 
@@ -83,47 +91,118 @@ def test_capture_records_the_tables_product_code_creates_and_not_the_tests_own(t
     own.close()
     fixture_only = build(["CREATE TABLE fixture_test_only (value TEXT)"])
     fixture_only.close()
-    schemas.finish()
+    schemas.finish(passed=True)
 
     captured = read_schema_statements(capture)
     assert any(statement.startswith("CREATE TABLE IF NOT EXISTS heartbeat_items") for statement in captured)
     assert not any("test_only" in statement for statement in captured)
 
 
+def test_capture_records_the_columns_an_upgrade_step_adds(tmp_path, monkeypatch):
+    from storage.sqlite_connection import connect_sqlite
+    from storage.table_columns import ensure_column
+
+    capture = tmp_path / "capture.sql"
+    schemas = _Schemas(seed=(), capture=capture)
+    monkeypatch.setattr(sqlite3, "connect", schemas.connect)
+    with connect_sqlite(str(tmp_path / "older.db")) as conn:
+        conn.execute("CREATE TABLE older (value TEXT)")  # The test's own older table.
+        ensure_column(conn, "older", "added", "TEXT")
+    schemas.finish(passed=True)
+
+    # Replayed after the release's own CREATE TABLE, it gives the table the
+    # form a real database of that release has (scripts/upgrade_schema_fixture.py).
+    assert read_schema_statements(capture) == ("ALTER TABLE older ADD COLUMN added TEXT",)
+
+
+def _report(nodeid: str, outcome: str) -> SimpleNamespace:
+    return SimpleNamespace(nodeid=nodeid, failed=outcome == "failed", skipped=outcome == "skipped")
+
+
+@pytest.mark.parametrize(
+    ("reports", "exitstatus"),
+    [
+        ([("tests/a.py::t", "failed")], 1),  # A test that failed may be the only one creating a table.
+        ([], 2),  # Stopped early (interrupted, or -x after a failure): later tests never ran.
+    ],
+)
+def test_capture_from_a_run_that_did_not_pass_is_not_saved(tmp_path, reports, exitstatus):
+    capture = tmp_path / "capture.sql"
+    schemas = _Schemas(seed=(), capture=capture)
+    schemas._captured["CREATE TABLE IF NOT EXISTS kept (value TEXT)"] = None
+    for nodeid, outcome in reports:
+        schemas.pytest_runtest_logreport(_report(nodeid, outcome))
+    schemas.pytest_sessionfinish(exitstatus=exitstatus)
+
+    assert not capture.exists()
+    lines: list[tuple[str, dict]] = []
+    schemas.pytest_terminal_summary(SimpleNamespace(write_line=lambda line, **markup: lines.append((line, markup))))
+    assert lines and "not saved" in lines[0][0] and lines[0][1]["red"]
+
+
+def test_capture_lists_the_tests_its_run_skipped(tmp_path):
+    from scripts.upgrade_schema_fixture import skipped_tests
+
+    capture = tmp_path / "capture.sql"
+    schemas = _Schemas(seed=(), capture=capture)
+    schemas._captured["CREATE TABLE IF NOT EXISTS kept (value TEXT)"] = None
+    schemas.pytest_collectreport(_report("tests/test_module_skip.py", "skipped"))
+    schemas.pytest_runtest_logreport(_report("tests/a.py::needs_cedar", "skipped"))
+    schemas.pytest_runtest_logreport(_report("tests/a.py::passes", "passed"))
+    expected_failure = _report("tests/a.py::xfail", "skipped")
+    expected_failure.wasxfail = "known"  # It ran.
+    schemas.pytest_runtest_logreport(expected_failure)
+    schemas.pytest_sessionfinish(exitstatus=0)
+
+    assert skipped_tests(capture) == ["tests/test_module_skip.py", "tests/a.py::needs_cedar"]
+    assert read_schema_statements(capture) == ("CREATE TABLE IF NOT EXISTS kept (value TEXT)",)
+    lines: list[tuple[str, dict]] = []
+    schemas.pytest_terminal_summary(SimpleNamespace(write_line=lambda line, **markup: lines.append((line, markup))))
+    assert "2 skipped test(s)" in lines[0][0] and lines[0][1]["yellow"]
+
+
 @pytest.mark.own_database
 def test_historical_vector_table_and_stored_embedding_remain_searchable(tmp_path):
     from storage.memory_graph_repository import SqliteMemoryGraphRepository, sqlite3 as driver
 
+    statements = read_schema_statements(FIXTURE)
+    # vec0 takes the instance's embedding dimension; the fixture keeps the first one a test created.
+    vector_table = next(statement for statement in statements if is_vector_table(statement))
+    dimension = int(re.search(r"float\[(\d+)\]", vector_table).group(1))
+    embedding = [1.0] + [0.0] * (dimension - 1)
     path = tmp_path / "memory.db"
     conn = driver.connect(str(path))
     load_sqlite_vec(conn)
     with conn:
-        for statement in read_schema_statements(FIXTURE):
+        for statement in statements:
             conn.execute(statement)
         # Columns and values written by 0.9, before the current repository opens
         # the file. Searching must reuse the old table and its stored embedding.
         conn.execute(
             "INSERT INTO memory_entities "
             "(entity_id, subject_id, entity_type, canonical_name, normalized_name, embedding, created_at, updated_at) "
-            "VALUES ('entity_old', 'subject_old', 'concept', 'SQLite', 'sqlite', '[1,0,0]', 'old', 'old')"
+            "VALUES ('entity_old', 'subject_old', 'concept', 'SQLite', 'sqlite', ?, 'old', 'old')",
+            (json.dumps(embedding),),
         )
         conn.execute(
-            "INSERT INTO memory_graph_vector_index_state VALUES ('default', 'sqlite_vec', 3, '0.1.9', 'old', 'old')"
+            "INSERT INTO memory_graph_vector_index_state VALUES ('default', 'sqlite_vec', ?, '0.1.9', 'old', 'old')",
+            (dimension,),
         )
         conn.execute(
-            "INSERT INTO memory_graph_vector_records VALUES (1, 'entity', 'entity_old', 'subject_old', NULL, 3, 'old')"
+            "INSERT INTO memory_graph_vector_records VALUES (1, 'entity', 'entity_old', 'subject_old', NULL, ?, 'old')",
+            (dimension,),
         )
         conn.execute(
             "INSERT INTO memory_graph_vectors "
             "(rowid, record_kind, record_id, subject_id, embedding_profile_id, embedding) "
             "VALUES (1, 'entity', 'entity_old', 'subject_old', '', ?)",
-            (serialize_float32([1, 0, 0]),),
+            (serialize_float32(embedding),),
         )
         before = conn.execute("SELECT sql FROM sqlite_master WHERE name='memory_graph_vectors'").fetchone()[0]
     conn.close()
 
     repo = SqliteMemoryGraphRepository(str(path))
-    found = repo.search_entities_by_embedding(subject_id="subject_old", query_embedding=[1, 0, 0])
+    found = repo.search_entities_by_embedding(subject_id="subject_old", query_embedding=embedding)
     assert [entity.entity_id for entity in found] == ["entity_old"]
     with repo._connect() as current:
         load_sqlite_vec(current)
@@ -145,7 +224,10 @@ def test_configured_alternate_driver_seeds_and_captures_the_real_memory_store(tm
     fixture.write_text("CREATE TABLE older (value TEXT);\n")
     capture = tmp_path / "capture.sql"
     options = {"--upgrade-from": str(fixture), "--capture-schema": str(capture)}
-    config = SimpleNamespace(getoption=options.get, stash={})
+    plugins: list[object] = []
+    config = SimpleNamespace(
+        getoption=options.get, stash={}, pluginmanager=SimpleNamespace(register=lambda plugin, name: plugins.append(plugin))
+    )
     upgrade_schemas.pytest_configure(config)
     try:
         repo = memory.SqliteMemoryGraphRepository(str(tmp_path / "memory.db"), vector_enabled=False)
@@ -153,6 +235,7 @@ def test_configured_alternate_driver_seeds_and_captures_the_real_memory_store(tm
             assert "older" in _tables(conn)
     finally:
         upgrade_schemas.pytest_unconfigure(config)
+    plugins[0].pytest_sessionfinish(exitstatus=0)
     assert any("CREATE TABLE IF NOT EXISTS memory_entities" in statement for statement in read_schema_statements(capture))
     assert driver.connect is upgrade_schemas._original_connect
 
