@@ -117,6 +117,62 @@ def serving_subject(address: str, team: str, receiver_id: str) -> str:
     return SUBJECT_PREFIX.format(team=team, sender="*") + "." + filled
 
 
+def build_frame(kind: str, body: Mapping[str, Any], audience: Mapping[str, Any], *, issuer: Mapping[str, Any],
+                issued: datetime, subject: str, authority: Optional[Mapping[str, Any]] = None,
+                answering: Optional[Frame] = None, lifetime_seconds: Optional[int] = None) -> dict[str, Any]:
+    """An unsigned frame of ``kind`` from ``issuer``, its body checked against the kind's schema first.
+
+    A sender's mistake is caught here rather than refused by the receiver. The caller
+    signs it with the key the issuer names (``sign_frame``).
+    """
+
+    spec, is_reply = _spec(kind)
+    model = spec.reply_model if is_reply else spec.body_model
+    assert model is not None  # replies exist only for operations with a reply schema
+    model.validate_python(dict(body))
+    lifetime = min(lifetime_seconds or spec.expiry_seconds, spec.expiry_seconds)
+    frame: dict[str, Any] = {
+        "protocol": PROTOCOL,
+        "kind": kind,
+        "message_id": new_message_id(int(issued.timestamp() * 1000)),
+        "issuer": dict(issuer),
+        "audience": dict(audience),
+        "subject": subject,
+        "issued_at": format_timestamp(issued),
+        "expires_at": format_timestamp(issued + timedelta(seconds=lifetime)),
+    }
+    if authority is not None:
+        frame["authority"] = dict(authority)
+    frame["algorithm"] = "ed25519"
+    frame["body"] = dict(body)
+    if answering is not None:
+        frame["causation_id"] = answering.message_id
+    frame["idempotency_key"] = expected_idempotency_key(frame, spec, is_reply, answering)
+    return frame
+
+
+def encode(frame: Mapping[str, Any]) -> tuple[bytes, dict[str, str]]:
+    """A frame's bytes and the header copies every publish sets (README "NATS headers")."""
+
+    return json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), {
+        HEADER_KIND: str(frame["kind"]), HEADER_ID: str(frame["message_id"])}
+
+
+def answer_headers(message: Any) -> dict[str, str]:
+    return dict(message.headers or {})
+
+
+def raise_if_refused(kind: str, subject: str, message: Any, logger: logging.Logger) -> None:
+    """Raise ``RequestRefused`` when the answer is a refusal (README "Refused requests")."""
+
+    headers = answer_headers(message)
+    if REFUSAL_HEADER in headers:
+        code, at = headers[REFUSAL_HEADER], headers.get(REFUSAL_AT_HEADER, "")
+        logger.warning("A request was refused. event=protocol1_request_refused kind=%s subject=%s code=%s at=%s",
+                       kind, subject, code, at)
+        raise RequestRefused(kind, code, at)
+
+
 @dataclass
 class LiveHost:
     """One host's live messaging: it signs as ``identity`` and checks with ``trust``."""
@@ -142,37 +198,12 @@ class LiveHost:
         caught here rather than refused by the receiver.
         """
 
-        spec, is_reply = _spec(kind)
-        model = spec.reply_model if is_reply else spec.body_model
-        assert model is not None  # replies exist only for operations with a reply schema
-        model.validate_python(dict(body))
-        issued = self.clock()
-        lifetime = min(lifetime_seconds or spec.expiry_seconds, spec.expiry_seconds)
-        frame: dict[str, Any] = {
-            "protocol": PROTOCOL,
-            "kind": kind,
-            "message_id": new_message_id(int(issued.timestamp() * 1000)),
-            "issuer": self.identity.issuer(team, agent),
-            "audience": dict(audience),
-            "subject": subject or request_subject(kind, audience, self.identity.runtime),
-            "issued_at": format_timestamp(issued),
-            "expires_at": format_timestamp(issued + timedelta(seconds=lifetime)),
-        }
-        if authority is not None:
-            frame["authority"] = dict(authority)
-        frame["algorithm"] = "ed25519"
-        frame["body"] = dict(body)
-        if answering is not None:
-            frame["causation_id"] = answering.message_id
-        frame["idempotency_key"] = expected_idempotency_key(frame, spec, is_reply, answering)
+        frame = build_frame(kind, body, audience, issuer=self.identity.issuer(team, agent), issued=self.clock(),
+                            subject=subject or request_subject(kind, audience, self.identity.runtime),
+                            authority=authority, answering=answering, lifetime_seconds=lifetime_seconds)
         return sign_frame(frame, self.identity.keys.application_key)
 
-    @staticmethod
-    def encode(frame: Mapping[str, Any]) -> tuple[bytes, dict[str, str]]:
-        """The frame's bytes and the header copies every publish sets (README "NATS headers")."""
-
-        return json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8"), {
-            HEADER_KIND: str(frame["kind"]), HEADER_ID: str(frame["message_id"])}
+    encode = staticmethod(encode)
 
     # -- requesting -----------------------------------------------------------------------------
 
@@ -203,17 +234,12 @@ class LiveHost:
             self.logger.warning("A request got no answer. event=protocol1_request_unanswered kind=%s subject=%s reason=%s",
                                 kind, frame["subject"], reason)
             raise ServiceUnavailable(kind, frame["subject"], reason) from error
-        answer_headers = dict(message.headers or {})
-        if REFUSAL_HEADER in answer_headers:
-            code, at = answer_headers[REFUSAL_HEADER], answer_headers.get(REFUSAL_AT_HEADER, "")
-            self.logger.warning("A request was refused. event=protocol1_request_refused kind=%s subject=%s code=%s at=%s",
-                                kind, frame["subject"], code, at)
-            raise RequestRefused(kind, code, at)
+        raise_if_refused(kind, frame["subject"], message, self.logger)
         request = Frame.model_validate(frame)
         now = self.clock()
         verified = verify_frame(message.data, trust=self.trust.store, receiver=self.reply_receiver(request),
                                 arrived_on=message.subject, now=now, replay=self.replay.lookup,
-                                headers=answer_headers, answering=request)
+                                headers=answer_headers(message), answering=request)
         self.replay.admit(verified, now)
         return verified
 

@@ -4210,8 +4210,31 @@ signed against records that chain to the installation's authority keys.
 - **Signed records** (`state_records`): records in the key-value buckets, signed by
   their writer, with compare-and-set for placements, and verified on every read.
 
-The kernel runs nowhere yet; the installation authority and team services processes
-use it first.
+**The installation authority** (`installation_authority`, `assistant_cli
+run-installation-authority`) vouches for the hosts. It runs no model. The launcher
+prepares the trust folder first (`docker.message_hosts`): it keeps the installation's
+id, creates any missing key, writes the hosts it starts with their public keys
+(`expected-hosts.json`) and the bundle's authority keys. It then starts the authority
+right after NATS and waits until the bundle carries the authority's certificate and a
+freshly signed revocations record. The authority:
+
+- creates the key-value buckets and each team's dead-letter stream and consumer (it is
+  the contract's topology owner; queued work streams come with queued work);
+- signs its own certificate, and the revocations record every six hours (it lasts a
+  day, with an ever higher sequence, so a restored authority never writes a lower one);
+- answers `host.join` and `host.renew`. A join from a host the launcher listed, with
+  that key, asking for no more than listed, gets a 30-day certificate; any other join
+  is denied, so a local installation never takes in a host nobody approved. A host
+  asking again with its key gets its certificate back while over a third of its life
+  is left, otherwise a new one with the next membership epoch that replaces it. While
+  the contract is a pre-release, a host running another contract digest gets
+  `protocol_mismatch`;
+- keeps every certificate it issued, so a restarted authority still recognises the
+  hosts that renew.
+
+Hosts join with `custom_transport.protocol1.joining`, which waits for an authority that
+is still starting and checks the returned certificate against the bundle's authority
+keys. The hosts still share one NATS login, so a join returns no NATS credential.
 
 ## Certificate trust
 

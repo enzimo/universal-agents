@@ -101,6 +101,11 @@ from custom_agents.memory_graph_embedding_profile_runtime import (
     build_embedding_profile_spec,
     ensure_memory_graph_embedding_profile,
 )
+from docker.message_hosts import (
+    build_installation_authority_command,
+    prepare_message_host_trust,
+    start_installation_authority,
+)
 from env_secrets import (
     PROCESS_ACTIVITY_COLLECTOR,
     PROCESS_ADAPTER_HOST,
@@ -108,6 +113,7 @@ from env_secrets import (
     PROCESS_CONSUMER_CHECK,
     PROCESS_EXECUTION_CONTROLLER,
     PROCESS_GATEWAY,
+    PROCESS_INSTALLATION_AUTHORITY,
     PROCESS_MANAGER,
     PROCESS_OPENSHELL_CLI,
     PROCESS_OPENSHELL_GATEWAY,
@@ -2767,6 +2773,25 @@ def main() -> int:
         before_external_shutdown=cleanup_managed_openshell,
     ):
         return 2
+    # The message hosts' keys and their installation authority, before any host starts
+    # (docker.message_hosts).
+    try:
+        prepare_message_host_trust(config.layout)
+        authority_process = start_installation_authority(
+            config.layout,
+            build_installation_authority_command(config_path, repo_root=REPO_ROOT),
+            environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env),
+            cwd=REPO_ROOT,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        stop_external_processes(external_processes, cleanup_managed_openshell)
+        LOGGER.error(
+            "Headless launch refused: the installation authority could not start. "
+            "event=installation_authority_start_failed error=%s",
+            exc,
+        )
+        return 2
+    external_processes = (*external_processes, ("installation authority", authority_process))
 
     return run_supervised(
         manager_command=manager_command,
