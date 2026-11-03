@@ -2,7 +2,7 @@
   "protocol": "1.0-pre",
   "kind": "access.resolved",
   "message_id": "01928f3a-7b2c-7117-8000-000000000117",
-  "idempotency_key": "access.resolved:InBR8teOQa-eLt-nw7csN21bPFCkz3X8mMqGgN4I1HA",
+  "idempotency_key": "access.resolved:7tomEQImgS-SfqFPO94KIkhb-k3m4AI_s6mM8wcnoqs",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -45,6 +45,7 @@
   "algorithm": "ed25519",
   "body": {
     "request_id": "areq_1",
+    "decision_id": "decision_1",
     "choice": "approve_task",
     "note": "Read only, please.",
     "kept_item_ids": [
@@ -52,6 +53,6 @@
     ],
     "keep_hours": 24
   },
-  "body_digest": "oHt_L1bJy8ZC7f8ffhNdPXw1rEUMwD4zGzTl7M7wGRk",
-  "signature": "E5TTjych9gg2nGPsyNR4I8QBvcWhJPS9oGFbgB8WtCEghvPObGozdZThViR6rmS5s_yVmBXkEN3EogcejIqSDQ"
+  "body_digest": "m-AxpUXzwT3-hkZU3mQzjTPxlpaEjhqCTTLp5s0IhAM",
+  "signature": "O5jlcVHzxd5EQEpZQVdSxkxdK2oNa8we04dPNYLVLQ35DtIIYPbwcD4HljPxasGM9Gns67qTRmeOLvSJ8Y1oBA"
 }

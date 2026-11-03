@@ -1,0 +1,14 @@
+{
+  "description": "An access list gives each tool read, write or full.",
+  "refusal": "invalid_body",
+  "at": "/body/access_list/tools/0/level",
+  "base": "custody.confirmed/remote-claim.json",
+  "changes": [
+    {
+      "set": "/body/access_list/tools/0/level",
+      "to": "admin"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"custody.confirmed\", \"message_id\": \"01928f3a-7b2c-7d50-8000-000000000d50\", \"idempotency_key\": \"custody.confirmed:CmNrJoQSAbHwbSgxgEKP4tG0CYkJ6FJ4lXU79RGgqRI\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"surveyor-1\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.control.surveyor-1\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_field_1\", \"custody_token\": 2, \"sequence\": 1, \"reason\": \"claimed\", \"custody_window\": {\"renewed_by\": \"reconnection\", \"ends_at\": \"2026-10-27T04:30:00.000Z\"}, \"access_list\": {\"sequence\": 1, \"holder\": \"surveyor-1\", \"task_id\": \"task_field_1\", \"root_task_id\": \"task_root_7f\", \"person\": \"person_7c1\", \"runtime\": \"remote-host-1\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"ends_at\": \"2026-10-29T04:00:00.000Z\", \"tools\": [{\"tool_id\": \"fn:files\", \"level\": \"admin\", \"fresh_check\": false}, {\"tool_id\": \"fn:web_research\", \"level\": \"read\", \"fresh_check\": false}, {\"tool_id\": \"cli:soil-sensor\", \"level\": \"read\", \"fresh_check\": false}], \"one_time\": []}}, \"body_digest\": \"pom7gzyYfKyxER-_4CMrWXOBp1T_H-mjWkouWEg1kiE\", \"signature\": \"13eiVG8WxIoqGUthnFhlWum86l8D5xM1CA4h2xX2uP12AKujEZdXj2Negb7o_Tf_iIXPIueEIGz00vw30iLzAw\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7116-9000-000000000116\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"jELY9TnLxNgTvbK4CmdzfvdVKBtaxfFv0AzEv0IuTjy1bNwa6pXFc48_cfLafg3EA-b0zurB1H64GcSdPHzTBg\"}}"
+}

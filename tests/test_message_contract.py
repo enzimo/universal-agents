@@ -30,7 +30,7 @@ from referencing import Registry
 from referencing.jsonschema import DRAFT202012
 
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal
-from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology
+from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology, trust as wire_trust
 from custom_messages.wire.canonical import CanonicalJsonError
 from custom_messages.wire.frame import (
     FrameRefused,
@@ -45,6 +45,7 @@ from custom_messages.wire.frame import (
     signing_bytes,
     verify_frame,
 )
+from custom_messages.wire.permissions import HostPlacement, host_permissions, host_subjects
 from custom_messages.wire.trust import TrustStore, ed25519_public_key, sign_state, state_signing_bytes
 from custom_messages.wire.values import parse_timestamp
 from tests import message_contract_support as fixtures
@@ -177,6 +178,53 @@ def refusal(data: bytes, frame: dict, context: dict | None = None, **overrides) 
 
 def test_generated_files_are_current() -> None:
     assert EXPORT.stale(EXPORT.render()) == []
+
+
+def test_the_digest_covers_only_the_contracts_sources(tmp_path: Path) -> None:
+    """README, "Versions": hidden files and other kinds of file never change the contract digest."""
+
+    for name in ("README.md", "registry.yaml", "schemas/frame.schema.json", "generated/registry.json"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    digest = EXPORT.contract_sha256({}, root=tmp_path)
+    for name in (".DS_Store", "registry.yaml~", "notes.txt", ".editor/settings.json", "schemas/.frame.schema.json.swp"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("stray", encoding="utf-8")
+    assert [path.relative_to(tmp_path).as_posix() for path in EXPORT.contract_sources(tmp_path)] == [
+        "README.md", "registry.yaml", "schemas/frame.schema.json"]
+    assert EXPORT.contract_sha256({}, root=tmp_path) == digest
+    (tmp_path / "registry.yaml").write_text("registry.yaml\n", encoding="utf-8")
+    assert EXPORT.contract_sha256({}, root=tmp_path) != digest
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "contracts/messages/v1/** text eol=lf" in attributes
+
+
+def test_the_seven_day_cut_off_and_the_one_day_revocations_record_are_pinned() -> None:
+    """Owner decision 45 and the revocations record's day: a changed lifetime fails here instead of passing silently."""
+
+    week, day = 7 * 24 * 3600, 24 * 3600
+    assert TRANSPORT["classes"]["durable"]["max_expiry_seconds"] == week
+    assert {entry["expiry_seconds"] for entry in REGISTRY["kinds"].values() if entry["class"] == "durable"} == {week}
+    assert REGISTRY["authority_token_max_seconds"] == week
+    records = REGISTRY["state_records"]
+    assert (records["agent_session"]["max_lifetime_seconds"], records["block_list"]["max_lifetime_seconds"],
+            records["revocations"]["max_lifetime_seconds"]) == (week, week, day)
+    assert kinds.STATE_RECORDS["revocations"].max_lifetime_seconds == day
+
+
+def test_the_compatibility_record_names_the_contract_by_its_digest() -> None:
+    """README, "Versions": the SHA-256 of every source path and its bytes, in path order; peers compare it while -pre."""
+
+    digest = hashlib.sha256()
+    sources = sorted((path for path in CONTRACT.rglob("*") if path.is_file() and "generated" not in path.relative_to(CONTRACT).parts),
+                     key=lambda path: path.relative_to(CONTRACT).as_posix().encode("utf-8"))
+    assert CONTRACT / "README.md" in sources and CONTRACT / "registry.yaml" in sources
+    for path in sources:
+        data = path.read_bytes()
+        digest.update(path.relative_to(CONTRACT).as_posix().encode("utf-8") + b"\0" + str(len(data)).encode() + b"\0" + data)
+    record = json.loads((CONTRACT / "generated" / "compatibility.json").read_text(encoding="utf-8"))
+    assert record["contract_sha256"] == digest.hexdigest()
+    assert record["protocol"].endswith("-pre") and "-pre" in record["accepts"]["contract_sha256"]
 
 
 def test_export_refuses_a_retry_key_based_on_an_optional_field() -> None:
@@ -356,6 +404,14 @@ def test_transport_settings_that_would_lose_or_replay_messages_are_refused(chang
          "starts ua.v1.{team}."),
         (lambda t: t["streams"].update({"UA1_{team}_{edge}": {"subjects": ["ua.v1.{team}.*.spare"]}}), "may name only"),
         (lambda t: t["consumers"]["edge"].update(stream="UA1_AGENT_WORK_{team}"), "stores its filter's subjects"),
+        # An agent's control queue is read on its own, with its own consumer.
+        (lambda t: t["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].remove("ua.v1.{team}.*.work.control.*"),
+         "work.control.{agent} is stored in exactly one"),
+        (lambda t: t.pop("agent_queues"), "agent_queues names the inbox and the control queue"),
+        (lambda t: t["agent_queues"].update(control="work.agent.{agent}"), "agent_queues names the inbox and the control queue"),
+        (lambda t: t["consumers"].pop("agent_control"), "has exactly one consumer"),
+        (lambda t: t["consumers"]["agent_control"].update(filter=t["consumers"]["agent_inbox"]["filter"]),
+         "has exactly one consumer, so the host reads it on its own"),
     ],
 )
 def test_streams_store_each_queued_address_once_and_nothing_else(change, problem) -> None:
@@ -365,38 +421,20 @@ def test_streams_store_each_queued_address_once_and_nothing_else(change, problem
         EXPORT.check_transport(transport)
 
 
-def edges_beside_agents(transport: dict) -> None:
-    transport["streams"]["UA1_WORK"]["subjects"] = ["ua.v1.*.*.work.team"]
-    transport["streams"]["UA1_AGENT_WORK_{team}"]["subjects"].append("ua.v1.{team}.*.work.edge.*")
-    transport["consumers"]["edge"]["stream"] = "UA1_AGENT_WORK_{team}"
+def test_streams_store_a_full_size_frame_with_the_largest_headers_senders_may_set() -> None:
+    """README, "NATS headers": JetStream counts headers in a stream's maximum message size."""
 
-
-def agent_work_of_every_team_in_one_stream(transport: dict) -> None:
-    spec = transport["streams"].pop("UA1_AGENT_WORK_{team}")
-    spec["subjects"] = ["ua.v1.*.*.work.agent.*", "ua.v1.*.*.work.pool.*"]
-    transport["streams"]["UA1_AGENT_WORK"] = spec
-    transport["classes"]["durable"]["streams"] = ["UA1_AGENT_WORK", "UA1_WORK"]
-    for key in ("agent_inbox", "pool"):
-        transport["consumers"][key]["stream"] = "UA1_AGENT_WORK"
-
-
-@pytest.mark.parametrize(
-    ("change", "problem"),
-    [
-        # A grant on every consumer of a stream would reach the edges' work, or other teams'.
-        (edges_beside_agents, "beside others"),
-        (agent_work_of_every_team_in_one_stream, "named with {team}"),
-        (lambda t: t.update(team_grants=["agent", "pool", "edge"]), "beside others"),
-        (lambda t: t.update(team_grants=["agent", "team"]), "team_grants lists"),
-        # Gateways and edge adapters do not run agents: a shared grant would give them agent work.
-        (lambda t: t["audience_targets"].update(pool=["lead_host", "worker_host", "gateway"]), "served by the same roles"),
-    ],
-)
-def test_whole_team_grants_reach_only_one_teams_agent_and_pool_work(change, problem) -> None:
-    transport = copy.deepcopy(TRANSPORT)
-    change(transport)
-    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
-        EXPORT.check_transport(transport)
+    assert EXPORT.largest_header_block(CONTRACT_SCHEMAS) == 891 <= TRANSPORT["limits"]["max_header_bytes"] == 1024
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    assert "is 891 bytes" in readme and "is 1,024" in readme
+    for change, problem in (
+            (lambda t: t["limits"].update(max_header_bytes=890), "max_header_bytes holds the largest header block"),
+            (lambda t: t["streams"]["UA1_WORK"].update(max_message_bytes=262144), "UA1_WORK's max_message_bytes"),
+            (lambda t: t["limits"].update(nats_max_payload_bytes=262144), "fit nats_max_payload_bytes")):
+        transport = copy.deepcopy(TRANSPORT)
+        change(transport)
+        with pytest.raises(EXPORT.ContractError, match=problem):
+            EXPORT.check_message_sizes(transport, CONTRACT_SCHEMAS)
 
 
 def test_a_team_wide_address_is_received_by_the_same_roles_for_every_kind() -> None:
@@ -435,25 +473,25 @@ def test_every_kind_has_a_model_and_every_model_a_kind() -> None:
 
 
 def consumer_grants() -> set[str]:
-    """Every JetStream subject a role may be granted: a team's agent work stream whole, other consumers by name."""
+    """Every JetStream subject a reader may be granted: each consumer by its exact name, ids still placeholders."""
 
     grants = set()
     for consumer in TRANSPORT["consumers"].values():
         stream, name = consumer["stream"], consumer["name"]
-        if "{team}" in stream:
-            grants |= {f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.*", f"$JS.ACK.{stream}.>"}
-        else:
-            grants |= {f"$JS.API.CONSUMER.INFO.{stream}.{name}", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
-                       f"$JS.ACK.{stream}.{name}.>"}
+        grants |= {f"$JS.API.CONSUMER.INFO.{stream}.{name}", f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
+                   f"$JS.ACK.{stream}.{name}.>"}
     return grants
 
 
-def test_permissions_cover_whole_teams_only_for_agents_and_pools_and_publish_only_under_the_senders_own_id() -> None:
+def test_permissions_name_exact_receivers_and_publish_only_under_the_senders_own_id() -> None:
+    """A host reads only the queues and control requests of the ids membership code fills in (README, "Grants ...")."""
+
     folder = CONTRACT / "generated" / "permissions"
-    assert TRANSPORT["team_grants"] == ["agent", "pool"]
-    grants = consumer_grants()
+    assert "team_grants" not in TRANSPORT
+    management = EXPORT.stream_management_grants(TRANSPORT)
     for role in REGISTRY["host_roles"]:
         document = json.loads((folder / f"{role}.json").read_text(encoding="utf-8"))
+        grants = consumer_grants() | management.get(role, set())
         for subject in document["publish"]:
             if subject.startswith("$JS."):
                 assert subject in grants, (role, subject)
@@ -462,9 +500,8 @@ def test_permissions_cover_whole_teams_only_for_agents_and_pools_and_publish_onl
         assert document["subscribe"][0] == "_INBOX.{self}.>"
         for subject in document["subscribe"][1:]:
             prefix = "ua.v1._install.*." if subject.startswith("ua.v1._install.") else "ua.v1.{team}.*."
-            # Only an agent's id becomes a wildcard: requests to any agent of the team.
-            rest = subject.removeprefix(prefix)
-            assert subject.startswith(prefix) and (rest == "ctl.agent.*" or "*" not in rest), subject
+            # Only the sender slot is a wildcard; every receiver id is a placeholder.
+            assert subject.startswith(prefix) and "*" not in subject.removeprefix(prefix), subject
         receives_requests = False
         for entry in REGISTRY["kinds"].values():
             for address in EXPORT.entry_addresses(entry):
@@ -472,25 +509,232 @@ def test_permissions_cover_whole_teams_only_for_agents_and_pools_and_publish_onl
                     assert EXPORT.full_subject(EXPORT.send_pattern(address), "{self}") in document["publish"]
                 receives = role in EXPORT.receiving_roles(entry, address, TRANSPORT)
                 if entry["class"] not in {"durable", "dead_letter"}:
-                    granted = EXPORT.full_subject(EXPORT.receive_pattern(address, TRANSPORT), "*")
+                    granted = EXPORT.full_subject(address, "*")
                     assert (granted in document["subscribe"]) == receives, (role, address)
                 receives_requests |= receives and entry["class"] == "request_reply"
         expires = f"{TRANSPORT['classes']['request_reply']['max_expiry_seconds'] + TRANSPORT['clock_skew_seconds']}s"
         assert document.get("allow_responses") == ({"max": 1, "expires": expires} if receives_requests else None)
 
 
+def expanded(role: str, placement: HostPlacement | None = None, **ids: list[str]) -> set[str]:
+    """A role's permission subjects filled for one host, as membership code fills them (README, "Filling the templates").
+
+    Without ``placement``, the host serves team_example and runs or serves ``ids``
+    (``agent``, ``pool`` and ``edge`` lists) there.
+    """
+
+    document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
+    if placement is None:
+        placement = HostPlacement(f"{role}-1", ("team_example",),
+                                  **{f"{name}s": {"team_example": tuple(values)} for name, values in ids.items()})
+    filled = host_permissions(document, placement)
+    return set(filled["publish"]) | set(filled["subscribe"])
+
+
+def test_a_host_holds_no_grant_on_another_hosts_agents() -> None:
+    """The worker host running researcher-2 cannot read the lead's queue or hear the lead's control requests."""
+
+    worker = expanded("worker_host", agent=["researcher-2"], pool=["researcher"])
+    lead = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_example", agent="lead")
+    own = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_example", agent="researcher-2")
+    stream = "UA1_AGENT_WORK_team_example"
+    assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{own}" in worker
+    assert "ua.v1.team_example.*.ctl.agent.researcher-2" in worker
+    assert not {subject for subject in worker if lead in subject or subject.endswith(".ctl.agent.lead")}
+    assert not {subject for subject in worker if subject.endswith(".*") and "CONSUMER" in subject}
+    # Gaining an agent is a new credential, with that agent's subjects added.
+    moved = expanded("worker_host", agent=["researcher-2", "lead"], pool=["researcher"])
+    assert f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{lead}" in moved - worker
+
+
+def test_a_host_serving_two_teams_gets_grants_only_on_each_agents_own_team() -> None:
+    """Team A's researcher and team B's researcher are different agents; a host running one never reaches the other."""
+
+    placement = HostPlacement("worker-host-1", ("team_a", "team_b"),
+                              agents={"team_a": ("researcher",)}, pools={"team_b": ("writer",)})
+    subjects = expanded("worker_host", placement)
+    inbox = TRANSPORT["consumers"]["agent_inbox"]["name"].format(team="team_a", agent="researcher")
+    assert f"$JS.API.CONSUMER.MSG.NEXT.UA1_AGENT_WORK_team_a.{inbox}" in subjects
+    assert "ua.v1.team_a.*.ctl.agent.researcher" in subjects
+    assert not {subject for subject in subjects if "researcher" in subject and "team_b" in subject}
+    assert not {subject for subject in subjects if "writer" in subject and "team_a" in subject}
+    # A subject that names no agent, pool or edge serves every team of the host.
+    assert {subject for subject in subjects if subject.startswith("ua.v1.team_b.worker-host-1.")}
+
+
+@pytest.mark.parametrize("role", sorted(path.stem for path in (CONTRACT / "generated" / "permissions").glob("*.json")))
+def test_every_roles_templates_fill_to_exact_ids(role: str) -> None:
+    placement = HostPlacement(f"{role}-1", ("team_a", "team_b"), agents={"team_a": ("lead",), "team_b": ("lead",)},
+                              pools={"team_a": ("researcher",)}, edges={"team_b": ("web",)})
+    subjects = expanded(role, placement)
+    assert subjects and not {subject for subject in subjects if "{" in subject}
+
+
+def test_a_credential_fits_the_limit_servers_read_and_the_jwt_field_allows() -> None:
+    """README, "Credential size": max_credential_bytes and the jwt field's maxLength are one limit."""
+
+    schemas = EXPORT.load_schemas()
+    jwt = schemas["common.schema.json"]["$defs"]["connection_credential"]["properties"]["jwt"]
+    assert jwt["maxLength"] == TRANSPORT["limits"]["max_credential_bytes"] == 65536
+    transport = copy.deepcopy(TRANSPORT)
+    transport["limits"]["max_credential_bytes"] = 16384
+    with pytest.raises(EXPORT.ContractError, match="max_credential_bytes"):
+        EXPORT.check_message_sizes(transport, schemas)
+
+
+def test_a_placement_names_only_teams_its_host_serves() -> None:
+    with pytest.raises(ValueError, match="teams the host does not serve"):
+        HostPlacement("worker-host-1", ("team_a",), agents={"team_b": ("researcher",)})
+    with pytest.raises(ValueError, match="cannot fill"):
+        host_subjects("ua.v1.{team}.{installation}.x", HostPlacement("worker-host-1", ("team_a",)))
+
+
+def longest_id(definition: str) -> int:
+    """The most characters a common.schema.json id definition allows (its pattern's {0,n} plus the first character)."""
+
+    defs = CONTRACT_SCHEMAS["common.schema.json"]["$defs"]
+    while "pattern" not in defs[definition]:
+        definition = defs[definition]["$ref"].rsplit("/", 1)[-1]
+    found = re.search(r"\{0,(\d+)\}\$$", defs[definition]["pattern"])
+    assert found, definition
+    return int(found.group(1)) + 1
+
+
+# Each permission placeholder, filled with the longest id its definition allows.
+PLACEHOLDER_IDS = {"team": "team_id", "agent": "agent_id", "pool": "agent_type", "edge": "token_id", "self": "runtime_id"}
+
+
+def permission_bytes(subjects: list[str]) -> int:
+    """Bytes of permission JSON for these templates, each placeholder filled with its longest id."""
+
+    def longest(match: re.Match[str]) -> str:
+        return "a" * longest_id(PLACEHOLDER_IDS[match.group(1)])
+
+    return sum(len(re.sub(r"\{([a-z_]+)\}", longest, subject)) + len('"",') for subject in subjects)
+
+
+def credential_growth(role: str, placeholder: str) -> int:
+    """Bytes of permission JSON one more ``placeholder`` id adds to ``role``'s credential, every id as long as allowed."""
+
+    document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
+    return permission_bytes([template for template in document["publish"] + document["subscribe"]
+                             if "{" + placeholder + "}" in template])
+
+
+def test_the_readme_states_what_each_hosted_agent_and_pool_adds_to_a_credential() -> None:
+    readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    assert (longest_id("team_id"), longest_id("agent_id"), longest_id("agent_type")) == (24, 32, 24)
+    agent = max(credential_growth(role, "agent") for role in ("lead_host", "worker_host"))
+    pool = max(credential_growth(role, "pool") for role in ("lead_host", "worker_host"))
+    assert f"{agent} bytes of permission JSON" in readme and f"{pool} bytes with" in readme
+    assert f"about {-(-agent * 4 // 3):,} bytes" in readme
+
+
+def test_a_credential_names_about_fifty_agents_beside_ten_pools_with_the_longest_ids() -> None:
+    """README, "Credential size": what the id caps buy, counted as a NATS user JWT.
+
+    The count allows 1,024 bytes for the JWT's header, claims and signature, and
+    base64url turns three bytes into four.
+    """
+
+    document = json.loads((CONTRACT / "generated" / "permissions" / "lead_host.json").read_text(encoding="utf-8"))
+    subjects = document["publish"] + document["subscribe"]
+    fixed = permission_bytes([s for s in subjects if not re.search(r"\{(agent|pool|edge)\}", s)])
+    agent, pool = credential_growth("lead_host", "agent"), credential_growth("lead_host", "pool")
+    room = TRANSPORT["limits"]["max_credential_bytes"] * 3 // 4 - 1024 - fixed - 10 * pool
+    assert room // agent in range(50, 55)
+    readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
+    assert "about 50 agents beside 10 worker pools" in readme
+
+
+def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_withdraw_queued_work() -> None:
+    """README, "Who sets up the streams" and "Withdrawing queued work"."""
+
+    assert (TRANSPORT["topology_owner"], TRANSPORT["withdrawal"]["role"]) == ("installation_authority", "team_services")
+    for role in REGISTRY["host_roles"]:
+        publish = role_permissions(role)["publish"]
+        creates = {subject for subject in publish if ".CREATE." in subject or ".UPDATE." in subject or ".DELETE." in subject}
+        deletes = {subject for subject in creates if ".MSG.DELETE." in subject}
+        reads = {subject for subject in publish if ".MSG.GET." in subject or ".DIRECT.GET." in subject}
+        if role == "installation_authority":
+            assert "$JS.API.STREAM.CREATE.UA1_AGENT_WORK_{team}" in publish and not deletes and not reads
+            assert "$JS.API.CONSUMER.CREATE.UA1_AGENT_WORK_{team}.*.>" in publish
+        elif role == "team_services":
+            # Their own team's stream only: neither grant reaches the shared UA1_WORK.
+            assert deletes == creates == {"$JS.API.STREAM.MSG.DELETE.UA1_AGENT_WORK_{team}"}
+            assert reads == {"$JS.API.STREAM.MSG.GET.UA1_AGENT_WORK_{team}"}
+        else:
+            assert not creates and not reads, role
+    for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
+                            (lambda t: t["withdrawal"].update(streams=["UA1_DLQ"]), "only from the durable class's streams"),
+                            (lambda t: t["withdrawal"].update(streams=["UA1_WORK"]), "only in per-team streams")):
+        transport = copy.deepcopy(TRANSPORT)
+        change(transport)
+        with pytest.raises(EXPORT.ContractError, match=problem):
+            EXPORT.check_stream_management(EXPORT.load_yaml("registry.yaml"), transport)
+
+
 def test_outside_agents_cannot_publish_into_worker_pools() -> None:
     edge = json.loads((CONTRACT / "generated" / "permissions" / "edge_adapter.json").read_text(encoding="utf-8"))
     assert "ua.v1.{team}.{self}.work.pool.*" not in edge["publish"]
-    assert "ua.v1.{team}.{self}.work.agent.*" in edge["publish"]
+    # Tasks, results and answers to an agent's inbox; claims and progress to its control queue.
+    assert {"ua.v1.{team}.{self}.work.agent.*", "ua.v1.{team}.{self}.work.control.*"} <= set(edge["publish"])
+
+
+# README, "An agent's two queues": the inbox holds what needs a free slot, the control queue the rest.
+INBOX_KINDS = {"task.request", "task.result", "task.question", "task.answer", "question.closed", "credential.form.result",
+               "tool.setup.result"}
+CONTROL_KINDS = {"task.stop", "task.steer", "custody.moved", "custody.confirmed", "access.decision", "task.progress",
+                 "task.claimed", "task.handback", "task.account", "task.report", "delivery.refused", "ledger.fact"}
+
+
+def test_an_agents_control_queue_holds_every_kind_its_host_takes_at_once() -> None:
+    """A stop, a steer, a custody renewal or an access decision never waits behind work the agent cannot start yet."""
+
+    queues = TRANSPORT["agent_queues"]
+    assert queues == {"inbox": "work.agent.{agent}", "control": "work.control.{agent}"}
+    queued = {name: spec.addresses["agent"] for name, spec in kinds.KINDS.items() if "agent" in spec.addresses}
+    assert {name for name, address in queued.items() if address == queues["inbox"]} == INBOX_KINDS
+    assert {name for name, address in queued.items() if address == queues["control"]} == CONTROL_KINDS
+    for name in INBOX_KINDS:
+        assert kinds.KINDS[name].execution_slot and not kinds.KINDS[name].accepted_while_paused, name
+    for name in CONTROL_KINDS:
+        assert not kinds.KINDS[name].execution_slot and kinds.KINDS[name].accepted_while_paused, name
+    # Each queue has its own consumer, and an agent's host may read both.
+    for role in ("lead_host", "worker_host"):
+        publish = role_permissions(role)["publish"]
+        for consumer in ("agent_inbox", "agent_control"):
+            spec = TRANSPORT["consumers"][consumer]
+            assert f"$JS.API.CONSUMER.MSG.NEXT.{spec['stream']}.{spec['name']}" in publish
+            assert f"$JS.ACK.{spec['stream']}.{spec['name']}.>" in publish
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        # In the inbox a custody renewal for the task holding the slot could wait behind new tasks.
+        (lambda r: r["kinds"]["custody.confirmed"].update(address=["work.agent.{agent}", "work.edge.{edge}"]),
+         "goes to the agent's control queue"),
+        # On the control queue a new task would be taken while no slot is free.
+        (lambda r: r["kinds"]["task.answer"].update(address=["work.control.{agent}", "work.edge.{edge}"]),
+         "waits in the agent's inbox"),
+        (lambda r: r["kinds"]["task.stop"]["admission"].update(accepted_while_paused=False), "accepted while paused"),
+        (lambda r: r["kinds"]["task.answer"]["admission"].update(accepted_while_paused=True), "does not read its inbox"),
+    ],
+)
+def test_a_kind_sent_to_an_agent_waits_in_its_inbox_only_when_it_needs_a_free_slot(change, problem) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    change(registry)
+    with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
 def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
-    """team services receive task.request's copy on work.team, not the agent and pool inboxes (review I5)."""
+    """team services receive task.request's copy on work.team, not the agent and pool inboxes (README, "Durable copies")."""
 
     services = json.loads((CONTRACT / "generated" / "permissions" / "team_services.json").read_text(encoding="utf-8"))
     consumers = {subject.split(".")[-1] if not subject.startswith("$JS.ACK.") else subject.split(".")[3]
-                 for subject in services["publish"] if subject.startswith("$JS.")}
+                 for subject in services["publish"] if subject.startswith(("$JS.API.CONSUMER.", "$JS.ACK."))}
     assert consumers == {TRANSPORT["consumers"]["team_services"]["name"]}
 
 
@@ -543,7 +787,7 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"copy_to": ["work.agent.{agent}"]}, "two of its addresses deliver to one audience target"),
     ({"copy_to": ["work.pool.{pool}"]}, "copies go only to"),
     ({"receivers": ["lead_host", "gateway", "edge_adapter", "scheduler"]}, "serve none of its addresses"),
-    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires or any_of rule"),
+    ({"body_rules": [{"unique": "/body/summary"}]}, "is not a unique, requires, any_of, allowed or ends_within rule"),
     ({"body_rules": [{"requires": "/body/no_such_field", "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
     ({"body_rules": [{"any_of": ["/body/summary"]}]}, "is not a unique"),
     ({"authority": "optional"}, "state authority_binding"),
@@ -553,6 +797,14 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
     ({"wakes_model": {"by": "outcome.state", "values": {"completed": "next_turn", "failed": "always"}}}, "must name a body oneOf"),
     ({"body_rules": [{"unique": "/body/outcome/artifacts", "by": "no_such_member"}]}, "is not a unique"),
     ({"body_rules": [{"requires": "/body/summary", "when": [{"at": "/body/outcome/state", "is": "untill"}]}]}, "is not a unique"),
+    # An allowed rule names values its field can hold, each once, under at least one condition.
+    ({"body_rules": [{"allowed": "/body/outcome/state", "values": ["complete"], "when": [{"at": "/body/sequence", "is": 1}]}]},
+     "is not a unique"),
+    ({"body_rules": [{"allowed": "/body/outcome/state", "values": ["completed", "completed"],
+                      "when": [{"at": "/body/sequence", "is": 1}]}]}, "is not a unique"),
+    ({"body_rules": [{"allowed": "/body/outcome/state", "values": ["completed"], "when": []}]}, "is not a unique"),
+    ({"body_rules": [{"allowed": "/body/no_such_field", "values": ["completed"], "when": [{"at": "/body/sequence", "is": 1}]}]},
+     "is not a unique"),
     ({"idempotency": ["/body/summary"]}, "names no part every frame carries"),
     ({"senders": ["gateway"], "senders_by_address": {}}, "not a topology check"),
 ])
@@ -563,8 +815,80 @@ def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
+@pytest.mark.parametrize("rule", [
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at", "seconds": 604800},
+    {"ends_within": "/body/access_list/ends_at", "of": "/body/access_list/issued_at", "seconds": 1},
+])
+def test_the_generator_accepts_an_ends_within_rule_between_timestamps(rule: dict) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["custody.confirmed"]["body_rules"] = [rule]
+    EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+@pytest.mark.parametrize("rule", [
+    {"ends_within": "/body/task_id", "of": "/issued_at", "seconds": 60},                         # not a timestamp
+    {"ends_within": "/body/custody_window/ends_at", "of": "/body/task_id", "seconds": 60},       # nor this
+    {"ends_within": "/body/custody_window/ends_at", "of": "/subject", "seconds": 60},            # a frame field, not a time
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at", "seconds": 0},           # no span
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at", "seconds": "604800"},    # not a whole number
+    {"ends_within": "/body/custody_window/ends_at", "of": "/body/custody_window/ends_at", "seconds": 60},
+    {"ends_within": "/body/custody_window/ends_at", "of": "/issued_at"},
+])
+def test_the_generator_refuses_a_broken_ends_within_rule(rule: dict) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["custody.confirmed"]["body_rules"] = [rule]
+    with pytest.raises(EXPORT.ContractError, match="is not a unique, requires, any_of, allowed or ends_within rule"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_an_allowed_rule_checks_a_single_value_and_each_item_of_a_list() -> None:
+    """README, "What bodies carry": under its conditions the field, or each item of a list, holds one of the values."""
+
+    spec = dataclasses.replace(kinds.KINDS["task.result"], body_rules=(
+        {"allowed": "/body/outcome/state", "values": ["completed"], "when": [{"at": "/body/sequence", "is": 2}]},
+        {"allowed": "/body/tags", "values": ["a", "b"], "when": [{"at": "/body/sequence", "is": 2}]},
+    ))
+    check = wire_frame._check_body_rules  # noqa: SLF001 - the rule check itself, without a signed frame
+    check({"body": {"sequence": 1, "outcome": {"state": "failed"}}}, spec)  # its condition does not hold
+    check({"body": {"sequence": 2, "outcome": {"state": "completed"}, "tags": ["b", "a"]}}, spec)
+    check({"body": {"sequence": 2}}, spec)  # an absent field holds no other value
+    for body, at in (({"sequence": 2, "outcome": {"state": "failed"}}, "/body/outcome/state"),
+                     ({"sequence": 2, "outcome": {"state": "completed"}, "tags": ["a", "c"]}, "/body/tags")):
+        with pytest.raises(FrameRefused) as refused:
+            check({"body": body}, spec)
+        assert (refused.value.code, refused.value.at) == ("invalid_body", at)
+
+
+def test_an_ends_within_rule_allows_the_whole_span_and_not_a_millisecond_more() -> None:
+    """README, "What bodies carry": a custody window ends at most 7 days after the frame that carries it was issued."""
+
+    spec = kinds.KINDS["custody.confirmed"]
+    check = wire_frame._check_body_rules  # noqa: SLF001 - the rule check itself, without a signed frame
+
+    def frame(ends_at: str) -> dict:
+        return {"issued_at": "2026-10-22T04:30:00.000Z",
+                "body": {"custody_window": {"renewed_by": "reconnection", "ends_at": ends_at}}}
+
+    check(frame("2026-10-29T04:30:00.000Z"), spec)
+    check({"issued_at": "2026-10-22T04:30:00.000Z", "body": {"custody_window": {"renewed_by": "host_record", "seconds": 300}}},
+          spec)  # a window renewed by host record writes has no end to bound
+    with pytest.raises(FrameRefused) as refused:
+        check(frame("2026-10-29T04:30:00.001Z"), spec)
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/custody_window/ends_at")
+
+
 def drop_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None:
     schemas["bodies/dlq.notice.schema.json"]["properties"]["reason"]["enum"].remove("bad_authority")
+
+
+def add_temporary_notice_reason(_registry: dict, _transport: dict, schemas: dict) -> None:
+    schemas["bodies/dlq.notice.schema.json"]["properties"]["reason"]["enum"].append("revocations_not_current")
+
+
+def temporary_flag(value: object):
+    def change(registry: dict, _transport: dict, _schemas: dict) -> None:
+        registry["verification_refusals"][0]["temporary"] = value
+    return change
 
 
 def host_ttl(ttl: int | None):
@@ -591,12 +915,18 @@ def scope_pattern(_registry: dict, _transport: dict, schemas: dict) -> None:
     schemas["common.schema.json"]["$defs"]["scope_id"]["pattern"] = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 
 
+def pool_token(registry: dict, _transport: dict, _schemas: dict) -> None:
+    del registry["kinds"]["task.request"]["authority_by_address"]
+
+
 def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
     registry["kinds"]["dlq.notice"]["receivers"] = ["team_services", "installation_authority"]
 
 
 @pytest.mark.parametrize(("change", "problem"), [
     (drop_notice_reason, "names every verification refusal"),
+    (add_temporary_notice_reason, "names no temporary refusal"),
+    (temporary_flag(False), "optionally temporary: true"),
     (host_ttl(None), "ttl_seconds is its bucket's"),
     (host_ttl(30), "ttl_seconds is its bucket's"),
     (proof_of_possession_on("agent.pause"), "proves possession"),
@@ -604,6 +934,7 @@ def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
     (overlap(86400), "certificate_overlap_seconds"),
     (scope_pattern, "scope_id must allow"),
     (notice_reader, "serve none of its addresses"),
+    (pool_token, "carries no authority token"),
 ])
 def test_the_generator_refuses_records_and_notices_that_break_the_contract(change, problem: str) -> None:
     registry, transport, schemas = (copy.deepcopy(EXPORT.load_yaml("registry.yaml")), copy.deepcopy(TRANSPORT),
@@ -701,7 +1032,7 @@ def test_reply_errors_are_the_reply_schemas_outcomes_other_than_ok(change) -> No
 
 @pytest.mark.parametrize(("kind", "role", "edge", "given_by_person", "allowed"), [
     ("task.result", "lead", "person", False, True),     # the lead answers the person (forwarded-as-is)
-    ("task.question", "lead", "person", False, True),   # the lead asks the person (change-conflict)
+    ("task.question", "lead", "person", False, True),   # the lead asks the person
     ("task.result", "worker", "up", False, True),       # a worker answers its lead
     ("task.answer", "lead", "down", False, True),       # the lead answers its worker
     ("task.request", "lead", "out", False, True),       # the lead delegates to an outside agent
@@ -774,7 +1105,7 @@ def role_permissions(role: str) -> dict:
 
 
 def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_services() -> None:
-    """Plan 13A.4 and 11A.10: the gateway asks the team services, which pass the command on to the agent's host."""
+    """README, "Relays to an agent's host": the gateway asks the team services, which pass the command on."""
 
     relayed = ("tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump")
     for kind in relayed:
@@ -783,7 +1114,7 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
     assert "ua.v1.{team}.{self}.svc.team" in gateway["publish"]
     assert "ua.v1.{team}.{self}.ctl.agent.*" in services["publish"]
     for host in ("lead_host", "worker_host"):
-        assert "ua.v1.{team}.*.ctl.agent.*" in role_permissions(host)["subscribe"]
+        assert "ua.v1.{team}.*.ctl.agent.{agent}" in role_permissions(host)["subscribe"]
     # Operations share their address, and the gateway sends other agent controls there,
     # so the agent's host, not NATS, refuses a relayed kind straight from the gateway.
     case = json.loads((EXAMPLES / "invalid" / "tasks-list-from-the-gateway-to-an-agent.json").read_text(encoding="utf-8"))
@@ -791,7 +1122,7 @@ def test_agent_queues_and_debug_settings_are_reached_only_through_the_team_servi
 
 
 def test_the_scheduler_answers_only_run_context_sign_and_reads_no_copies() -> None:
-    """Only a scheduler signs a run's token (plan 13A.10); it listens at its own address, never at svc.team."""
+    """Only a scheduler signs a run's token (README, "A run's token"); it listens at its own address, never at svc.team."""
 
     scheduler = role_permissions("scheduler")
     assert scheduler["subscribe"] == ["_INBOX.{self}.>", "ua.v1.{team}.*.svc.scheduler"]
@@ -826,9 +1157,127 @@ def test_every_token_an_example_body_carries_verifies() -> None:
         frame = json.loads(path.read_text(encoding="utf-8"))
         for at, token in carried_tokens(frame["body"], "/body"):
             verified = wire_frame.verify_authority_token(models.AuthorityToken.model_validate(token), token, trust,
-                                                         valid_at=parse_timestamp(frame["issued_at"]), at=at)
+                                                         valid_at=parse_timestamp(frame["issued_at"]), now=fixtures.NOW,
+                                                         at=at)
             checked.append((path.parent.name, verified.certificate.runtime))
     assert ("run_context.sign.reply", "scheduler-1") in checked, checked
+
+
+def test_a_token_is_valid_when_the_frame_is_received_within_the_clock_tolerance() -> None:
+    """README, "On behalf of a person": without a stored time, a frame's token must still be valid by the receiver's clock."""
+
+    frame = fixtures.example_frame("access.resolved", "full")
+    data = json.dumps(frame).encode()
+    token_end = parse_timestamp(frame["authority"]["expires_at"])
+    assert parse_timestamp(frame["issued_at"]) < token_end
+    fixtures.verify(data, frame, {"now": format_timestamp(token_end + SKEW - timedelta(milliseconds=1))})
+    refused = refusal(data, frame, {"now": format_timestamp(token_end + SKEW)})
+    assert (refused.code, refused.at) == ("bad_authority", "/authority/expires_at")
+
+
+def test_queued_works_token_is_judged_when_the_stream_stored_it() -> None:
+    """A person's decision that waits in the queue past its token's end is accepted; one stored after the end is not.
+
+    The stream's timestamp is set by the server, so a sender cannot date a frame back to
+    use a token that had already expired. A request is still judged on arrival.
+    """
+
+    frame = fixtures.example_frame("access.resolved", "full")
+    data = json.dumps(frame).encode()
+    token_end = parse_timestamp(frame["authority"]["expires_at"])
+    later = format_timestamp(token_end + timedelta(hours=1))  # still within the example revocations record
+    fixtures.verify(data, frame, {"now": later, "stored_at": format_timestamp(token_end + SKEW - timedelta(milliseconds=1))})
+    refused = refusal(data, frame, {"now": later, "stored_at": format_timestamp(token_end + SKEW)})
+    assert (refused.code, refused.at) == ("bad_authority", "/authority/expires_at")
+    # A request is no queued work: a stored time, even one after its token's end, does not count.
+    command = fixtures.example_frame("tasks.cancel", "by-all")
+    command_end = parse_timestamp(command["authority"]["expires_at"])
+    fixtures.verify(json.dumps(command).encode(), command, {"stored_at": format_timestamp(command_end + timedelta(hours=1))})
+    with pytest.raises(ValueError, match="time zone"):
+        wire_frame.verify_frame(data, trust=fixtures.trust_store(), receiver=fixtures.default_receiver(frame),
+                                arrived_on=frame["subject"], now=fixtures.NOW, replay=fixtures.replay_holding(),
+                                stored_at=fixtures.NOW.replace(tzinfo=None))
+
+
+def test_a_corrected_decision_is_a_new_message_and_a_retried_one_is_not() -> None:
+    """README, "Change reviews", step 3: each decision has its own id, which its key names."""
+
+    decision = fixtures.example_frame("access.resolved", "use-change")
+    corrected = copy.deepcopy(decision)
+    corrected["body"]["decision_id"] = "decision_5"
+    assert registry_key(decision) == registry_key(copy.deepcopy(decision))
+    assert registry_key(corrected) != registry_key(decision)
+    without = copy.deepcopy(decision)
+    del without["body"]["decision_id"]
+    assert not validator("bodies/access.resolved.schema.json").is_valid(without["body"])
+
+
+def test_a_change_review_answers_with_the_version_and_refuses_another_requests_case() -> None:
+    """README, "Change reviews", steps 1, 4 and 6."""
+
+    decided = fixtures.example_frame("access.decision", "change-decided")["body"]["status"]
+    assert (decided["choice"], decided["seen_version"]) == ("use_change", "3")
+    schema = json.loads((CONTRACT / "schemas/bodies/access.decision.schema.json").read_text())
+    refused = next(alternative for alternative in schema["properties"]["status"]["oneOf"]
+                   if alternative["properties"]["state"]["const"] == "refused")
+    assert "not_own_case" in refused["properties"]["code"]["enum"]
+    withdrawn = fixtures.example_frame("access.resolved", "withdrawn-by-message")
+    fixtures.verify(json.dumps(withdrawn).encode(), withdrawn)
+    assert withdrawn["body"]["choice"] == "withdrawn_by_message"
+
+
+def test_the_edge_adapter_neither_presents_nor_receives_a_persons_token() -> None:
+    """README, "On behalf of a person": outside agents never hold a person's token, in either direction."""
+
+    answer = fixtures.example_frame("task.answer", "from-outside-agent")
+    answer["authority"] = fixtures.example_frame("custody.confirmed", "claim-with-token")["authority"]
+    refused = refusal(fixtures.resign(answer), answer)
+    assert (refused.code, refused.at) == ("bad_authority", "/authority/bound_to/type")
+    for kind, entry in REGISTRY["kinds"].items():
+        if "edge_adapter" in entry["senders"] and entry.get("authority", "none") != "none":
+            bindings = entry["authority_binding"] if isinstance(entry["authority_binding"], list) else [entry["authority_binding"]]
+            assert all("edge_adapter" not in binding.get("senders", entry["senders"]) for binding in bindings), kind
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["task.answer"]["authority_binding"] = {"type": "root_task"}
+    with pytest.raises(EXPORT.ContractError, match="presents no token"):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
+
+
+def test_a_move_and_the_confirmations_share_one_numbering_per_task() -> None:
+    """README, "After a move" and "Claims": two claimants that lost are told apart, and an older confirmation is ignored."""
+
+    assert REGISTRY["kinds"]["custody.moved"]["idempotency"] == ["/body/task_id", "/body/sequence"]
+    moved = fixtures.example_frame("custody.moved", "claimed-elsewhere")
+    claim = fixtures.example_frame("custody.confirmed", "claim-with-token")
+    assert (moved["body"]["task_id"], moved["body"]["custody_token"]) == (claim["body"]["task_id"], claim["body"]["custody_token"])
+    assert moved["body"]["sequence"] > claim["body"]["sequence"] and moved["body"]["reason"] == "claimed_elsewhere"
+
+
+def test_tasks_for_a_worker_pool_carry_no_token_and_their_copies_do() -> None:
+    """The holder of pool work receives the task's token from the team services, in custody.confirmed."""
+
+    assert kinds.KINDS["task.request"].authority_by_target == {"pool": "none"}
+    for path in (EXAMPLES / "valid" / "task.request").glob("*.json"):
+        frame = json.loads(path.read_text(encoding="utf-8"))
+        if frame["audience"]["target"] == "pool":
+            assert "authority" not in frame, path.name
+    copy_frame = fixtures.example_frame("task.request", "scheduled-run-copy-to-team-services")
+    confirmed = fixtures.example_frame("custody.confirmed", "claim-with-token")
+    assert copy_frame["authority"] == confirmed["authority"]
+    assert confirmed["body"]["task_id"] == fixtures.example_frame("task.request", "scheduled-run")["body"]["task_id"]
+
+
+@pytest.mark.parametrize(("narrower", "problem"), [
+    ({"work.pool.{pool}": "required"}, "narrows the authority"),
+    ({"work.team": "none"}, "narrows the authority"),
+    ({"work.pool.{pool}": "sometimes"}, "narrows the authority"),
+    (["work.pool.{pool}"], "maps some of its own addresses"),
+])
+def test_authority_by_address_only_narrows_a_kinds_own_addresses(narrower, problem: str) -> None:
+    registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
+    registry["kinds"]["task.request"]["authority_by_address"] = narrower
+    with pytest.raises(EXPORT.ContractError, match=problem):
+        EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), CONTRACT_SCHEMAS)
 
 
 def test_a_run_token_names_no_person_exactly_when_the_run_is_system_work() -> None:
@@ -840,7 +1289,7 @@ def test_a_run_token_names_no_person_exactly_when_the_run_is_system_work() -> No
 
 
 def test_each_example_command_has_its_own_token() -> None:
-    """Plan section 8: a command token is bound to one command; only the team services' relay carries it again."""
+    """README, "On behalf of a person": a command token is bound to one command; only the team services' relay carries it again."""
 
     uses: dict[str, list] = {}
     for path in valid_examples():
@@ -863,7 +1312,7 @@ def test_every_reply_example_names_exactly_one_request() -> None:
 
 
 def test_every_kind_has_an_invalid_example() -> None:
-    """Plan 13A.8: every kind has a full example and invalid examples."""
+    """README, "Examples": every kind has a valid example and an invalid one."""
 
     refused = set()
     for path in invalid_examples():
@@ -1005,6 +1454,55 @@ def test_a_host_cannot_write_another_hosts_liveness() -> None:
     with pytest.raises(FrameRefused) as refused:
         fixtures.verify_state(signed_state(document))
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/runtime")
+
+
+def test_a_certificate_names_its_connection_class_and_a_remote_hosts_tools() -> None:
+    """README, "Access on remote hosts": a host with a tool list decides from signed lists; one without reads the store."""
+
+    store = fixtures.trust_store()
+    remote = store.host_certificate("install_example", "remote-host-1", 1)
+    local = store.host_certificate("install_example", "worker-host-1", 3)
+    assert remote is not None and local is not None
+    assert (remote.connection_class, remote.tools) == ("intermittent", frozenset({"fn:files", "fn:web_research",
+                                                                                 "cli:soil-sensor"}))
+    assert (local.connection_class, local.tools) == ("connected", None)
+
+
+def test_a_block_list_is_fresh_for_fifteen_minutes_and_usable_until_it_expires() -> None:
+    """README, "Access on remote hosts": fresh_check tools need a list at most fresh_seconds old, by the reader's clock."""
+
+    data = (STATE_EXAMPLES / "valid" / "block_list" / "team.json").read_bytes()
+    written = parse_timestamp(json.loads(data)["issued_at"])
+    fresh_for = timedelta(seconds=kinds.STATE_RECORDS["block_list"].fresh_seconds) + SKEW
+    record = fixtures.verify_state(data)
+    assert wire_trust.fresh(record, written + fresh_for)
+    assert not wire_trust.fresh(record, written + fresh_for + timedelta(milliseconds=1))
+    # Older than fresh, the list still serves other tools until it expires.
+    later = written + timedelta(days=6)
+    revocations = fixtures.current_revocations(later)
+    old = fixtures.verify_state(data, {"now": format_timestamp(later)}, trust=fixtures.trust_store(
+        extra_documents=[revocations], now=later))
+    assert not wire_trust.fresh(old, later)
+    # A record without fresh_seconds is never fresh.
+    assert not wire_trust.fresh(fixtures.verify_state((STATE_EXAMPLES / "valid" / "placement" / "lead.json").read_bytes()),
+                                written)
+
+
+def test_a_reader_keeps_the_newest_block_list_even_when_it_holds_fewer_blocks() -> None:
+    """A newer list may shrink; a copy of the older one written back is refused."""
+
+    data = (STATE_EXAMPLES / "valid" / "block_list" / "team.json").read_bytes()
+    record = fixtures.verify_state(data)
+    newer = state_example("block_list/team.json")
+    newer["sequence"] += 1
+    newer["issued_at"] = "2026-10-22T04:45:00.000Z"
+    newer["body"]["blocks"] = newer["body"]["blocks"][:1]
+    newer_record = fixtures.verify_state(signed_state(newer), {"held": {"sequence": record.document.sequence,
+                                                                         "digest": record.digest},
+                                                                "now": "2026-10-22T04:45:00.000Z"})
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(data, {"held": {"sequence": newer_record.document.sequence, "digest": newer_record.digest}})
+    assert (refused.value.code, refused.value.at) == ("replayed", "/sequence")
 
 
 def test_team_view_key_must_name_its_body_entry() -> None:
@@ -1244,7 +1742,7 @@ def renewed_lead_certificate(*, issued_at: str = "2026-10-22T04:30:00.000Z", epo
 
 
 def test_a_replaced_certificate_signs_new_frames_only_during_the_overlap() -> None:
-    """Authorization plan 12.5: in-flight frames from the old key are accepted until a short deadline."""
+    """README, "Trust over time": frames from the replaced key are accepted until a short deadline after renewal."""
 
     store = fixtures.trust_store(extra_documents=[renewed_lead_certificate(issued_at="2026-10-22T04:20:00.000Z")])
     pause = fixtures.example_frame("agent.pause")
@@ -1454,9 +1952,11 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
 
 
 # Body fields a receiver checks against its trust store or the request a reply answers:
-# a reply's certificate (its signature, single validity window and what it certifies)
-# and a key rotation's new key id and proof (README, "Installation traffic").
-RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/application_key_rotation/(key/key_id|proof)")
+# a reply's certificate (its signature, single validity window and what it certifies) and
+# the end of the credential that comes with it, and a key rotation's new key id, public
+# key and proof (README, "Installation traffic").
+RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/connection/expires_at"
+                              r"|/body/application_key_rotation/(key/key_id|key/public_key|proof)")
 ROTATION_PROOF_AT = "/body/application_key_rotation/proof"
 
 
@@ -1476,7 +1976,8 @@ def receiver_only(case: dict) -> bool:
 
     kind = json.loads(case["frame_text"])["kind"]
     rules = REGISTRY["kinds"].get(kind, {}).get("body_rules", [])
-    places = {rule.get("unique") or rule.get("requires") or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
+    places = {rule.get("unique") or rule.get("requires") or rule.get("allowed") or rule.get("ends_within")
+              or rule["any_of"][0].rsplit("/", 1)[0] for rule in rules}
     return case["at"] == "/idempotency_key" or case["at"] in places or receiver_compares_body(case)
 
 
@@ -1531,7 +2032,8 @@ def certificate_record(runtime: str, *, roles: tuple[str, ...], epoch: int = 1,
         "certificate_id": f"cert_{runtime}", "installation": installation, "runtime": runtime, "teams": ["team_example"],
         "roles": list(roles), "membership_epoch": epoch, "revocation_epoch": 1,
         "application_key": {"key_id": key_id, "public_key": fixtures.KEYS[key_id]["public_key"]},
-        "nats_public_key": "U" + "X" * 55, "agent_types": [], "session_limit": 0, "protocol": kinds.PROTOCOL,
+        "nats_public_key": "U" + "X" * 55, "agent_types": [], "session_limit": 0, "connection_class": "connected",
+        "protocol": kinds.PROTOCOL,
         "deployment": "local", "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
         "issued_at": issued_at, "expires_at": expires_at,
     }
@@ -1573,16 +2075,176 @@ def test_a_session_signed_by_a_host_without_team_services_is_refused() -> None:
     assert (refused.value.code, refused.value.at) == ("wrong_issuer", "/writer")
 
 
-def test_an_older_record_never_replaces_a_newer_one_and_revocations_only_grow() -> None:
-    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"])
-    assert store.revoked("install_example", "cert_lead_host_1")
+def pruned_revocations(sequence: int, issued_at, revocation_epoch: int = 2) -> bytes:
+    """The record that revoked the lead, written again at ``issued_at`` without the lead's entry."""
+
+    document = json.loads((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_text())
+    document["sequence"], document["issued_at"] = sequence, format_timestamp(issued_at)
+    document["body"]["revocation_epoch"] = revocation_epoch
+    document["body"]["entries"] = [entry for entry in document["body"]["entries"] if entry["certificate_id"] != "cert_lead_host_1"]
+    document["body"]["expires_at"] = format_timestamp(issued_at + timedelta(hours=6))
+    return signed_state(document)
+
+
+def test_an_entry_leaves_the_revocations_record_only_once_every_certificate_with_its_key_ended(caplog) -> None:
+    """README, "Trust over time": an entry stays until its key_expires_at plus the replay retention; the epoch never falls.
+
+    The lead's renewal kept the revoked key and ends after the lead's own certificate, so
+    an entry that left with the lead's own end would let the renewal sign again.
+    """
+
+    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"],
+                                 extra_documents=[renewed_lead_certificate(key_id="test-lead-key-1")])
+    lead, renewal = (store.host_certificate("install_example", "lead-host-1", epoch) for epoch in (3, 4))
+    assert lead is not None and renewal is not None and store.revoked(lead) and store.revoked(renewal)
+    entry = next(item for item in json.loads((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json")
+                                             .read_text())["body"]["entries"] if item["certificate_id"] == "cert_lead_host_1")
+    assert parse_timestamp(entry["key_expires_at"]) == renewal.expires_at > lead.expires_at
+    # A restarted host adds its stored record first, so an older copy written back to the bucket is ignored.
     assert store.add((EXAMPLES / "trust" / "revocations" / "install_example.json").read_bytes(), now=fixtures.NOW) is False
-    assert store.revoked("install_example", "cert_lead_host_1")
-    shrunk = json.loads((EXAMPLES / "trust" / "revocations" / "install_example.json").read_text())
-    shrunk["sequence"] = 9
+    early = lead.expires_at + wire_trust.RETENTION + SKEW
+    assert store.add(pruned_revocations(9, early), now=early) is True
+    assert store.revoked(renewal) and store.revoked(lead)
+    assert "left out entry cert_lead_host_1" in caplog.text
+    late = renewal.expires_at + wire_trust.RETENTION + SKEW
+    assert store.add(pruned_revocations(10, late), now=late) is True
+    assert not store.revoked(renewal) and not store.revoked(lead)
+    assert store.add((EXAMPLES / "trust" / "extra" / "lead-host-revoked-after-issue.json").read_bytes(), now=late) is False
     with pytest.raises(FrameRefused) as refused:
-        store.add(json.dumps(sign_state(shrunk, fixtures.private_key("test-authority-key-1"))).encode(), now=fixtures.NOW)
-    assert refused.value.code == "invalid_body"
+        store.add(pruned_revocations(11, late, revocation_epoch=1), now=late)
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/revocation_epoch")
+
+
+def relabelled_certificate(runtime: str, key_id: str, public_key_of: str, epoch: int = 1) -> bytes:
+    """A certificate for ``runtime`` that names ``key_id`` but holds ``public_key_of``'s public key."""
+
+    document = json.loads(certificate_record(runtime, roles=("worker_host",), epoch=epoch))
+    document["body"]["application_key"] = {"key_id": key_id, "public_key": fixtures.KEYS[public_key_of]["public_key"]}
+    return signed_state({key: value for key, value in document.items() if key not in {"algorithm", "body_digest", "signature"}})
+
+
+def test_a_revoked_public_key_stays_revoked_under_another_key_id_or_runtime() -> None:
+    """README, "Trust over time": a key id is a label, so revoking a certificate revokes its public key everywhere."""
+
+    relabelled = relabelled_certificate("worker-host-9", "relabelled-key-1", "test-lead-key-1")
+    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"], extra_documents=[relabelled])
+    certificate = store.host_certificate("install_example", "worker-host-9", 1)
+    assert certificate is not None and store.revoked(certificate)
+    assert not fixtures.trust_store(extra_documents=[relabelled]).revoked(certificate)
+    # A join presenting the revoked public key under a new key id is refused too.
+    document = join_frame(key_id="relabelled-key-2", public_key_of="test-lead-key-1")
+    data = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    refused = refusal(data, document, {"trust": {"add": ["extra/lead-host-revoked-after-issue.json"]}})
+    assert (refused.code, refused.at) == ("revoked", "/body/application_key/public_key")
+    fixtures.verify(data, document, trust=without_lead_host())
+
+
+def test_a_rotation_to_a_public_key_another_certificate_holds_is_refused() -> None:
+    document = fixtures.example_frame("host.renew", "rotate")
+    document["body"]["application_key_rotation"]["key"] = {"key_id": "fresh-key-1",
+                                                           "public_key": fixtures.KEYS["test-worker-key-1"]["public_key"]}
+    document["body"]["application_key_rotation"] = wire_frame.sign_renew_key_proof(
+        document, fixtures.private_key("test-worker-key-1"))["body"]["application_key_rotation"]
+    document["idempotency_key"] = registry_key(document)
+    signed = sign_frame(document, fixtures.private_key("test-lead-key-1"))
+    refused = refusal(json.dumps(signed).encode(), signed)
+    assert (refused.code, refused.at) == ("invalid_body", "/body/application_key_rotation/key/public_key")
+
+
+def test_a_join_is_refused_for_a_listed_key_without_its_certificate_or_without_a_current_record() -> None:
+    """The join's own revocation checks: a listed key id whose certificate the store never held, and the current record."""
+
+    document = join_frame()
+    data = json.dumps(sign_frame(document, fixtures.private_key("test-lead-key-1"))).encode()
+    listed = json.loads((EXAMPLES / "trust" / "extra" / "lead-host-key-revoked.json").read_text())
+    assert {(entry["runtime"], entry["key_id"]) for entry in listed["body"]["entries"]} >= {("lead-host-1", "test-lead-key-1")}
+    store = fixtures.trust_store(remove=["certificates/lead-host-1.json", "sessions/lead.json"],
+                                 add=["extra/lead-host-key-revoked.json"])
+    assert store.certificates_with_key("install_example", "test-lead-key-1") == []
+    refused = refusal(data, document, trust=store)
+    assert (refused.code, refused.at) == ("revoked", "/issuer/key_id")
+    stale = fixtures.trust_store(remove=["certificates/lead-host-1.json", "sessions/lead.json", "revocations/install_example.json"])
+    refused = refusal(data, document, trust=stale)
+    assert (refused.code, refused.at) == ("revocations_not_current", "/issuer/installation")
+
+
+def test_revoking_a_certificate_revokes_every_certificate_of_its_runtime_with_its_key() -> None:
+    store = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"],
+                                 extra_documents=[renewed_lead_certificate(key_id="test-lead-key-1")])
+    renewed = store.host_certificate("install_example", "lead-host-1", 4)
+    assert renewed is not None and renewed.certificate_id != "cert_lead_host_1" and store.revoked(renewed)
+    assert store.key_revoked("install_example", "lead-host-1", "test-lead-key-1")
+    assert not store.key_revoked("install_example", "lead-host-2", "test-lead-key-1")
+    rotated = fixtures.trust_store(add=["extra/lead-host-revoked-after-issue.json"],
+                                   extra_documents=[renewed_lead_certificate(key_id="test-lead-key-2")])
+    assert not rotated.revoked(rotated.host_certificate("install_example", "lead-host-1", 4))
+
+
+def test_a_receiver_without_a_current_revocations_record_refuses_every_host_but_its_authority() -> None:
+    frame = signed_example()
+    data = json.dumps(frame).encode()
+    store = fixtures.trust_store(remove=["revocations/install_example.json"])
+    refused = refusal(data, frame, trust=store)
+    assert (refused.code, refused.at) == ("revocations_not_current", "/issuer/installation")
+    # The authority still answers, so a host whose record expired can renew and read a current one.
+    reply = fixtures.example_frame("host.renew.reply", "ok")
+    fixtures.verify(json.dumps(reply).encode(), reply, trust=store)
+    token = fixtures.example_frame("access.resolved", "full")["authority"]
+    with pytest.raises(FrameRefused) as refused_token:
+        wire_frame.verify_authority_token(models.AuthorityToken.model_validate(token), token, store,
+                                          valid_at=fixtures.NOW, now=fixtures.NOW)
+    assert (refused_token.value.code, refused_token.value.at) == ("bad_authority", "/authority/issuer")
+    # Only an expired record is as good as none, within the clock tolerance.
+    ends = parse_timestamp(json.loads((EXAMPLES / "trust" / "revocations" / "install_example.json").read_text())
+                           ["body"]["expires_at"])
+    fixtures.verify(data, frame, {"now": format_timestamp(ends + SKEW - timedelta(milliseconds=1))})
+    assert refusal(data, frame, {"now": format_timestamp(ends + SKEW)}).code == "revocations_not_current"
+    fixtures.verify(data, frame, trust=fixtures.trust_store(now=ends + SKEW,
+                                                            extra_documents=[fixtures.current_revocations(ends + SKEW)]),
+                    context={"now": format_timestamp(ends + SKEW)})
+
+
+def test_only_installation_traffic_from_the_receivers_own_authority_needs_no_current_record() -> None:
+    """README, "Who sent it", step 4: the exception covers join and renewal replies, not every frame of an authority host."""
+
+    store = fixtures.trust_store(remove=["revocations/install_example.json"])
+    authority, = store.certificates_with_key("install_example", "test-authority-host-key-1")
+    store.require_current_revocations(authority, fixtures.NOW, at="/issuer/installation", installation_traffic=True)
+    with pytest.raises(FrameRefused) as refused:
+        store.require_current_revocations(authority, fixtures.NOW, at="/issuer/installation")
+    assert (refused.value.code, refused.value.at) == ("revocations_not_current", "/issuer/installation")
+    # Another installation's host in the authority role gets no exception, even for installation traffic.
+    peer_store = fixtures.trust_store(remove=["revocations/install_peer.json"])
+    peer_host, = peer_store.certificates_with_key("install_peer", "test-peer-lead-key-1")
+    peer_authority = dataclasses.replace(peer_host, roles=frozenset({"installation_authority"}))
+    with pytest.raises(FrameRefused) as refused:
+        peer_store.require_current_revocations(peer_authority, fixtures.NOW, at="/issuer/installation",
+                                               installation_traffic=True)
+    assert refused.value.code == "revocations_not_current"
+
+
+def test_a_frame_from_another_installation_needs_a_current_record_of_that_installation() -> None:
+    frame = fixtures.example_frame("task.stop", "from-peer")
+    data = json.dumps(frame).encode()
+    fixtures.verify(data, frame)
+    refused = refusal(data, frame, trust=fixtures.trust_store(remove=["revocations/install_peer.json"]))
+    assert (refused.code, refused.at) == ("revocations_not_current", "/issuer/installation")
+
+
+def test_a_temporary_refusal_is_no_dead_letter_reason() -> None:
+    """README, "Who sent it" and "Dead letters": a receiver waits for a current record and sets nothing aside for it."""
+
+    assert kinds.TEMPORARY_REFUSALS == frozenset({"revocations_not_current"})
+    reasons = set(json.loads((CONTRACT / "schemas/bodies/dlq.notice.schema.json").read_text())["properties"]["reason"]["enum"])
+    assert set(kinds.VERIFICATION_REFUSALS) - kinds.TEMPORARY_REFUSALS <= reasons
+    assert not reasons & kinds.TEMPORARY_REFUSALS
+
+
+def test_the_revocations_record_is_never_forgotten() -> None:
+    store = fixtures.trust_store()
+    store.forget(forgotten_from("certificate") + timedelta(days=4000))
+    assert store.held()["revocations"] == 2
+    assert store.add((EXAMPLES / "trust" / "revocations" / "install_example.json").read_bytes(), now=fixtures.NOW) is False
 
 
 def test_a_record_sequence_reused_for_other_content_is_refused() -> None:
@@ -1628,7 +2290,7 @@ def test_a_host_that_joins_later_is_trusted_once_its_certificate_arrives() -> No
     frame = signed_example()
     frame["issuer"] = {"installation": "install_example", "team": "team_example", "runtime": "lead-host-2",
                        "membership_epoch": 1, "revocation_epoch": 1, "key_id": "test-gateway-key-1"}
-    frame["subject"] = "ua.v1.team_example.lead-host-2.work.agent.researcher-2"
+    frame["subject"] = "ua.v1.team_example.lead-host-2.work.control.researcher-2"
     data = json.dumps(sign_frame(frame, fixtures.private_key("test-gateway-key-1"))).encode()
     assert refusal(data, frame, trust=store).code == "unknown_key"
     store.add(certificate_record("lead-host-2", roles=("lead_host",), key_id="test-gateway-key-1"), now=fixtures.NOW)
@@ -1638,7 +2300,10 @@ def test_a_host_that_joins_later_is_trusted_once_its_certificate_arrives() -> No
 # Trust records that end: the example record and the body field that says when.
 ENDING_RECORDS = {"certificate": ("certificates/lead-host-1.json", "expires_at"),
                   "agent_session": ("sessions/lead.json", "ends_at"),
-                  "agreement": ("agreements/install_peer.json", "expires_at")}
+                  "agreement": ("agreements/install_peer.json", "expires_at"),
+                  "revocations": ("revocations/install_example.json", "expires_at")}
+# Those a receiver forgets once nothing can still need them; never the revocations record.
+FORGOTTEN_RECORDS = sorted(set(ENDING_RECORDS) - {"revocations"})
 RETENTION = timedelta(seconds=kinds.REPLAY_LEDGER_RETENTION_SECONDS)
 
 
@@ -1681,11 +2346,11 @@ def test_a_trust_record_ends_within_its_longest_lifetime(record: str) -> None:
     assert (refused.value.code, refused.value.at) == ("invalid_body", f"/body/{ENDING_RECORDS[record][1]}")
 
 
-@pytest.mark.parametrize("record", sorted(ENDING_RECORDS))
+@pytest.mark.parametrize("record", FORGOTTEN_RECORDS)
 def test_a_trust_record_is_forgotten_when_nothing_can_still_need_it_and_does_not_come_back(record: str) -> None:
     store = fixtures.trust_store()
     held = store.held()
-    assert held == {"agreement": 1, "certificate": 8, "revocations": 1, "agent_session": 3}
+    assert held == {"agreement": 1, "certificate": 9, "revocations": 2, "agent_session": 4}
     store.forget(forgotten_from(record) - timedelta(milliseconds=1))
     assert store.held().get(record, 0) >= 1
     lookups = {"certificate": lambda: store.host_certificate("install_example", "lead-host-1", 3),
@@ -1697,7 +2362,7 @@ def test_a_trust_record_is_forgotten_when_nothing_can_still_need_it_and_does_not
     # The record, and any version of it written no later, is ignored from now on.
     assert store.add((EXAMPLES / "trust" / ENDING_RECORDS[record][0]).read_bytes(), now=fixtures.NOW) is False
     assert lookups[record]() is None
-    assert store.held()["revocations"] == 1
+    assert store.held()["revocations"] == 2
 
 
 def test_forgetting_needs_a_newer_version_to_be_forgotten_too() -> None:
@@ -1877,8 +2542,14 @@ def test_the_clock_tolerance_applies_at_both_ends_of_the_lifetime(kind: str) -> 
     def at(moment):
         return {"now": wire_frame.format_timestamp(moment)}
 
-    fixtures.verify(data, frame, at(issued_at + limit + SKEW - millisecond))
-    assert refusal(data, frame, at(issued_at + limit + SKEW)).code == "expired"
+    def current(moment):
+        """The receiver at ``moment`` holds a revocations record current then (README, "Trust over time")."""
+
+        return fixtures.trust_store(now=moment, extra_documents=[fixtures.current_revocations(moment)])
+
+    late = issued_at + limit + SKEW
+    fixtures.verify(data, frame, at(late - millisecond), trust=current(late - millisecond))
+    assert refusal(data, frame, at(late), trust=current(late)).code == "expired"
     fixtures.verify(data, frame, at(issued_at - SKEW))
     assert refusal(data, frame, at(issued_at - SKEW - millisecond)).code == "not_yet_valid"
 
@@ -1893,13 +2564,14 @@ def test_the_senders_own_expiry_counts_before_the_kinds_lifetime() -> None:
 
 
 def test_timestamp_extremes_do_not_overflow_lifetime_checks() -> None:
+    latest = parse_timestamp("9999-12-31T23:59:59.999Z")
     store = fixtures.trust_store(extra_documents=[certificate_record(
-        "far-host", roles=("lead_host",), issued_at="9999-10-02T23:59:59.999Z", expires_at="9999-12-31T23:59:59.999Z")],
-        now=parse_timestamp("9999-12-31T23:59:59.999Z"))
+        "far-host", roles=("lead_host",), issued_at="9999-10-02T23:59:59.999Z", expires_at="9999-12-31T23:59:59.999Z"),
+        fixtures.current_revocations(latest)], now=latest)
     frame = signed_example()
     frame["issuer"] = {"installation": "install_example", "team": "team_example", "runtime": "far-host", "membership_epoch": 1,
                        "revocation_epoch": 1, "key_id": "test-worker-key-1"}
-    frame["subject"] = "ua.v1.team_example.far-host.work.agent.researcher-2"
+    frame["subject"] = "ua.v1.team_example.far-host.work.control.researcher-2"
     frame["issued_at"] = "9999-12-31T23:59:59.998Z"
     frame["expires_at"] = "9999-12-31T23:59:59.999Z"
     data = json.dumps(sign_frame(frame, fixtures.private_key("test-worker-key-1"))).encode()

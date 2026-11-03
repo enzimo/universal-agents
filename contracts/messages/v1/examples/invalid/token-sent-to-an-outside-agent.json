@@ -1,0 +1,35 @@
+{
+  "description": "A lead sends an outside agent's adapter an answer that carries the person's authority token: a person's token never goes to an outside agent.",
+  "refusal": "bad_authority",
+  "at": "/authority",
+  "base": "task.answer/to-outside-agent.json",
+  "changes": [
+    {
+      "set": "/authority",
+      "to": {
+        "token_id": "01928f3a-7b2c-7211-8000-000000000211",
+        "issuer": {
+          "installation": "install_example",
+          "runtime": "scheduler-1",
+          "membership_epoch": 1,
+          "key_id": "test-scheduler-key-1"
+        },
+        "audience": {
+          "installation": "install_example",
+          "team": "team_example"
+        },
+        "person": "person_7c1",
+        "bound_to": {
+          "type": "root_task",
+          "id": "run_sched_1_0430"
+        },
+        "schedule_id": "sched_1",
+        "issued_at": "2026-10-22T04:29:00.000Z",
+        "expires_at": "2026-10-23T04:29:00.000Z",
+        "algorithm": "ed25519"
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"task.answer\", \"message_id\": \"01928f3a-7b2c-7230-8000-000000000230\", \"idempotency_key\": \"task.answer:URKNSJLUxbtZCt2uqGIfqMqUu-9UTUPo3S5vnVvGzXc\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"edge\", \"id\": \"a2a_partner\"}, \"subject\": \"ua.v1.team_example.lead-host-1.work.edge.a2a_partner\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"question_id\": \"q_out_2\", \"task_id\": \"task_out_1\", \"text\": \"Print on recycled paper.\"}, \"body_digest\": \"aYGoEaUNcYU8FJF-nSzBAVH4QmqwbmDRltfG4LaeMao\", \"signature\": \"nlwWD9h8CLq-E5AMEgSMs4aDjudLUoYtBhrUDyXyLtt0OBCrxGeDYQ4IEHATbrVdK8rKvhFSZg9UaeDTCuEWAw\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7211-8000-000000000211\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"scheduler-1\", \"membership_epoch\": 1, \"key_id\": \"test-scheduler-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"run_sched_1_0430\"}, \"schedule_id\": \"sched_1\", \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"Fc3mfow4c6Vb79czXRhioFKXuUDYfeb3B2B9qtKpgy0BfgBnpVcPmj2GUVVVy_JhcfyS9RFCQ3v_GtuOzC3fAA\"}}"
+}

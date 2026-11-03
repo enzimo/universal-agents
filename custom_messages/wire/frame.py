@@ -33,7 +33,6 @@ from custom_messages.wire.kinds import (
     AUTHORITY_TOKEN_DOMAIN,
     AUTHORITY_TOKEN_MAX_SECONDS,
     COMMAND_TOKEN_MAX_SECONDS,
-    DECISION_TOKEN_DOMAIN,
     BETWEEN_INSTALLATIONS,
     FRAME_SHAPE,
     INSTALLATION_ADDRESS_PREFIX,
@@ -64,8 +63,8 @@ from custom_messages.wire.values import parse_timestamp
 __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
     "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
-    "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_decision_token",
-    "sign_frame", "sign_renew_key_proof", "signing_bytes", "verify_authority_token", "verify_frame",
+    "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_frame",
+    "sign_renew_key_proof", "signing_bytes", "verify_authority_token", "verify_frame",
 ]
 
 REPLY_SUFFIX = ".reply"
@@ -78,9 +77,6 @@ SCHEDULE_ISSUER_ROLE = "scheduler"
 AUTHORITY_AT = "/authority"
 # The token type bound to one command; it lasts at most COMMAND_TOKEN_MAX_SECONDS.
 COMMAND_BINDING = "command"
-# The role whose certificate signs change-conflict decision tokens (README, "What bodies carry").
-DECISION_ISSUER_ROLE = "team_services"
-DECISION_TOKEN_AT = "/body/decision_token"
 # The host role that speaks for outside agents (A2A); its frames reach only the lead.
 OUTSIDE_ROLE = "edge_adapter"
 # Who speaks for a team beyond it, to an outside agent or another installation: the lead
@@ -164,19 +160,6 @@ def frame_digest(frame: Mapping[str, Any]) -> str:
 
 def authority_signing_bytes(token: Mapping[str, Any]) -> bytes:
     return signed_bytes(AUTHORITY_TOKEN_DOMAIN, token)
-
-
-def decision_signing_bytes(token: Mapping[str, Any]) -> bytes:
-    return signed_bytes(DECISION_TOKEN_DOMAIN, token)
-
-
-def sign_decision_token(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> dict[str, Any]:
-    """Return ``unsigned`` with its algorithm and signature filled in; the team services sign it."""
-
-    token = {key: value for key, value in unsigned.items() if key != "signature"}
-    token["algorithm"] = "ed25519"
-    token["signature"] = b64url(private_key.sign(decision_signing_bytes(token)))
-    return token
 
 
 def sign_authority_token(unsigned: Mapping[str, Any], private_key: Ed25519PrivateKey) -> dict[str, Any]:
@@ -378,19 +361,27 @@ def _verify_signature(raw: Mapping[str, Any], frame: Frame, public_key: Ed25519P
         raise FrameRefused("bad_signature", at="/signature") from error
 
 
-def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore) -> None:
+def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore, now: datetime) -> None:
     """A join speaks for its own new host only (README, "Installation traffic").
 
-    Its known key must not be revoked. It names the installation scope, no agent, epoch
-    zero and an unreserved runtime id; its body asks for that runtime in that
-    installation, and only for roles a joining host may hold (the kind's senders, which
-    the receiver cannot check against a certificate the host does not have yet).
+    Its key must not be revoked, by its key id or by its public key under any key id,
+    and the receiver needs a current revocations record to know that. It names the installation scope, no agent, epoch zero and an unreserved
+    runtime id; its body asks for that runtime in that installation, and only for roles a
+    joining host may hold (the kind's senders, which the receiver cannot check against a
+    certificate the host does not have yet).
     """
 
     issuer = frame.issuer
-    if any(trust.revoked(certificate.installation, certificate.certificate_id)
-           for certificate in trust.certificates_with_key(issuer.installation, issuer.key_id)):
+    if trust.key_revoked(issuer.installation, issuer.runtime, issuer.key_id) or any(
+            trust.revoked(certificate) for certificate in trust.certificates_with_key(issuer.installation, issuer.key_id)):
         raise FrameRefused("revoked", "the presented key's certificate is revoked", at="/issuer/key_id")
+    # A key id is only a label: the revoked key itself stays refused under a new one.
+    if trust.public_key_revoked(issuer.installation, ed25519_public_key(raw["body"]["application_key"]["public_key"])):
+        raise FrameRefused("revoked", "the presented public key belongs to a revoked certificate",
+                           at="/body/application_key/public_key")
+    if not trust.revocations_current(issuer.installation, now):
+        raise FrameRefused("revocations_not_current", "no current revocations record of this installation",
+                           at="/issuer/installation")
     if issuer.team != INSTALLATION_SCOPE:
         raise FrameRefused("wrong_issuer", "a join names the installation scope", at="/issuer/team")
     if issuer.agent is not MISSING or issuer.session is not MISSING:
@@ -421,13 +412,23 @@ def _session(frame: Frame, trust: TrustStore) -> Optional[AgentSession]:
     return trust.agent_session(frame.issuer.installation, frame.issuer.team, frame.issuer.session)
 
 
-def _verify_revocation(certificate: HostCertificate, session: Optional[AgentSession], trust: TrustStore) -> None:
-    # A revoked certificate stops every frame not yet admitted, whatever issue time
-    # the frame gives: the sender chooses that time.
-    if trust.revoked(certificate.installation, certificate.certificate_id):
+def _verify_revocation(frame: Frame, certificate: HostCertificate, session: Optional[AgentSession], trust: TrustStore,
+                       now: datetime) -> None:
+    """Neither certificate is revoked, and the receiver's revocations record of the issuer's installation is current.
+
+    A revoked certificate, or key, stops every frame not yet admitted, whatever issue
+    time the frame gives: the sender chooses that time. The session's signer belongs to
+    the issuer's installation, so one current record covers both. Only installation
+    traffic (the installation scope) from the receiver's own authority needs no current
+    record, so a host whose record expired can still renew.
+    """
+
+    if trust.revoked(certificate):
         raise FrameRefused("revoked", "the issuer's certificate is revoked", at="/issuer/key_id")
-    if session is not None and trust.revoked(session.signer.installation, session.signer.certificate_id):
+    if session is not None and trust.revoked(session.signer):
         raise FrameRefused("revoked", "the certificate that signed the agent session is revoked", at="/issuer/session")
+    trust.require_current_revocations(certificate, now, at="/issuer/installation",
+                                      installation_traffic=frame.issuer.team == INSTALLATION_SCOPE)
 
 
 def _verify_epochs(certificate: HostCertificate, spec: Optional[KindSpec], trust: TrustStore) -> None:
@@ -509,7 +510,7 @@ def _verify_sender(frame: Frame, certificate: HostCertificate, session: Optional
     _verify_outside_boundary(frame, roles, session, receiver)
     if frame.issuer.installation == trust.installation:
         # Within an installation a host speaks inside the team it names; reaching
-        # another team is a later agreement (message contract plan, phase 6).
+        # another team needs an agreement between teams, which this contract does not define yet.
         if frame.audience.team != frame.issuer.team:
             raise FrameRefused("wrong_sender", "a frame stays within its issuer's team", at="/audience/team")
         return
@@ -638,9 +639,11 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
     """A renewal that rotates keys names a new key id and proves possession of that key over the whole renewal.
 
     The key id is new to the installation: not the signing certificate's, not another
-    host's, not an authority key. The one exception is the key of the certificate that
-    already replaced the signing one, with the same public key: what a retry after a lost
-    reply names. The authority answers it with that certificate.
+    host's, not an authority key. So is the public key: no held certificate holds it
+    under another key id, so a revoked key cannot return under a new label. The one
+    exception is the key of the certificate that already replaced the signing one, with
+    the same public key: what a retry after a lost reply names. The authority answers it
+    with that certificate.
     """
 
     if raw["kind"] != _HOST_RENEW or _KEY_ROTATION not in raw["body"]:
@@ -660,6 +663,13 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
                 or (used and not retried)):
             raise FrameRefused("invalid_body", "a rotation names a key id the installation does not use yet",
                                at=f"/body/{_KEY_ROTATION}/key/key_id")
+        try:
+            held = trust.certificates_with_public_key(certificate.installation, ed25519_public_key(str(key.get("public_key"))))
+        except ValueError:
+            held = []  # the proof check below refuses a key that is not one
+        if any(other.key_id != key_id for other in held):
+            raise FrameRefused("invalid_body", "a rotation names a public key the installation does not use yet",
+                               at=f"/body/{_KEY_ROTATION}/key/public_key")
     try:
         public_key = ed25519_public_key(rotation["key"]["public_key"])
         public_key.verify(b64url_decode(rotation["proof"]), renew_key_proof_bytes(raw))
@@ -668,21 +678,30 @@ def _verify_renew_key_proof(raw: Mapping[str, Any], certificate: Optional[HostCe
                            at=f"/body/{_KEY_ROTATION}/proof") from error
 
 
-def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_reply: bool,
-                      trust: TrustStore, sender: Optional[HostCertificate]) -> Optional[VerifiedAuthority]:
-    """The frame's token, if any: allowed on the kind, valid on its own, and of a type this sender may present here.
+def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_reply: bool, trust: TrustStore,
+                      sender: Optional[HostCertificate], receiver: Receiver, now: datetime,
+                      stored_at: Optional[datetime]) -> Optional[VerifiedAuthority]:
+    """The frame's token, if any: allowed on the kind at this address, valid on its own, and of a type this sender may present here.
 
     ``sender`` is None only for a join, which takes no token (registry ``authority: none``).
+    A kind's ``authority_by_target`` narrows it for some addresses: a task for a worker
+    pool carries no token, since every host running the pool reads its queue. A person's
+    token never reaches an outside agent: an adapter receiving for one refuses it.
+    Queued work's token must still be valid when the stream stored the frame
+    (``stored_at``), other frames' when they are received.
     """
 
-    mode = "none" if is_reply or sender is None else spec.authority
+    target = frame.audience.target
+    mode = "none" if is_reply or sender is None else spec.authority_by_target.get(target, spec.authority)
     token = frame.authority
     if token is MISSING:
         if mode == "required":
             raise FrameRefused("bad_authority", f"{frame.kind} requires an authority token", at=AUTHORITY_AT)
         return None
     if mode == "none":
-        raise FrameRefused("bad_authority", f"{frame.kind} takes no authority token", at=AUTHORITY_AT)
+        raise FrameRefused("bad_authority", f"{frame.kind} to a {target} takes no authority token", at=AUTHORITY_AT)
+    if receiver.outside:
+        raise FrameRefused("bad_authority", "a person's token never goes to an outside agent", at=AUTHORITY_AT)
     assert sender is not None  # a frame without a certificate takes no token (mode none above)
     issuer, audience = token.issuer, token.audience
     if not issuer.installation == audience.installation == frame.issuer.installation:
@@ -691,17 +710,26 @@ def _verify_authority(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, is_r
     if audience.team != frame.issuer.team:
         raise FrameRefused("bad_authority", "only the team the person asked presents the token", at="/authority/audience/team")
     # Over the token as received: a newer minor's unknown fields are signed too.
-    verified = verify_authority_token(token, raw["authority"], trust, valid_at=parse_timestamp(frame.issued_at))
+    queued = stored_at is not None and spec.delivery_class in QUEUED_CLASSES
+    verified = verify_authority_token(token, raw["authority"], trust, valid_at=parse_timestamp(frame.issued_at), now=now,
+                                      reached_at=stored_at if queued else None)
     return _verify_binding(raw, frame, spec, sender, verified)
 
 
 def verify_authority_token(token: AuthorityToken, fields: Mapping[str, Any], trust: TrustStore, *,
-                           valid_at: datetime, at: str = AUTHORITY_AT) -> VerifiedAuthority:
+                           valid_at: datetime, now: datetime, reached_at: Optional[datetime] = None,
+                           at: str = AUTHORITY_AT) -> VerifiedAuthority:
     """Check an authority token on its own; raise ``FrameRefused`` (``bad_authority``) at ``at`` when it fails.
 
     ``token`` is the validated token and ``fields`` its JSON object as received,
-    which its signature covers. ``valid_at`` is when it must be valid: the issue
-    time of the frame that carries it. The checks (README, "On behalf of a person"):
+    which its signature covers. It must be valid both at ``valid_at``, the issue time
+    of the frame that carries it, and at ``reached_at``, when the frame reached the
+    receiver: for queued work the time the stream stored it, which the server sets and
+    the sender cannot, and by default ``now``, the receiver's clock. So a frame dated
+    back cannot carry a token that had expired when it was sent, while queued work that
+    waits past its token's end is still accepted. Both allow the clock tolerance; the
+    receiver still needs a current revocations record at ``now``. The checks (README,
+    "On behalf of a person"):
     an unrevoked gateway or scheduler certificate of its audience team signed it;
     only a scheduler names a schedule; a token names its person, unless it is
     system work, which names its schedule instead; it lasts at most
@@ -711,20 +739,20 @@ def verify_authority_token(token: AuthorityToken, fields: Mapping[str, Any], tru
     """
 
     signed = _SignedToken(at, fields, authority_signing_bytes(fields))
-    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, token.audience.team, "a gateway or scheduler")
+    certificate = _token_certificate(signed, trust, AUTHORITY_ISSUER_ROLES, token.audience.team, "a gateway or scheduler", now)
     if token.schedule_id is not MISSING and SCHEDULE_ISSUER_ROLE not in certificate.roles:
         raise FrameRefused("bad_authority", "only a scheduler names the schedule a run belongs to", at=at + "/schedule_id")
     if token.person is MISSING and token.schedule_id is MISSING:
         raise FrameRefused("bad_authority", "a token names its person, or for system work its schedule", at=at + "/person")
     command = token.bound_to.type == COMMAND_BINDING
-    _verify_token_signature_and_time(signed, certificate, valid_at,
+    _verify_token_signature_and_time(signed, certificate, valid_at, now if reached_at is None else reached_at,
                                      COMMAND_TOKEN_MAX_SECONDS if command else AUTHORITY_TOKEN_MAX_SECONDS)
     return VerifiedAuthority(token=token, certificate=certificate)
 
 
 @dataclass(frozen=True)
 class _SignedToken:
-    """An authority or decision token as received: where it sits, its fields, and what its signature covers."""
+    """An authority token as received: where it sits, its fields, and what its signature covers."""
 
     at: str
     fields: Mapping[str, Any]
@@ -740,22 +768,26 @@ class _SignedToken:
 
 
 def _token_certificate(token: _SignedToken, trust: TrustStore, roles: frozenset[str], team: str,
-                       signers: str) -> HostCertificate:
-    """The unrevoked certificate, valid when the token was issued, of a host in one of ``roles`` serving ``team``."""
+                       signers: str, now: datetime) -> HostCertificate:
+    """The unrevoked certificate, valid when the token was issued, of a host in one of ``roles`` serving ``team``.
+
+    The receiver needs a current revocations record of its installation to know it is unrevoked.
+    """
 
     issuer = token.fields["issuer"]
     certificate = trust.host_certificate(issuer["installation"], issuer["runtime"], issuer["membership_epoch"])
     if (certificate is None or certificate.key_id != issuer["key_id"] or not certificate.valid_at(token.issued_at)
-            or trust.revoked(certificate.installation, certificate.certificate_id)):
-        raise FrameRefused("bad_authority", "no unrevoked certificate for the token's issuer", at=token.at + "/issuer")
+            or trust.revoked(certificate) or not trust.revocations_current(certificate.installation, now)):
+        raise FrameRefused("bad_authority", "no certificate known to be unrevoked for the token's issuer",
+                           at=token.at + "/issuer")
     if not certificate.roles & roles or team not in certificate.teams:
         raise FrameRefused("bad_authority", f"only {signers} of the team signs this token", at=token.at + "/issuer")
     return certificate
 
 
 def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCertificate, valid_at: datetime,
-                                     max_seconds: int = AUTHORITY_TOKEN_MAX_SECONDS) -> None:
-    """The signature verifies, the token lasts at most ``max_seconds``, and it was valid at ``valid_at``."""
+                                     reached_at: datetime, max_seconds: int) -> None:
+    """The signature verifies, the token lasts at most ``max_seconds``, and it is valid at ``valid_at`` and at ``reached_at``."""
 
     try:
         certificate.public_key.verify(b64url_decode(token.fields["signature"]), token.signing_bytes)
@@ -765,6 +797,9 @@ def _verify_token_signature_and_time(token: _SignedToken, certificate: HostCerti
         raise FrameRefused("bad_authority", f"the token lasts longer than {max_seconds} seconds", at=token.at + "/expires_at")
     if not within(token.issued_at, token.expires_at, valid_at):
         raise FrameRefused("bad_authority", "the token was not valid when the frame was issued", at=token.at + "/expires_at")
+    if not within(token.issued_at, token.expires_at, reached_at):
+        raise FrameRefused("bad_authority", "the token was not valid when the frame reached the receiver",
+                           at=token.at + "/expires_at")
 
 
 def _verify_binding(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, sender: HostCertificate,
@@ -810,32 +845,51 @@ def _says_nothing(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
     return all(_pointed(raw, pointer) is None for pointer in rule["any_of"])
 
 
+def _holds_other(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    """Whether the field holds a value outside ``values`` (each item, for a list) while every condition holds."""
+
+    if not all(_pointed(raw, condition["at"]) == condition["is"] for condition in rule["when"]):
+        return False
+    value = _pointed(raw, rule["allowed"])
+    if value is None:
+        return False
+    return any(item not in rule["values"] for item in (value if isinstance(value, list) else [value]))
+
+
+def _ends_late(raw: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    """Whether the time at ``ends_within`` is more than ``seconds`` after the time at ``of``; an absent time passes.
+
+    Both are timestamps the schema and the frame's own form already checked.
+    """
+
+    end, start = _pointed(raw, rule["ends_within"]), _pointed(raw, rule["of"])
+    if end is None or start is None:
+        return False
+    return parse_timestamp(end) - parse_timestamp(start) > timedelta(seconds=rule["seconds"])
+
+
+# Each body rule form (README, "What bodies carry"): the key that names it, the check that
+# finds a defect, the refusal's detail, and the place the refusal names.
+_BodyRuleForm = tuple[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool],
+                      Callable[[Mapping[str, Any]], str], Callable[[Mapping[str, Any]], str]]
+_BODY_RULE_FORMS: tuple[_BodyRuleForm, ...] = (
+    ("unique", _repeats, lambda rule: "a list holds the same value twice", lambda rule: rule["unique"]),
+    ("requires", _lacks_required, lambda rule: "a field its other fields need is missing", lambda rule: rule["requires"]),
+    ("any_of", _says_nothing, lambda rule: "the body needs one of " + ", ".join(rule["any_of"]),
+     lambda rule: rule["any_of"][0].rsplit("/", 1)[0]),
+    ("allowed", _holds_other, lambda rule: "a value its other fields do not allow here", lambda rule: rule["allowed"]),
+    ("ends_within", _ends_late, lambda rule: f"ends more than {rule['seconds']} seconds after {rule['of']}",
+     lambda rule: rule["ends_within"]),
+)
+
+
 def _check_body_rules(raw: Mapping[str, Any], spec: KindSpec) -> None:
     """What the schema cannot say (registry body_rules; README, "What bodies carry")."""
 
     for rule in spec.body_rules:
-        if "unique" in rule and _repeats(raw, rule):
-            raise FrameRefused("invalid_body", "a list holds the same value twice", at=rule["unique"])
-        if "requires" in rule and _lacks_required(raw, rule):
-            raise FrameRefused("invalid_body", "a field its other fields need is missing", at=rule["requires"])
-        if "any_of" in rule and _says_nothing(raw, rule):
-            raise FrameRefused("invalid_body", "the body needs one of " + ", ".join(rule["any_of"]),
-                               at=rule["any_of"][0].rsplit("/", 1)[0])
-
-
-def _verify_decision_token(raw: Mapping[str, Any], frame: Frame, trust: TrustStore) -> None:
-    """A change-conflict decision token in the body is the team services' signed record of a person's choice."""
-
-    token = _pointed(raw, DECISION_TOKEN_AT)
-    if token is None:
-        return
-    issuer = token["issuer"]
-    if (issuer["installation"], issuer["team"]) != (frame.issuer.installation, frame.audience.team):
-        raise FrameRefused("bad_authority", "the decision token belongs to another installation or team",
-                           at=DECISION_TOKEN_AT + "/issuer")
-    signed = _SignedToken(DECISION_TOKEN_AT, token, decision_signing_bytes(token))
-    certificate = _token_certificate(signed, trust, frozenset({DECISION_ISSUER_ROLE}), issuer["team"], "a team-services host")
-    _verify_token_signature_and_time(signed, certificate, parse_timestamp(frame.issued_at))
+        for key, defective, detail, place in _BODY_RULE_FORMS:
+            if key in rule and defective(raw, rule):
+                raise FrameRefused("invalid_body", detail(rule), at=place(rule))
 
 
 def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: TrustStore) -> None:
@@ -843,8 +897,10 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
 
     It verifies against this installation's authority keys and certifies the host that
     asked: its runtime, and the key and NATS key it presented or kept. A join's
-    certificate grants at most the teams, roles, agent types and sessions it asked
-    for. A renewal's has a higher membership epoch than the certificate it replaces.
+    certificate grants at most the teams, roles, agent types, sessions and tools it asked
+    for, with the connection class it asked for. A renewal's has a higher membership
+    epoch than the certificate it replaces and keeps its connection class and tools.
+    The connection credential that comes with it ends no later than it does.
     """
 
     document = _pointed(raw, ISSUED_CERTIFICATE_AT)
@@ -866,7 +922,20 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
         raise refuse("runtime", "the certificate is for another host than the one that asked")
     if answering.kind == _HOST_RENEW:
         _verify_renewed_certificate(issued, answering, asked, trust, refuse)
-        return
+    else:
+        _verify_joined_certificate(issued, asked, refuse)
+    # NATS checks a credential only when the host connects, so it must not outlive the
+    # certificate that says the host may serve (README, "Grants for the agents a host runs").
+    connection = raw["body"].get("connection")
+    if isinstance(connection, Mapping) and parse_timestamp(str(connection["expires_at"])) > issued.expires_at:
+        raise FrameRefused("invalid_body", "the connection credential ends after the certificate it comes with",
+                           at="/body/connection/expires_at")
+
+
+def _verify_joined_certificate(issued: HostCertificate, asked: Mapping[str, Any],
+                               refuse: Callable[[str, str], FrameRefused]) -> None:
+    """A join's certificate names the keys and connection class it presented, and grants at most what it asked for."""
+
     key = asked.get("application_key") or {}
     if (issued.key_id, b64url(issued.public_key.public_bytes_raw())) != (key.get("key_id"), key.get("public_key")):
         raise refuse("application_key", "the certificate names another key than the join presented")
@@ -875,8 +944,12 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
     for field_name in ("teams", "roles", "agent_types"):
         if not getattr(issued, field_name) <= set(asked.get(field_name) or ()):
             raise refuse(field_name, f"the certificate grants {field_name} the join did not ask for")
-    if document["body"]["session_limit"] > asked.get("session_limit", 0):
+    if issued.session_limit > asked.get("session_limit", 0):
         raise refuse("session_limit", "the certificate allows more sessions than the join asked for")
+    if issued.connection_class != asked.get("connection_class"):
+        raise refuse("connection_class", "the certificate names another connection class than the join asked for")
+    if issued.tools is not None and not issued.tools <= set(asked.get("tools") or ()):
+        raise refuse("tools", "the certificate names tools the join did not ask for")
 
 
 def _verify_renewed_certificate(issued: HostCertificate, answering: Frame, asked: Mapping[str, Any], trust: TrustStore,
@@ -898,6 +971,11 @@ def _verify_renewed_certificate(issued: HostCertificate, answering: Frame, asked
         raise refuse("application_key", "the certificate names another key than the renewal kept or rotated to")
     if issued.nats_public_key != asked.get("new_nats_public_key", current.nats_public_key):
         raise refuse("nats_public_key", "the certificate names another NATS key than the renewal kept or asked for")
+    # A renewal carries neither: changing what the host is approved for needs a new join.
+    if issued.connection_class != current.connection_class:
+        raise refuse("connection_class", "a renewed certificate keeps the connection class of the one it replaces")
+    if issued.tools != current.tools:
+        raise refuse("tools", "a renewed certificate keeps the tools of the one it replaces")
 
 
 def verify_frame(
@@ -910,19 +988,23 @@ def verify_frame(
     replay: ReplayLookup,
     headers: Optional[Mapping[str, str]] = None,
     answering: Optional[Frame] = None,
+    stored_at: Optional[datetime] = None,
 ) -> VerifiedFrame:
     """Check one received frame in the registry's order; raise ``FrameRefused`` on the first failure.
 
     ``headers`` are the NATS headers the frame arrived with, ``{}`` when it arrived
     with none (nats-py reports that as None), or None only for a frame read from
     storage. ``answering`` is the request a reply answers; replies are refused
-    without it. ``now`` must name its time zone.
+    without it. ``stored_at`` is when a stream stored a queued frame: JetStream's
+    message timestamp, which the server sets, not the sender. A queued frame's token
+    must be valid then, and without it at ``now``. ``now`` and ``stored_at`` must name
+    their time zone.
     """
 
     if isinstance(data, str):
         raise TypeError("frames are verified as the bytes received")
-    if now.tzinfo is None:
-        raise ValueError("now must name its time zone")
+    if now.tzinfo is None or (stored_at is not None and stored_at.tzinfo is None):
+        raise ValueError("now and stored_at must name their time zone")
     if trust.installation != receiver.installation:
         raise ValueError("the trust store belongs to another installation than the receiver")
     data = bytes(data)
@@ -943,10 +1025,10 @@ def verify_frame(
         raise FrameRefused("bad_digest", at="/body_digest")
     if certificate is None:
         assert spec is not None  # only a known kind proves possession
-        _verify_join(raw, frame, spec, trust)
+        _verify_join(raw, frame, spec, trust, now)
     else:
         session = _session(frame, trust)
-        _verify_revocation(certificate, session, trust)
+        _verify_revocation(frame, certificate, session, trust, now)
         _verify_epochs(certificate, spec, trust)
         _verify_issuer(frame, spec, certificate, session, issued_at, is_reply, answering)
         if not is_reply:
@@ -982,8 +1064,6 @@ def verify_frame(
     elif _installation_operation(spec) and ISSUED_CERTIFICATE_AT.rsplit("/", 1)[1] in known:
         assert answering is not None  # _verify_issuer refused replies without their request
         _verify_issued_certificate(raw, answering, trust)
-    authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate)
-    if not is_reply and DECISION_TOKEN_AT.rsplit("/", 1)[1] in known:
-        _verify_decision_token(raw, frame, trust)
+    authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate, receiver, now, stored_at)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

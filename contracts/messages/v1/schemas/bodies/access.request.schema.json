@@ -12,6 +12,7 @@
       "$ref": "../common.schema.json#/$defs/record_id"
     },
     "reason": {
+      "description": "Why the task needs the access or the staged change; a change review asks its question instead (registry body_rules).",
       "$ref": "../common.schema.json#/$defs/note_text"
     },
     "what": {
@@ -21,7 +22,6 @@
   "required": [
     "request_id",
     "task_id",
-    "reason",
     "what"
   ],
   "additionalProperties": false

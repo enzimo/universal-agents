@@ -31,6 +31,7 @@
       "researcher"
     ],
     "session_limit": 4,
+    "connection_class": "connected",
     "protocol": "1.0-pre",
     "deployment": "local",
     "profile_sha256": "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo",
@@ -42,6 +43,6 @@
     "expires_at": "2026-11-21T00:00:00.000Z"
   },
   "algorithm": "ed25519",
-  "body_digest": "ncLp5Dy3o1H7G7sMRTciv_T6hAVvgVorEJY-mDtvvwA",
-  "signature": "Gl3a5bwCfezKVJEZmwJUaP-WDxOVodtXo7GblhjwY3IGhuVN4RlzDGO1mToQDvV4g5EXYswtc99kxiXQ-d4qCw"
+  "body_digest": "zdlADY_7n9azOg8E4W4OOrNBooeu8N5pigQar-6aRNw",
+  "signature": "d5j8gfPgz2unhICf2UmE4y1JwiVMA_SL5Iz0JWj7Kh1wejO76oC_yLmY3_OK9oowf93xWEq0Fi7OcZBjkOTRCg"
 }

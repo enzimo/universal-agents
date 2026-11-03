@@ -82,6 +82,9 @@ class KindSpec:
     receivers: tuple[str, ...]
     expiry_seconds: int
     authority: str
+    # Audience target -> a narrower authority for that address (registry
+    # authority_by_address); other targets take ``authority``.
+    authority_by_target: dict[str, str]
     # The token types this kind takes, one binding per type; empty when it takes no
     # token. A token of any other type is refused.
     authority_binding: tuple[TokenBinding, ...]
@@ -118,9 +121,14 @@ class StateSpec:
     # The bucket's per-key lifetime (registry ttl_seconds): a record of this kind must
     # expire within it, so an old copy is never read as current. None when records last.
     ttl_seconds: Optional[int]
-    # How long after it is written a trust record may end (registry max_lifetime_seconds),
-    # which bounds when a receiver forgets it. None for records the trust store does not forget.
+    # How long after it is written a record may end (registry max_lifetime_seconds). For a
+    # trust record it bounds when a receiver forgets it (never the revocations record, which
+    # a newer one replaces). None for records without a longest lifetime.
     max_lifetime_seconds: Optional[int]
+    # How long after it is written a record still counts as fresh for readers that need a
+    # recent one (registry fresh_seconds; the block list's fresh_check tools). None when no
+    # reader judges the record by its age.
+    fresh_seconds: Optional[int]
     body_model: TypeAdapter[Any]
     # What a newer minor's record body may hold that this version knows (see prune).
     body_shape: Any

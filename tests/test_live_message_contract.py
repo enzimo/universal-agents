@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import re
 import secrets
@@ -30,8 +31,10 @@ from typing import Iterable
 import nats
 import pytest
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
+from nats.js.errors import NotFoundError
 
 from custom_messages.wire.kinds import KINDS
+from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
@@ -46,6 +49,9 @@ STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
 HOSTS = {
     "lead": {"role": "lead_host", "runtime": "lead-host-1", "agents": ["lead"], "pools": [], "edges": []},
     "worker": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2"], "pools": ["researcher"], "edges": []},
+    # The same host after researcher-3 moved to it: a new credential naming both agents.
+    "worker_moved": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2", "researcher-3"],
+                     "pools": ["researcher"], "edges": []},
     "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": []},
     "services": {"role": "team_services", "runtime": "team-services-1", "agents": [], "pools": [], "edges": []},
     "scheduler": {"role": "scheduler", "runtime": "scheduler-1", "agents": [], "pools": [], "edges": []},
@@ -58,27 +64,14 @@ HOSTS = {
 BOOTSTRAP_RECORDS = {"certificates/authority-1.json", "revocations/install_example.json"}
 
 
-def expand(template: str, bindings: dict[str, list[str]]) -> list[str]:
-    """Fill each {placeholder} with every value bound to it; identities never become wildcards."""
-
-    subjects = [template]
-    for name, values in bindings.items():
-        subjects = [subject.replace("{" + name + "}", value) for subject in subjects for value in values] \
-            if "{" + name + "}" in template else subjects
-    leftover = [subject for subject in subjects if re.search(r"\{[a-z_]+\}", subject)]
-    assert not leftover, f"unbound placeholders in {leftover}"
-    return subjects
-
-
 def permissions(user: str) -> dict:
+    """The host's generated permissions filled as membership code fills them (README, "Filling the templates")."""
+
     host = HOSTS[user]
     document = json.loads((CONTRACT / "generated/permissions" / f"{host['role']}.json").read_text())
-    bindings = {"team": [TEAM], "self": [host["runtime"]], "agent": host["agents"], "pool": host["pools"], "edge": host["edges"]}
-    granted = {action: sorted({subject for template in document[action] for subject in expand(template, bindings)})
-               for action in ("publish", "subscribe")}
-    if "allow_responses" in document:
-        granted["allow_responses"] = document["allow_responses"]
-    return granted
+    placement = HostPlacement(host["runtime"], (TEAM,), agents={TEAM: tuple(host["agents"])},
+                              pools={TEAM: tuple(host["pools"])}, edges={TEAM: tuple(host["edges"])})
+    return host_permissions(document, placement)
 
 
 def consumer_name(template: str, **ids: str) -> str:
@@ -89,8 +82,11 @@ def consumer_stream(template: str, team: str = TEAM) -> str:
     return TRANSPORT["consumers"][template]["stream"].format(team=team)
 
 
-# The team's agent inboxes and worker pools (transport.yaml team_grants).
+# The team's agent inboxes, agent control queues and worker pools; each host reads only its own
+# agents' and pools' consumers.
 AGENT_STREAM = consumer_stream("agent_inbox")
+# Each agent's two queues (README, "An agent's two queues").
+AGENT_QUEUES = ("agent_inbox", "agent_control")
 
 
 def stream_config(name: str, team: str = TEAM) -> StreamConfig:
@@ -255,7 +251,7 @@ async def connect(stack: AsyncExitStack, broker, user: str) -> Client:
 
 
 async def create_topology(admin: Client, agents: Iterable[str] = (), teams: Iterable[str] = (TEAM,)) -> None:
-    """What the topology owner does: the work streams and one inbox consumer per agent of TEAM."""
+    """What the topology owner does: the work streams and both queues' consumers for each agent of TEAM."""
 
     js = admin.nc.jetstream()
     expected = [stream_config("UA1_WORK")] + [stream_config("UA1_AGENT_WORK_{team}", team) for team in teams]
@@ -264,42 +260,57 @@ async def create_topology(admin: Client, agents: Iterable[str] = (), teams: Iter
         for setting in ("subjects", "retention", "storage", "max_age", "duplicate_window", "max_consumers", "max_msg_size"):
             assert getattr(info.config, setting) == getattr(config, setting), setting
     for agent in agents:
-        consumer = await js.add_consumer(AGENT_STREAM, config=consumer_config("agent_inbox", agent=agent))
-        for setting in ("filter_subject", "ack_policy", "ack_wait", "max_deliver"):
-            assert getattr(consumer.config, setting) == getattr(consumer_config("agent_inbox", agent=agent), setting)
+        for queue in AGENT_QUEUES:
+            consumer = await js.add_consumer(AGENT_STREAM, config=consumer_config(queue, agent=agent))
+            for setting in ("filter_subject", "ack_policy", "ack_wait", "max_deliver"):
+                assert getattr(consumer.config, setting) == getattr(consumer_config(queue, agent=agent), setting)
 
 
 @pytest.mark.asyncio
-async def test_a_host_pulls_and_acknowledges_any_agent_of_its_team_and_no_other_consumer(isolated_broker) -> None:
-    """Whole-team grants (README, "Whole-team grants"): work queued for an agent follows it to any host of its team."""
+async def test_a_host_reads_only_the_queues_of_the_agents_it_runs(isolated_broker) -> None:
+    """README, "Grants for the agents a host runs": queued work waits for the host the agent moves to."""
 
     async with AsyncExitStack() as stack:
         admin = await connect(stack, isolated_broker, "admin")
         lead = await connect(stack, isolated_broker, "lead")
         worker = await connect(stack, isolated_broker, "worker")
-        await create_topology(admin, ["researcher-2", "researcher-3"], teams=(TEAM, "team_other"))
+        await create_topology(admin, ["lead", "researcher-2", "researcher-3"], teams=(TEAM, "team_other"))
         await admin.nc.jetstream().add_consumer("UA1_WORK", config=consumer_config("team_services"))
         worker_js = worker.nc.jetstream()
 
+        # A stop waits in the holder's control queue.
         frame = fixtures.example_frame("task.stop")
         await lead.nc.jetstream().publish(frame["subject"], json.dumps(frame).encode(), headers=headers(frame))
-        # researcher-3 moved here after work was queued for it: the same credential reads it.
         moved = frame["subject"].replace("researcher-2", "researcher-3")
-        await lead.nc.jetstream().publish(moved, b"queued before the move")
+        await lead.nc.jetstream().publish(moved, b"queued before researcher-3 moved to the worker host")
+        own = consumer_name("agent_control", agent="researcher-2")
+        await worker_js.consumer_info(AGENT_STREAM, own)
+        subscription = await worker_js.pull_subscribe_bind(stream=AGENT_STREAM, consumer=own)
+        delivered, = await subscription.fetch(1, timeout=2)
+        checked = fixtures.verify(delivered.data, frame, arrived(frame, delivered))
+        assert checked.body.task_id == frame["body"]["task_id"]
+        await delivered.ack_sync(timeout=2)
+
+        # Another host's agent, and an agent not yet placed here, are out of reach.
+        for agent in ("lead", "researcher-3"):
+            for queue in AGENT_QUEUES:
+                await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.{AGENT_STREAM}.{consumer_name(queue, agent=agent)}")
+                await worker.publish_refused(f"$JS.API.CONSUMER.INFO.{AGENT_STREAM}.{consumer_name(queue, agent=agent)}")
+        # Once researcher-3 moved here, the host's new credential reads the work queued before the move.
+        after_move = await connect(stack, isolated_broker, "worker_moved")
+        name = consumer_name("agent_control", agent="researcher-3")
+        subscription = await after_move.nc.jetstream().pull_subscribe_bind(stream=AGENT_STREAM, consumer=name)
+        delivered, = await subscription.fetch(1, timeout=2)
+        assert delivered.data == b"queued before researcher-3 moved to the worker host"
+        await delivered.ack_sync(timeout=2)
         for agent in ("researcher-2", "researcher-3"):
-            name = consumer_name("agent_inbox", agent=agent)
-            await worker_js.consumer_info(AGENT_STREAM, name)
-            subscription = await worker_js.pull_subscribe_bind(stream=AGENT_STREAM, consumer=name)
-            delivered, = await subscription.fetch(1, timeout=2)
-            if agent == "researcher-2":
-                checked = fixtures.verify(delivered.data, frame, arrived(frame, delivered))
-                assert checked.body.task_id == frame["body"]["task_id"]
-            await delivered.ack_sync(timeout=2)
-            info = await admin.nc.jetstream().consumer_info(AGENT_STREAM, name)
-            assert info.num_ack_pending == 0 and info.num_pending == 0
+            for queue in AGENT_QUEUES:
+                info = await admin.nc.jetstream().consumer_info(AGENT_STREAM, consumer_name(queue, agent=agent))
+                assert info.num_ack_pending == 0 and info.num_pending == 0
 
         other_team = consumer_stream("agent_inbox", "team_other")
         await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.{other_team}.agent~team_other~researcher-2")
+        await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.{other_team}.control~team_other~researcher-2")
         services = consumer_name("team_services")
         await worker.publish_refused(f"$JS.API.CONSUMER.MSG.NEXT.UA1_WORK.{services}")
         await admin.nc.jetstream().publish(f"ua.v1.{TEAM}.lead-host-1.work.team", b"the team services' work")
@@ -308,7 +319,7 @@ async def test_a_host_pulls_and_acknowledges_any_agent_of_its_team_and_no_other_
         await worker.publish_refused(services_delivery.reply, b"+ACK")
         assert (await admin.nc.jetstream().consumer_info("UA1_WORK", services)).num_ack_pending == 1
         await services_delivery.ack_sync(timeout=2)
-        assert worker.errors.empty() and lead.errors.empty()
+        assert worker.errors.empty() and lead.errors.empty() and after_move.errors.empty()
 
 
 @pytest.mark.asyncio
@@ -318,26 +329,112 @@ async def test_workers_cannot_manage_streams_speak_for_others_or_read_others_tra
         worker = await connect(stack, isolated_broker, "worker")
         await create_topology(admin, ["researcher-2"])
         own = consumer_name("agent_inbox", agent="researcher-2")
+        control = consumer_name("agent_control", agent="researcher-2")
         for subject in (
             f"$JS.API.CONSUMER.CREATE.{AGENT_STREAM}.{own}",
             f"$JS.API.CONSUMER.DURABLE.CREATE.{AGENT_STREAM}.{own}",
             f"$JS.API.CONSUMER.DELETE.{AGENT_STREAM}.{own}",
+            f"$JS.API.CONSUMER.DELETE.{AGENT_STREAM}.{control}",
             f"$JS.API.STREAM.INFO.{AGENT_STREAM}",
             f"$JS.API.STREAM.MSG.GET.{AGENT_STREAM}",
             "$JS.API.STREAM.INFO.UA1_WORK",
             "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
+            "ua.v1.team_example.lead-host-1.work.control.researcher-2",
             "ua.v1.team_example.lead-host-1.ctl.agent.researcher-2",
         ):
             await worker.publish_refused(subject)
         for subject in (
             "_INBOX.lead-host-1.>",
             "ua.v1.team_example.lead-host-1.work.agent.researcher-2",
+            "ua.v1.team_example.*.work.control.researcher-2",
             "ua.v1.team_example.*.work.>",
             "ua.v1.team_example.*.svc.team",
             "ua.v1.team_other.*.ctl.agent.researcher-2",
+            "ua.v1.team_example.*.ctl.agent.lead",
+            "ua.v1.team_example.*.ctl.agent.*",
         ):
             await worker.subscribe_refused(subject)
         assert worker.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_topology_owner_sets_up_streams_and_the_team_services_withdraw_queued_work(isolated_broker) -> None:
+    """README, "Who sets up the streams" and "Withdrawing queued work", with each role's generated grants."""
+
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        services = await connect(stack, isolated_broker, "services")
+        lead = await connect(stack, isolated_broker, "lead")
+        worker = await connect(stack, isolated_broker, "worker")
+        await create_topology(authority, ["researcher-2"])
+        owner = authority.nc.jetstream()
+        await owner.update_stream(config=stream_config("UA1_WORK"))
+        await owner.add_consumer(AGENT_STREAM, config=consumer_config("pool", pool="researcher"))
+        # Two tasks queued for researcher-2; the team services withdraw the second one.
+        kept, withdrawn = (fixtures.example_frame("task.request", name) for name in ("delegation", "delegation-for-person"))
+        for queued in (kept, withdrawn):
+            await lead.nc.jetstream().publish(queued["subject"], json.dumps(queued).encode(), headers=headers(queued))
+        work_subjects = f"ua.v1.{TEAM}.*.work.>"
+        lookup = json.dumps({"seq": 1, "next_by_subj": work_subjects}).encode()
+        await worker.publish_refused(f"$JS.API.STREAM.MSG.GET.{AGENT_STREAM}", lookup)
+        await worker.publish_refused(f"$JS.API.STREAM.MSG.DELETE.{AGENT_STREAM}", json.dumps({"seq": 1}).encode())
+        await lead.publish_refused(f"$JS.API.STREAM.CREATE.{AGENT_STREAM}")
+        # The task's copy names only the task, so the team services read their own team's
+        # stream across its work subjects and delete each verified task frame for that task.
+        services_js, sequence, found = services.nc.jetstream(), 0, []
+        while True:
+            try:
+                stored = await services_js.get_msg(AGENT_STREAM, seq=sequence + 1, subject=work_subjects, next=True)
+            except NotFoundError:  # past the stream's last message
+                break
+            sequence = stored.seq
+            if stored.headers and stored.headers.get("UA-Kind") == "task.request":
+                document = json.loads(stored.data)
+                task = fixtures.verify(stored.data, document, {"arrived_on": stored.subject, "headers": dict(stored.headers)})
+                if task.body.task_id == withdrawn["body"]["task_id"]:
+                    found.append(sequence)
+        assert len(found) == 1 and await services_js.delete_msg(AGENT_STREAM, found[0])
+        inbox = consumer_name("agent_inbox", agent="researcher-2")
+        assert (await owner.consumer_info(AGENT_STREAM, inbox)).num_pending == 1
+        # The shared UA1_WORK, which holds other teams' messages, stays out of their reach.
+        await services.publish_refused("$JS.API.STREAM.MSG.DELETE.UA1_WORK", json.dumps({"seq": 1}).encode())
+        await services.publish_refused("$JS.API.STREAM.MSG.GET.UA1_WORK", json.dumps({"seq": 1}).encode())
+        assert await owner.delete_consumer(AGENT_STREAM, consumer_name("pool", pool="researcher"))
+        assert authority.errors.empty() and services.errors.empty() and lead.errors.empty() and worker.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_custody_confirmation_reaches_a_busy_agent_past_the_tasks_waiting_in_its_inbox(isolated_broker) -> None:
+    """README, "An agent's two queues": the host reads the control queue while new work waits in the inbox.
+
+    In one queue, a host with no free slot stops pulling, so the confirmation its running
+    task needs would wait behind the new tasks.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        lead = await connect(stack, isolated_broker, "lead")
+        services = await connect(stack, isolated_broker, "services")
+        worker = await connect(stack, isolated_broker, "worker")
+        await create_topology(admin, ["researcher-2"])
+        # Two new tasks for researcher-2, which has no free slot, so its host does not pull them.
+        for name in ("delegation", "delegation-for-person"):
+            task = fixtures.example_frame("task.request", name)
+            await lead.nc.jetstream().publish(task["subject"], json.dumps(task).encode(), headers=headers(task))
+        confirmed = fixtures.example_frame("custody.confirmed", "claim-with-token")
+        stored = await services.nc.jetstream().publish(confirmed["subject"], json.dumps(confirmed).encode(),
+                                                       headers=headers(confirmed))
+        assert stored.stream == AGENT_STREAM
+        control = await worker.nc.jetstream().pull_subscribe_bind(
+            stream=AGENT_STREAM, consumer=consumer_name("agent_control", agent="researcher-2"))
+        delivered, = await control.fetch(1, timeout=2)
+        custody = fixtures.verify(delivered.data, confirmed, arrived(confirmed, delivered))
+        assert (custody.frame.audience.id, custody.body.task_id) == ("researcher-2", confirmed["body"]["task_id"])
+        await delivered.ack_sync(timeout=2)
+        # The new tasks still wait in the inbox for a free slot; nothing was taken from it.
+        inbox = await admin.nc.jetstream().consumer_info(AGENT_STREAM, consumer_name("agent_inbox", agent="researcher-2"))
+        assert (inbox.num_pending, inbox.num_ack_pending) == (2, 0)
+        assert lead.errors.empty() and services.errors.empty() and worker.errors.empty()
 
 
 @pytest.mark.asyncio
@@ -419,6 +516,24 @@ async def test_a_reassigned_task_is_delivered_again_and_its_retry_is_deduplicate
         await received.ack_sync(timeout=2)
         assert (await js.stream_info(AGENT_STREAM)).state.messages == 0
         assert lead.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_full_size_frame_is_stored_with_the_largest_headers_senders_may_set(isolated_broker) -> None:
+    """README, "NATS headers": the stream's message limit leaves max_header_bytes for headers."""
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        await create_topology(admin)
+        js = admin.nc.jetstream()
+        largest = {"Nats-Msg-Id": "task.stop:" + "k" * 118, "UA-Kind": "k" * 84, "UA-Id": "0" * 36,
+                   "traceparent": "00-" + "1" * 32 + "-" + "2" * 16 + "-01", "tracestate": "t" * 512}
+        subject = f"ua.v1.{TEAM}.lead-host-1.work.agent.researcher-2"
+        ack = await js.publish(subject, b"x" * TRANSPORT["limits"]["max_frame_bytes"], headers=largest)
+        assert (await js.get_msg(AGENT_STREAM, ack.seq)).headers["tracestate"] == "t" * 512
+        too_large = TRANSPORT["streams"]["UA1_AGENT_WORK_{team}"]["max_message_bytes"] + 1
+        with pytest.raises(nats.js.errors.APIError):
+            await js.publish(subject, b"x" * too_large)
 
 
 @pytest.mark.asyncio
@@ -526,17 +641,21 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
     """The scheduler's task names the person's gateway route as its reply target (README, "Replies").
 
     Each host publishes and pulls with its own generated grants: the scheduler puts
-    the run into the worker pool, the worker sends its result to the route the task
-    names, and the gateway reads it with the delivery reference it needs.
+    the run into the worker pool without its token, the worker claims it, the team
+    services read the claim's copy and hand the token to that worker on its agent's control
+    queue (custody.confirmed),
+    the worker sends its result to the route the task names, and the gateway reads it
+    with the delivery reference it needs.
     """
 
     async with AsyncExitStack() as stack:
         admin = await connect(stack, isolated_broker, "admin")
         scheduler = await connect(stack, isolated_broker, "scheduler")
+        services = await connect(stack, isolated_broker, "services")
         worker = await connect(stack, isolated_broker, "worker")
         gateway = await connect(stack, isolated_broker, "gateway")
         js = admin.nc.jetstream()
-        await create_topology(admin)
+        await create_topology(admin, ["researcher-2"])
         await js.add_consumer(AGENT_STREAM, config=consumer_config("pool", pool="researcher"))
         await js.add_consumer("UA1_WORK", config=consumer_config("edge", edge="web"))
         run = fixtures.example_frame("task.request", "scheduled-run")
@@ -545,8 +664,33 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         pool = await worker.nc.jetstream().pull_subscribe_bind(stream=AGENT_STREAM, consumer=consumer_name("pool", pool="researcher"))
         received, = await pool.fetch(1, timeout=2)
         task = fixtures.verify(received.data, run, arrived(run, received))
-        assert task.authority is not None and task.authority.token.schedule_id == "sched_1"
+        assert task.authority is None  # every host running the pool reads its queue
+        # The stream's own time for the frame, which the server sets: a receiver judges a
+        # queued token by it (verify_frame(stored_at=), README "On behalf of a person").
+        stored = received.metadata.timestamp
+        assert stored.tzinfo is not None and abs(datetime.now(timezone.utc) - stored) < timedelta(minutes=1)
         await received.ack_sync(timeout=2)
+        # The worker claims the run. A scheduled run's requester is the person's route, so the
+        # claim goes only to its copy; the team services read it and answer with custody.
+        claim = fixtures.example_frame("task.claimed", "scheduled-run-copy-to-team-services")
+        assert claim["body"]["task_id"] == task.body.task_id
+        await worker.nc.jetstream().publish(claim["subject"], json.dumps(claim).encode(), headers=headers(claim))
+        await js.add_consumer("UA1_WORK", config=consumer_config("team_services"))
+        team_inbox = await services.nc.jetstream().pull_subscribe_bind(stream="UA1_WORK",
+                                                                       consumer=consumer_name("team_services"))
+        delivered_claim, = await team_inbox.fetch(1, timeout=2)
+        claimed = fixtures.verify(delivered_claim.data, claim, arrived(claim, delivered_claim))
+        assert (claimed.frame.issuer.agent, claimed.body.task_id) == ("researcher-2", task.body.task_id)
+        await delivered_claim.ack_sync(timeout=2)
+        confirmed = fixtures.example_frame("custody.confirmed", "claim-with-token")
+        await services.nc.jetstream().publish(confirmed["subject"], json.dumps(confirmed).encode(), headers=headers(confirmed))
+        control = await worker.nc.jetstream().pull_subscribe_bind(stream=AGENT_STREAM,
+                                                                  consumer=consumer_name("agent_control", agent="researcher-2"))
+        delivered, = await control.fetch(1, timeout=2)
+        custody = fixtures.verify(delivered.data, confirmed, arrived(confirmed, delivered))
+        assert custody.authority is not None and custody.authority.token.schedule_id == "sched_1"
+        custody.authority.require_bound_to("root_task", task.body.work.root_task_id)
+        await delivered.ack_sync(timeout=2)
         reply_to = task.body.work.reply_to
         assert (reply_to.target, reply_to.id) == ("edge", "web") and result["audience"]["id"] == reply_to.id
         await worker.nc.jetstream().publish(result["subject"], json.dumps(result).encode(), headers=headers(result))
@@ -555,7 +699,7 @@ async def test_a_scheduled_run_reaches_its_worker_and_its_result_reaches_the_per
         answer = fixtures.verify(delivered.data, result, arrived(result, delivered))
         assert answer.body.delivery_ref == task.body.work.delivery_ref
         await delivered.ack_sync(timeout=2)
-        assert scheduler.errors.empty() and worker.errors.empty() and gateway.errors.empty()
+        assert scheduler.errors.empty() and services.errors.empty() and worker.errors.empty() and gateway.errors.empty()
 
 
 @pytest.mark.asyncio
@@ -591,7 +735,7 @@ async def test_the_scheduler_signs_a_run_token_for_a_worker_that_asks(isolated_b
 
 @pytest.mark.asyncio
 async def test_the_team_services_pass_a_queue_request_on_to_the_agent_that_holds_the_queue(isolated_broker) -> None:
-    """The gateway asks the team services, which relay the command, token unchanged, to the holder (plan 13A.4)."""
+    """The gateway asks the team services, which relay the command, token unchanged, to the holder (README, "Relays")."""
 
     async with AsyncExitStack() as stack:
         gateway = await connect(stack, isolated_broker, "gateway")

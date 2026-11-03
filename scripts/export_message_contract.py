@@ -6,8 +6,8 @@ transport.yaml, team-topologies.yaml and schemas/. This script validates them an
 writes:
 
 - contracts/messages/v1/generated/: JSON copies of the YAML files, per-role NATS
-  permissions, the AsyncAPI 3.1 document, the compatibility record and a digest
-  manifest of every source and generated file;
+  permissions, the AsyncAPI 3.1 document, the compatibility record (with the digest
+  of the contract's sources) and a digest manifest of every source and generated file;
 - custom_messages/wire/models.py: Pydantic models for the shared values, the
   frame and every body;
 - custom_messages/wire/kinds.py: the registry as Python constants, each kind's
@@ -49,7 +49,8 @@ SCHEMA_BASE = "https://universal-agents.local/contracts/messages/v1/schemas/"
 
 CLASSES = {"durable", "request_reply", "event", "dead_letter"}
 VERIFICATION = {"standard", "proof_of_possession"}
-AUTHORITY = {"none", "optional", "required"}
+# How strongly a kind asks for an authority token, weakest first.
+AUTHORITY = ("none", "optional", "required")
 ROUTING = {"requester", "holder", "team", "person", "named", "broadcast", "sender"}
 EDGES = {"up", "down", "person", "sideways", "out", "none"}
 WAKES = {"never", "always", "next_turn"}
@@ -59,9 +60,10 @@ ENTRY_FIELDS = {
     "description", "class", "address", "body", "reply", "senders", "receivers", "expiry_seconds",
     "authority", "idempotency", "admission", "routing", "topology_edge", "ledger", "wakes_model",
     "rendering", "covered_change", "copy_to", "senders_by_address", "authority_binding", "body_rules", "verification",
+    "authority_by_address",
 }
 REQUIRED_ENTRY_FIELDS = ENTRY_FIELDS - {"reply", "covered_change", "copy_to", "senders_by_address", "authority_binding",
-                                        "body_rules", "verification"}
+                                        "body_rules", "verification", "authority_by_address"}
 
 # The schema subset (contracts/messages/v1/README.md).
 ALLOWED_KEYWORDS = {
@@ -88,9 +90,8 @@ PORTABLE_ESCAPES = set(".-\\[](){}*+?|^$/")
 # with a character outside this set.
 ID_CHARACTER = re.compile(r"[A-Za-z0-9_-]")
 # Address placeholders that name the receiver. A sender may address any receiver in
-# its team. A host receives for any receiver of its team whose target transport.yaml
-# lists under team_grants; for the others, subscriptions and consumer grants keep the
-# placeholder for membership code to fill per assigned id.
+# its team. Subscriptions and consumer grants keep the placeholder, and membership code
+# fills it with each id the host runs or serves, so a host reads only its own queues.
 RECEIVER_PLACEHOLDERS = ("agent", "pool", "edge")
 # Other address placeholders: a dead-letter copy id (the body's copy_id), and the
 # sender of an installation address (<installation scope>.{sender}.svc).
@@ -102,6 +103,8 @@ AGENT_HOSTS = {"lead_host", "worker_host"}
 # scheduler answers run_context.sign at svc.scheduler) never reads copies.
 COPY_READERS = {"team_services": ["team_services"]}
 # The token type bound to one command; its binding always names the command id (`at`).
+# The host role that speaks for outside agents (README, "On behalf of a person").
+OUTSIDE_SPEAKER = "edge_adapter"
 COMMAND_BINDING = "command"
 # The permission set of a host that has not joined yet (it holds no role): it only sends
 # its own join request and reads its own reply inbox (README, "Installation traffic").
@@ -125,8 +128,17 @@ COVERED_ONLY_REFUSALS = {"change_conflict", "needs_person_decision", "record_bus
 # one of them would never repeat and could not find the stored outcome.
 PER_FRAME_PARTS = {"/message_id", "/idempotency_key", "/issued_at", "/not_before", "/expires_at", "/body_digest",
                    "/signature"}
+# The NATS headers a sender may set (README, "NATS headers"), each with the longest value it
+# holds: the idempotency key and the kind (the common schema definition whose maxLength
+# bounds them), the message id (a UUID's 36 characters), and W3C Trace Context's traceparent
+# (always 55 characters) and tracestate (senders keep it within the 512 characters W3C asks
+# every system to pass on).
+HEADER_VALUES: dict[str, str | int] = {"Nats-Msg-Id": "idempotency_key", "UA-Kind": "kind", "UA-Id": 36,
+                                       "traceparent": 55, "tracestate": 512}
+# NATS's header block: a version line, one "Name: value" line per header, and an empty line.
+NATS_HEADER_VERSION, NATS_LINE_END = "NATS/1.0\r\n", "\r\n"
 STATE_FIELDS = {"description", "bucket", "key", "signer", "signer_roles", "writers", "body", "ttl_seconds", "max_lifetime_seconds",
-                "write_rule"}
+                "fresh_seconds", "write_rule"}
 REQUIRED_STATE_FIELDS = {"description", "bucket", "key", "signer", "writers", "body", "write_rule"}
 SIGNERS = {"authority", "host"}
 
@@ -341,9 +353,10 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         where = f"registry.yaml kinds.{name}"
         check_entry_fields(where, name, entry, registry, transport, schemas)
         check_entry_addresses(where, name, entry, transport)
+        check_agent_queue(where, entry, transport)
         check_agent_addressed_edges(where, entry)
         check_idempotency(where, name, entry, schemas, registry["frame_schema"])
-        check_body_rules(where, entry, schemas)
+        check_body_rules(where, entry, schemas, registry["frame_schema"])
         check_wake_alternatives(where, entry, schemas)
         check_reply_errors(where, entry, schemas)
         check_covered_change(where, entry, registry, schemas)
@@ -370,7 +383,7 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
     if missing or unknown:
         raise ContractError(f"{where}: missing {sorted(missing)}, unknown {sorted(unknown)}")
     checks = {
-        "class": (entry["class"], CLASSES), "authority": (entry["authority"], AUTHORITY),
+        "class": (entry["class"], CLASSES), "authority": (entry["authority"], set(AUTHORITY)),
         "routing": (entry["routing"], ROUTING), "rendering": (entry["rendering"], RENDERING),
         "admission.priority": (entry["admission"].get("priority"), PRIORITIES),
     }
@@ -389,6 +402,8 @@ def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: d
         raise ContractError(f"{where}: request/reply kinds, and only they, have a reply")
     if "reply" in entry and entry["reply"]["body"] not in schemas:
         raise ContractError(f"{where}: reply schema {entry['reply']['body']} is missing")
+    check_authority_by_address(where, entry)
+    check_pool_tokens(where, entry)
     check_authority_binding(where, entry, schemas)
     if entry.get("verification", "standard") not in VERIFICATION:
         raise ContractError(f"{where}: verification must be one of {sorted(VERIFICATION)}")
@@ -411,6 +426,32 @@ def check_routing_rules(where: str, entry: dict[str, Any]) -> None:
         raise ContractError(f"{where}: admission states execution_slot, accepted_while_paused and priority")
 
 
+def check_agent_queue(where: str, entry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """A kind sent to an agent waits in its inbox only when it needs a free slot (README, "An agent's two queues").
+
+    The host reads the inbox only while the agent can start more work, so a message the
+    host could act on at once would wait there behind tasks it cannot start yet: a stop
+    or a custody renewal for the very task that holds the slot. The control queue is read
+    whenever the host runs the agent, paused or not, so everything on it is taken at once.
+    """
+
+    queues = transport["agent_queues"]
+    admission = entry["admission"]
+    for address in own_addresses(entry):
+        if address == queues["inbox"] and not admission["execution_slot"]:
+            raise ContractError(f"{where}: it needs no execution slot, so it goes to the agent's control queue "
+                                f"({queues['control']}), where it never waits behind new work")
+        if address == queues["inbox"] and admission["accepted_while_paused"]:
+            raise ContractError(f"{where}: a paused agent's host does not read its inbox, so a kind sent there is not "
+                                "accepted while paused")
+        if address == queues["control"] and admission["execution_slot"]:
+            raise ContractError(f"{where}: it needs an execution slot, so it waits in the agent's inbox "
+                                f"({queues['inbox']}): the host reads the control queue even when no slot is free")
+        if address == queues["control"] and not admission["accepted_while_paused"]:
+            raise ContractError(f"{where}: the host reads the control queue while the agent is paused, so a kind sent "
+                                "there is accepted while paused")
+
+
 def check_agent_addressed_edges(where: str, entry: dict[str, Any]) -> None:
     """A kind an agent sends to another agent, a worker pool or an edge route names the edges it may take.
 
@@ -431,6 +472,24 @@ def check_agent_addressed_edges(where: str, entry: dict[str, Any]) -> None:
 
 
 
+def address_authority(entry: dict[str, Any], address: str) -> str:
+    """Whether frames to one of the kind's addresses carry a token: its own authority, or a narrower one for that address."""
+
+    return str(entry.get("authority_by_address", {}).get(address, entry["authority"]))
+
+
+def check_authority_by_address(where: str, entry: dict[str, Any]) -> None:
+    """``authority_by_address`` only narrows the kind's authority, for some of its own addresses."""
+
+    narrower = entry.get("authority_by_address", {})
+    if not isinstance(narrower, dict):
+        raise ContractError(f"{where}: authority_by_address maps some of its own addresses to an authority")
+    for address, authority in narrower.items():
+        if address not in own_addresses(entry) or authority not in AUTHORITY \
+                or AUTHORITY.index(authority) >= AUTHORITY.index(entry["authority"]):
+            raise ContractError(f"{where}: authority_by_address narrows the authority of one of its own addresses")
+
+
 def token_bindings(entry: dict[str, Any]) -> list[dict[str, Any]]:
     """The kind's ``authority_binding`` as a list: one binding, or a list of them, one per token type."""
 
@@ -440,11 +499,20 @@ def token_bindings(entry: dict[str, Any]) -> list[dict[str, Any]]:
     return list(binding) if isinstance(binding, list) else [binding]
 
 
+def check_pool_tokens(where: str, entry: dict[str, Any]) -> None:
+    """Every host that runs a worker pool reads its queue, so no kind carries a token into one (README, "On behalf of a person")."""
+
+    for address in own_addresses(entry):
+        if audience_target(address) == "pool" and address_authority(entry, address) != "none":
+            raise ContractError(f"{where}: every host running a pool reads its queue, so {address} carries no authority "
+                                "token: set its authority_by_address to none")
+
+
 def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
     """A kind that takes a token lists each token type it takes, where the body names its record, and who presents it.
 
     A binding is ``{type, at?, senders?}``. A command token always names its
-    command in the body (``at``): the plan binds commands to the command id, and
+    command in the body (``at``): a command token is bound to its command's id, and
     the receiver checks the field that names it. ``senders`` narrows who may
     present that type; without it every sender of the frame's address may. A kind
     that requires a token must accept one from each of its senders.
@@ -462,6 +530,11 @@ def check_authority_binding(where: str, entry: dict[str, Any], schemas: dict[str
     for binding in bindings:
         check_binding_parameters(where, entry, schemas, binding)
     check_binding_presenters(where, entry, bindings)
+    # Outside agents never hold a person's token, so the role that speaks for them presents none.
+    if OUTSIDE_SPEAKER in entry["senders"] and any(OUTSIDE_SPEAKER in binding.get("senders", entry["senders"])
+                                                   for binding in bindings):
+        raise ContractError(f"{where}: the {OUTSIDE_SPEAKER} speaks for outside agents and presents no token; leave it "
+                            "out of the binding's senders")
 
 
 def check_binding_parameters(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]],
@@ -479,9 +552,9 @@ def check_binding_parameters(where: str, entry: dict[str, Any], schemas: dict[st
 def check_binding_presenters(where: str, entry: dict[str, Any], bindings: list[dict[str, Any]]) -> None:
     """Every sender of a token-required operation can present one of its accepted token types."""
 
-    if entry["authority"] != "required":
-        return
     for address in own_addresses(entry):
+        if address_authority(entry, address) != "required":
+            continue
         for sender in address_senders(entry, address):
             if not any(sender in binding.get("senders", [sender]) for binding in bindings):
                 raise ContractError(f"{where}: {sender} sends it to {address} but may present none of its token types")
@@ -743,16 +816,35 @@ def reply_alternatives(entry: dict[str, Any], schemas: dict[str, dict[str, Any]]
 
 
 class BodyFields:
-    """Looks up a kind's body fields by JSON pointer, for checking its body rules."""
+    """Looks up a kind's body fields by JSON pointer, for checking its body rules.
 
-    def __init__(self, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    ``frame_schema`` also lets a rule name a field of the frame around the body
+    (``/issued_at``), where a rule allows one.
+    """
+
+    def __init__(self, entry: dict[str, Any], schemas: dict[str, dict[str, Any]], frame_schema: str = "") -> None:
         self.resolver = ModelWriter(schemas)
         self.file, self.root = entry["body"], schemas[entry["body"]]
+        self.frame_file, self.frame_root = frame_schema, schemas.get(frame_schema, {})
 
     def leaves(self, pointer: Any) -> list[tuple[str, dict[str, Any]]]:
         if not isinstance(pointer, str) or not pointer.startswith("/body/"):
             return []
         return schema_leaves(self.resolver, self.file, self.root, pointer.split("/")[2:])
+
+    def frame_leaves(self, pointer: Any) -> list[tuple[str, dict[str, Any]]]:
+        """A field of the frame outside the body, such as ``/issued_at``."""
+
+        if not isinstance(pointer, str) or not re.fullmatch(r"(/[a-z_]+)+", pointer) or pointer.startswith("/body/"):
+            return []
+        return schema_leaves(self.resolver, self.frame_file, self.frame_root, pointer[1:].split("/"))
+
+    def timestamp(self, pointer: Any, in_frame: bool = False) -> bool:
+        """Whether every schema the pointer reaches is the shared timestamp definition."""
+
+        leaves = self.frame_leaves(pointer) if in_frame else self.leaves(pointer)
+        return bool(leaves) and all(node is self.resolver.node("common.schema.json", "/$defs/timestamp")
+                                    for _file, node in leaves)
 
     def defined(self, pointer: Any, kind: str | None = None) -> bool:
         leaves = self.leaves(pointer)
@@ -769,28 +861,65 @@ class BodyFields:
     def fits(self, pointer: str, value: Any) -> bool:
         return any(value_fits(self.resolver, file, node, value) for file, node in self.leaves(pointer))
 
+    def holds(self, pointer: str, value: Any) -> bool:
+        """Whether the field, or each item of it when it is a list, could hold ``value``."""
+
+        leaves = self.leaves(pointer)
+        return bool(leaves) and any(
+            any(value_fits(self.resolver, item_file, item, value)
+                for item_file, item in schema_leaves(self.resolver, file, node["items"], []))
+            if resolved_type(self.resolver, file, node) == "array" else value_fits(self.resolver, file, node, value)
+            for file, node in leaves)
+
 
 def unique_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
     return set(rule) <= {"unique", "by"} and fields.defined(rule.get("unique"), "array") \
         and ("by" not in rule or fields.items_have(rule["unique"], rule["by"]))
 
 
+def conditions_valid(conditions: Any, fields: BodyFields) -> bool:
+    """A rule's ``when``: at least one {at, is}, each naming a body field that can hold the value."""
+
+    return isinstance(conditions, list) and bool(conditions) and all(
+        isinstance(c, dict) and set(c) == {"at", "is"} and fields.defined(c["at"]) and fields.fits(c["at"], c["is"])
+        for c in conditions)
+
+
 def requires_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
-    return set(rule) == {"requires", "when"} and fields.defined(rule["requires"]) and bool(rule["when"]) \
-        and all(set(c) == {"at", "is"} and fields.defined(c["at"]) and fields.fits(c["at"], c["is"]) for c in rule["when"])
+    return set(rule) == {"requires", "when"} and fields.defined(rule["requires"]) and conditions_valid(rule["when"], fields)
+
+
+def allowed_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    """``{allowed, values, when}``: distinct values the field (or each item of a list) can hold, under conditions."""
+
+    values = rule.get("values")
+    return set(rule) == {"allowed", "values", "when"} and isinstance(values, list) and bool(values) \
+        and len({json.dumps(value) for value in values}) == len(values) \
+        and all(fields.holds(rule["allowed"], value) for value in values) and conditions_valid(rule["when"], fields)
 
 
 def any_of_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
     return set(rule) == {"any_of"} and len(rule["any_of"]) > 1 and all(fields.defined(p) for p in rule["any_of"])
 
 
-def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
-    """Each rule is one of the three README shapes and names fields its body defines, with values they can hold."""
+def ends_within_rule_valid(rule: dict[str, Any], fields: BodyFields) -> bool:
+    """``{ends_within, of, seconds}``: a body timestamp at most ``seconds`` after another body or frame timestamp."""
 
-    fields = BodyFields(entry, schemas)
+    seconds = rule.get("seconds")
+    return set(rule) == {"ends_within", "of", "seconds"} and type(seconds) is int and seconds > 0 \
+        and fields.timestamp(rule["ends_within"]) and rule["of"] != rule["ends_within"] \
+        and (fields.timestamp(rule["of"]) or fields.timestamp(rule["of"], in_frame=True))
+
+
+def check_body_rules(where: str, entry: dict[str, Any], schemas: dict[str, dict[str, Any]], frame_schema: str) -> None:
+    """Each rule is one of the five README shapes and names fields its body defines, with values they can hold."""
+
+    fields = BodyFields(entry, schemas, frame_schema)
     for rule in entry.get("body_rules", []):
-        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)):
-            raise ContractError(f"{where}: body rule {rule} is not a unique, requires or any_of rule over its body's fields")
+        if not (unique_rule_valid(rule, fields) or requires_rule_valid(rule, fields) or any_of_rule_valid(rule, fields)
+                or allowed_rule_valid(rule, fields) or ends_within_rule_valid(rule, fields)):
+            raise ContractError(f"{where}: body rule {rule} is not a unique, requires, any_of, allowed or ends_within rule "
+                                "over its body's fields")
 
 
 def value_fits(resolver: "ModelWriter", file: str, node: dict[str, Any], value: Any) -> bool:
@@ -896,22 +1025,41 @@ def check_state_records(registry: dict[str, Any], transport: dict[str, Any], sch
         bucket_ttl = transport["key_value"][entry["bucket"]]["per_key_ttl_seconds"]
         if entry.get("ttl_seconds", 0) != bucket_ttl:
             raise ContractError(f"{where}: ttl_seconds is its bucket's per_key_ttl_seconds ({bucket_ttl}), and only then present")
-        lifetime = entry.get("max_lifetime_seconds", 1)
-        if type(lifetime) is not int or lifetime < 1 or ("max_lifetime_seconds" in entry and bucket_ttl):
-            raise ContractError(f"{where}: max_lifetime_seconds is a positive whole number, for records whose bucket keeps them")
+        check_record_ages(where, entry, bucket_ttl)
+
+
+def check_record_ages(where: str, entry: dict[str, Any], bucket_ttl: int) -> None:
+    """A longest lifetime only for records whose bucket keeps them, and a fresh age shorter than that lifetime."""
+
+    lifetime = entry.get("max_lifetime_seconds", 1)
+    if type(lifetime) is not int or lifetime < 1 or ("max_lifetime_seconds" in entry and bucket_ttl):
+        raise ContractError(f"{where}: max_lifetime_seconds is a positive whole number, for records whose bucket keeps them")
+    fresh = entry.get("fresh_seconds")
+    if fresh is not None and (type(fresh) is not int or fresh < 1 or "max_lifetime_seconds" not in entry
+                              or fresh >= entry["max_lifetime_seconds"]):
+        raise ContractError(f"{where}: fresh_seconds is a positive whole number, shorter than the record's "
+                            "max_lifetime_seconds")
 
 
 def check_shared_lists(registry: dict[str, Any], transport: dict[str, Any], topologies: dict[str, Any],
                        schemas: dict[str, dict[str, Any]]) -> None:
     """Lists the schemas repeat must match the registry and topologies they come from."""
 
-    refusals = {item["code"] for item in registry["verification_refusals"]}
+    for item in registry["verification_refusals"]:
+        if not set(item) <= {"code", "meaning", "temporary"} or item.get("temporary", True) is not True:
+            raise ContractError(f"registry.yaml: refusal {item.get('code')} has a code, a meaning and optionally temporary: true")
+    # A temporary refusal waits for what the receiver lacks, so no message is set aside for it.
+    refusals = {item["code"] for item in registry["verification_refusals"] if not item.get("temporary")}
+    temporary = {item["code"] for item in registry["verification_refusals"] if item.get("temporary")}
     for entry in registry["kinds"].values():
         if entry["class"] == "dead_letter":
             reasons = set(schemas[entry["body"]]["properties"]["reason"]["enum"])
             if not refusals <= reasons:
                 raise ContractError(f"{entry['body']}: a notice's reason names every verification refusal; missing "
                                     f"{sorted(refusals - reasons)}")
+            if reasons & temporary:
+                raise ContractError(f"{entry['body']}: a notice's reason names no temporary refusal; remove "
+                                    f"{sorted(reasons & temporary)}")
 
     common = schemas["common.schema.json"]["$defs"]
     if set(common["host_role"]["enum"]) != set(registry["host_roles"]):
@@ -1008,7 +1156,68 @@ def check_transport(transport: dict[str, Any]) -> None:
             raise ContractError(f"transport.yaml: class {name} states between_installations")
         check_class_streams(name, spec, transport, skew)
     check_stream_subjects(transport)
-    check_team_grants(transport)
+    check_agent_queues(transport)
+
+
+def check_agent_queues(transport: dict[str, Any]) -> None:
+    """An agent's queued messages go to one of its two queues, each with its own consumer (README, "An agent's two queues")."""
+
+    queues = transport.get("agent_queues")
+    durable = [address for address in transport["classes"]["durable"]["addresses"] if audience_target(address) == "agent"]
+    if not isinstance(queues, dict) or set(queues) != {"inbox", "control"} or sorted(queues.values()) != sorted(durable) \
+            or len(durable) != 2:
+        raise ContractError("transport.yaml: agent_queues names the inbox and the control queue, the durable class's "
+                            "two agent addresses")
+    prefix = transport["subject_prefix"].replace("{sender}", "*") + "."
+    filters = [consumer["filter"] for consumer in transport["consumers"].values()]
+    for queue, address in queues.items():
+        if filters.count(prefix + address) != 1:
+            name = "control queue" if queue == "control" else queue
+            raise ContractError(f"transport.yaml: the agent's {name} ({address}) has exactly one consumer, so the host "
+                                "reads it on its own")
+
+
+def largest_header_block(schemas: dict[str, dict[str, Any]]) -> int:
+    """Bytes of the largest NATS header block a sender may set (HEADER_VALUES)."""
+
+    common = schemas["common.schema.json"]["$defs"]
+    sizes = {name: value if isinstance(value, int) else int(common[value]["maxLength"]) for name, value in HEADER_VALUES.items()}
+    return len(NATS_HEADER_VERSION) + sum(len(f"{name}: {NATS_LINE_END}") + size for name, size in sizes.items()) \
+        + len(NATS_LINE_END)
+
+
+def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> None:
+    """Every stream stores a full-size frame with its headers, which JetStream counts in a message's size."""
+
+    limits = transport["limits"]
+    largest = largest_header_block(schemas)
+    if not isinstance(limits.get("max_header_bytes"), int) or limits["max_header_bytes"] < largest:
+        raise ContractError(f"transport.yaml: max_header_bytes holds the largest header block senders may set, {largest} bytes")
+    message = limits["max_frame_bytes"] + limits["max_header_bytes"]
+    if message > limits["nats_max_payload_bytes"]:
+        raise ContractError("transport.yaml: a frame and its headers fit nats_max_payload_bytes")
+    for name, stream in transport["streams"].items():
+        if stream.get("max_message_bytes") != message:
+            raise ContractError(f"transport.yaml: stream {name}'s max_message_bytes is max_frame_bytes plus max_header_bytes")
+    credential = schemas["common.schema.json"]["$defs"]["connection_credential"]["properties"]["jwt"]["maxLength"]
+    if limits.get("max_credential_bytes") != credential:
+        raise ContractError("transport.yaml: max_credential_bytes is the connection credential's jwt maxLength in "
+                            "common.schema.json")
+
+
+def check_stream_management(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """The topology owner and the withdrawal role are host roles; withdrawal deletes only from durable work streams."""
+
+    withdrawal = transport.get("withdrawal")
+    if transport.get("topology_owner") not in registry["host_roles"] or not isinstance(withdrawal, dict) \
+            or set(withdrawal) != {"role", "streams"} or withdrawal["role"] not in registry["host_roles"]:
+        raise ContractError("transport.yaml: topology_owner and withdrawal.role name host roles")
+    work = set(transport["classes"]["durable"]["streams"])
+    if not withdrawal["streams"] or not set(withdrawal["streams"]) <= work:
+        raise ContractError("transport.yaml: withdrawal deletes queued work only from the durable class's streams")
+    if not all("{team}" in stream for stream in withdrawal["streams"]):
+        raise ContractError("transport.yaml: withdrawal reads and deletes only in per-team streams ({team}), so it never "
+                            "reaches another team's messages")
 
 
 def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
@@ -1115,40 +1324,6 @@ def check_address_storage(class_name: str, streams: list[str] | None, address: s
         raise ContractError(f"transport.yaml: {address} is stored in exactly one of the {class_name} class's streams")
 
 
-def granted_target(consumer: dict[str, Any], transport: dict[str, Any]) -> str | None:
-    """The team-granted audience target whose work a consumer delivers, if any."""
-
-    placeholders = set(re.findall(r"\{([a-z_]+)\}", consumer["filter"])) & set(RECEIVER_PLACEHOLDERS)
-    granted = placeholders & set(transport["team_grants"])
-    return next(iter(granted), None)
-
-
-def check_team_grants(transport: dict[str, Any]) -> None:
-    """A grant on every consumer of a stream reaches only team-granted work of one team.
-
-    Team-granted consumers live in streams named with {team}, beside no other consumers,
-    and the targets sharing one stream are served by the same roles; otherwise a host
-    could read another team's work, an edge's or the team services', or work its role
-    does not serve.
-    """
-
-    grants = transport.get("team_grants")
-    if not isinstance(grants, list) or not set(grants) <= set(RECEIVER_PLACEHOLDERS) or len(set(grants)) != len(grants):
-        raise ContractError(f"transport.yaml: team_grants lists distinct targets among {list(RECEIVER_PLACEHOLDERS)}")
-    by_stream: dict[str, set[str | None]] = {}
-    for consumer in transport["consumers"].values():
-        by_stream.setdefault(consumer["stream"], set()).add(granted_target(consumer, transport))
-    for stream, targets in by_stream.items():
-        if targets == {None}:
-            continue
-        if None in targets:
-            raise ContractError(f"transport.yaml: stream {stream} holds team-granted consumers beside others")
-        if "{team}" not in stream:
-            raise ContractError(f"transport.yaml: stream {stream} holds team-granted consumers and is named with {{team}}")
-        if len({tuple(transport["audience_targets"][target]) for target in targets}) != 1:
-            raise ContractError(f"transport.yaml: the targets read from stream {stream} are served by the same roles")
-
-
 def class_addresses(transport: dict[str, Any], delivery_class: str) -> list[str]:
     spec = transport["classes"][delivery_class]
     return list(spec["addresses"]) + list(spec.get("installation_addresses", []))
@@ -1180,20 +1355,13 @@ def publication_addresses(entry: dict[str, Any], transport: dict[str, Any]) -> l
     return addresses
 
 
-def receive_pattern(address: str, transport: dict[str, Any]) -> str:
-    """The address a receiving host is granted: any receiver of its team for team-granted targets."""
-
-    return re.sub(r"\{(" + "|".join(transport["team_grants"]) + r")\}", "*", address)
-
-
 def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     """Pull, inspect and acknowledge the consumers for this delivery address.
 
-    A team-granted target's consumers fill a stream of their own per team, so the
-    grant covers every consumer of the host's team's stream. Other consumer names keep
-    their {team} and receiver placeholders; membership code fills them with the host's
-    own team and each id it serves, never with wildcards. Creating consumers stays
-    with the topology owner.
+    Consumer names keep their {team} and receiver placeholders; membership code fills
+    them with the host's own teams and each id it runs or serves, never with wildcards,
+    so a host reads no other host's agents' queues. Creating consumers stays with the
+    topology owner.
     """
 
     expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address
@@ -1203,31 +1371,57 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     subjects = set()
     for consumer in matches:
         stream = consumer["stream"]
-        name = "*" if granted_target(consumer, transport) else consumer["name"]
+        name = consumer["name"]
         subjects.update({
             f"$JS.API.CONSUMER.INFO.{stream}.{name}",
             f"$JS.API.CONSUMER.MSG.NEXT.{stream}.{name}",
-            f"$JS.ACK.{stream}.>" if name == "*" else f"$JS.ACK.{stream}.{name}.>",
+            f"$JS.ACK.{stream}.{name}.>",
         })
     return subjects
+
+
+def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
+    """The JetStream API subjects of the topology owner and of the role that withdraws queued work.
+
+    The topology owner creates, updates and inspects every stream, and creates, inspects
+    and deletes every consumer of them. Consumer names are a wildcard for it: it serves
+    every agent, pool and edge, and membership code fills {team} with every team of the
+    installation. The withdrawal role reads its own team's stream to find a queued
+    message and deletes it by its stream sequence; NATS cannot narrow either to some
+    subjects of a stream, so withdrawal uses per-team streams only.
+    """
+
+    owner: set[str] = set()
+    for stream in transport["streams"]:
+        owner |= {f"$JS.API.STREAM.{action}.{stream}" for action in ("CREATE", "UPDATE", "INFO")}
+    for stream in {consumer["stream"] for consumer in transport["consumers"].values()}:
+        owner |= {f"$JS.API.CONSUMER.CREATE.{stream}.*", f"$JS.API.CONSUMER.CREATE.{stream}.*.>",
+                  f"$JS.API.CONSUMER.DURABLE.CREATE.{stream}.*", f"$JS.API.CONSUMER.INFO.{stream}.*",
+                  f"$JS.API.CONSUMER.DELETE.{stream}.*"}
+    grants = {transport["topology_owner"]: owner}
+    withdrawal = transport["withdrawal"]
+    grants.setdefault(withdrawal["role"], set()).update(
+        f"$JS.API.STREAM.MSG.{action}.{stream}" for stream in withdrawal["streams"] for action in ("GET", "DELETE"))
+    return grants
 
 
 def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Per host role: the NATS permissions it gets, as templates.
 
-    {team} is each team the host serves and {self} its runtime id. A host receives
-    requests and work for any agent or pool of its teams (transport.yaml team_grants),
-    so its permissions do not grow with its agents; the signed audience names the
-    agent. {edge} is each edge the host serves: membership code repeats a subject once
-    per id and never turns one into a wildcard. A host publishes only under its own id.
+    {team} is each team the host serves and {self} its runtime id. {agent}, {pool} and
+    {edge} are each agent and pool the host runs and each edge it serves: membership
+    code repeats a subject once per id and never turns one into a wildcard, so a host
+    receives requests and queued work only for its own agents and pools, and its
+    credential changes when it gains or loses one. A host publishes only under its own id.
     A receiver of requests answers each one once, within the class's expiry, through
     NATS allow_responses; it holds no grant on other runtimes' inboxes.
     """
 
     reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
+    management = stream_management_grants(transport)
     result = {}
     for role in registry["host_roles"]:
-        publish: set[str] = set()
+        publish: set[str] = set(management.get(role, set()))
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
@@ -1240,8 +1434,8 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
                     publish.update(consumer_permissions(address, transport))
                 elif entry["class"] != "dead_letter":
                     # Dead letters wait in UA1_DLQ; its read grants come with the services
-                    # that read it (message contract plan 13A.9), not as a subscription.
-                    subscribe.add(full_subject(receive_pattern(address, transport), "*"))
+                    # that read it, not as a subscription.
+                    subscribe.add(full_subject(address, "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
         if answers_requests:
@@ -1339,17 +1533,56 @@ def address_operations(key: str, entry: dict[str, Any], address: str, channel_id
     return operations
 
 
-def compatibility(registry: dict[str, Any]) -> dict[str, Any]:
+# The kinds of file the contract's sources are; the digest covers only these (README, "Versions").
+SOURCE_SUFFIXES = frozenset({".md", ".yaml", ".json"})
+
+
+def contract_sources(root: Path = CONTRACT) -> list[Path]:
+    """The contract's source files under ``root``: its Markdown, YAML and JSON files outside generated/.
+
+    A hidden file or folder (a name starting with ".") and any other kind of file, such
+    as an editor's backup or a desktop's folder index, is no source, so it never
+    changes the digest.
+    """
+
+    generated = root / GENERATED.relative_to(CONTRACT)
+    return sorted(path for path in root.rglob("*")
+                  if path.is_file() and path.suffix in SOURCE_SUFFIXES and generated not in path.parents
+                  and not any(part.startswith(".") for part in path.relative_to(root).parts))
+
+
+def contract_sha256(files: dict[Path, str], root: Path = CONTRACT) -> str:
+    """The digest of the contract's sources (README, "Versions"): its source files, see ``contract_sources``.
+
+    In order of their paths relative to the folder, compared as UTF-8 bytes, it hashes
+    each path in UTF-8, a zero byte, the file's size in decimal digits, a zero byte and
+    the file's bytes. Examples and vectors count as this run renders them, so the digest
+    never depends on a stale signature.
+    """
+
+    generated = root / GENERATED.relative_to(CONTRACT)
+    paths = set(contract_sources(root))
+    paths |= {path for path in files if root in path.parents and generated not in path.parents}
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix().encode("utf-8")):
+        data = files[path].encode("utf-8") if path in files else path.read_bytes()
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0" + str(len(data)).encode("ascii")
+                      + b"\0" + data)
+    return digest.hexdigest()
+
+
+def compatibility(registry: dict[str, Any], digest: str) -> dict[str, Any]:
     label = registry["protocol"]
     major, rest = label.split(".", 1)
     return {
         "protocol": label,
+        "contract_sha256": digest,
         "accepts": {"major": int(major), "label": rest.split("-", 1)[1] if "-" in rest else None,
-                    "minors": "any; a newer minor's unknown optional fields are ignored"},
+                    "minors": "any; a newer minor's unknown optional fields are ignored",
+                    "contract_sha256": "the same, while the label ends in -pre"},
         "signing_domain": registry["signing_domain"],
         "state_signing_domain": registry["state_signing_domain"],
         "authority_token_domain": registry["authority_token_domain"],
-        "decision_token_domain": registry["decision_token_domain"],
         "kinds": sorted(registry["kinds"]),
         "state_records": sorted(registry["state_records"]),
     }
@@ -1566,6 +1799,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
             f"        receivers={tuple(entry['receivers'])!r},\n"
             f"        expiry_seconds={entry['expiry_seconds']!r},\n"
             f"        authority={entry['authority']!r},\n"
+            f"        authority_by_target={ {audience_target(a): v for a, v in entry.get('authority_by_address', {}).items()}!r},\n"
             f"        authority_binding={binding_text(entry)},\n"
             f"        body_rules={tuple(entry.get('body_rules', ()))!r},\n"
             f"        execution_slot={entry['admission']['execution_slot']!r},\n"
@@ -1585,7 +1819,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"    {name!r}: StateSpec(name={name!r}, bucket={entry['bucket']!r}, key={entry['key']!r}, "
         f"signer={entry['signer']!r}, signer_roles={tuple(entry.get('signer_roles', ()))!r}, "
         f"writers={tuple(entry['writers'])!r}, ttl_seconds={entry.get('ttl_seconds')!r}, "
-        f"max_lifetime_seconds={entry.get('max_lifetime_seconds')!r}, "
+        f"max_lifetime_seconds={entry.get('max_lifetime_seconds')!r}, fresh_seconds={entry.get('fresh_seconds')!r}, "
         f"body_model=models.{class_name(name)}StateAdapter, "
         f"body_shape={shape(writer, entry['body'], schemas[entry['body']])!r}),"
         for name, entry, _body in states
@@ -1599,12 +1833,12 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
         f"AUTHORITY_TOKEN_DOMAIN = {registry['authority_token_domain']!r}\n"
-        f"DECISION_TOKEN_DOMAIN = {registry['decision_token_domain']!r}\n"
         f"RENEW_KEY_PROOF_DOMAIN = {registry['renew_key_proof_domain']!r}\n"
         f"AUTHORITY_TOKEN_MAX_SECONDS = {registry['authority_token_max_seconds']!r}\n"
         f"COMMAND_TOKEN_MAX_SECONDS = {registry['command_token_max_seconds']!r}\n"
         f"CERTIFICATE_OVERLAP_SECONDS = {registry['certificate_overlap_seconds']!r}\n"
         f"MAX_FRAME_BYTES = {registry['max_frame_bytes']!r}\n"
+        f"MAX_HEADER_BYTES = {transport['limits']['max_header_bytes']!r}\n"
         f"MAX_NESTING_DEPTH = {registry['max_nesting_depth']!r}\n"
         f"CLOCK_SKEW_SECONDS = {transport['clock_skew_seconds']!r}\n"
         f"REPLAY_LEDGER_RETENTION_SECONDS = {transport['replay_ledger_retention_seconds']!r}\n"
@@ -1615,6 +1849,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"INSTALLATION_ADDRESS_PREFIX = {INSTALLATION_ADDRESS!r}\n"
         f"BETWEEN_INSTALLATIONS = frozenset({between!r})\n"
         f"VERIFICATION_REFUSALS = {tuple(item['code'] for item in registry['verification_refusals'])!r}\n"
+        f"TEMPORARY_REFUSALS = frozenset({sorted(item['code'] for item in registry['verification_refusals'] if item.get('temporary'))!r})\n"
         f"CHANGE_REFUSALS = {tuple(item['code'] for item in registry['change_refusals'])!r}\n"
         f"COVERED_RECORD_KINDS = {tuple(registry['covered_record_kinds'])!r}\n"
         f"RETRY_OUTCOMES = frozenset({sorted(registry['retry_outcomes'])!r})\n"
@@ -1634,22 +1869,24 @@ def render() -> dict[Path, str]:
     if registry["max_frame_bytes"] != transport["limits"]["max_frame_bytes"]:
         raise ContractError("registry.yaml and transport.yaml disagree on the frame size limit")
     check_transport(transport)
+    check_message_sizes(transport, schemas)
     check_consumer_names(transport)
     check_registry(registry, transport, topologies, schemas)
+    check_stream_management(registry, transport)
     files: dict[Path, str] = {
         GENERATED / "registry.json": json_text(registry),
         GENERATED / "transport.json": json_text(transport),
         GENERATED / "team-topologies.json": json_text(topologies),
         GENERATED / "asyncapi.json": json_text(asyncapi(registry, transport)),
-        GENERATED / "compatibility.json": json_text(compatibility(registry)),
     }
     for role, document in permissions(registry, transport).items():
         files[GENERATED / "permissions" / f"{role}.json"] = json_text(document)
     files.update(render_python(registry, schemas, transport, topologies))
     # Examples are sources whose digests and signatures this run fills in; the
-    # manifest records them as rendered.
+    # contract digest and the manifest record them as rendered.
     files.update(render_examples(registry))
-    sources = sorted(path for path in CONTRACT.rglob("*") if path.is_file() and GENERATED not in path.parents)
+    files[GENERATED / "compatibility.json"] = json_text(compatibility(registry, contract_sha256(files)))
+    sources = contract_sources()
     entries = {path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
     entries.update({path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(text.encode("utf-8")).hexdigest()
                     for path, text in files.items()})

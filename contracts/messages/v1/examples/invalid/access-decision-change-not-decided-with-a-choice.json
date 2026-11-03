@@ -1,0 +1,14 @@
+{
+  "description": "Nobody decided, so the outcome carries no choice.",
+  "refusal": "invalid_body",
+  "at": "/body/status/choice",
+  "base": "access.decision/change-not-decided.json",
+  "changes": [
+    {
+      "set": "/body/status/choice",
+      "to": "keep_current"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"access.decision\", \"message_id\": \"01928f3a-7b2c-733e-8000-00000000033e\", \"idempotency_key\": \"access.decision:V_5UMLkqCReyjTYrhpYnt0Uu2PYIe9NG1Kbl1Ffr1ao\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.control.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"areq_3\", \"task_id\": \"task_sub_1\", \"status\": {\"state\": \"change_not_decided\", \"choice\": \"keep_current\"}}, \"body_digest\": \"GqK9BB00c47TH3Ns2-J9MEIkRkTZA9lytgo0pSqaI6E\", \"signature\": \"y0fq0rFrYgGAdqRN2DeWy_ht4iP3XJU5oatZ79sTjIHo7tbnr3JCeSBqPwa1ln85qD3M4ZItQenFV8ILHpyZDQ\"}"
+}

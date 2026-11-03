@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.decision.schema.json",
   "title": "access.decision body",
-  "description": "What became of an access request, sent to the waiting task.",
+  "description": "What became of an access request or a change review, sent to the waiting task.",
   "type": "object",
   "properties": {
     "request_id": {
@@ -35,6 +35,10 @@
                 "until",
                 "until_revoked"
               ]
+            },
+            "access_list": {
+              "description": "The task's new access list, with a higher sequence; sent when the holder's host certificate names its tools (README, \"Access on remote hosts\").",
+              "$ref": "../common.schema.json#/$defs/task_access_list"
             }
           },
           "required": [
@@ -89,6 +93,10 @@
             },
             "expires_at": {
               "$ref": "../common.schema.json#/$defs/timestamp"
+            },
+            "access_list": {
+              "description": "The task's new access list, with a higher sequence; sent when the holder's host certificate names its tools (README, \"Access on remote hosts\").",
+              "$ref": "../common.schema.json#/$defs/task_access_list"
             }
           },
           "required": [
@@ -123,7 +131,8 @@
               "type": "string",
               "enum": [
                 "lead",
-                "task_ended"
+                "task_ended",
+                "person_message"
               ]
             }
           },
@@ -156,8 +165,10 @@
               "enum": [
                 "blocked",
                 "invalid_target",
-                "not_allowed"
-              ]
+                "not_allowed",
+                "not_own_case"
+              ],
+              "description": "blocked, invalid_target and not_allowed refuse access asks; not_own_case refuses a change review whose case the store opened for another request."
             },
             "message": {
               "$ref": "../common.schema.json#/$defs/note_text"
@@ -167,6 +178,48 @@
             "state",
             "code",
             "message"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "The person decided a change review; the task acts on the choice (README, \"Change reviews\").",
+          "properties": {
+            "state": {
+              "const": "change_decided"
+            },
+            "choice": {
+              "type": "string",
+              "enum": [
+                "keep_current",
+                "use_change",
+                "stop_request"
+              ]
+            },
+            "note": {
+              "$ref": "../common.schema.json#/$defs/note_text"
+            },
+            "seen_version": {
+              "description": "The record's version that the brief showed. On use_change the task sends its change again as a new command with this seen_version; absent when the operation takes no version.",
+              "$ref": "../common.schema.json#/$defs/record_version"
+            }
+          },
+          "required": [
+            "state",
+            "choice"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "Nobody decided the change review by its deadline; the change was not made.",
+          "properties": {
+            "state": {
+              "const": "change_not_decided"
+            }
+          },
+          "required": [
+            "state"
           ],
           "additionalProperties": false
         }

@@ -11,6 +11,7 @@
         "agent",
         "agent_session",
         "agreement",
+        "block_list",
         "certificate",
         "host",
         "placement",

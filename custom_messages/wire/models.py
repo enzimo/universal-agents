@@ -21,19 +21,19 @@ TokenId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,
 InstallationId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$')]
 
 
-TeamId = TokenId
+TeamId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$')]
 
 
 RuntimeId = TokenId
 
 
-AgentId = TokenId
+AgentId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')]
 
 
 DurableOwnerId = Annotated[str, StringConstraints(min_length=1, max_length=16384)]
 
 
-AgentType = TokenId
+AgentType = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$')]
 
 
 SessionId = TokenId
@@ -87,7 +87,7 @@ class BlobRef(WireModel):
     name: Union[Annotated[str, StringConstraints(min_length=1, max_length=255)], MISSING] = Field(default=MISSING)
 
 
-ScopeId = Annotated[str, StringConstraints(pattern='^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$')]
+ScopeId = Annotated[str, StringConstraints(pattern='^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,23})$')]
 
 
 class Issuer(WireModel):
@@ -211,6 +211,12 @@ TimeZone = Annotated[str, StringConstraints(pattern='^[A-Za-z][A-Za-z0-9_+-]{0,3
 ToolId = Annotated[str, StringConstraints(pattern='^(fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}$')]
 
 
+ToolList = Annotated[list[ToolId], Field(max_length=1024)]
+
+
+ActionDigest = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]
+
+
 CredentialKey = Annotated[str, StringConstraints(pattern='^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$')]
 
 
@@ -218,6 +224,54 @@ ChangeRecordKind = Literal['memory_fact', 'knowledge_page', 'schedule', 'objecti
 
 
 CustodyToken = Annotated[int, Field(ge=1, le=9007199254740991)]
+
+
+ConnectionClass = Literal['connected', 'intermittent']
+
+
+class CustodyWindowHostRecord(WireModel):
+    "A connected host's window: it lasts this many seconds after the holder's last host record write that the store acknowledged, so every host record write renews it. Standard: 300."
+
+    renewed_by: Literal['host_record']
+    seconds: Annotated[int, Field(ge=60, le=3600)]
+
+
+class CustodyWindowReconnection(WireModel):
+    "An intermittent host's window: it ends at a fixed time, standard 5 days after the confirmation and never more than 7 days after the frame that carries it was issued. Only a new custody.confirmed renews it, which the team services send when the host reconnects."
+
+    renewed_by: Literal['reconnection']
+    ends_at: Timestamp
+
+
+CustodyWindow = Annotated[Union[CustodyWindowHostRecord, CustodyWindowReconnection], Field(discriminator='renewed_by')]
+
+
+class TaskAccessListToolsItem(WireModel):
+    tool_id: ToolId
+    level: Literal['read', 'write', 'full']
+    fresh_check: bool
+
+
+class TaskAccessListOneTimeItem(WireModel):
+    approval_id: RecordId
+    tool_id: ToolId
+    level: Literal['read', 'write', 'full']
+    action_digest: ActionDigest
+
+
+class TaskAccessList(WireModel):
+    "What one task may use on a host whose certificate names its tools, worked out by the team services with the same access decision as on the main machine and carried in their signed frame (README, \"Access on remote hosts\"). The holder keeps the list with the highest sequence for its task."
+
+    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    holder: AgentId
+    task_id: RecordId
+    root_task_id: RecordId
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
+    runtime: RuntimeId
+    issued_at: Timestamp
+    ends_at: Timestamp
+    tools: Annotated[list[TaskAccessListToolsItem], Field(max_length=1024)]
+    one_time: Annotated[list[TaskAccessListOneTimeItem], Field(max_length=64)]
 
 
 class Attachment(WireModel):
@@ -320,28 +374,6 @@ class DecisionAhead(WireModel):
     kind: Literal['forward_result_to_person', 'forward_progress_to_person', 'forward_steering_to_holders']
 
 
-class DecisionTokenIssuer(WireModel):
-    installation: InstallationId
-    team: TeamId
-    runtime: RuntimeId
-    membership_epoch: Epoch
-    key_id: KeyId
-
-
-class DecisionToken(WireModel):
-    "A person's decision on a change conflict, recorded by the team services and bound to a digest of the values the person was shown. A team-services certificate signs the RFC 8785 canonical JSON of the token without its signature, after the domain prefix universal-agents/decision-token/v1 and a newline (README, \"What bodies carry\")."
-
-    token_id: MessageId
-    case_id: RecordId
-    choice: Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']
-    values_digest: Sha256Digest
-    issuer: DecisionTokenIssuer
-    issued_at: Timestamp
-    expires_at: Timestamp
-    algorithm: Literal['ed25519']
-    signature: Ed25519Signature
-
-
 class AccessTarget(WireModel):
     kind: Literal['tool', 'tool_set', 'folder']
     id: Annotated[str, StringConstraints(min_length=1, max_length=400)]
@@ -380,7 +412,7 @@ class AccessAskAccess(WireModel):
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
     hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
     hand_on: bool
-    action_digest: Union[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')], MISSING] = Field(default=MISSING)
+    action_digest: Union[ActionDigest, MISSING] = Field(default=MISSING)
 
 
 class AccessAskChange(WireModel):
@@ -390,7 +422,15 @@ class AccessAskChange(WireModel):
     plan_digest: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$')]
 
 
-AccessAsk = Annotated[Union[AccessAskAccess, AccessAskChange], Field(discriminator='type')]
+class AccessAskChangeReview(WireModel):
+    "A change review: the store refused this task's change because another writer changed the record (change_conflict or needs_person_decision), and the holder asks the person the request works for (README, \"Change reviews\")."
+
+    type: Literal['change_review']
+    case_id: RecordId
+    question: NoteText
+
+
+AccessAsk = Annotated[Union[AccessAskAccess, AccessAskChange, AccessAskChangeReview], Field(discriminator='type')]
 
 
 class RecipientPerson(WireModel):
@@ -540,10 +580,10 @@ class CertificateRef(WireModel):
 
 
 class ConnectionCredential(WireModel):
-    "The credential a host connects to NATS with. Never logged."
+    "The credential a host connects to NATS with, naming the agents and pools it runs; it ends no later than the certificate it comes with. Never logged."
 
     type: Literal['nats_user_jwt']
-    jwt: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$', max_length=16384)]
+    jwt: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$', max_length=65536)]
     expires_at: Timestamp
 
 
@@ -571,7 +611,7 @@ class Frame(WireModel):
 class State(WireModel):
     "Every key-value record is one state record, signed with Ed25519 over the domain prefix universal-agents/state-record/v1 and a newline, then the RFC 8785 canonical JSON of the record without its signature. The registry names, per record, who signs it and the schema its body follows. Readers verify every record they use; where it is stored adds no trust."
 
-    record: Literal['agent', 'agent_session', 'agreement', 'certificate', 'host', 'placement', 'revocations', 'team_view']
+    record: Literal['agent', 'agent_session', 'agreement', 'block_list', 'certificate', 'host', 'placement', 'revocations', 'team_view']
     protocol: ProtocolLabel
     key: StateKey
     writer: StateWriter
@@ -624,8 +664,60 @@ class AgreementState(WireModel):
     expires_at: Timestamp
 
 
+class BlockListStateBlocksItemSubjectTeam(WireModel):
+    kind: Literal['team']
+
+
+class BlockListStateBlocksItemSubjectAgentType(WireModel):
+    kind: Literal['agent_type']
+    agent_type: AgentType
+
+
+class BlockListStateBlocksItemSubjectAgent(WireModel):
+    kind: Literal['agent']
+    agent: AgentId
+
+
+class BlockListStateBlocksItemSubjectPerson(WireModel):
+    kind: Literal['person']
+    person: PersonRef
+
+
+class BlockListStateBlocksItemSubjectSchedule(WireModel):
+    kind: Literal['schedule']
+    schedule_id: RecordId
+
+
+class BlockListStateBlocksItemRequest(WireModel):
+    "Present on an agent's block, which stays inside the request and person it was made for; absent on people's and administrators' blocks, which are team-wide."
+
+    root_task_id: RecordId
+    person: PersonRef
+
+
+class BlockListStateBlocksItem(WireModel):
+    block_id: RecordId
+    subject: Annotated[Union[BlockListStateBlocksItemSubjectTeam, BlockListStateBlocksItemSubjectAgentType, BlockListStateBlocksItemSubjectAgent, BlockListStateBlocksItemSubjectPerson, BlockListStateBlocksItemSubjectSchedule], Field(discriminator='kind')]
+    tool_id: ToolId
+    operation: Union[Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$')], MISSING] = Field(default=MISSING)
+    request: Union[BlockListStateBlocksItemRequest, MISSING] = Field(default=MISSING)
+
+
+class BlockListStatePeopleItem(WireModel):
+    person: PersonRef
+    standing: Literal['disabled', 'removed']
+
+
+class BlockListState(WireModel):
+    "A team's blocks on tools and its people's standing, for hosts that decide tool calls from signed lists (README, \"Access on remote hosts\"). Only the team services write it, one per team; they sign it again at least every 15 minutes (registry fresh_seconds) even when nothing changed, and a newer list may hold fewer entries. A host uses the newest list it holds, for at most the record's lifetime."
+
+    team: TeamId
+    blocks: Annotated[list[BlockListStateBlocksItem], Field(max_length=1000)]
+    people: Annotated[list[BlockListStatePeopleItem], Field(max_length=1000)]
+
+
 class CertificateState(WireModel):
-    "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it."
+    "Issued by an installation's authority: which key a host signs with, for which teams, roles and agent types, how it is connected, which tools it may run, and from when to when. A receiver checks a frame with the certificate that was valid when the frame was issued, unless any revocation lists it."
 
     certificate_id: RecordId
     installation: InstallationId
@@ -638,6 +730,8 @@ class CertificateState(WireModel):
     nats_public_key: NatsUserKey
     agent_types: Annotated[list[AgentType], Field(max_length=256)]
     session_limit: Annotated[int, Field(ge=0, le=100000)]
+    connection_class: ConnectionClass
+    tools: Union[ToolList, MISSING] = Field(default=MISSING)
     protocol: ProtocolLabel
     deployment: Literal['local', 'operator_managed', 'third_party']
     profile_sha256: Sha256Digest
@@ -690,17 +784,20 @@ class PlacementState(WireModel):
 class RevocationsStateEntriesItem(WireModel):
     certificate_id: RecordId
     runtime: RuntimeId
+    key_id: KeyId
+    key_expires_at: Timestamp
     membership_epoch: Epoch
     revoked_at: Timestamp
     reason: Literal['compromised', 'decommissioned', 'quarantined']
 
 
 class RevocationsState(WireModel):
-    "An installation's revoked host certificates. A listed certificate stops every frame and record that relies on it and was not already admitted, whenever that frame or record says it was issued."
+    "An installation's revoked host certificates and their keys. A listed certificate, every certificate of the same runtime with the same key id, and every certificate of the installation with the same public key stop every frame and record that relies on them and was not already admitted, whenever that frame or record says it was issued. The authority signs the record again at least every 6 hours, and it lasts at most a day (registry max_lifetime_seconds); a receiver without a current record refuses other hosts' frames (README, \"Who sent it\")."
 
     installation: InstallationId
     revocation_epoch: Annotated[int, Field(ge=1, le=9007199254740991)]
     entries: Annotated[list[RevocationsStateEntriesItem], Field(max_length=2000)]
+    expires_at: Timestamp
 
 
 class TeamViewStateRoster(WireModel):
@@ -722,6 +819,7 @@ class TeamViewStateTask(WireModel):
     requester: AgentId
     state: ProgressState
     custody_token: Union[CustodyToken, MISSING] = Field(default=MISSING)
+    custody_window: Union[CustodyWindow, MISSING] = Field(default=MISSING)
     since: Timestamp
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
 
@@ -756,6 +854,7 @@ class AccessDecisionBodyStatusHandedDown(WireModel):
     state: Literal['handed_down']
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
+    access_list: Union[TaskAccessList, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusWaiting(WireModel):
@@ -768,6 +867,7 @@ class AccessDecisionBodyStatusGranted(WireModel):
     level: Literal['read', 'write', 'full']
     lifetime: Literal['one_time', 'task', 'until', 'until_revoked']
     expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    access_list: Union[TaskAccessList, MISSING] = Field(default=MISSING)
 
 
 class AccessDecisionBodyStatusDenied(WireModel):
@@ -777,7 +877,7 @@ class AccessDecisionBodyStatusDenied(WireModel):
 
 class AccessDecisionBodyStatusWithdrawn(WireModel):
     state: Literal['withdrawn']
-    by: Literal['lead', 'task_ended']
+    by: Literal['lead', 'task_ended', 'person_message']
 
 
 class AccessDecisionBodyStatusAlreadyHeld(WireModel):
@@ -786,16 +886,31 @@ class AccessDecisionBodyStatusAlreadyHeld(WireModel):
 
 class AccessDecisionBodyStatusRefused(WireModel):
     state: Literal['refused']
-    code: Literal['blocked', 'invalid_target', 'not_allowed']
+    code: Literal['blocked', 'invalid_target', 'not_allowed', 'not_own_case']
     message: NoteText
 
 
+class AccessDecisionBodyStatusChangeDecided(WireModel):
+    "The person decided a change review; the task acts on the choice (README, \"Change reviews\")."
+
+    state: Literal['change_decided']
+    choice: Literal['keep_current', 'use_change', 'stop_request']
+    note: Union[NoteText, MISSING] = Field(default=MISSING)
+    seen_version: Union[RecordVersion, MISSING] = Field(default=MISSING)
+
+
+class AccessDecisionBodyStatusChangeNotDecided(WireModel):
+    "Nobody decided the change review by its deadline; the change was not made."
+
+    state: Literal['change_not_decided']
+
+
 class AccessDecisionBody(WireModel):
-    "What became of an access request, sent to the waiting task."
+    "What became of an access request or a change review, sent to the waiting task."
 
     request_id: RecordId
     task_id: RecordId
-    status: Annotated[Union[AccessDecisionBodyStatusHandedDown, AccessDecisionBodyStatusWaiting, AccessDecisionBodyStatusGranted, AccessDecisionBodyStatusDenied, AccessDecisionBodyStatusWithdrawn, AccessDecisionBodyStatusAlreadyHeld, AccessDecisionBodyStatusRefused], Field(discriminator='state')]
+    status: Annotated[Union[AccessDecisionBodyStatusHandedDown, AccessDecisionBodyStatusWaiting, AccessDecisionBodyStatusGranted, AccessDecisionBodyStatusDenied, AccessDecisionBodyStatusWithdrawn, AccessDecisionBodyStatusAlreadyHeld, AccessDecisionBodyStatusRefused, AccessDecisionBodyStatusChangeDecided, AccessDecisionBodyStatusChangeNotDecided], Field(discriminator='state')]
 
 
 class AccessRequestBody(WireModel):
@@ -803,15 +918,16 @@ class AccessRequestBody(WireModel):
 
     request_id: RecordId
     task_id: RecordId
-    reason: NoteText
+    reason: Union[NoteText, MISSING] = Field(default=MISSING)
     what: AccessAsk
 
 
 class AccessResolvedBody(WireModel):
-    "A person's decision on an access request, from the gateway to the team services."
+    "A person's decision on an access request or a change review, from the gateway to the team services."
 
     request_id: RecordId
-    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']
+    decision_id: RecordId
+    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request', 'withdrawn_by_message']
     note: Union[NoteText, MISSING] = Field(default=MISSING)
     kept_item_ids: Union[Annotated[list[RecordId], Field(max_length=80)], MISSING] = Field(default=MISSING)
     keep_hours: Union[Annotated[int, Field(ge=1, le=2160)], MISSING] = Field(default=MISSING)
@@ -820,16 +936,16 @@ class AccessResolvedBody(WireModel):
 
 
 class AccessReviewBodyStateOpen(WireModel):
-    "A person or the administrators must decide."
+    "A person or the administrators must decide. A change review is decided only by the person the request works for."
 
     type: Literal['open']
     task_id: RecordId
     decider: Recipient
     requester_agent: AgentId
     what: AccessAsk
-    reason: NoteText
+    reason: Union[NoteText, MISSING] = Field(default=MISSING)
     brief: Union[BlobRef, MISSING] = Field(default=MISSING)
-    choices: Annotated[list[Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']], Field(min_length=1, max_length=5)]
+    choices: Annotated[list[Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request']], Field(min_length=1, max_length=5)]
     expires_at: Timestamp
 
 
@@ -846,7 +962,7 @@ class AccessReviewBodyStateDecided(WireModel):
     "The decision was recorded; the card closes."
 
     type: Literal['decided']
-    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny']
+    choice: Literal['approve', 'approve_read', 'approve_task', 'approve_all', 'deny', 'keep_current', 'use_change', 'stop_request']
 
 
 class AccessReviewBodyStateClosed(WireModel):
@@ -857,7 +973,7 @@ class AccessReviewBodyStateClosed(WireModel):
 
 
 class AccessReviewBody(WireModel):
-    "The team services tell the gateway about one access review: open it for whoever may decide, say a person's decision was refused, or close it. The gateway's Inbox shows it; the team services keep the request."
+    "The team services tell the gateway about one access or change review: open it for whoever may decide, say a person's decision was refused, or close it. The gateway's Inbox shows it; the team services keep the request."
 
     request_id: RecordId
     state: Annotated[Union[AccessReviewBodyStateOpen, AccessReviewBodyStateRefused, AccessReviewBodyStateDecided, AccessReviewBodyStateClosed], Field(discriminator='type')]
@@ -982,110 +1098,6 @@ class AgentStatusReplyOk(WireModel):
 
 class AgentStatusReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsCancelBody(WireModel):
-    "An administrator cancels a change conflict."
-
-    request_id: RecordId
-    case_id: RecordId
-    reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
-
-
-class ConflictsCancelReplyOk(WireModel):
-    outcome: Literal['ok']
-    state: Literal['cancelled', 'already_closed']
-
-
-class ConflictsCancelReplyNotFound(WireModel):
-    outcome: Literal['not_found']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsCancelReplyAdministratorRequired(WireModel):
-    outcome: Literal['administrator_required']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideBodyChoiceKeepCurrent(WireModel):
-    type: Literal['keep_current']
-
-
-class ConflictsDecideBodyChoiceUseThisChange(WireModel):
-    type: Literal['use_this_change']
-
-
-class ConflictsDecideBodyChoiceRedoWithNote(WireModel):
-    type: Literal['redo_with_note']
-    note: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
-
-
-class ConflictsDecideBodyChoiceStopRequest(WireModel):
-    type: Literal['stop_request']
-
-
-class ConflictsDecideBody(WireModel):
-    "A person decides a change conflict."
-
-    case_id: RecordId
-    question_id: RecordId
-    values_digest: Sha256Digest
-    choice: Annotated[Union[ConflictsDecideBodyChoiceKeepCurrent, ConflictsDecideBodyChoiceUseThisChange, ConflictsDecideBodyChoiceRedoWithNote, ConflictsDecideBodyChoiceStopRequest], Field(discriminator='type')]
-    request_id: RecordId
-
-
-class ConflictsDecideReplyOk(WireModel):
-    outcome: Literal['ok']
-    state: Literal['decided', 'already_decided']
-    case_id: RecordId
-    choice: Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']
-
-
-class ConflictsDecideReplyNotFound(WireModel):
-    outcome: Literal['not_found']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideReplyCaseClosed(WireModel):
-    outcome: Literal['case_closed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideReplyValuesChanged(WireModel):
-    outcome: Literal['values_changed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsDecideReplyNotAllowed(WireModel):
-    outcome: Literal['not_allowed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class ConflictsListBody(WireModel):
-    "Open and recent change conflicts, for administrators."
-
-    request_id: RecordId
-    offset: Annotated[int, Field(ge=0, le=100000)]
-    limit: Annotated[int, Field(ge=1, le=50)]
-    state: Union[Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled'], MISSING] = Field(default=MISSING)
-
-
-class ConflictsListReplyOkCasesItem(WireModel):
-    case_id: RecordId
-    record_kind: ChangeRecordKind
-    opened_at: Timestamp
-    state: Literal['open', 'decided', 'withdrawn', 'expired', 'cancelled']
-
-
-class ConflictsListReplyOk(WireModel):
-    outcome: Literal['ok']
-    cases: Annotated[list[ConflictsListReplyOkCasesItem], Field(max_length=50)]
-    total: Count
-
-
-class ConflictsListReplyAdministratorRequired(WireModel):
-    outcome: Literal['administrator_required']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1285,6 +1297,17 @@ class CredentialFormResultBody(WireModel):
     credential: Union[CredentialFormResultBodyCredential, MISSING] = Field(default=MISSING)
 
 
+class CustodyConfirmedBody(WireModel):
+    "Tells a task's holder that the team services recorded its custody, with its custody token and custody window, and, on a host whose certificate names its tools, the task's access list. The team services send it again with the same custody token to renew a window or to replace the access list. The frame carries the task's authority token when the work has one: the only way the holder of pool work receives it (README, \"On behalf of a person\", \"Custody windows\")."
+
+    task_id: RecordId
+    custody_token: CustodyToken
+    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    reason: Literal['claimed', 'reassigned', 'renewed', 'access_changed']
+    custody_window: CustodyWindow
+    access_list: Union[TaskAccessList, MISSING] = Field(default=MISSING)
+
+
 class CustodyDecideBodyDecisionReassignToAgent(WireModel):
     target: Literal['agent']
     agent: AgentId
@@ -1307,13 +1330,20 @@ class CustodyDecideBodyDecisionAdoptLateWork(WireModel):
     stop_current: bool
 
 
+class CustodyDecideBodyOverride(WireModel):
+    "A person moves the task before the holder's custody window ends, without a handback or a retired host. Only the gateway sends it, with the person's command token; the person is the one the request works for or an administrator, and the gateway showed them that both holders may then act (README, \"Custody windows\")."
+
+    warning_shown: Literal['both_holders_may_act']
+
+
 class CustodyDecideBody(WireModel):
-    "The lead reassigns a task or adopts late work."
+    "The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window."
 
     request_id: RecordId
     task_id: RecordId
     seen_custody_token: CustodyToken
     decision: Annotated[Union[CustodyDecideBodyDecisionReassign, CustodyDecideBodyDecisionAdoptLateWork], Field(discriminator='type')]
+    override: Union[CustodyDecideBodyOverride, MISSING] = Field(default=MISSING)
 
 
 class CustodyDecideReplyOk(WireModel):
@@ -1333,6 +1363,14 @@ class CustodyDecideReplyStaleCustody(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class CustodyDecideReplyCustodyWindowOpen(WireModel):
+    "The holder's custody window is still open, and the task was not handed back, its host was not retired, and the move is not a person's override."
+
+    outcome: Literal['custody_window_open']
+    window_ends_at: Timestamp
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class CustodyDecideReplyLateWorkNotFound(WireModel):
     outcome: Literal['late_work_not_found']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
@@ -1348,12 +1386,20 @@ class CustodyDecideReplyNotOwnRequest(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class CustodyDecideReplyNotAllowed(WireModel):
+    "An override that did not come with a gateway's command token, or from a person who is neither the one the request works for nor an administrator."
+
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class CustodyMovedBody(WireModel):
-    "Tells a former holder that its task moved; later results are kept as late work."
+    "Tells a former holder that its task moved, or a later claimant that another claim was recorded first; later results are kept as late work."
 
     task_id: RecordId
     custody_token: CustodyToken
-    reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled']
+    sequence: Annotated[int, Field(ge=1, le=9007199254740991)]
+    reason: Literal['reassigned', 'adopted_elsewhere', 'cancelled', 'claimed_elsewhere', 'withdrawn']
 
 
 class DebugDumpBody(WireModel):
@@ -1815,6 +1861,8 @@ class HostJoinBody(WireModel):
     nats_public_key: NatsUserKey
     agent_types: Annotated[list[AgentType], Field(max_length=256)]
     session_limit: Annotated[int, Field(ge=0, le=100000)]
+    connection_class: ConnectionClass
+    tools: Union[ToolList, MISSING] = Field(default=MISSING)
     protocol: ProtocolLabel
     deployment: Literal['local', 'operator_managed', 'third_party']
     profile_sha256: Sha256Digest
@@ -3204,6 +3252,7 @@ class LedgerFactBodyFactCustodyConfirmed(WireModel):
     type: Literal['custody_confirmed']
     holder: AgentId
     custody_token: CustodyToken
+    custody_window: CustodyWindow
 
 
 class LedgerFactBodyFactAccessRequested(WireModel):
@@ -7328,7 +7377,6 @@ class TaskAnswerBody(WireModel):
     decision: Union[Literal['resume', 'partial', 'cancel', 'retry', 'retry_in_5_minutes', 'retry_in_10_minutes'], MISSING] = Field(default=MISSING)
     replied_message: Union[RepliedMessage, MISSING] = Field(default=MISSING)
     passed_on: Union[TaskAnswerBodyPassedOn, MISSING] = Field(default=MISSING)
-    decision_token: Union[DecisionToken, MISSING] = Field(default=MISSING)
 
 
 class TaskClaimedBody(WireModel):
@@ -7341,7 +7389,7 @@ class TaskClaimedBody(WireModel):
 
 
 class TaskHandbackBody(WireModel):
-    "A holder that lost its lease returns a task."
+    "A holder returns a task it will not finish, so the task can move before the holder's custody window ends."
 
     handback_id: RecordId
     task_id: RecordId
@@ -7432,13 +7480,6 @@ class TaskQuestionBodyPurposeOutsideHelp(WireModel):
     party: Annotated[str, StringConstraints(min_length=1, max_length=200)]
 
 
-class TaskQuestionBodyPurposeChangeConflict(WireModel):
-    type: Literal['change_conflict']
-    case_id: RecordId
-    brief: BlobRef
-    choices: Annotated[list[Literal['keep_current', 'use_this_change', 'redo_with_note', 'stop_request']], Field(min_length=1, max_length=4)]
-
-
 class TaskQuestionBodyPurposeRuntimePause(WireModel):
     type: Literal['runtime_pause']
     trigger: Literal['tool_call_budget_exceeded', 'context_budget_exceeded', 'delegated_subtask_timeout', 'specialist_runtime_budget_pause', 'provider_overloaded']
@@ -7463,7 +7504,7 @@ class TaskQuestionBody(WireModel):
     relays_question_id: Union[RecordId, MISSING] = Field(default=MISSING)
     deadline: Union[Timestamp, MISSING] = Field(default=MISSING)
     assumption: Union[Assumption, MISSING] = Field(default=MISSING)
-    purpose: Annotated[Union[TaskQuestionBodyPurposeInput, TaskQuestionBodyPurposeSetup, TaskQuestionBodyPurposeScope, TaskQuestionBodyPurposeBudget, TaskQuestionBodyPurposeCoordination, TaskQuestionBodyPurposeHelp, TaskQuestionBodyPurposeOutsideHelp, TaskQuestionBodyPurposeChangeConflict, TaskQuestionBodyPurposeRuntimePause, TaskQuestionBodyPurposeRecoveryCheckpoint], Field(discriminator='type')]
+    purpose: Annotated[Union[TaskQuestionBodyPurposeInput, TaskQuestionBodyPurposeSetup, TaskQuestionBodyPurposeScope, TaskQuestionBodyPurposeBudget, TaskQuestionBodyPurposeCoordination, TaskQuestionBodyPurposeHelp, TaskQuestionBodyPurposeOutsideHelp, TaskQuestionBodyPurposeRuntimePause, TaskQuestionBodyPurposeRecoveryCheckpoint], Field(discriminator='type')]
 
 
 class TaskReportBodyKindLessons(WireModel):
@@ -8158,16 +8199,11 @@ AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
 AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting], Field(discriminator='outcome')])
 AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
-ConflictsCancelBodyAdapter = TypeAdapter(ConflictsCancelBody)
-ConflictsCancelReplyAdapter = TypeAdapter(Annotated[Union[ConflictsCancelReplyOk, ConflictsCancelReplyNotFound, ConflictsCancelReplyAdministratorRequired], Field(discriminator='outcome')])
-ConflictsDecideBodyAdapter = TypeAdapter(ConflictsDecideBody)
-ConflictsDecideReplyAdapter = TypeAdapter(Annotated[Union[ConflictsDecideReplyOk, ConflictsDecideReplyNotFound, ConflictsDecideReplyCaseClosed, ConflictsDecideReplyValuesChanged, ConflictsDecideReplyNotAllowed], Field(discriminator='outcome')])
-ConflictsListBodyAdapter = TypeAdapter(ConflictsListBody)
-ConflictsListReplyAdapter = TypeAdapter(Annotated[Union[ConflictsListReplyOk, ConflictsListReplyAdministratorRequired], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
 CredentialFormResultBodyAdapter = TypeAdapter(CredentialFormResultBody)
+CustodyConfirmedBodyAdapter = TypeAdapter(CustodyConfirmedBody)
 CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)
-CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest], Field(discriminator='outcome')])
+CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyCustodyWindowOpen, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest, CustodyDecideReplyNotAllowed], Field(discriminator='outcome')])
 CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)
 DebugDumpBodyAdapter = TypeAdapter(DebugDumpBody)
 DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed], Field(discriminator='outcome')])
@@ -8362,6 +8398,7 @@ TopicsTagThreadReplyAdapter = TypeAdapter(Annotated[Union[TopicsTagThreadReplyOk
 AgentStateAdapter = TypeAdapter(AgentState)
 AgentSessionStateAdapter = TypeAdapter(AgentSessionState)
 AgreementStateAdapter = TypeAdapter(AgreementState)
+BlockListStateAdapter = TypeAdapter(BlockListState)
 CertificateStateAdapter = TypeAdapter(CertificateState)
 HostStateAdapter = TypeAdapter(HostState)
 PlacementStateAdapter = TypeAdapter(PlacementState)

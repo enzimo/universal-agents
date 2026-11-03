@@ -72,6 +72,12 @@
       "public_key": "lsy1UwdJesPa9n2oD7wr9avSQUGV4RRHfgeQAa7TdC8",
       "installation": "install_example",
       "holder": "edge-adapter-1"
+    },
+    "test-remote-key-1": {
+      "seed": "OxXz3cZ345ccM87UwN51SX5LVT_d37LPBnqrgJfYZFY",
+      "public_key": "N9lOrynDzDCzewEPeSa5r1JWcZGYQ3lyIqrE3JseDbE",
+      "installation": "install_example",
+      "holder": "remote-host-1"
     }
   }
 }

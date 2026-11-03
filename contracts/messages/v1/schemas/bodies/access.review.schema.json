@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/access.review.schema.json",
   "title": "access.review",
-  "description": "The team services tell the gateway about one access review: open it for whoever may decide, say a person's decision was refused, or close it. The gateway's Inbox shows it; the team services keep the request.",
+  "description": "The team services tell the gateway about one access or change review: open it for whoever may decide, say a person's decision was refused, or close it. The gateway's Inbox shows it; the team services keep the request.",
   "type": "object",
   "properties": {
     "request_id": {
@@ -12,7 +12,7 @@
       "oneOf": [
         {
           "type": "object",
-          "description": "A person or the administrators must decide.",
+          "description": "A person or the administrators must decide. A change review is decided only by the person the request works for.",
           "properties": {
             "type": {
               "const": "open"
@@ -30,13 +30,15 @@
               "$ref": "../common.schema.json#/$defs/access_ask"
             },
             "reason": {
+              "description": "The request's reason; a change review has its question in what instead (registry body_rules).",
               "$ref": "../common.schema.json#/$defs/note_text"
             },
             "brief": {
-              "description": "The review card's text for a staged change, written by code.",
+              "description": "The card's text written by code: a staged change's review card, or a change review's brief (what changed, by whom, and the request's planned values).",
               "$ref": "../common.schema.json#/$defs/blob_ref"
             },
             "choices": {
+              "description": "The choices the card offers: access choices for access and staged-change reviews, change choices for a change review (registry body_rules).",
               "type": "array",
               "items": {
                 "type": "string",
@@ -45,7 +47,10 @@
                   "approve_read",
                   "approve_task",
                   "approve_all",
-                  "deny"
+                  "deny",
+                  "keep_current",
+                  "use_change",
+                  "stop_request"
                 ]
               },
               "minItems": 1,
@@ -61,7 +66,6 @@
             "decider",
             "requester_agent",
             "what",
-            "reason",
             "choices",
             "expires_at"
           ],
@@ -113,7 +117,10 @@
                 "approve_read",
                 "approve_task",
                 "approve_all",
-                "deny"
+                "deny",
+                "keep_current",
+                "use_change",
+                "stop_request"
               ]
             }
           },

@@ -1,4 +1,8 @@
 {
+  "agent_queues": {
+    "control": "work.control.{agent}",
+    "inbox": "work.agent.{agent}"
+  },
   "audience_targets": {
     "agent": [
       "lead_host",
@@ -45,6 +49,7 @@
     "durable": {
       "addresses": [
         "work.agent.{agent}",
+        "work.control.{agent}",
         "work.pool.{pool}",
         "work.edge.{edge}",
         "work.team"
@@ -81,6 +86,15 @@
   },
   "clock_skew_seconds": 8,
   "consumers": {
+    "agent_control": {
+      "ack": "explicit",
+      "ack_wait_seconds": 60,
+      "filter": "ua.v1.{team}.*.work.control.{agent}",
+      "max_deliveries": 20,
+      "mode": "pull",
+      "name": "control~{team}~{agent}",
+      "stream": "UA1_AGENT_WORK_{team}"
+    },
     "agent_inbox": {
       "ack": "explicit",
       "ack_wait_seconds": 60,
@@ -124,6 +138,10 @@
       "description": "one record per agent (availability, busy, idle, paused, exiting), written only on change",
       "per_key_ttl_seconds": 0
     },
+    "UA1_BLOCK_LIST": {
+      "description": "one block list per team, written by the team services and read by every host of the team; each record states its own expiry",
+      "per_key_ttl_seconds": 0
+    },
     "UA1_CERTS": {
       "description": "host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket",
       "per_key_ttl_seconds": 0
@@ -142,7 +160,9 @@
     }
   },
   "limits": {
+    "max_credential_bytes": 65536,
     "max_frame_bytes": 262144,
+    "max_header_bytes": 1024,
     "nats_max_payload_bytes": 1048576
   },
   "object_store": {
@@ -164,17 +184,18 @@
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
       "max_consumers": 4096,
-      "max_message_bytes": 262144,
+      "max_message_bytes": 263168,
       "retention": "workqueue",
       "storage": "file",
       "subjects": [
         "ua.v1.{team}.*.work.agent.*",
+        "ua.v1.{team}.*.work.control.*",
         "ua.v1.{team}.*.work.pool.*"
       ]
     },
     "UA1_DLQ": {
       "max_age_seconds": 2592060,
-      "max_message_bytes": 262144,
+      "max_message_bytes": 263168,
       "retention": "limits",
       "storage": "file",
       "subjects": [
@@ -185,7 +206,7 @@
       "duplicate_window_seconds": 120,
       "max_age_seconds": 604860,
       "max_consumers": 4096,
-      "max_message_bytes": 262144,
+      "max_message_bytes": 263168,
       "retention": "workqueue",
       "storage": "file",
       "subjects": [
@@ -195,8 +216,11 @@
     }
   },
   "subject_prefix": "ua.v1.{team}.{sender}",
-  "team_grants": [
-    "agent",
-    "pool"
-  ]
+  "topology_owner": "installation_authority",
+  "withdrawal": {
+    "role": "team_services",
+    "streams": [
+      "UA1_AGENT_WORK_{team}"
+    ]
+  }
 }

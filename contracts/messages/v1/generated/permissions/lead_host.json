@@ -4,9 +4,15 @@
     "max": 1
   },
   "publish": [
-    "$JS.ACK.UA1_AGENT_WORK_{team}.>",
-    "$JS.API.CONSUMER.INFO.UA1_AGENT_WORK_{team}.*",
-    "$JS.API.CONSUMER.MSG.NEXT.UA1_AGENT_WORK_{team}.*",
+    "$JS.ACK.UA1_AGENT_WORK_{team}.agent~{team}~{agent}.>",
+    "$JS.ACK.UA1_AGENT_WORK_{team}.control~{team}~{agent}.>",
+    "$JS.ACK.UA1_AGENT_WORK_{team}.pool~{team}~{pool}.>",
+    "$JS.API.CONSUMER.INFO.UA1_AGENT_WORK_{team}.agent~{team}~{agent}",
+    "$JS.API.CONSUMER.INFO.UA1_AGENT_WORK_{team}.control~{team}~{agent}",
+    "$JS.API.CONSUMER.INFO.UA1_AGENT_WORK_{team}.pool~{team}~{pool}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_AGENT_WORK_{team}.agent~{team}~{agent}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_AGENT_WORK_{team}.control~{team}~{agent}",
+    "$JS.API.CONSUMER.MSG.NEXT.UA1_AGENT_WORK_{team}.pool~{team}~{pool}",
     "ua.v1._install.{self}.svc",
     "ua.v1.{team}.{self}.ctl.agent.*",
     "ua.v1.{team}.{self}.dlq.notice.*",
@@ -14,6 +20,7 @@
     "ua.v1.{team}.{self}.evt.skills_changed",
     "ua.v1.{team}.{self}.svc.team",
     "ua.v1.{team}.{self}.work.agent.*",
+    "ua.v1.{team}.{self}.work.control.*",
     "ua.v1.{team}.{self}.work.edge.*",
     "ua.v1.{team}.{self}.work.pool.*",
     "ua.v1.{team}.{self}.work.team"
@@ -21,7 +28,7 @@
   "role": "lead_host",
   "subscribe": [
     "_INBOX.{self}.>",
-    "ua.v1.{team}.*.ctl.agent.*",
+    "ua.v1.{team}.*.ctl.agent.{agent}",
     "ua.v1.{team}.*.evt.skills_changed"
   ]
 }

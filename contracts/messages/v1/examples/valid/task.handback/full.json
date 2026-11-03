@@ -19,7 +19,7 @@
     "target": "agent",
     "id": "lead"
   },
-  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "subject": "ua.v1.team_example.worker-host-1.work.control.lead",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-23T04:30:00.000Z",
   "algorithm": "ed25519",
@@ -30,9 +30,9 @@
     "disposition": "interrupted",
     "launch_id": "launch_7",
     "interrupted_at": "2026-10-22T04:10:00.000Z",
-    "reason": "The host lost its lease.",
+    "reason": "The host is being handed over to another machine.",
     "scheduler_errors": [
-      "lease renewal timed out"
+      "host handover started"
     ],
     "actions": [
       {
@@ -94,6 +94,6 @@
       }
     }
   },
-  "body_digest": "VBXEzbPzB36G2aH8oNnGo-jSnigcUsCE9EiTZA8IoDU",
-  "signature": "YZcuHVjW6-pqAB9XylovlICnv2syvETeeh0kdz7bkRVUm4sL9G6W6ziAHolowgwJgLmJG8du5p6B2XVDOVGfAg"
+  "body_digest": "D6GlO_yFF5uOoYakVZ0RwFzsgz-nXGbeunCPscAQAFA",
+  "signature": "jfBtLHV84RzdomTGkhcOk7a_IVjDhaif5ahWDcSJjvXeNzX7f6WvwWU9hxWfkjEF-rpXp224WRyzACDIZVS1Ag"
 }

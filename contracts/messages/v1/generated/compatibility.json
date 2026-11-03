@@ -1,11 +1,12 @@
 {
   "accepts": {
+    "contract_sha256": "the same, while the label ends in -pre",
     "label": "pre",
     "major": 1,
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "authority_token_domain": "universal-agents/authority-token/v1",
-  "decision_token_domain": "universal-agents/decision-token/v1",
+  "contract_sha256": "d497c123d238a04e77e9376464423a221568c3a27301126339fcb5e83e70af35",
   "kinds": [
     "access.decision",
     "access.request",
@@ -16,11 +17,9 @@
     "agent.pause",
     "agent.resume",
     "agent.status",
-    "conflicts.cancel",
-    "conflicts.decide",
-    "conflicts.list",
     "credential.form.request",
     "credential.form.result",
+    "custody.confirmed",
     "custody.decide",
     "custody.moved",
     "debug.dump",
@@ -135,6 +134,7 @@
     "agent",
     "agent_session",
     "agreement",
+    "block_list",
     "certificate",
     "host",
     "placement",

@@ -1,0 +1,13 @@
+{
+  "description": "An access request says why the task needs the access; only a change review asks a question instead.",
+  "refusal": "invalid_body",
+  "at": "/body/reason",
+  "base": "access.request/access.json",
+  "changes": [
+    {
+      "remove": "/body/reason"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"access.request\", \"message_id\": \"01928f3a-7b2c-7114-8000-000000000114\", \"idempotency_key\": \"access.request:InBR8teOQa-eLt-nw7csN21bPFCkz3X8mMqGgN4I1HA\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.work.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"areq_1\", \"task_id\": \"task_sub_1\", \"what\": {\"type\": \"access\", \"target\": {\"kind\": \"folder\", \"id\": \"team/finance\"}, \"level\": \"read\", \"lifetime\": \"task\", \"hours\": 24, \"hand_on\": false, \"action_digest\": \"a1b2c3\"}}, \"body_digest\": \"AwtO3LNbDXvkRfe6ugpAekS6NVShs4WGlKws7TwZTxE\", \"signature\": \"jZUEbXy_JfNiMq7BVStN3UiMBR5zvS20b6vKlC_QsMGofcsyHAH5K5i3rsO1LrIaNv2FNtDuoW8i44fCOJ8tDA\"}"
+}

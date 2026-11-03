@@ -19,7 +19,7 @@
     "target": "agent",
     "id": "lead"
   },
-  "subject": "ua.v1.team_example.worker-host-1.work.agent.lead",
+  "subject": "ua.v1.team_example.worker-host-1.work.control.lead",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-23T04:30:00.000Z",
   "algorithm": "ed25519",
@@ -33,5 +33,5 @@
     }
   },
   "body_digest": "M6cPgErj9BKwQl9pMFaVShV9nE1YYsxzTGh29WRQrag",
-  "signature": "nV9H5cQFBxrrzoiUFM5dfvqtwPdO45ZNl78yIoL81bizc12fHWvaE3GKVIDSN5Stgu5IcznyHqNYa9wbN0ueAA"
+  "signature": "xj_S2qn5HQx5vTsVnFhr38Ve1KAEj5yXLnSsCGvDfu5KEbSFch51xoFN2Ne7Chb3ipBKq4ipg_JHxpl_zCkXBw"
 }

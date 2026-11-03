@@ -79,6 +79,10 @@
         "custody_token": {
           "$ref": "../common.schema.json#/$defs/custody_token"
         },
+        "custody_window": {
+          "description": "The holder's custody window from its latest confirmation (README, \"Custody windows\").",
+          "$ref": "../common.schema.json#/$defs/custody_window"
+        },
         "since": {
           "$ref": "../common.schema.json#/$defs/timestamp"
         },

@@ -59,9 +59,6 @@
         "original_message_id"
       ],
       "additionalProperties": false
-    },
-    "decision_token": {
-      "$ref": "../common.schema.json#/$defs/decision_token"
     }
   },
   "required": [

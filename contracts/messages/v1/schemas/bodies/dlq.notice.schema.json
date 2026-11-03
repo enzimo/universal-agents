@@ -36,7 +36,7 @@
         "delivery_limit",
         "upgrade_drain"
       ],
-      "description": "Why the message was set aside: a verification refusal code (registry verification_refusals), or handler_failed (its handler failed), delivery_limit (it was delivered too often) or upgrade_drain (it waited through an upgrade)."
+      "description": "Why the message was set aside: a verification refusal code (registry verification_refusals) other than a temporary one, which only makes the receiver wait, or handler_failed (its handler failed), delivery_limit (it was delivered too often) or upgrade_drain (it waited through an upgrade)."
     },
     "pointer": {
       "description": "The refusal's JSON pointer, up to the last field the receiver's schema knows: an unknown field is named by the object that holds it, so a name the sender chose never reaches the notice.",

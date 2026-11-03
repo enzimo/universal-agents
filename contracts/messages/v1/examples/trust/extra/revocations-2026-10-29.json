@@ -1,0 +1,31 @@
+{
+  "record": "revocations",
+  "protocol": "1.0-pre",
+  "key": "revocations.install_example",
+  "writer": {
+    "type": "authority",
+    "installation": "install_example",
+    "key_id": "test-authority-key-1"
+  },
+  "sequence": 4,
+  "issued_at": "2026-10-29T04:30:00.000Z",
+  "body": {
+    "installation": "install_example",
+    "revocation_epoch": 1,
+    "entries": [
+      {
+        "certificate_id": "cert_old_host",
+        "runtime": "old-host-1",
+        "key_id": "test-old-host-key-1",
+        "key_expires_at": "2026-11-20T12:00:00.000Z",
+        "membership_epoch": 1,
+        "revoked_at": "2026-10-21T12:00:00.000Z",
+        "reason": "decommissioned"
+      }
+    ],
+    "expires_at": "2026-10-30T04:30:00.000Z"
+  },
+  "algorithm": "ed25519",
+  "body_digest": "_6Udnc5yt6cd9-6HdMEtym2LPo7zxhzwR5Aidhbu1x8",
+  "signature": "qtDSDEkuPenJ2j64vQDmVzpFkmQQHlRQq435p6W_IlWl0ShXpnDZaDKcZYrIeCSs_tAjByxG-mSkiqJmnw8oBQ"
+}

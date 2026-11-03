@@ -1,0 +1,13 @@
+{
+  "description": "The team services number their confirmations, so the holder applies only newer ones.",
+  "refusal": "invalid_body",
+  "at": "/body/sequence",
+  "base": "custody.confirmed/reassignment.json",
+  "changes": [
+    {
+      "remove": "/body/sequence"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"custody.confirmed\", \"message_id\": \"01928f3a-7b2c-732c-8000-00000000032c\", \"idempotency_key\": \"custody.confirmed:m_DGnRJnXT2s6MdrpG8vpMqD4_ESXnnUFQ9jXTR1ouQ\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.control.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_sub_1\", \"custody_token\": 5, \"reason\": \"reassigned\", \"custody_window\": {\"renewed_by\": \"host_record\", \"seconds\": 300}}, \"body_digest\": \"Qo2_kXtWEFqYqt4CGFNEydCrsvGcmqQ33ttCdHOzfIY\", \"signature\": \"69TADQ2N5H5pubTduBOWtbd9eMwCr0Rmfa6QRbXa_F1BS-dKimYrv8HBbIjrWJy493U-kkjgaHilNiIuDKxhBw\"}"
+}

@@ -18,7 +18,8 @@
 #   body           the body schema, under schemas/
 #   body_rules     optional: what a schema cannot say, checked after it (README, "What bodies carry"):
 #                  unique values in a list, a field required when others have given values,
-#                  or at least one of several fields
+#                  at least one of several fields, the values a field may hold when others
+#                  have given values, or a time that ends within a span of another time
 #   reply          request/reply only: the reply body schema and its error codes, which are exactly
 #                  the reply's outcomes other than ok
 #   senders        host roles that may publish it; receivers check them against the issuer's certificate
@@ -27,6 +28,8 @@
 #   receivers      host roles that may receive it at its own addresses (and so send its reply)
 #   expiry_seconds how long after issue a receiver still accepts it (at most its class's max_expiry_seconds)
 #   authority      none | optional | required: whether the frame carries an authority token
+#   authority_by_address  optional: a narrower authority for some of its own addresses (task.request
+#                  carries no token into a worker pool; README, "On behalf of a person")
 #   authority_binding  the token types it takes: one binding {type, at, senders}, or a list of them,
 #                  one per type; a token of another type is refused. `type` is what the token is
 #                  bound to (root_task, command or access_request). With `at`, the body field
@@ -37,7 +40,10 @@
 #   idempotency    JSON pointers into the frame whose values make the idempotency key:
 #                  <kind>:<unpadded base64url SHA-256 of the RFC 8785 array of the values>
 #                  (README, "Idempotency keys")
-#   admission      execution_slot (needs a free slot), accepted_while_paused, priority
+#   admission      execution_slot (needs a free slot), accepted_while_paused, priority. A kind sent to an
+#                  agent goes to its inbox when it needs a slot, and is then not accepted while paused;
+#                  otherwise to its control queue, and is then accepted while paused (transport.yaml
+#                  agent_queues; README, "An agent's two queues")
 #   routing        requester | holder | team | person | named | broadcast | sender (README, "Replies")
 #   topology_edge  the edges an agent may send it on: up | down | person | sideways | out, or none
 #                  when it is not a topology check: sent to the team services, only by hosts, or
@@ -61,18 +67,20 @@ signing_domain: universal-agents/message-frame/v1
 renew_key_proof_domain: universal-agents/host-renew-key-proof/v1
 state_signing_domain: universal-agents/state-record/v1
 authority_token_domain: universal-agents/authority-token/v1
-decision_token_domain: universal-agents/decision-token/v1
 frame_schema: frame.schema.json
 state_schema: state.schema.json
 max_frame_bytes: 262144
 max_nesting_depth: 64
 authority_token_max_seconds: 604800   # today's signed person context lasts at most 7 days
-command_token_max_seconds: 300        # a token bound to one command lasts minutes (plan, section 8)
-certificate_overlap_seconds: 300      # a replaced certificate still signs new frames this long after its replacement is issued (authorization plan 12.5)
+command_token_max_seconds: 300        # a token bound to one command lasts minutes
+certificate_overlap_seconds: 300      # a replaced certificate still signs new frames this long after its replacement is issued
 
 # Refusals a receiver gives before any handler runs, in the order it checks them.
 # "The issuer's certificate" is the host certificate the receiver's trust store holds
 # for the issuer's installation, runtime and membership epoch (README, "Who sent it").
+# A temporary refusal names something the receiver lacks rather than a defect of the frame:
+# the receiver answers a request with it, but never sets queued work aside for it, so it is
+# no dead-letter reason.
 verification_refusals:
   - code: too_large
     meaning: the serialized frame is larger than max_frame_bytes
@@ -85,7 +93,12 @@ verification_refusals:
   - code: bad_digest
     meaning: the body digest does not match the body
   - code: revoked
-    meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, whenever it was revoked and whenever the frame says it was issued
+    meaning: the issuer's certificate, or the certificate that signed the issuer's agent session, is listed in its installation's revocations, by its id, by its runtime and key id, or by its public key (a listed certificate's public key revokes every certificate of the installation that holds it), whenever it was revoked and whenever the frame says it was issued
+  - code: revocations_not_current
+    meaning: the receiver holds no revocations record of the issuer's installation that is current at its clock (none, or only an expired one), and the frame is not installation traffic from the receiver's own installation authority
+    # The receiver lacks a record, not the frame a defect: it waits for a current record and
+    # never sets the frame aside (README, "Who sent it").
+    temporary: true
   - code: epoch_too_old
     meaning: the issuer's certificate has a membership or revocation epoch below the receiver's minimum for that runtime or installation (request/reply and events only; queued work is judged by the certificate valid when it was issued, and a join by the key it presents)
   - code: wrong_issuer
@@ -109,7 +122,7 @@ verification_refusals:
   - code: invalid_body
     meaning: the body breaks the kind's schema or body rules, or the idempotency key is not the one the kind's key parts give; or a renewal's key rotation names a key id the installation already uses or a proof that does not verify; or the certificate in a join or renewal reply does not verify against the receiver's authority keys or does not certify the host that asked (README, "Installation traffic")
   - code: bad_authority
-    meaning: the frame carries an authority token its kind does not take or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation, names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds; or a change-conflict decision token in the body is not signed by a team-services certificate of the frame's installation and team, or was not valid when the frame was issued
+    meaning: the frame carries an authority token its kind does not take at the frame's address (registry authority_by_address) or lacks one it requires; or the token is not signed by a gateway or scheduler certificate of its own installation known to be unrevoked (with a current revocations record), names a schedule without a scheduler's signature, names another team than the issuer's, was not valid when the frame was issued or when it reached the receiver (for queued work, when the stream stored it; otherwise when it is received), reaches an outside agent's adapter, names neither a person nor a schedule (system work), lasts longer than authority_token_max_seconds (command_token_max_seconds when bound to a command), is bound to a type of record its kind does not take, is of a type the sender's roles may not present on that address, or is bound to another record than the body field its kind's binding names (at) or, for a binding without one, than the task the handler holds
   - code: access_denied
     meaning: the receiver's access decision refused the sender
 # Refusals of a change to a covered store record. Each covered operation offers those that
@@ -156,7 +169,10 @@ host_roles:
 # form; signer (authority | host); signer_roles, the roles whose certificates may sign it;
 # writers, the host roles that may store it (the edge adapter stores unchanged copies of a
 # peer's records under the peer's installation id); body; ttl_seconds, the bucket's per-key
-# lifetime, within which each record must expire; write_rule.
+# lifetime, within which each record must expire; max_lifetime_seconds, how long after it is
+# written a record that ends may end; fresh_seconds, how long after it is written a record
+# still counts as fresh for readers that need a recent one (its writer signs it again at
+# least this often); write_rule.
 state_records:
   certificate:
     description: A host's membership certificate.
@@ -168,13 +184,14 @@ state_records:
     max_lifetime_seconds: 7776000   # 90 days
     write_rule: written once; deleted once receivers forget it (README, "Trust over time"), which is after its expiry plus the longest kind lifetime, so queued frames can still be checked; kept while the revocations record lists it
   revocations:
-    description: An installation's revoked certificates.
+    description: An installation's revoked certificates and their keys.
     bucket: UA1_CERTS
     key: "revocations.<installation>"
     signer: authority
     writers: [installation_authority, edge_adapter]
     body: state/revocations.schema.json
-    write_rule: rewritten with a higher sequence on each revocation; the revocation epoch only grows and entries are never removed while a revoked certificate could still be named
+    max_lifetime_seconds: 86400     # 24 hours; the authority signs it again at least every 6 hours
+    write_rule: signed again at least every 6 hours and at once on each revocation, with a sequence above the highest in the bucket and at least its issue time in milliseconds since 1970, so an authority restored from a backup never writes a lower one; the revocation epoch only grows; an entry names when the last certificate with its key ends (key_expires_at) and may leave once that time plus replay_ledger_retention_seconds and the clock tolerance have passed; the authority issues no certificate for a revoked key; receivers keep the newest record they verified, also across restarts, never forget it, and keep an entry a newer record leaves out early
   agent_session:
     description: An agent session certificate, issued by the team services that place the agent.
     bucket: UA1_CERTS
@@ -183,7 +200,7 @@ state_records:
     signer_roles: [team_services]
     writers: [team_services, edge_adapter]
     body: state/agent_session.schema.json
-    max_lifetime_seconds: 86400     # a day; a longer session is renewed
+    max_lifetime_seconds: 604800    # 7 days: covers the longest cut-off the contract promises (every durable kind lives 7 days); hosts renew sessions while connected
     write_rule: rewritten with a higher sequence to renew it or to record its actual end; deleted once receivers forget it (README, "Trust over time"), which is after its end plus the longest kind lifetime
   agreement:
     description: A federation agreement with another installation.
@@ -231,18 +248,29 @@ state_records:
     writers: [team_services]
     body: state/team_view.schema.json
     write_rule: deleted when the item closes or the person it names departs; each entry at most 4 KiB
+  block_list:
+    description: A team's blocks on tools and its people's standing, read by the team's hosts that decide tool calls from signed lists.
+    bucket: UA1_BLOCK_LIST
+    key: "<team>"
+    signer: host
+    signer_roles: [team_services]
+    writers: [team_services]
+    body: state/block_list.schema.json
+    max_lifetime_seconds: 604800    # 7 days: a cut-off host keeps using its newest list for its custody window
+    fresh_seconds: 900              # 15 minutes: a fresh_check tool runs only with a list signed this recently
+    write_rule: signed again at least every fresh_seconds, even when nothing changed, and at once on each change, with a sequence above the highest in the bucket and at least its issue time in milliseconds since 1970; states its expiry, at most max_lifetime_seconds after it is written; a newer list may hold fewer entries; every host of the team reads it, and keeps the highest sequence it has seen, also across restarts
 
 kinds:
   task.stop:
     description: Stop one task. Sent only to the task's current holder.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}"]
+    address: ["work.control.{agent}", "work.edge.{edge}"]
     body: bodies/task.stop.schema.json
     senders: [lead_host, team_services]
     senders_by_address:
       work.edge.{edge}: [lead_host, team_services]
     receivers: [lead_host, worker_host, edge_adapter]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: optional
     authority_binding: {type: root_task}
     idempotency: [/body/task_id, /body/stop_id]
@@ -304,7 +332,12 @@ kinds:
     receivers: [lead_host, worker_host, edge_adapter]
     expiry_seconds: 604800
     authority: optional
-    authority_binding: {type: root_task, at: /body/work/root_task_id}
+    # A worker pool's queue is read by every host that runs the pool, so the token waits
+    # for the holder's custody.confirmed; the copy to the team services carries it.
+    authority_by_address:
+      work.pool.{pool}: none
+    # The edge adapter speaks for outside agents, which never hold a person's token.
+    authority_binding: {type: root_task, at: /body/work/root_task_id, senders: [gateway, lead_host, scheduler, team_services]}
     idempotency: [/body/task_id, /message_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
     routing: named
@@ -372,14 +405,15 @@ kinds:
     body: bodies/task.answer.schema.json
     body_rules:
       - {unique: /body/selected_choice_ids}
-      - {any_of: [/body/text, /body/text_file, /body/selected_choice_ids, /body/decision, /body/decision_token]}
+      - {any_of: [/body/text, /body/text_file, /body/selected_choice_ids, /body/decision]}
     senders: [gateway, lead_host, team_services, worker_host, edge_adapter]
     senders_by_address:
       work.edge.{edge}: [lead_host]
     receivers: [lead_host, worker_host, edge_adapter]
     expiry_seconds: 604800
     authority: optional
-    authority_binding: {type: root_task}
+    # The edge adapter speaks for outside agents, which never hold a person's token.
+    authority_binding: {type: root_task, senders: [gateway, lead_host, team_services, worker_host]}
     idempotency: [/body/question_id]
     admission: {execution_slot: true, accepted_while_paused: false, priority: high}
     routing: named
@@ -391,12 +425,12 @@ kinds:
   task.progress:
     description: Where a task stands, from its holder to its requester.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.progress.schema.json
     senders: [worker_host, lead_host, edge_adapter]
     receivers: [lead_host]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/task_id, /body/custody_token, /body/sequence]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
@@ -409,13 +443,13 @@ kinds:
   task.steer:
     description: Steering for the holder of one named task.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}"]
+    address: ["work.control.{agent}", "work.edge.{edge}"]
     body: bodies/task.steer.schema.json
     senders: [lead_host, team_services]
     senders_by_address:
       work.edge.{edge}: [lead_host, team_services]
     receivers: [worker_host, lead_host, edge_adapter]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: optional
     authority_binding: {type: root_task}
     idempotency: [/body/task_id, /body/steer_id]
@@ -431,12 +465,12 @@ kinds:
   task.account:
     description: A held holder's account of where its task stopped.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.account.schema.json
     senders: [worker_host, lead_host]
     receivers: [lead_host]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/task_id, /body/steer_id, /body/stage/type]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
@@ -449,15 +483,15 @@ kinds:
   task.claimed:
     description: A holder took a task.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.claimed.schema.json
     senders: [worker_host, lead_host, edge_adapter]
     receivers: [lead_host]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/claim_id]
-    admission: {execution_slot: false, accepted_while_paused: false, priority: normal}
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: requester
     topology_edge: [up]
     ledger: standin_holder
@@ -465,9 +499,9 @@ kinds:
     rendering: none
 
   task.handback:
-    description: A holder that lost its lease returns a task.
+    description: A holder returns a task it will not finish, so the task can move before the holder's custody window ends.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     copy_to: [work.team]
     body: bodies/task.handback.schema.json
     senders: [worker_host, lead_host]
@@ -485,14 +519,14 @@ kinds:
   task.report:
     description: A report from a holder to its requester; the lead decides whether a person sees it.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     body: bodies/task.report.schema.json
     senders: [worker_host, lead_host]
     receivers: [lead_host]
     expiry_seconds: 604800
     authority: none
     idempotency: [/body/report_id]
-    admission: {execution_slot: false, accepted_while_paused: false, priority: high}
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: requester
     topology_edge: [up]
     ledger: report_received
@@ -500,15 +534,15 @@ kinds:
     rendering: full
 
   custody.moved:
-    description: Tells a former holder that its task moved; later results are kept as late work.
+    description: Tells a former holder that its task moved, or a later claimant that another claim was recorded first; later results are kept as late work.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}"]
+    address: ["work.control.{agent}", "work.edge.{edge}"]
     body: bodies/custody.moved.schema.json
     senders: [team_services]
     receivers: [worker_host, lead_host, edge_adapter]
     expiry_seconds: 604800
     authority: none
-    idempotency: [/body/task_id, /body/custody_token]
+    idempotency: [/body/task_id, /body/sequence]
     admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: none
@@ -516,13 +550,38 @@ kinds:
     wakes_model: never
     rendering: none
 
+  custody.confirmed:
+    description: Tells a task's holder, an agent or an outside agent's adapter, that the team services recorded its custody, with its custody token, custody window and, on a host whose certificate names its tools, the task's access list; sent again to renew a window or replace the list. A confirmation that gives custody (claimed, reassigned) carries the task's authority token when the work has one, except to an outside agent; renewals and new lists carry none.
+    class: durable
+    address: ["work.control.{agent}", "work.edge.{edge}"]
+    body: bodies/custody.confirmed.schema.json
+    body_rules:
+      - {ends_within: /body/custody_window/ends_at, of: /issued_at, seconds: 604800}
+      - {ends_within: /body/access_list/ends_at, of: /body/access_list/issued_at, seconds: 604800}
+      - {unique: /body/access_list/tools, by: tool_id}
+      - {unique: /body/access_list/one_time, by: approval_id}
+    senders: [team_services]
+    receivers: [lead_host, worker_host, edge_adapter]
+    expiry_seconds: 604800
+    authority: optional
+    authority_binding: {type: root_task}
+    idempotency: [/body/task_id, /body/custody_token, /body/sequence]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: holder
+    topology_edge: none
+    ledger: custody_confirmed
+    wakes_model: never
+    rendering: none
+
   access.request:
-    description: A task asks the team services for access; no model decides it.
+    description: A task asks the team services for access, a staged change's approval or a person's change review; no model decides it.
     class: durable
     address: work.team
     body: bodies/access.request.schema.json
     body_rules:
       - {requires: /body/what/hours, when: [{at: /body/what/lifetime, is: until}]}
+      - {requires: /body/reason, when: [{at: /body/what/type, is: access}]}
+      - {requires: /body/reason, when: [{at: /body/what/type, is: change}]}
     senders: [worker_host, lead_host]
     receivers: [team_services]
     expiry_seconds: 604800
@@ -537,18 +596,21 @@ kinds:
     rendering: none
 
   access.decision:
-    description: What became of an access request, sent to the waiting task.
+    description: What became of an access request or a change review, sent to the waiting task.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     body: bodies/access.decision.schema.json
     body_rules:
       - {requires: /body/status/expires_at, when: [{at: /body/status/state, is: granted}, {at: /body/status/lifetime, is: until}]}
+      - {ends_within: /body/status/access_list/ends_at, of: /body/status/access_list/issued_at, seconds: 604800}
+      - {unique: /body/status/access_list/tools, by: tool_id}
+      - {unique: /body/status/access_list/one_time, by: approval_id}
     senders: [team_services]
     receivers: [worker_host, lead_host]
     expiry_seconds: 604800
     authority: none
     idempotency: [/body/request_id, /body/status/state]
-    admission: {execution_slot: false, accepted_while_paused: false, priority: high}
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: named
     topology_edge: none
     ledger: access_wait_closed
@@ -562,10 +624,12 @@ kinds:
         withdrawn: always
         already_held: always
         refused: always
+        change_decided: always
+        change_not_decided: always
     rendering: none
 
   access.resolved:
-    description: A person's decision on an access request, from the gateway to the team services.
+    description: A person's decision on an access request or a change review, from the gateway to the team services.
     class: durable
     address: work.team
     body: bodies/access.resolved.schema.json
@@ -574,7 +638,8 @@ kinds:
     expiry_seconds: 604800
     authority: required
     authority_binding: {type: access_request, at: /body/request_id}
-    idempotency: [/body/request_id]
+    # A corrected decision after a refusal is a new decision, not a duplicate of the refused one.
+    idempotency: [/body/request_id, /body/decision_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none
@@ -583,12 +648,20 @@ kinds:
     rendering: none
 
   access.review:
-    description: An access review for the gateway's Inbox, from the team services; a refused decision returns this way too.
+    description: An access or change review for the gateway's Inbox, from the team services; a refused decision returns this way too.
     class: durable
     address: work.edge.{edge}
     body: bodies/access.review.schema.json
     body_rules:
       - {unique: /body/state/choices}
+      - {requires: /body/state/reason, when: [{at: /body/state/what/type, is: access}]}
+      - {requires: /body/state/reason, when: [{at: /body/state/what/type, is: change}]}
+      - {allowed: /body/state/choices, values: [approve, approve_read, approve_task, approve_all, deny], when: [{at: /body/state/what/type, is: access}]}
+      - {allowed: /body/state/choices, values: [approve, approve_read, approve_task, approve_all, deny], when: [{at: /body/state/what/type, is: change}]}
+      # A change review: only the person the request works for decides it, from the brief code wrote.
+      - {allowed: /body/state/choices, values: [keep_current, use_change, stop_request], when: [{at: /body/state/what/type, is: change_review}]}
+      - {requires: /body/state/decider/delivery_ref, when: [{at: /body/state/what/type, is: change_review}]}
+      - {requires: /body/state/brief, when: [{at: /body/state/what/type, is: change_review}]}
     senders: [team_services]
     receivers: [gateway]
     expiry_seconds: 604800
@@ -639,13 +712,13 @@ kinds:
   delivery.refused:
     description: A receiver refused a message; sent back to its sender.
     class: durable
-    address: ["work.agent.{agent}", "work.edge.{edge}", work.team]
+    address: ["work.control.{agent}", "work.edge.{edge}", work.team]
     body: bodies/delivery.refused.schema.json
     senders: [lead_host, worker_host, team_services, gateway, edge_adapter]
     senders_by_address:
       work.edge.{edge}: [lead_host, team_services]
     receivers: [lead_host, worker_host, team_services, gateway, edge_adapter]
-    expiry_seconds: 86400
+    expiry_seconds: 604800
     authority: none
     idempotency: [/body/refused_message_id, /issuer/runtime, /issuer/agent]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
@@ -728,7 +801,7 @@ kinds:
   ledger.fact:
     description: A fact for an agent's work ledger from the team services.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     body: bodies/ledger.fact.schema.json
     senders: [team_services]
     receivers: [lead_host, worker_host]
@@ -2066,69 +2139,6 @@ kinds:
     wakes_model: never
     rendering: none
 
-  conflicts.decide:
-    description: A person decides a change conflict.
-    class: request_reply
-    address: svc.team
-    body: bodies/conflicts.decide.schema.json
-    reply:
-      body: bodies/conflicts.decide.reply.schema.json
-      errors: [not_found, case_closed, values_changed, not_allowed]
-    senders: [gateway]
-    receivers: [team_services]
-    expiry_seconds: 30
-    authority: required
-    authority_binding: {type: command, at: /body/request_id}
-    idempotency: [/body/request_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
-    routing: team
-    topology_edge: none
-    ledger: none
-    wakes_model: never
-    rendering: none
-
-  conflicts.list:
-    description: Open and recent change conflicts, for administrators.
-    class: request_reply
-    address: svc.team
-    body: bodies/conflicts.list.schema.json
-    reply:
-      body: bodies/conflicts.list.reply.schema.json
-      errors: [administrator_required]
-    senders: [gateway]
-    receivers: [team_services]
-    expiry_seconds: 30
-    authority: required
-    authority_binding: {type: command, at: /body/request_id}
-    idempotency: [/message_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
-    routing: team
-    topology_edge: none
-    ledger: none
-    wakes_model: never
-    rendering: none
-
-  conflicts.cancel:
-    description: An administrator cancels a change conflict.
-    class: request_reply
-    address: svc.team
-    body: bodies/conflicts.cancel.schema.json
-    reply:
-      body: bodies/conflicts.cancel.reply.schema.json
-      errors: [not_found, administrator_required]
-    senders: [gateway]
-    receivers: [team_services]
-    expiry_seconds: 30
-    authority: required
-    authority_binding: {type: command, at: /body/request_id}
-    idempotency: [/body/request_id]
-    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
-    routing: team
-    topology_edge: none
-    ledger: none
-    wakes_model: never
-    rendering: none
-
   debug.dump:
     description: Turn an agent's diagnostic context dumps on or off.
     class: request_reply
@@ -2194,18 +2204,20 @@ kinds:
     rendering: none
 
   custody.decide:
-    description: The lead reassigns a task or adopts late work.
+    description: The lead reassigns a task or adopts late work; the gateway sends a person's move, including an early move that overrides the holder's custody window.
     class: request_reply
     address: svc.team
     body: bodies/custody.decide.schema.json
     reply:
       body: bodies/custody.decide.reply.schema.json
-      errors: [not_found, stale_custody, late_work_not_found, request_closed, not_own_request]
-    senders: [lead_host]
+      errors: [not_found, stale_custody, custody_window_open, late_work_not_found, request_closed, not_own_request, not_allowed]
+    senders: [lead_host, gateway]
     receivers: [team_services]
     expiry_seconds: 30
     authority: required
-    authority_binding: {type: root_task}
+    authority_binding:
+      - {type: root_task, senders: [lead_host]}
+      - {type: command, at: /body/request_id, senders: [gateway]}
     idempotency: [/body/request_id]
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
@@ -2789,6 +2801,8 @@ kinds:
     class: request_reply
     address: _install.{sender}.svc
     body: bodies/host.join.schema.json
+    body_rules:
+      - {unique: /body/tools}
     reply:
       body: bodies/host.join.reply.schema.json
       errors: [pending, denied, protocol_mismatch, not_allowed]

@@ -15,9 +15,8 @@ values:
 
 This module fills in public keys, idempotency keys, body digests, signatures and
 each invalid example's ``frame_text``. Tokens are signed wherever a frame carries
-them: its authority token, an authority token in its body (``body.authority``, the
-scheduler's answer to ``run_context.sign``) and a change-conflict decision token
-(``body.decision_token``). It signs and derives keys with RFC 8785,
+them: its authority token, and an authority token in its body (``body.authority``, the
+scheduler's answer to ``run_context.sign``). It signs and derives keys with RFC 8785,
 SHA-256 and Ed25519 directly, not with ``custom_messages.wire``, so the tests
 compare two implementations of the signing and key rules. ``scripts/export_message_contract.py`` runs it before writing its manifest;
 ``--check`` there fails when a file here is not what this module renders.
@@ -122,7 +121,6 @@ class Signer:
         self.state_domain = registry["state_signing_domain"]
         self.token_domain = registry["authority_token_domain"]
         self.renew_domain = registry["renew_key_proof_domain"]
-        self.decision_domain = registry["decision_token_domain"]
 
     def private_key(self, key_id: str) -> Ed25519PrivateKey:
         if key_id not in self.keys:
@@ -187,10 +185,6 @@ class Signer:
         body = frame.get("body")
         if isinstance(body, dict) and isinstance(body.get("authority"), dict) and sign_token:
             body = frame["body"] = dict(body, authority=self.token(body["authority"]))
-        if isinstance(body, dict) and isinstance(body.get("decision_token"), dict) and sign_token:
-            decision = dict(body["decision_token"], algorithm="ed25519")
-            decision["signature"] = self.sign(self.decision_domain, decision, decision["issuer"]["key_id"])
-            frame["body"] = dict(body, decision_token=decision)
         frame["algorithm"] = "ed25519"
         frame["body_digest"] = digest or self.digest(frame["body"])
         frame["signature"] = self.sign(self.frame_domain, frame, key_id or frame["issuer"]["key_id"])
