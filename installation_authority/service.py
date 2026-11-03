@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
-from nats.js.errors import BucketNotFoundError, KeyNotFoundError, NotFoundError
+from nats.js.errors import BucketNotFoundError, KeyNotFoundError, NoKeysError, NotFoundError
 
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
@@ -254,7 +254,7 @@ class InstallationAuthority:
         assert self.live is not None
         try:
             keys = [key for key in await (await self._records()).keys() if key.startswith(f"host.{self.installation}.")]
-        except NotFoundError:  # no key in the bucket yet
+        except (NoKeysError, NotFoundError):  # no key in the bucket yet
             return
         for key in keys:
             stored = await self._stored(key)
@@ -273,7 +273,7 @@ class InstallationAuthority:
         prefix = f"host.{self.installation}.{runtime}."
         try:
             keys = [key for key in await (await self._records()).keys() if key.startswith(prefix)]
-        except NotFoundError:  # the bucket holds no keys yet
+        except (NoKeysError, NotFoundError):  # the bucket holds no keys yet
             keys = []
         epochs = sorted((int(key.rsplit(".", 1)[1]) for key in keys if key.rsplit(".", 1)[1].isdigit()), reverse=True)
         for epoch in epochs:
