@@ -21,19 +21,19 @@ TokenId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,
 InstallationId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$')]
 
 
-TeamId = TokenId
+TeamId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$')]
 
 
 RuntimeId = TokenId
 
 
-AgentId = TokenId
+AgentId = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$')]
 
 
 DurableOwnerId = Annotated[str, StringConstraints(min_length=1, max_length=16384)]
 
 
-AgentType = TokenId
+AgentType = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$')]
 
 
 SessionId = TokenId
@@ -87,7 +87,7 @@ class BlobRef(WireModel):
     name: Union[Annotated[str, StringConstraints(min_length=1, max_length=255)], MISSING] = Field(default=MISSING)
 
 
-ScopeId = Annotated[str, StringConstraints(pattern='^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$')]
+ScopeId = Annotated[str, StringConstraints(pattern='^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,23})$')]
 
 
 class Issuer(WireModel):

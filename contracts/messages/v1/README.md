@@ -687,11 +687,12 @@ without a list runs no tools.
 Work, requests and events use `ua.v1.<audience team>.<sender slot>.<address>`. The third
 token is the destination team. The sender slot is the issuer's runtime, or
 `x-<issuer installation>` for a frame from another installation; runtime ids starting with
-`x-` or `_` are reserved. The address decides the audience target: `{agent}`, `{pool}` and
-`{edge}` addresses deliver to that target with the audience id in the address,
-`work.team`, `svc.team` and `svc.scheduler` to `team_services`, and `evt.*` events to the
-whole `team`. For the last two the audience id is the team id. Any receiver in the team
-accepts a frame for the whole `team`.
+`x-` or `_` are reserved. Team ids and agent types are at most 24 characters and agent
+ids at most 32, which keeps a host's credential small ("Credential size"). The address
+decides the audience target: `{agent}`, `{pool}` and `{edge}` addresses deliver to that
+target with the audience id in the address, `work.team`, `svc.team` and `svc.scheduler` to
+`team_services`, and `evt.*` events to the whole `team`. For the last two the audience id is
+the team id. Any receiver in the team accepts a frame for the whole `team`.
 
 **One address per receiving service.** Requests do not get a subject per operation. The
 team services answer every operation at `svc.team`, the scheduler its one operation at
@@ -809,17 +810,18 @@ after its certificate is refused (`invalid_body` at `/body/connection/expires_at
 
 **Credential size.** A credential grows with the agents its host runs: each hosted agent
 adds seven subjects (the info, next-message and acknowledgement subjects of its inbox's and
-its control queue's consumers, and its control address), 1580 bytes of permission JSON with
-64-character team and agent ids, which a NATS user JWT's base64url encoding turns into
-about 2,107 bytes. Each worker pool adds three subjects, 709 bytes.
-`tests/test_message_contract.py` recomputes these figures from the generated templates. A
-credential is at most `max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt`
-field's limit, so the authority places no more agents and pools on one host than its
-credential can name: about 30 agents with the longest ids, or about 85 with team and agent
-ids of a dozen characters. A certificate's `session_limit` does not lift that limit. NATS
-reads a user JWT in the client's `CONNECT` line, which the server's `max_control_line`
-limits (4,096 bytes unless configured), so an installation's servers set `max_control_line`
-above `max_credential_bytes` plus the rest of the `CONNECT` line.
+its control queue's consumers, and its control address), 836 bytes of permission JSON with
+the longest team and agent ids (24 and 32 characters), which a NATS user JWT's base64url
+encoding turns into about 1,115 bytes. Each worker pool adds three subjects, 349 bytes with
+a 24-character agent type. `tests/test_message_contract.py` recomputes these figures from
+the generated templates. A credential is at most `max_credential_bytes` (65,536 bytes,
+`transport.yaml`), the `jwt` field's limit, so the authority places no more agents and
+pools on one host than its credential can name: with the longest ids, about 50 agents
+beside 10 worker pools. The id caps exist for this; with 64-character ids a host held about
+25. A certificate's `session_limit` does not lift that limit. NATS reads a user JWT in the
+client's `CONNECT` line, which the server's `max_control_line` limits (4,096 bytes unless
+configured), so an installation's servers set `max_control_line` above
+`max_credential_bytes` plus the rest of the `CONNECT` line.
 
 **Filling the templates.** Before installing permissions, trusted membership code fills
 each role's templates for the host (`custom_messages.wire.permissions.host_permissions`):

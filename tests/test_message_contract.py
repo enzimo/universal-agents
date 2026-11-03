@@ -589,21 +589,62 @@ def test_a_placement_names_only_teams_its_host_serves() -> None:
         host_subjects("ua.v1.{team}.{installation}.x", HostPlacement("worker-host-1", ("team_a",)))
 
 
+def longest_id(definition: str) -> int:
+    """The most characters a common.schema.json id definition allows (its pattern's {0,n} plus the first character)."""
+
+    defs = CONTRACT_SCHEMAS["common.schema.json"]["$defs"]
+    while "pattern" not in defs[definition]:
+        definition = defs[definition]["$ref"].rsplit("/", 1)[-1]
+    found = re.search(r"\{0,(\d+)\}\$$", defs[definition]["pattern"])
+    assert found, definition
+    return int(found.group(1)) + 1
+
+
+# Each permission placeholder, filled with the longest id its definition allows.
+PLACEHOLDER_IDS = {"team": "team_id", "agent": "agent_id", "pool": "agent_type", "edge": "token_id", "self": "runtime_id"}
+
+
+def permission_bytes(subjects: list[str]) -> int:
+    """Bytes of permission JSON for these templates, each placeholder filled with its longest id."""
+
+    def longest(match: re.Match[str]) -> str:
+        return "a" * longest_id(PLACEHOLDER_IDS[match.group(1)])
+
+    return sum(len(re.sub(r"\{([a-z_]+)\}", longest, subject)) + len('"",') for subject in subjects)
+
+
 def credential_growth(role: str, placeholder: str) -> int:
-    """Bytes of permission JSON one more ``placeholder`` id adds to ``role``'s credential, every id 64 characters."""
+    """Bytes of permission JSON one more ``placeholder`` id adds to ``role``'s credential, every id as long as allowed."""
 
     document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
-    long_id = "a" * 64
-    subjects = [template for template in document["publish"] + document["subscribe"] if "{" + placeholder + "}" in template]
-    return sum(len(re.sub(r"\{[a-z_]+\}", long_id, subject)) + len('"",') for subject in subjects)
+    return permission_bytes([template for template in document["publish"] + document["subscribe"]
+                             if "{" + placeholder + "}" in template])
 
 
 def test_the_readme_states_what_each_hosted_agent_and_pool_adds_to_a_credential() -> None:
     readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
+    assert (longest_id("team_id"), longest_id("agent_id"), longest_id("agent_type")) == (24, 32, 24)
     agent = max(credential_growth(role, "agent") for role in ("lead_host", "worker_host"))
     pool = max(credential_growth(role, "pool") for role in ("lead_host", "worker_host"))
-    assert f"{agent} bytes of permission JSON" in readme and f"{pool} bytes." in readme
+    assert f"{agent} bytes of permission JSON" in readme and f"{pool} bytes with" in readme
     assert f"about {-(-agent * 4 // 3):,} bytes" in readme
+
+
+def test_a_credential_names_about_fifty_agents_beside_ten_pools_with_the_longest_ids() -> None:
+    """README, "Credential size": what the id caps buy, counted as a NATS user JWT.
+
+    The count allows 1,024 bytes for the JWT's header, claims and signature, and
+    base64url turns three bytes into four.
+    """
+
+    document = json.loads((CONTRACT / "generated" / "permissions" / "lead_host.json").read_text(encoding="utf-8"))
+    subjects = document["publish"] + document["subscribe"]
+    fixed = permission_bytes([s for s in subjects if not re.search(r"\{(agent|pool|edge)\}", s)])
+    agent, pool = credential_growth("lead_host", "agent"), credential_growth("lead_host", "pool")
+    room = TRANSPORT["limits"]["max_credential_bytes"] * 3 // 4 - 1024 - fixed - 10 * pool
+    assert room // agent in range(50, 55)
+    readme = " ".join((CONTRACT / "README.md").read_text(encoding="utf-8").split())
+    assert "about 50 agents beside 10 worker pools" in readme
 
 
 def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_withdraw_queued_work() -> None:

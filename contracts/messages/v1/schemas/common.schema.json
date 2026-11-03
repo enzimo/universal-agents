@@ -14,15 +14,18 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$"
     },
     "team_id": {
-      "$ref": "#/$defs/token_id"
+      "description": "A team: one NATS subject token of at most 24 characters. A host's credential names its teams' streams and consumers once per agent it runs, so short team ids keep it within max_credential_bytes (README, \"Credential size\"). Ids starting with an underscore are reserved.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$"
     },
     "runtime_id": {
       "description": "One runtime host: a supervisor process that runs agent sessions. Unique within an installation.",
       "$ref": "#/$defs/token_id"
     },
     "agent_id": {
-      "description": "An agent's stable id. It stays the same when the agent restarts or moves to another host.",
-      "$ref": "#/$defs/token_id"
+      "description": "An agent's stable id: one NATS subject token of at most 32 characters, which a host's credential names in each of the agent's grants (README, \"Credential size\"). It stays the same when the agent restarts or moves to another host.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
     },
     "durable_owner_id": {
       "description": "The stored owner of an Objective or its work records, including manager_scope:<team>:<role>. This is data, never a routing or certificate agent id.",
@@ -31,7 +34,9 @@
       "maxLength": 16384
     },
     "agent_type": {
-      "$ref": "#/$defs/token_id"
+      "description": "A kind of agent, which also names its worker pool: one NATS subject token of at most 24 characters, which a host's credential names in each pool's grants (README, \"Credential size\").",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$"
     },
     "session_id": {
       "description": "One run of an agent on one host, named by its agent session certificate. A restart or a move starts a new session.",
@@ -1652,9 +1657,9 @@
       "additionalProperties": false
     },
     "scope_id": {
-      "description": "A team, or _install for installation-wide traffic.",
+      "description": "A team (at most 24 characters, as team_id), or _install for installation-wide traffic.",
       "type": "string",
-      "pattern": "^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,63})$"
+      "pattern": "^(_install|[A-Za-z0-9][A-Za-z0-9_-]{0,23})$"
     },
     "placement_label": {
       "type": "string",
