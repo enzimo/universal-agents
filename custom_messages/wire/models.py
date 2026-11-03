@@ -2018,7 +2018,7 @@ class CertificateDocument(WireModel):
 class HostJoinReplyOk(WireModel):
     outcome: Literal['ok']
     certificate: CertificateDocument
-    connection: ConnectionCredential
+    connection: Union[ConnectionCredential, MISSING] = Field(default=MISSING)
 
 
 class HostJoinReplyPending(WireModel):
@@ -2070,7 +2070,7 @@ class HostRenewBody(WireModel):
 class HostRenewReplyOk(WireModel):
     outcome: Literal['ok']
     certificate: CertificateDocument
-    connection: ConnectionCredential
+    connection: Union[ConnectionCredential, MISSING] = Field(default=MISSING)
 
 
 class HostRenewReplyRevoked(WireModel):
