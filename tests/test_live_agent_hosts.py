@@ -104,3 +104,32 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         await gateway.close()
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_real_agent_opens_its_session_through_its_process_host(tmp_path: Path) -> None:
+    """A real agent's own NATS connection carries its host's protocol 1 traffic.
+
+    Replies to a host's requests must arrive under its inbox (``_INBOX.<host>.``); agents
+    once connected without it, so every reply, starting with their sessions', was refused.
+    """
+
+    from unittest.mock import MagicMock, patch
+
+    from id_generation import new_id
+    from tests.protocol1_team_support import protocol1_team
+    from tests.test_live_multi_agent_state_boundaries import _agent, _start_agent, _stop_agents
+
+    team_id = new_id("team_hosts")[:24]
+    with patch("custom_agents.strands_agent.Agent", return_value=MagicMock()), patch(
+        "custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()
+    ):
+        async with protocol1_team(tmp_path, team_id, ("TeamArchitect",)) as host:
+            lead = _agent(agent_id=new_id("lead"), name="lead", team_id=team_id, named_agent_type="TeamArchitect",
+                          db_path=tmp_path / "lead.db", workspace_dir=tmp_path, is_lead=True)
+            running = [(lead, await _start_agent(lead))]
+            try:
+                await _until(lambda: lead.id in host.agents and host.agents[lead.id].session is not None, timeout=30)
+                assert host.agents[lead.id].subscription is not None
+            finally:
+                await _stop_agents(running)
