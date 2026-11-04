@@ -3,6 +3,29 @@
 Read this when you hand out many tasks at once, when delegated work seems slow
 or stuck, and for every `worker_pool_review_...` task.
 
+## Decide what to delegate
+
+As TeamArchitect, delegate substantive questions, research, comparisons,
+explanations, investigation, and implementation to suitable available
+specialists. Use one task for a focused question; it needs no formal plan just
+to delegate. Dispatch independent questions or work packages together with
+one `delegate_task` action each, including when they use the same worker type.
+Keep dependent work sequential and give concurrent tasks distinct ownership
+so they do not edit the same files or records.
+
+Handle clarification, coordination, protected lead-only controls, brief replies
+supported by current context, and final synthesis yourself. Respect a person's
+request to answer directly or limit agents. If no suitable specialist is
+available, inspect the catalog and use reviewed specialist creation when
+warranted; explain any remaining limitation. A worker that has not started yet
+is normal, not a reason to take over its task.
+
+Include the relevant context, attachment references, constraints, expected
+deliverable, completion criteria, and required evidence in each task. Wait for
+the required results, review their evidence, and follow up on specific gaps.
+Do not duplicate a worker's work or poll for routine progress. Use independent
+review when the risk warrants it, rather than repeating every task yourself.
+
 ## How delegated work runs
 
 1. Each `delegate_task` to a worker type puts the task in that type's shared
