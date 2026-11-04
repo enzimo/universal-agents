@@ -33,12 +33,17 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
+from storage.config import StorageSettings
+from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
 from storage.schema_setup import begin_schema_setup
-from storage.sql_dialect import SqlDialect
+from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
+from storage.sqlite_connection import connect_sqlite
 
 OUTCOMES_TABLE = "protocol1_operation_outcomes"
 OUTCOME_RETENTION = timedelta(days=7)
@@ -213,3 +218,40 @@ class CommandOutcomeWrites:
         with self._write() as conn:
             complete_outcome(conn, self._dialect, command_outcome, reply)
 
+
+class OperationOutcomeStore(CommandOutcomeWrites):
+    """The outcome table on connections of its own.
+
+    For a family whose store has no outcome hook in its writes because its changes can
+    be carried out again with the same effect (tagging a conversation thread): the reply
+    is stored right after the change, in a transaction of its own. A stop between the
+    two only means a retry makes the same change again and gets the same reply.
+    """
+
+    def __init__(self, settings: StorageSettings, *, logger: logging.Logger = _LOGGER) -> None:
+        self._settings = settings
+        self._logger = logger
+        self._dialect = POSTGRES if settings.postgres_dsn else SQLITE
+        with self._connect() as conn:
+            ensure_outcome_table(conn)
+            conn.commit()
+
+    def _connect(self) -> Any:
+        if self._settings.postgres_dsn:
+            return connect_postgres(self._settings.postgres_dsn)
+        ensure_storage_parent_dir(self._settings.sqlite_path)
+        return connect_sqlite(str(self._settings.sqlite_path), logger=self._logger, row_factory=sqlite3.Row)
+
+    @contextmanager
+    def _write(self) -> Iterator[Any]:
+        with self._connect() as conn:
+            conn.begin_write()
+            yield conn
+            conn.commit()
+
+    def save_reply(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> dict[str, Any]:
+        """Store a carried-out command's reply (a reply already stored under the key is kept); returns it."""
+
+        with self._write() as conn:
+            _insert(conn, self._dialect, command_outcome, reply, complete=True)
+        return reply

@@ -6,7 +6,6 @@ from access_control.ownership import (
     PRIVATE_DELETE,
     PRIVATE_READ,
     PRIVATE_UPDATE,
-    RESOURCE_CONVERSATION,
     RESOURCE_OBJECTIVE,
     RESOURCE_SCHEDULE,
     RESOURCE_TASK,
@@ -66,7 +65,6 @@ from custom_messages.contracts.control_v1 import (
     RESUME_OBJECTIVE,
     STOP_OBJECTIVE,
     ManagerRuntimeWorkCommand,
-    ManagerTopicCommand,
     RuntimeWorkCancellationReceipt,
     RuntimeWorkChildSummary,
     RuntimeObjectiveSubgoal,
@@ -488,84 +486,6 @@ async def handle_manager_schedule_command(
                 response.message = SCHEDULE_CHANGED_SINCE_LISTED if changed else SYSTEM_SCHEDULE_CHANGE_REFUSED
         if response.success and getattr(agent, "_scheduler_wake", None) is not None:
             agent._scheduler_wake.set()
-    await _send_durable_response(
-        agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
-    )
-
-
-async def handle_manager_topic_command(
-    agent: Any,
-    *,
-    command: ManagerTopicCommand,
-    msg_header: MessageHeader,
-    msg_meta: MessageMeta,
-) -> None:
-    if command.command_type == MessageMetaType.RESPONSE:
-        return
-    response = command.model_copy(deep=True)
-    response.command_type = MessageMetaType.RESPONSE
-    response.known_tags = []
-    response.thread_matches = []
-    response.applied_tags = []
-    person, refusal = verified_command_person(agent, msg_meta)
-    if not getattr(agent, "is_team_lead", False) or person is None:
-        response.success = False
-        response.message = refusal or "manager_required"
-        await _send_durable_response(
-            agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
-        )
-        return
-
-    owner = person.canonical_user_id
-    store = agent._conversation_store
-    try:
-        if command.action == "list_tags":
-            response.known_tags = await agent.task_manager.operations_runtime.run(
-                store.list_known_thread_tags,
-                team_id=agent.team_id,
-                canonical_user_id=owner,
-            )
-        elif command.action == "find_threads":
-            response.thread_matches = await agent.task_manager.operations_runtime.run(
-                store.find_threads_by_tags,
-                tags=list(command.tags or ([command.tag] if command.tag else [])),
-                team_id=agent.team_id,
-                canonical_user_id=owner,
-                limit=10,
-            )
-        else:
-            thread = await agent.task_manager.operations_runtime.run(
-                store.get_thread, command.conversation_id or ""
-            )
-            thread_owner = str(
-                (thread or {}).get("owner_canonical_user_id") or ""
-            ).strip()
-            decision = private_access(
-                person_id=owner,
-                owner_id=thread_owner,
-                resource_type=RESOURCE_CONVERSATION,
-                resource_id=command.conversation_id or "unknown",
-                action=PRIVATE_UPDATE,
-                team_id=agent.team_id,
-            )
-            if not thread or not decision.allowed:
-                raise ValueError("conversation not found")
-            for tag in command.tags:
-                row = await agent.task_manager.operations_runtime.run(
-                    store.tag_thread,
-                    conversation_id=command.conversation_id or "",
-                    tag=tag,
-                    team_id=agent.team_id,
-                    canonical_user_id=owner if command.private else None,
-                    source="gateway_command",
-                    created_by_agent_id=agent.id,
-                )
-                response.applied_tags.append(str(row["tag"]))
-        response.success = True
-        response.message = "topic_command_completed"
-    except Exception as exc:
-        response.success = False
-        response.message = str(exc)
     await _send_durable_response(
         agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
     )

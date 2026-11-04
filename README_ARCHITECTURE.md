@@ -4282,7 +4282,11 @@ once. They serve the team's address (`svc.team`) and answer, so far:
   agents' tools). Replies name a person editor by reference. Page text travels inline, at
   most 32,768 characters, until the contract's object store exists: a longer page is
   answered with a plain refusal, and the gateway refuses a longer text before sending
-  (the default page limit is 24,000).
+  (the default page limit is 24,000);
+- the chat's topic commands, `topics.list_tags`, `.find_threads` and `.tag_thread`
+  (`team_services.topics`, the durable `ManagerTopicCommand` until phase 2), on the same
+  conversation store. Tagging can be done again with the same effect, so its outcome is
+  stored right after the change by `storage.operation_outcomes.OperationOutcomeStore`.
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.

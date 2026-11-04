@@ -6,7 +6,6 @@ from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.control_v1 import ControlInstruction
 from custom_messages.contracts.control_v1 import Instruction
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
-from custom_messages.contracts.control_v1 import ManagerTopicCommand
 from custom_messages.contracts.control_v1 import NoOpMessage
 from custom_messages.contracts.control_v1 import PersonStandingCommandV1
 from custom_messages.contracts.control_v1 import SystemStatusMessage
@@ -55,7 +54,6 @@ ContentType = Annotated[
         Instruction,  # Used directly? Or always via ControlPayload? Let's assume via ControlPayload
         ManagerRuntimeWorkCommand,
         ManagerScheduleCommand,
-        ManagerTopicCommand,
         ManagedSkillCatalogChangedV1,
         NoOpMessage,
         PersonStandingCommandV1,
@@ -92,7 +90,6 @@ ContentType = Annotated[
 GATEWAY_MANAGER_CONTROL_TYPES = (
     ManagerRuntimeWorkCommand,
     ManagerScheduleCommand,
-    ManagerTopicCommand,
     PersonStandingCommandV1,
 )
 

@@ -2631,115 +2631,6 @@
       "title": "ManagerScheduleCommand",
       "type": "object"
     },
-    "ManagerTopicCommand": {
-      "description": "Durable gateway-to-manager conversation-topic command.",
-      "properties": {
-        "action": {
-          "enum": [
-            "list_tags",
-            "find_threads",
-            "tag_thread"
-          ],
-          "title": "Action",
-          "type": "string"
-        },
-        "applied_tags": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Applied Tags",
-          "type": "array"
-        },
-        "command_id": {
-          "title": "Command Id",
-          "type": "string"
-        },
-        "command_type": {
-          "$ref": "#/$defs/MessageMetaType",
-          "default": "request"
-        },
-        "conversation_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Conversation Id"
-        },
-        "known_tags": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Known Tags",
-          "type": "array"
-        },
-        "message": {
-          "default": "",
-          "title": "Message",
-          "type": "string"
-        },
-        "message_class": {
-          "const": "ManagerTopicCommand",
-          "default": "ManagerTopicCommand",
-          "title": "Message Class",
-          "type": "string"
-        },
-        "private": {
-          "default": false,
-          "title": "Private",
-          "type": "boolean"
-        },
-        "success": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Success"
-        },
-        "tag": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Tag"
-        },
-        "tags": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Tags",
-          "type": "array"
-        },
-        "thread_matches": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Thread Matches",
-          "type": "array"
-        }
-      },
-      "required": [
-        "action"
-      ],
-      "title": "ManagerTopicCommand",
-      "type": "object"
-    },
     "MessageHeader": {
       "additionalProperties": true,
       "description": "Contains standard routing and identification metadata for a message.\n\nAttributes:\n    from_agent_id (Optional[str]):\n        Optional identifier of the agent originating the message. Useful for tracking message origin\n        and facilitating direct responses. Defaults to None if the message isn't directly associated with an agent.\n\n    to_routing_path (Optional[Union[str, RoutingType]]):\n        Optional identifier of the agent intended to receive the message, or a special routing type.\n        Used for routing messages to specific agents or groups within the system.\n        Special routing types include: '++<all>++', '++<self>++', '++<null>++'.\n        Defaults to None if the message is not targeted at a specific agent.\n\n    response_routing_key (Optional[Union[str, RoutingType]]):\n        Optional routing key (e.g., queue name) or a special routing type where a response to this message should be sent.\n        Defaults to None if no specific response routing is required.\n\n    timestamp (str):\n        Timestamp indicating when the message was created, automatically generated using the\n        ISO 8601 format. Provides a standardized time reference for all messages.\n\n    message_id (str):\n        Unique identifier for the message, automatically generated with a semantic prefix\n        and a 12-character lowercase hexadecimal suffix. Ensures message\n        uniqueness and facilitates tracking.\n\n    agent_signature (Optional[str]):\n        Optional signature of the agent's private key applied to the message_id of this message (for security).",
@@ -8008,7 +7899,6 @@
           "ManagedSkillCatalogChangedV1": "#/$defs/ManagedSkillCatalogChangedV1",
           "ManagerRuntimeWorkCommand": "#/$defs/ManagerRuntimeWorkCommand",
           "ManagerScheduleCommand": "#/$defs/ManagerScheduleCommand",
-          "ManagerTopicCommand": "#/$defs/ManagerTopicCommand",
           "NoOpMessage": "#/$defs/NoOpMessage",
           "PersonStandingCommandV1": "#/$defs/PersonStandingCommandV1",
           "ScheduledMessage": "#/$defs/ScheduledMessage",
@@ -8064,9 +7954,6 @@
         },
         {
           "$ref": "#/$defs/ManagerScheduleCommand"
-        },
-        {
-          "$ref": "#/$defs/ManagerTopicCommand"
         },
         {
           "$ref": "#/$defs/ManagedSkillCatalogChangedV1"
