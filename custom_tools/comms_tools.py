@@ -19,7 +19,7 @@ from id_generation import new_id
 def _process_host_runtime() -> Optional[str]:
     """This process's message host id (``custom_agents.agent_host``), or None without the launcher."""
 
-    from custom_agents.agent_host import process_host
+    from custom_agents.agent_requests import process_host
 
     host = process_host()
     return None if host is None else host.profile.runtime
