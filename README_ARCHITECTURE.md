@@ -122,6 +122,40 @@ running snapshot cannot restore an agent whose newer status says it exited.
 
 ## Work, scheduling, and recovery
 
+### When the lead delegates
+
+TeamArchitect delegates substantive questions and execution by default,
+including research, comparisons, explanations, investigation, and code work.
+One focused question normally needs one suitable specialist, without a formal
+plan just to delegate. Independent work is dispatched together; dependent work
+waits for its inputs. Concurrent tasks have distinct ownership of edits.
+The lead handles clarification, coordination, protected lead-only controls,
+brief replies supported by current context, and final synthesis. It respects
+requests to answer directly or limit agents, and explains when no suitable
+specialist can take the work.
+
+This policy lives in `ua_definitions/agent_definitions/prompts/team_architect.md`.
+The shared action instructions in `custom_agents/agent_instructions.py` allow
+several independent delegation actions in one turn. The action outbox publishes
+them sequentially, while workers can run them in parallel. Delegation keeps the
+lead focused on coordination; it does not require duplicating specialists'
+work for validation. The lead checks returned evidence, follows up on specific
+gaps, and waits for required results before answering. More delegation can use
+more model calls and add latency to a focused request. Existing access checks,
+pool limits, and provider-limit handling still decide what can run.
+
+Verify policy changes with real-model decision scenarios covering a substantive
+question, independent questions dispatched together, and direct-reply exceptions.
+Catalog and context tests verify instruction loading; real NATS tests verify
+dispatch, waiting, results, and worker startup. Fake model outputs in transport
+tests cannot prove that a model chooses to delegate more often.
+The decision scenarios are in `tests/test_live_litellm_provider_smoke.py`, selected
+with `-k manager_chooses_delegation` and enabled by
+`RUN_LIVE_LITELLM_PROVIDER_SMOKE=1`. They use the existing live-provider config
+and model-key lookup, with harmless research, shell, and notification tools;
+they never dispatch the proposed tasks. A rejected key or unavailable endpoint
+leaves model behavior unverified even when the transport tests pass.
+
 ### Worker pools and parallel work
 
 TeamArchitect can hand out dozens of tasks at once, one `delegate_task` action

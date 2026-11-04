@@ -719,3 +719,102 @@ def test_live_litellm_manager_full_tool_surface_structured_output_call(stream: b
     )
 
     _assert_turn_decision_answer(result, "OK")
+
+
+@pytest.mark.parametrize(
+    ("user_request", "expected_target", "minimum_tasks"),
+    [
+        pytest.param(
+            "What do the current Python docs say about free-threaded builds, their "
+            "limitations, and extension compatibility? Cite the relevant sources.",
+            "WebResearchAgent", 1, id="substantive-question",
+        ),
+        pytest.param(
+            "Explain recursion to a beginner with worked examples, common mistakes, "
+            "and practice exercises that build up in difficulty.",
+            "LearningCoachingAgent", 1, id="substantial-explanation",
+        ),
+        pytest.param(
+            "Implement a Python CSV import module in scratch/ that validates "
+            "required columns, reports invalid rows, and has tests for malformed input.",
+            "CodeWritingAgent", 1, id="implementation",
+        ),
+        pytest.param(
+            "I have two unrelated questions. First, what do the current Python docs "
+            "say about free-threaded extension compatibility? Second, what do the "
+            "current PostgreSQL docs say about transaction isolation anomalies? "
+            "Give each question its own cited explanation.",
+            "WebResearchAgent", 2, id="independent-questions",
+        ),
+        pytest.param("Thanks!", None, 0, id="acknowledgment"),
+        pytest.param(
+            "The earlier results are complete: option A costs $10 per month; option B "
+            "costs $15 per month. My only criterion is price. Which is cheaper?",
+            None, 0, id="answer-from-context",
+        ),
+        pytest.param(
+            "Please answer this yourself without using other agents: explain "
+            "recursion with a small worked example and one common mistake.",
+            None, 0, id="explicit-direct-answer",
+        ),
+    ],
+)
+def test_live_litellm_manager_chooses_delegation_for_substantive_work(
+    user_request: str, expected_target: str | None, minimum_tasks: int,
+) -> None:
+    """Probe model choices with the shipped prompt, without executing its actions.
+
+    Harmless tool stand-ins keep direct research and shell work available as
+    choices. Recording their use catches a lead that does the work first and
+    only delegates afterward. Real queues are covered by test_live_worker_pools.
+    """
+    direct_work_calls: list[str] = []
+
+    @tool
+    def exa_search(query: str) -> str:
+        """Search the web for current facts and sources matching query."""
+        direct_work_calls.append("exa_search")
+        return "No external operation was run in this isolated decision probe."
+
+    @tool
+    def shell(command: str) -> str:
+        """Run a shell command in the task's workspace."""
+        direct_work_calls.append("shell")
+        return "No command was run in this isolated decision probe."
+
+    @tool
+    def notify_user(message: str, target: str = "auto") -> str:
+        """Send a progress note to the person whose request is being handled."""
+        return "Progress note recorded."
+
+    settings = _runtime_settings()
+    agent = Agent(
+        system_prompt=_manager_system_prompt(),
+        model=_litellm_model(stream=None, max_tokens=4096, settings=settings),
+        tools=[exa_search, shell, notify_user],
+        callback_handler=None,
+    )
+    targets = "\n".join(f"- `{name}`" for name in sorted(AGENT_TYPE_MAP) if name != "TeamArchitect")
+    result = agent(
+        "Team Routing Context:\nAvailable specialist targets:\n"
+        f"{targets}\n\n"
+        "This is a new request with no active plan or outstanding tasks. "
+        "All access and account setup needed for this request is complete.\n\n"
+        f"Current request:\n{user_request}",
+        structured_output_model=_turn_decision_output_model(settings),
+        structured_output_prompt=_turn_decision_output_prompt(settings),
+    )
+
+    assert not direct_work_calls, f"Lead performed substantive work: {direct_work_calls}"
+    decision = result.structured_output
+    assert isinstance(decision, (ModelAgentTurnDecision, FireworksModelAgentTurnDecision))
+    actions = decision.to_runtime_decision().actions
+    if expected_target is None:
+        assert len(actions) == 1
+        assert isinstance(actions[0], TaskResponseAction)
+        assert _answer_text(actions[0].task.answer).strip()
+        return
+    assert len(actions) >= minimum_tasks
+    assert all(isinstance(action, DelegateTaskAction) for action in actions)
+    assert all(action.target_named_agent_type == expected_target for action in actions)
+    assert all(action.task.problem_statement.strip() for action in actions)
