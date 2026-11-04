@@ -16,6 +16,8 @@ the access model replaces.
 
 from __future__ import annotations
 
+import secrets
+
 import hashlib
 import json
 import re
@@ -1352,6 +1354,16 @@ class PersonStanding(StrEnum):
     REMOVED = "removed"  # taken off the team; their work and personal records are deleted or held
 
 
+# A person's opaque reference (protocol 1 ``person_ref``): "p-" and 22 random base64url characters.
+PERSON_REF_PATTERN = r"^p-[A-Za-z0-9_-]{22}$"
+
+
+def new_person_ref() -> str:
+    """A fresh opaque person reference: 132 random bits, which tell nothing about the person."""
+
+    return f"p-{secrets.token_urlsafe(16)[:22]}"
+
+
 class TeamPersonV1(AccessContractModel):
     """One person's current standing and roles in a team, as the gateway last recorded them.
 
@@ -1368,6 +1380,12 @@ class TeamPersonV1(AccessContractModel):
     schema_version: Literal[1] = 1
     team_id: str = Field(min_length=1, max_length=120)
     person_id: str = Field(min_length=1, max_length=240)
+    # The person's opaque reference in protocol 1 frames (plan decision 64): random,
+    # kept for as long as the person is in the team. person_id can be a display name,
+    # which no frame may carry. Every stored copy has one (the access store's upgrade
+    # step gives one to copies written before it existed), so the default only fills a
+    # newly made copy, which the gateway gives the person's earlier reference.
+    person_ref: str = Field(default_factory=lambda: new_person_ref(), pattern=PERSON_REF_PATTERN)
     standing: PersonStanding
     roles: tuple[str, ...] = ()
     changed_at_utc: datetime

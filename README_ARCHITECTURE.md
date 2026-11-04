@@ -4266,6 +4266,23 @@ once. They serve the team's address (`svc.team`) and answer, so far:
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one at a time.
 
+**The gateway as a host** (`assistant_gateway.message_host.GatewayMessageHost`): the
+launcher lists the gateway (host `gateway`, role `gateway`) beside the team services, and
+the gateway joins in the background when its NATS runtime connects, so nothing else in the
+gateway waits for the authority. It sends a person's operation to the team services with a
+command token (`custom_transport.protocol1.authority_tokens.command_token`): signed with the
+gateway's own key, bound to that one command, lasting at most five minutes, and naming the
+person only by their **person reference** (`TeamPersonV1.person_ref`, `p-` and 22 random
+URL-safe characters, plan decision 64). People's canonical ids can be names or chat
+handles, so they never travel in frames. The reference is stored with the person in the
+access store's people table (`access_people.person_ref`, unique per team), kept when the
+gateway copies the people again, and created for existing people when an older store is
+opened; `AccessRepository.team_person_by_ref` turns it back into the person. The team
+transfer does not carry the people copy, so a moved team's people get new references;
+nothing outside the instance keeps them. A gateway
+started without the launcher has no bootstrap bundle, so it runs no host and its commands
+say so (`event=gateway_host_not_prepared`).
+
 ## Certificate trust
 
 Certificate trust spans independent stores. Python certifi and uv use their

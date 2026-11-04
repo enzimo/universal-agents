@@ -2048,10 +2048,12 @@ def test_the_installation_authority_starts_after_the_streams_and_is_watched_with
     command, env = steps[2][1]
     assert command[-3:] == ["run-team-services", "--config", str(config_path)] and env["NATS_PASSWORD"] == "nats"
     assert "SECURE_TOOL_BROKER_TOKEN" not in env
-    # The team services are a host the authority approves without asking anyone.
+    # The team services and the gateway are hosts the authority approves without asking anyone.
     from installation_authority.expected_hosts import read_expected_hosts
 
-    assert read_expected_hosts(layout.trust_expected_hosts_path)["team-services"].roles == {"team_services", "scheduler"}
+    expected = read_expected_hosts(layout.trust_expected_hosts_path)
+    assert expected["team-services"].roles == {"team_services", "scheduler"}
+    assert expected["gateway"].roles == {"gateway"} and expected["gateway"].teams == {"team_test"}
     external = steps[3][1]["external_processes"]
     assert ("installation authority", authority) in external and ("team services", team_services) in external
     assert PROCESS_INSTALLATION_AUTHORITY == "installation_authority"

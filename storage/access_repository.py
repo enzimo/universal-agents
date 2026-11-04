@@ -124,6 +124,8 @@ from storage.table_columns import ensure_column, table_column_names
 logger = logging.getLogger(__name__)
 
 # The partial unique index that allows one active account link per tool and owner.
+# Lookups by a person's opaque reference, unique within a team (plan decision 64).
+PERSON_REF_INDEX = "access_people_person_ref"
 ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active"
 # The index that finds the grants one decision stored (``GrantV1.approval_id``).
 APPROVAL_ID_INDEX = "access_grants_approval"
@@ -404,7 +406,7 @@ class AccessRepository:
             # means "not known to the gateway", not "not recorded yet".
             conn.execute("""CREATE TABLE IF NOT EXISTS access_people (
                 team_id TEXT NOT NULL, person_id TEXT NOT NULL, payload_json TEXT NOT NULL,
-                changed_at TEXT NOT NULL,
+                changed_at TEXT NOT NULL, person_ref TEXT,
                 PRIMARY KEY (team_id, person_id)
             )""")
             conn.execute("""CREATE TABLE IF NOT EXISTS access_people_synced (
@@ -431,6 +433,7 @@ class AccessRepository:
             conn.commit()
         self._approval_id_column()
         self._one_active_link_per_owner()
+        self._people_references()
 
     def _connect(self) -> Any:
         joined = _OPEN_WRITE.get()
@@ -507,6 +510,37 @@ class AccessRepository:
                 )
             conn.execute(f"CREATE INDEX IF NOT EXISTS {APPROVAL_ID_INDEX} ON access_grants(approval_id)")
             conn.commit()
+
+    def _people_references(self) -> None:
+        """Give every stored person an opaque reference, and index references for lookups (plan decision 64).
+
+        Copies written before references existed have none; each gets a random one,
+        in its record and in the ``person_ref`` column, in one transaction with the
+        unique index. Later opens find the column, the index and no person without a
+        reference with reads, and take no write lock. The gateway keeps each person's
+        reference whenever it writes the copy again (``people_directory_sync``).
+        """
+
+        with self._connect() as conn:
+            if "person_ref" in table_column_names(conn, "access_people") and self._index_exists(conn, PERSON_REF_INDEX) \
+                    and conn.execute("SELECT 1 FROM access_people WHERE person_ref IS NULL").fetchone() is None:
+                return
+        p = self.dialect.bind
+        with self._connect() as conn:
+            conn.begin_write()
+            ensure_column(conn, "access_people", "person_ref", "TEXT", logger=logger)
+            rows = conn.execute("SELECT team_id, person_id, payload_json FROM access_people WHERE person_ref IS NULL").fetchall()
+            for team_id, person_id, payload_json in rows:
+                person = TeamPersonV1.model_validate_json(payload_json)
+                conn.execute(
+                    f"UPDATE access_people SET payload_json={p}, person_ref={p} WHERE team_id={p} AND person_id={p}",
+                    (person.model_dump_json(), person.person_ref, team_id, person_id),
+                )
+            conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {PERSON_REF_INDEX} ON access_people(team_id, person_ref)")
+            conn.commit()
+        if rows:
+            logger.info("Gave the people copy's records their opaque references. event=access_people_references_added "
+                        "people=%s", len(rows))
 
     def _index_exists(self, conn: Any, name: str) -> bool:
         p = self.dialect.bind
@@ -1039,10 +1073,11 @@ class AccessRepository:
     def _upsert_person(self, conn: Any, person: TeamPersonV1) -> None:
         p = self.dialect.bind
         conn.execute(
-            f"INSERT INTO access_people(team_id, person_id, payload_json, changed_at) VALUES ({p},{p},{p},{p}) "
+            f"INSERT INTO access_people(team_id, person_id, payload_json, changed_at, person_ref) "
+            f"VALUES ({p},{p},{p},{p},{p}) "
             "ON CONFLICT(team_id, person_id) DO UPDATE SET payload_json=excluded.payload_json, "
-            "changed_at=excluded.changed_at",
-            (person.team_id, person.person_id, person.model_dump_json(), _utc(person.changed_at_utc)),
+            "changed_at=excluded.changed_at, person_ref=excluded.person_ref",
+            (person.team_id, person.person_id, person.model_dump_json(), _utc(person.changed_at_utc), person.person_ref),
         )
 
     def team_person(self, team_id: str, person_id: str) -> TeamPersonV1 | None:
@@ -1050,6 +1085,16 @@ class AccessRepository:
         with self._connect() as conn:
             row = conn.execute(
                 f"SELECT payload_json FROM access_people WHERE team_id={p} AND person_id={p}", (team_id, person_id)
+            ).fetchone()
+        return TeamPersonV1.model_validate_json(row[0]) if row else None
+
+    def team_person_by_ref(self, team_id: str, person_ref: str) -> TeamPersonV1 | None:
+        """The person an opaque reference names in a team, if any (protocol 1 frames name people by it)."""
+
+        p = self.dialect.bind
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT payload_json FROM access_people WHERE team_id={p} AND person_ref={p}", (team_id, person_ref)
             ).fetchone()
         return TeamPersonV1.model_validate_json(row[0]) if row else None
 

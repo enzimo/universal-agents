@@ -257,3 +257,50 @@ async def test_gateway_start_copies_everyone_before_sending_maintenance_schedule
         assert access.people_synced_at("team_test") is not None
     finally:
         await gateway.close()
+
+
+def test_a_person_keeps_one_opaque_reference_across_every_copy(tmp_path: Path) -> None:
+    """Plan decision 64: protocol 1 frames name a person by a random reference that never changes."""
+
+    import re
+
+    from custom_messages.contracts.access_v2 import PERSON_REF_PATTERN
+
+    store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
+    _seed(store, {"Olive Smith": ("owner", "active"), "adam": ("admin", "active")})
+    clock = _Clock()
+    directory, access = people_directory(tmp_path, store.identity_repository, team_id=TEAM, clock=clock)
+    directory.record("Olive Smith")
+    reference = access.team_person(TEAM, "Olive Smith").person_ref
+    assert re.fullmatch(PERSON_REF_PATTERN, reference) and "olive" not in reference.lower()
+    clock.now += timedelta(hours=1)
+    directory.sync_all()
+    store.set_gateway_user_status("Olive Smith", "disabled")
+    directory.record("Olive Smith")
+    assert access.team_person(TEAM, "Olive Smith").person_ref == reference
+    assert access.team_person_by_ref(TEAM, reference).person_id == "Olive Smith"
+    assert access.team_person(TEAM, "adam").person_ref != reference
+    assert access.team_person_by_ref(TEAM, "p-" + "x" * 22) is None
+
+
+def test_people_copied_before_references_existed_get_one_when_the_store_opens(tmp_path: Path) -> None:
+    """The in-place upgrade step: an older copy's people get references, which later opens keep."""
+
+    import json
+    import sqlite3
+
+    from tests.people_directory_support import access_store_at
+
+    path = tmp_path / "access.db"
+    access_store_at(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX access_people_person_ref")
+        conn.execute("ALTER TABLE access_people DROP COLUMN person_ref")
+        old = {"schema_version": 1, "team_id": TEAM, "person_id": "olive", "standing": "active", "roles": ["owner"],
+               "changed_at_utc": "2026-09-25T12:00:00Z"}
+        conn.execute("INSERT INTO access_people(team_id, person_id, payload_json, changed_at) VALUES (?,?,?,?)",
+                     (TEAM, "olive", json.dumps(old), "2026-09-25T12:00:00+00:00"))
+    upgraded = access_store_at(tmp_path)
+    reference = upgraded.team_person(TEAM, "olive").person_ref
+    assert upgraded.team_person_by_ref(TEAM, reference).person_id == "olive"
+    assert access_store_at(tmp_path).team_person(TEAM, "olive").person_ref == reference

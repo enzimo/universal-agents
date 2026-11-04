@@ -129,6 +129,7 @@ from env_secrets import (
 )
 from runtime_settings.secret_names import configured_secret_names
 from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
+from assistant_gateway.message_host import GATEWAY_RUNTIME, gateway_profile
 from secure_tool_broker.credential_state import resolve_broker_credentials_dir
 from secure_tool_broker.defaults import resolve_secure_tool_broker_internal_base_url
 from secure_tool_broker.sealbox_runtime import (
@@ -2783,7 +2784,10 @@ def main() -> int:
     try:
         prepare_message_host_trust(
             config.layout,
-            {TEAM_SERVICES_RUNTIME: expected_host(config.layout, team_services_profile(config.manager.team_id))},
+            {
+                TEAM_SERVICES_RUNTIME: expected_host(config.layout, team_services_profile(config.manager.team_id)),
+                GATEWAY_RUNTIME: expected_host(config.layout, gateway_profile(config.manager.team_id)),
+            },
         )
         authority_process = start_installation_authority(
             config.layout,
