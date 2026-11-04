@@ -22,6 +22,7 @@ from custom_messages.wire.frame import Receiver
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
+from custom_transport.protocol1.live import LiveHost
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
@@ -33,6 +34,7 @@ from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
+from team_services.relays import Relays
 from team_services.topics import TopicOperations
 from team_services.service import Handler, TeamServices
 from team_services.sessions import SessionService
@@ -104,6 +106,11 @@ def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]
     return [memory.handlers(), knowledge.handlers(), topics.handlers()]
 
 
+def _started(host: MessageHost) -> LiveHost:
+    assert host.live is not None, "the team services serve only after joining"
+    return host.live
+
+
 async def run_team_services(config: GatewayInstanceConfig) -> None:
     team = config.manager.team_id
     adapter = NatsTransportAdapter(config=transport_config(config), mapper=NatsSubjectMapper(team_id=team), logger=_LOGGER)
@@ -114,7 +121,8 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     await adapter.connect()
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
-        await serve_team(host, team, stop, team_operations(config, host.clock))
+        relays = Relays(lambda: _started(host), host.nc.jetstream(), team, config.manager.named_agent_type, _LOGGER)
+        await serve_team(host, team, stop, [*team_operations(config, host.clock), relays.handlers()])
     finally:
         with contextlib.suppress(Exception):
             await adapter.close()

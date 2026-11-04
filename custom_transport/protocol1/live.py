@@ -65,6 +65,9 @@ Handler = Callable[[VerifiedFrame], Awaitable[Mapping[str, Any]]]
 TrustFetcher = Callable[[bytes], Awaitable[bool]]
 # Refusals another record could cure: a certificate or session this receiver does not hold yet.
 _CURABLE = frozenset({"unknown_key", "wrong_issuer"})
+# A relayed frame carries a token another host signed (a gateway's command token); a receiver
+# that has not met that host yet reads its certificate too (MessageHost.fetch_trust).
+_TOKEN_ISSUER_AT = "/authority/issuer"
 
 
 class ServiceUnavailable(RuntimeError):
@@ -199,7 +202,9 @@ class LiveHost:
         try:
             return verify_frame(data, trust=self.trust.store, **checks)
         except FrameRefused as refused:
-            if refused.code not in _CURABLE or self.fetch_trust is None or not await self.fetch_trust(data):
+            curable = refused.code in _CURABLE or (refused.code == "bad_authority"
+                                                    and refused.known_at == _TOKEN_ISSUER_AT)
+            if not curable or self.fetch_trust is None or not await self.fetch_trust(data):
                 raise
             return verify_frame(data, trust=self.trust.store, **checks)
 

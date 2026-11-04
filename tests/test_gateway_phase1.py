@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,7 +57,6 @@ from custom_agents.provider_error_runtime import PROVIDER_TIMEOUT_USER_MESSAGE
 from custom_agents.team_composition import TEAM_COMPOSITION_SCHEMA_VERSION
 from custom_messages.contracts.control_v1 import (
     AgentStatus,
-    ControlInstruction,
     ManagerRuntimeWorkCommand,
     PinnedMemoryCommandPayload,
     SystemStatusMessage,
@@ -102,6 +102,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.transport import TransportSettings
 from storage.conversation_repository import SqliteConversationRepository
 from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
+from custom_messages.contracts.access_v2 import PERSON_REF_PATTERN
 from tests.team_services_support import InProcessTeamServices
 
 
@@ -4597,62 +4598,38 @@ async def test_gateway_send_stop_request_accepts_authenticated_session_owner_wit
 
 
 @pytest.mark.asyncio
-async def test_gateway_send_context_debug_dump_control_targets_manager(tmp_path: Path):
+async def test_gateway_context_debug_dump_control_goes_to_the_team_services(tmp_path: Path):
+    """``/debug context_dump`` sends ``debug.dump`` for the signed-in person; the team services relay it to the lead."""
+
+    class _TeamServices:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, dict, str]] = []
+
+        async def command(self, kind, body, *, person_ref, request_id):
+            self.sent.append((kind, body, person_ref))
+            return {"outcome": "ok", "enabled": body["enabled"], "mode": body["mode"]}
+
     config = _build_test_config(tmp_path)
     bootstrap_instance(config)
+    team = _TeamServices()
     gateway = UserGateway(
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=team,
     )
-
     session = gateway.application.start_new_session()
-    published: list[MessageEnvelope] = []
-
-    async def fake_publish(envelope: MessageEnvelope) -> None:
-        published.append(envelope)
-        correlation_id = envelope.msg_meta.msg_correlation_id
-        await gateway._manager_client.get_response_channel(correlation_id).put(
-            MessageEnvelope(
-                msg_content=SystemStatusMessage(
-                    system_status="Context debug dump settings applied: enabled=true mode=always.",
-                ),
-                msg_meta=MessageMeta(
-                    msg_correlation_id=correlation_id,
-                    conversation_id=session.conversation_id,
-                ),
-                msg_header=MessageHeader(
-                    from_agent_id="manager_1234",
-                    to_routing_path="user_queue",
-                    agent_signature="",
-                ),
-            )
-        )
-
-    gateway._manager_client.publish_operational = fake_publish  # type: ignore[method-assign]
 
     response = await gateway._operational_controls.set_context_debug_dump(
-        GatewayContextDebugControlRequest(
-            enabled=True,
-            mode="always",
-            session_key=session.session_key,
-        )
+        GatewayContextDebugControlRequest(enabled=True, mode="always", session_key=session.session_key)
     )
 
     assert response.message_type == "system_status"
-    assert (
-        response.text
-        == "Context debug dump settings applied: enabled=true mode=always."
-    )
-    assert len(published) == 1
-    envelope = published[0]
-    assert isinstance(envelope.msg_content, ControlInstruction)
-    assert envelope.msg_content.instruction.instruction == "debug_context_dump"
-    assert envelope.msg_content.runtime_settings == {"enabled": True, "mode": "always"}
-    assert envelope.msg_content.cascade_to_subtasks is False
-    assert envelope.msg_header.to_routing_path == RoutingType.ALL_AGENTS_ROUTE
-    assert envelope.msg_meta.is_response_requested is True
-    assert envelope.msg_meta.to_named_agent_type == config.manager.named_agent_type
+    assert response.text == "Context debug dump is on (mode always)."
+    [(kind, body, person_ref)] = team.sent
+    assert (kind, body["enabled"], body["mode"]) == ("debug.dump", True, "always")
+    # The person is named by their reference from the gateway's copy of the people, never by id.
+    assert re.fullmatch(PERSON_REF_PATTERN, person_ref) and config.user.canonical_user_id not in person_ref
 
 
 def test_delivery_presentation_prefers_cancelled_answer_over_failed_errors() -> None:

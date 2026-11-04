@@ -57,6 +57,7 @@ from config_loader import (
     set_config,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from custom_agents.agent_host import configure_process_host, process_host_for
 from access_control.caller_tokens import CALLER_MANAGER, agent_caller_label, with_own_caller_token
 from runtime_settings.access_cutover import obsolete_binding_data, obsolete_binding_message
 from runtime_settings.legacy_layout import legacy_layout_message, legacy_layout_moves
@@ -596,6 +597,12 @@ def build_parser() -> argparse.ArgumentParser:
         help='Whether this agent is the team leader'
     )
     parser.add_argument(
+        '--host-runtime',
+        type=str,
+        default=None,
+        help="This process's protocol 1 host id (the launcher sets it; without it the process runs no host)",
+    )
+    parser.add_argument(
         '--model-provider',
         type=str,
         default=None,
@@ -887,6 +894,11 @@ def run_with_args(args: argparse.Namespace) -> None:
         logger.error("Agent start refused. %s", obsolete_binding_message(obsolete_bindings))
         sys.exit(2)
     skills_dir = str(layout.skills_dir)
+    if args.host_runtime:
+        configure_process_host(
+            process_host_for(args.host_runtime, layout, team_id, is_lead=args.is_lead, agent_type=args.agent_type,
+                             worker_pools=cfg.get('agent.worker_pools') or {})
+        )
     task_history_db_path = resolve_task_history_db_path(
         args.task_history_db_path or storage_sqlite_path or agent_runtime_settings['task_history_db_path'],
         instance_root=instance_root,

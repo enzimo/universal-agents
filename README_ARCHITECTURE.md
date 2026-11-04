@@ -4291,6 +4291,32 @@ once. They serve the team's address (`svc.team`) and answer, so far:
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.
 
+- people's task lists and removals, `tasks.list`, `.list_finished`, `.remove` and `.purge`,
+  and the team lead's context dump setting, `debug.dump` (`team_services.relays`): the agent
+  itself answers these, so the team services find its host in its placement and pass the
+  same body to its address (`ctl.agent.<agent>`) with the gateway's command token unchanged,
+  then answer with the agent's reply. `debug.dump` without an agent goes to the team lead.
+  An agent that runs nowhere is answered with a plain refusal.
+
+**Agent processes as hosts** (`custom_agents.agent_host`): the launcher starts the team
+lead's process as host `lead` (roles `lead_host` and `worker_host`) and each startup agent's
+process as host `agent-<label>` (role `worker_host`), lists them for the authority, and tells
+each process its host id (`strands_main.py --host-runtime`). Every agent in the team lead's
+process has its own NATS connection and event loop, so the host joins once, on the first
+agent's connection, and each agent opens its own session when it connects
+(`sessions.open`, with its definition digest) and closes it as it leaves. Attaching never
+waits: joining and opening sessions retry in the background, and the agent's work on today's
+queues does not depend on them. A request to an agent runs on that agent's own loop and is
+answered signed as the agent (`custom_agents.relayed_task_controls`: the task controls run for
+the person the gateway's token names, read back from the people copy). Agent ids are new at
+every start, so a host first closes the sessions its earlier run left behind
+(`event=agent_host_stale_session_closed`). The team lead's host may run any agent type in the
+instance's catalog, including specialists created while it runs: the launcher lists it with
+`agent_types_from_catalog`, the authority reads the catalog at each join, and a join asking
+for different grants gets a new certificate (a join asking for exactly the same gets its
+certificate back). A host that meets a relayed frame whose token another host signed reads
+that host's certificate from `UA1_CERTS` too.
+
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is
 retried. The store that makes the change checks for a stored reply under its write

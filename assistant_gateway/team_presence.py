@@ -38,20 +38,9 @@ class _PresenceObservation:
 def configured_agent_classes(config: Any) -> list[dict[str, str]]:
     """The team's defined agent classes (name, display name, description; never prompts)."""
 
-    from custom_agents.agent_catalog import (
-        default_team_agent_definition_paths,
-        load_agent_catalog,
-        resolve_agent_definition_paths,
-    )
+    from custom_agents.agent_catalog import instance_agent_catalog
 
-    root = str(config.instance_root_path)
-    catalog = load_agent_catalog(
-        [
-            *default_team_agent_definition_paths(instance_root=root),
-            *resolve_agent_definition_paths(config.agent.agent_definition_paths, instance_root=root),
-        ],
-        include_configured=False,
-    )
+    catalog = instance_agent_catalog(str(config.instance_root_path), config.agent.agent_definition_paths)
     return [
         {
             "named_agent_type": item.named_agent_type,

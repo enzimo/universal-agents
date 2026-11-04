@@ -104,7 +104,21 @@ class MessageHost:
         if isinstance(session, str):
             taken = await self.records.take_trust_record("agent_session", f"session.{installation}.{team}.{session}",
                                                          now=now) or taken
-        return taken
+        return await self._fetch_token_issuer(document, now) or taken
+
+    async def _fetch_token_issuer(self, document: Any, now: datetime) -> bool:
+        """The certificate of the host that signed a frame's authority token (a relayed command's gateway)."""
+
+        assert self.records is not None
+        try:
+            token_issuer = document["authority"]["issuer"]
+            installation, runtime = str(token_issuer["installation"]), str(token_issuer["runtime"])
+            epoch = int(token_issuer["membership_epoch"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if installation != self.identity.installation:
+            return False
+        return await self.records.take_trust_record("certificate", f"host.{installation}.{runtime}.{epoch}", now=now)
 
     async def refresh_trust(self) -> None:
         """Take the authority's newest revocations record; log, never stop, when it cannot be read."""

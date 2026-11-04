@@ -25,7 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -130,6 +130,14 @@ from env_secrets import (
 from runtime_settings.secret_names import configured_secret_names
 from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
 from assistant_gateway.message_host import GATEWAY_RUNTIME, gateway_profile
+from custom_agents.agent_host import (
+    LEAD_HOST_RUNTIME,
+    agent_host_runtime,
+    lead_host_profile,
+    lead_session_limit,
+    startup_agent_host_profile,
+)
+from installation_authority.expected_hosts import ExpectedHost
 from secure_tool_broker.credential_state import resolve_broker_credentials_dir
 from secure_tool_broker.defaults import resolve_secure_tool_broker_internal_base_url
 from secure_tool_broker.sealbox_runtime import (
@@ -1598,6 +1606,7 @@ def build_agent_command(
     *,
     agent_type: str,
     is_lead: bool,
+    host_runtime: str | None = None,
     python_executable: str | None = None,
 ) -> list[str]:
     command = [
@@ -1613,6 +1622,9 @@ def build_agent_command(
     ]
     if is_lead:
         command.append("--is-lead")
+    if host_runtime:
+        # The process's protocol 1 host (custom_agents.agent_host), listed for the authority below.
+        command.extend(["--host-runtime", host_runtime])
     if config.state.storage.backend == STORAGE_DEFAULTS.backend.value:
         command.extend(
             [
@@ -1621,6 +1633,26 @@ def build_agent_command(
             ]
         )
     return command
+
+
+def agent_process_hosts(
+    config: GatewayInstanceConfig, startup_agent_commands: Iterable[tuple[str, list[str]]]
+) -> dict[str, ExpectedHost]:
+    """The agent processes as hosts the authority approves: the team lead's, which may run any type in
+    the instance's catalog (read by the authority at each join), and each startup agent's."""
+
+    team = config.manager.team_id
+    hosts = {
+        LEAD_HOST_RUNTIME: expected_host(
+            config.layout,
+            lead_host_profile(team, (), lead_session_limit(config.agent.worker_pools)),
+            agent_types_from_catalog=True,
+        )
+    }
+    for label, _command in startup_agent_commands:
+        profile = startup_agent_host_profile(team, agent_host_runtime(label), startup_agent_type(label))
+        hosts[profile.runtime] = expected_host(config.layout, profile)
+    return hosts
 
 
 def build_manager_command(
@@ -1632,6 +1664,7 @@ def build_manager_command(
         config,
         agent_type=config.manager.named_agent_type,
         is_lead=True,
+        host_runtime=LEAD_HOST_RUNTIME,
         python_executable=python_executable,
     )
 
@@ -1736,6 +1769,7 @@ def build_startup_agent_commands(
                         config,
                         agent_type=agent_type,
                         is_lead=False,
+                        host_runtime=agent_host_runtime(label),
                         python_executable=python_executable,
                     ),
                 )
@@ -2784,7 +2818,7 @@ def main() -> int:
     try:
         prepare_message_host_trust(
             config.layout,
-            {
+            agent_process_hosts(config, startup_agent_commands) | {
                 TEAM_SERVICES_RUNTIME: expected_host(config.layout, team_services_profile(config.manager.team_id)),
                 GATEWAY_RUNTIME: expected_host(config.layout, gateway_profile(config.manager.team_id)),
             },

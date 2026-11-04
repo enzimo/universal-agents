@@ -185,3 +185,40 @@ async def test_the_launcher_starts_the_real_authority_and_a_listed_host_joins(br
     finally:
         process.terminate()
         assert process.wait(timeout=10) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_lead_host_asks_for_the_catalogs_agent_types_and_a_new_type_gets_a_new_certificate(
+    broker: str, tmp_path: Path,
+) -> None:
+    """The team lead's host is listed with agent_types_from_catalog: the authority reads the catalog at each join."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    prepare(layout)
+    lead_keys, _ = host_keys.ensure_host_keys(layout, "lead")
+    write_expected_hosts(layout.trust_expected_hosts_path, {"lead": ExpectedHost(
+        "lead", lead_keys.key_id, lead_keys.public_key_text, frozenset({"lead_host", "worker_host"}), frozenset({TEAM}),
+        frozenset(), 8, agent_types_from_catalog=True)})
+    catalog = {"TeamArchitect", "Researcher"}
+    async with AsyncExitStack() as stack:
+        authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
+                                          host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          catalog_agent_types=lambda: frozenset(catalog))
+        await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
+        lead_nc = await connect(stack, broker, "lead")
+
+        def lead(*types: str) -> HostProfile:
+            return HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), tuple(types), 8)
+
+        first = await join(lead_nc, lead_keys, host_trust(layout, "lead"), lead("Researcher", "TeamArchitect"))
+        assert first.agent_types == frozenset({"Researcher", "TeamArchitect"})
+        with pytest.raises(JoinRefused):
+            await join(lead_nc, lead_keys, host_trust(layout, "lead"), lead("Researcher", "Invented"))
+        # A specialist created while the team runs joins the catalog; asking for it gives a new certificate.
+        catalog.add("Analyst")
+        second = await join(lead_nc, lead_keys, host_trust(layout, "lead"), lead("Analyst", "Researcher", "TeamArchitect"))
+        assert second.membership_epoch == first.membership_epoch + 1
+        assert "Analyst" in second.agent_types
+        # Asking for exactly the same again hands that certificate back.
+        assert (await join(lead_nc, lead_keys, host_trust(layout, "lead"),
+                           lead("Analyst", "Researcher", "TeamArchitect"))).membership_epoch == second.membership_epoch

@@ -2054,6 +2054,11 @@ def test_the_installation_authority_starts_after_the_streams_and_is_watched_with
     expected = read_expected_hosts(layout.trust_expected_hosts_path)
     assert expected["team-services"].roles == {"team_services", "scheduler"}
     assert expected["gateway"].roles == {"gateway"} and expected["gateway"].teams == {"team_test"}
+    # The agent processes: the team lead's may run any type in the catalog, a startup agent's its one type.
+    assert expected["lead"].roles == {"lead_host", "worker_host"} and expected["lead"].agent_types_from_catalog
+    startup_hosts = [host for runtime, host in expected.items() if runtime.startswith("agent-")]
+    assert startup_hosts and all(host.roles == {"worker_host"} and host.session_limit == 1
+                                 and len(host.agent_types) == 1 for host in startup_hosts)
     external = steps[3][1]["external_processes"]
     assert ("installation authority", authority) in external and ("team services", team_services) in external
     assert PROCESS_INSTALLATION_AUTHORITY == "installation_authority"
@@ -2392,3 +2397,18 @@ def test_stream_setup_connects_to_nothing_without_jetstream(tmp_path: Path) -> N
     # A port nothing listens on: a connection attempt would retry for minutes.
     env = {"NATS_URL": "nats://127.0.0.1:9", "NATS_JETSTREAM_ENABLED": "false"}
     assert prepare_message_streams(config_path, env) == ()
+
+
+def test_each_agent_process_is_told_its_host(tmp_path: Path, monkeypatch) -> None:
+    """The launcher passes each agent process the host id it listed for the authority."""
+
+    import docker.launch_headless as lh
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    config_path = _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"NATS_PASSWORD": "nats"})
+    config = GatewayInstanceConfig.load_for_process(config_path)
+    manager = lh.build_manager_command(config)
+    assert manager[manager.index("--host-runtime") + 1] == "lead"
+    for label, command in lh.build_startup_agent_commands(config):
+        assert command[command.index("--host-runtime") + 1] == "agent-" + label.replace("#", "-")
+
