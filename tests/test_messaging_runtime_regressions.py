@@ -61,26 +61,34 @@ async def test_same_worker_can_announce_distinct_admissions_of_one_task():
     assert first.kwargs["message"].msg_header.idempotency_key != second.kwargs["message"].msg_header.idempotency_key
 
 
-def test_live_refresh_without_target_uses_matching_status_ids(monkeypatch):
+def test_live_refresh_without_target_asks_each_matching_agent(monkeypatch):
     status = AgentStatus(self_id="worker", team_id="team", name="Worker", agent_role="Researcher", named_agent_type="ResearchAgent", status_type=MessageMetaType.RESPONSE, is_paused=False, is_busy=False)
-    sent = []
+    asked = []
     agent = SimpleNamespace(
         id="lead", team_id="team", name="Lead", role="Manager", named_agent_type="TeamArchitect", paused=False, is_executing=False,
         task_manager=SimpleNamespace(current_task_id=None),
         _agent_state_store=SimpleNamespace(query=lambda filters: [status]),
         _agent_id_by_name={},
     )
-    async def send(envelope):
-        sent.append(envelope)
-    agent._send_operational_message = send
+
+    async def ask_agent(asker, kind, body, target, *, timeout=None):
+        asked.append((asker.id, kind, body, target))
+        return {"outcome": "ok", "agent_type": "ResearchAgent", "is_lead": False, "paused": False}
+
+    from custom_agents import agent_requests
+
+    monkeypatch.setattr(agent_requests, "ask_agent", ask_agent)
     monkeypatch.setattr(agent_management, "get_agent_ref", lambda: agent)
+
     def run(_agent, coroutine):
         import asyncio
-        asyncio.run(coroutine)
+        return asyncio.run(coroutine)
+
     monkeypatch.setattr(agent_management, "_run_agent_coroutine", run)
-    result = json.loads(agent_management.query_agent_state(live="true"))
-    assert result["live_refresh_targets"] == ["worker"]
-    assert sent[0].msg_header.to_routing_path == "worker"
+    result = json.loads(agent_management.query_agent_state(live="true", info_level="full"))
+    # The matching agent is asked itself (agent.status), and its answer is returned.
+    assert asked == [("lead", "agent.status", {"level": "full"}, "worker")]
+    assert result["live_status"]["worker"]["agent_type"] == "ResearchAgent"
 
 
 def _steering_agent(manager):

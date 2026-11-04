@@ -62,7 +62,7 @@ from custom_agents.deferred_message_runtime import (
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
 from custom_agents.custody_loss import install_custody_listeners
 from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
-from custom_agents.agent_liveness import own_process_identity, parse_utc, reconcile_received_status
+from custom_agents.agent_liveness import own_process_identity
 from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost
 from custom_agents.runtime_paths import (
     agent_layout,
@@ -140,7 +140,6 @@ from custom_agents.sdk.strands.skills import (
 )
 from custom_agents.skill_catalog_runtime import (
     SkillCatalogRuntimeState,
-    handle_managed_skill_catalog_notification,
     repair_agent_skill_catalog,
 )
 from custom_agents.message_routing import (
@@ -447,38 +446,6 @@ def _local_named_agent_types(
             if named_type
         )
     )
-
-
-def _validated_agent_status_id(
-    agent_status: AgentStatus,
-    *,
-    logger: logging.Logger,
-    receiving_agent_id: str,
-    msg_header: MessageHeader,
-    msg_meta: MessageMeta,
-) -> str | None:
-    """Return a usable status identity or reject the malformed update observably."""
-    if agent_status.self_id:
-        return agent_status.self_id
-    logger.error(
-        "[%s] Ignoring AgentStatus without self_id. "
-        "event=agent_status_identity_missing correlation_id=%s incoming_from_agent_id=%s",
-        receiving_agent_id,
-        getattr(msg_meta, "msg_correlation_id", None),
-        getattr(msg_header, "from_agent_id", None),
-    )
-    return None
-
-
-def _should_consume_broadcasts(
-    process_broadcasts: bool | None,
-    *,
-    is_team_lead: bool,
-) -> bool:
-    """Resolve the explicit override before the team-lead default."""
-    if process_broadcasts is not None:
-        return bool(process_broadcasts)
-    return is_team_lead
 
 
 def _direct_consumer_scope(*, configured_fields: set[str]) -> ConsumerScope:
@@ -1258,17 +1225,7 @@ class UniversalAgent(BaseModel):
     _activity_client: Optional[ActivityCollectorClient] = PrivateAttr(default=None)
     _operational_exchange_name: Optional[str] = PrivateAttr(default=None)
     _operational_queue_name: Optional[str] = PrivateAttr(default=None)
-    # Probes sent to a worker type (no known holder): only a reply from a worker
-    # that knows the task counts (subtask_watchdog_runtime).
-    _known_only_task_status_probes: set[str] = PrivateAttr(default_factory=set)
     _untracked_subtask_warnings: set[str] = PrivateAttr(default_factory=set)
-    _pending_task_status_futures: Dict[str, asyncio.Future] = PrivateAttr(
-        default_factory=dict
-    )
-    _pending_agent_status_futures: Dict[
-        str,
-        tuple[Optional[str], Optional[str], datetime, asyncio.Future],
-    ] = PrivateAttr(default_factory=dict)
     _runtime_loop: Optional[asyncio.AbstractEventLoop] = PrivateAttr(default=None)
     _task_runtime_coordinator: Optional[TaskRuntimeCoordinator] = PrivateAttr(
         default=None
@@ -1675,16 +1632,6 @@ class UniversalAgent(BaseModel):
 
     def _resolve_manager_identity(self, *args, **kwargs):
         return delegation_runtime._resolve_manager_identity(self, *args, **kwargs)
-
-    def _agent_status_matches_named_type(self, *args, **kwargs):
-        return delegation_runtime._agent_status_matches_named_type(
-            self, *args, **kwargs
-        )
-
-    def _resolve_pending_agent_status_probes(self, *args, **kwargs):
-        return delegation_runtime._resolve_pending_agent_status_probes(
-            self, *args, **kwargs
-        )
 
     async def _record_delegation_subtask_abort(self, *args, **kwargs):
         return await delegation_runtime._record_delegation_subtask_abort(
@@ -4052,13 +3999,6 @@ class UniversalAgent(BaseModel):
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )
-        elif isinstance(msg_content, ManagedSkillCatalogChangedV1):
-            await handle_managed_skill_catalog_notification(
-                self,
-                notification=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
         elif isinstance(msg_content, DelegatedTaskClaimedV1):
             from custom_agents.delegated_work_runtime import handle_delegated_task_claimed
 
@@ -4256,16 +4196,7 @@ class UniversalAgent(BaseModel):
         msg_meta: MessageMeta,
     ) -> None:
         if task_status.status_type == MessageMetaType.RESPONSE:
-            future = self._pending_task_status_futures.get(task_status.task_status_id)
-            if (
-                task_status.task_status_id in self._known_only_task_status_probes
-                and not task_status.is_known_task
-            ):
-                # Another worker of the type answered that it does not hold the
-                # task; wait for the one that does, or the probe's timeout.
-                return
-            if future is not None and not future.done():
-                future.set_result(task_status)
+            # Agents ask each other with task.probe (custom_agents.live_controls); a reply here is the gateway's.
             return
 
         if not self._operational_target_matches(
@@ -4941,28 +4872,6 @@ class UniversalAgent(BaseModel):
                         ready=lambda: mailbox_has_room(self),
                     )
 
-                if _should_consume_broadcasts(
-                    self.process_broadcasts,
-                    is_team_lead=self.is_team_lead,
-                ):
-                    await adapter.subscribe_subject(
-                        name=f"{self.id}:broadcast",
-                        subject=f"{self._nats_mapper().prefix}.broadcast",
-                        handler=self.on_nats_delivery,
-                        logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                        delivery=SubscriptionDelivery.CORE,
-                    )
-                    await adapter.subscribe_subject(
-                        name=f"{self.id}:presence",
-                        subject=f"{self._nats_mapper().prefix}.presence.*",
-                        handler=self.on_nats_delivery,
-                        logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                        delivery=SubscriptionDelivery.JETSTREAM_EPHEMERAL,
-                        consumer_scope=ConsumerScope.PROCESS,
-                        consumer_role="presence_snapshot",
-                        owner_agent_id=self.id,
-                        deliver_last_per_subject=True,
-                    )
 
             if self.is_team_lead and self.named_agent_type:
                 # The lead is the only TeamArchitect; work addressed to its type
@@ -5292,9 +5201,8 @@ class UniversalAgent(BaseModel):
             isinstance(msg_content, (TaskStatus, AgentStatus))
             and msg_content.status_type == MessageMetaType.RESPONSE
         ):
-            await self._dispatch_message(
-                msg_header=msg_header, msg_content=msg_content, msg_meta=msg_meta
-            )
+            # Answers to the gateway's questions; agents learn about each other from the team's
+            # records and ask with agent.status and task.probe (custom_agents.team_directory).
             await delivery.ack()
             return
 
@@ -5582,103 +5490,9 @@ class UniversalAgent(BaseModel):
                     getattr(msg_meta, "to_named_agent_type", None),
                 )
         else:
-            await self.handle_agent_status_message(
-                agent_status=info_request, msg_header=msg_header, msg_meta=msg_meta
-            )
-
-    async def handle_agent_status_message(
-        self,
-        agent_status: AgentStatus,
-        msg_header: MessageHeader,
-        msg_meta: MessageMeta,
-    ):
-        """
-        Processes a status message sent by another agent.
-
-        Args:
-            agent_status (AgentStatus): The received AgentStatus payload.
-            msg_header (MessageHeader): The MessageHeader of the incoming message.
-            msg_meta (MessageMeta): The MessageMeta of the incoming message.
-        """
-        agent_id = _validated_agent_status_id(
-            agent_status,
-            logger=self._logger,
-            receiving_agent_id=self.id,
-            msg_header=msg_header,
-            msg_meta=msg_meta,
-        )
-        if not agent_id:
-            return
-        agent_name = agent_status.name or f"Agent_{agent_id}"
-
-        if agent_id == self.id:
-            self._logger.debug(
-                f"[{self.id}] Received status message about self. Ignoring."
-            )
-            return
-
-        self._logger.debug(
-            f"[{self.id}] Received status update for agent '{agent_name}' ({agent_id})."
-        )
-
-        # Keep the message's raw time for probe evidence. A missing timestamp
-        # must not become a fresh reply when normalized to arrival below.
-        sent_at = parse_utc(agent_status.last_seen_at)
-        agent_status = await reconcile_received_status(self, agent_status)
-        agent_name = agent_status.name or f"Agent_{agent_id}"
-        self.known_agents.agent_map[agent_id] = agent_status
-        self._resolve_pending_agent_status_probes(
-            agent_status, getattr(msg_meta, "msg_correlation_id", None), sent_at
-        )
-        if agent_status.name:
-            self._agent_id_by_name[agent_status.name] = agent_id
-
-        if agent_status.is_exiting:
-            self._logger.warning(
-                f"[{self.id}] Agent '{agent_name}' ({agent_id}) is exiting."
-            )
-            if agent_id in self.known_agents.agent_map:
-                del self.known_agents.agent_map[agent_id]
-            if agent_status.name and agent_status.name in self._agent_id_by_name:
-                del self._agent_id_by_name[agent_status.name]
-            if self.is_team_lead and agent_status.name:
-                pending_direct_subtasks = [
-                    subtask_info
-                    for subtask_info in await self.task_manager.operations_runtime.run(
-                        self.task_manager.get_pending_subtasks,
-                    )
-                    if getattr(subtask_info.meta, "to_agent_name", None)
-                    == agent_status.name
-                ]
-                for subtask_info in pending_direct_subtasks:
-                    parent_task_id = await self.task_manager.operations_runtime.run(
-                        self.task_manager.get_parent_task_id, subtask_info.task.task_id
-                    )
-                    if not parent_task_id:
-                        continue
-                    await self._fail_subtask_and_reconcile_parent(
-                        parent_task_id=parent_task_id,
-                        subtask_info=subtask_info,
-                        error_message=(
-                            f"Delegated subtask failed because assigned agent "
-                            f"{agent_status.name} exited before replying."
-                        ),
-                    )
-
-            # Keep the agent in the persistent store to maintain history,
-            # but log that it has exited.
-            if self._agent_state_store and self.is_team_lead:
-                self._logger.info(
-                    f"[{self.id}] Team lead maintained exited agent '{agent_name}' ({agent_id}) in AgentStateStore."
-                )
-        else:
-            self._logger.debug(
-                f"[{self.id}] Agent '{agent_name}' Status: Type={agent_status.named_agent_type}, "
-                f"Executing={agent_status.is_executing}, HasCapacity={agent_status.has_execution_capacity}"
-            )
-
-        # AgentStatus traffic is operational metadata; keep it out of the LLM loop.
-        return
+            # The team's directory comes from its agents' records (custom_agents.team_directory).
+            self._logger.debug("[%s] Ignored an agent status reply. event=agent_status_reply_ignored from_agent_id=%s",
+                               self.id, getattr(msg_header, "from_agent_id", None))
 
     def _should_apply_stale_broadcast_filter(
         self, msg_envelope: MessageEnvelope

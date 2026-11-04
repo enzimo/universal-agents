@@ -57,7 +57,8 @@ from config_loader import (
     set_config,
 )
 from runtime_settings.instance_layout import InstanceLayout
-from custom_agents.agent_host import configure_process_host, process_host_for
+from custom_agents.agent_host import process_host_for
+from custom_agents.agent_requests import configure_process_host
 from access_control.caller_tokens import CALLER_MANAGER, agent_caller_label, with_own_caller_token
 from runtime_settings.access_cutover import obsolete_binding_data, obsolete_binding_message
 from runtime_settings.legacy_layout import legacy_layout_message, legacy_layout_moves

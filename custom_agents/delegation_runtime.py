@@ -8,7 +8,6 @@ tracks them after publication.
 from __future__ import annotations
 
 from custom_tools.runtime_context import bound_task_id
-import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,14 +18,12 @@ from custom_agents.task_transport import (
     task_response_history_transport_copy,
 )
 from custom_messages.contracts.control_v1 import AgentStatus
-from custom_messages.contracts.envelope_v1 import CommsMessage, MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.envelope_v1 import CommsMessage
+from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
-    ControlType,
     MessageMetaType,
     RequesterType,
-    RoutingType,
     TaskHistoryImportance,
     TaskHistorySource,
     TaskHistoryType,
@@ -41,96 +38,6 @@ def _resolve_manager_identity(self) -> tuple[Optional[str], Optional[str]]:
         if status.team_id == self.team_id and status.is_team_lead:
             return status.self_id, status.name
     return None, None
-
-
-def _agent_status_matches_named_type(
-    self,
-    status: AgentStatus,
-    named_agent_type: Optional[str],
-    target_agent_name: Optional[str] = None,
-) -> bool:
-    # A winding-down worker stays present to finish held tasks but takes no
-    # new work, so it cannot satisfy a delegation.
-    if status.is_exiting or not status.accepting_work:
-        return False
-    if named_agent_type and status.named_agent_type != named_agent_type:
-        return False
-    if status.team_id != self.team_id:
-        return False
-    return not target_agent_name or status.name == target_agent_name
-
-
-def _resolve_pending_agent_status_probes(
-    self,
-    agent_status: AgentStatus,
-    correlation_id: Optional[str],
-    sent_at: Optional[datetime],
-) -> int:
-    """Resolve matching liveness probes from a response or fresh presence update."""
-
-    if correlation_id:
-        pending = self._pending_agent_status_futures.get(correlation_id)
-        candidates = [(correlation_id, pending)] if pending is not None else []
-        verification_source = "correlated_response"
-    else:
-        # A newly created worker can publish presence after a probe was sent but
-        # before its operational subscription existed. Only a snapshot sent
-        # during this probe can substitute for its correlated response; retained
-        # presence from before the probe is discovery data, not a live reply.
-        candidates = list(self._pending_agent_status_futures.items())
-        verification_source = "presence_update"
-
-    resolved = 0
-    for pending_correlation_id, pending in candidates:
-        expected_named_agent_type, expected_agent_name, started_at, future = pending
-        if not correlation_id:
-            if sent_at is None or not started_at <= sent_at <= datetime.now(timezone.utc):
-                self._logger.debug(
-                    "[%s] Presence cannot answer this live probe. "
-                    "event=agent_status_probe_presence_ignored correlation_id=%s "
-                    "responding_agent_id=%s sent_at=%s probe_started_at=%s",
-                    self.id, pending_correlation_id, agent_status.self_id,
-                    sent_at, started_at.isoformat(),
-                )
-                continue
-        matches_probe = self._agent_status_matches_named_type(
-            agent_status,
-            expected_named_agent_type,
-            expected_agent_name,
-        )
-        if not future.done() and matches_probe:
-            self._logger.debug(
-                "[%s] event=agent_status_probe_matched correlation_id=%s "
-                "expected_named_agent_type=%s responding_agent_id=%s "
-                "responding_team_id=%s responding_is_exiting=%s "
-                "verification_source=%s",
-                self.id,
-                pending_correlation_id,
-                expected_named_agent_type,
-                agent_status.self_id,
-                agent_status.team_id,
-                agent_status.is_exiting,
-                verification_source,
-            )
-            future.set_result(agent_status)
-            resolved += 1
-        elif correlation_id and not future.done():
-            self._logger.warning(
-                "[%s] event=agent_status_probe_response_rejected correlation_id=%s "
-                "expected_named_agent_type=%s expected_agent_name=%s "
-                "response_named_agent_type=%s response_agent_name=%s "
-                "response_team_id=%s local_team_id=%s response_is_exiting=%s",
-                self.id,
-                pending_correlation_id,
-                expected_named_agent_type,
-                expected_agent_name,
-                agent_status.named_agent_type,
-                agent_status.name,
-                agent_status.team_id,
-                self.team_id,
-                agent_status.is_exiting,
-            )
-    return resolved
 
 
 async def _record_delegation_subtask_abort(
@@ -195,114 +102,25 @@ async def _probe_live_named_agent_type(
     named_agent_type: Optional[str],
     target_agent_name: Optional[str] = None,
 ) -> Optional[AgentStatus]:
+    """A live agent of the type (or with the name) that accepts work, or None.
+
+    Answered from the team's agent records (``custom_agents.team_directory``): they already
+    say who is live, so nothing is sent and nothing waits.
+    """
+
+    from custom_agents.team_directory import live_agent_status
+
     if not self.team_id or not (named_agent_type or target_agent_name):
         return None
-    if not self._operational_exchange_name:
-        self._logger.warning(
-            "[%s] event=agent_status_probe_unavailable target_named_agent_type=%s",
-            self.id,
-            named_agent_type,
-        )
-        return None
-
-    correlation_id = new_id("corr_agent_prb")
-    timeout = max(0.1, float(self.subtask_status_probe_timeout_seconds or 5.0))
-    operational_exchange = (
-        self._operational_exchange_name or f"{self.team_id}_operational"
-    )
-    response_route = self.id
+    status = live_agent_status(self, named_agent_type, target_agent_name)
     self._logger.debug(
-        "[%s] event=agent_status_probe_start correlation_id=%s target_named_agent_type=%s "
-        "operational_exchange=%s response_queue=%s timeout_seconds=%s agent_id=%s team_id=%s "
-        "named_agent_type=%s",
+        "[%s] event=agent_liveness_lookup target_named_agent_type=%s target_agent_name=%s found_agent_id=%s",
         self.id,
-        correlation_id,
-        named_agent_type,
-        operational_exchange,
-        response_route,
-        timeout,
-        self.id,
-        self.team_id,
-        self.named_agent_type,
-    )
-    status_request = AgentStatus(
-        self_id=self.id,
-        team_id=self.team_id,
-        named_agent_type=self.named_agent_type,
-        is_paused=bool(self.paused),
-        is_executing=bool(self.is_executing),
-        has_execution_capacity=bool(self._has_execution_capacity()),
-        is_busy=bool(self.is_executing),
-        name=self.name,
-        agent_role=self.role,
-        status_type=MessageMetaType.REQUEST,
-        info_type=ControlType.STATUS_REQUEST_BASIC,
-    )
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future = loop.create_future()
-    self._pending_agent_status_futures[correlation_id] = (
         named_agent_type,
         target_agent_name,
-        datetime.now(timezone.utc),
-        future,
+        status.self_id if status is not None else None,
     )
-    envelope = MessageEnvelope(
-        msg_content=status_request,
-        msg_header=MessageHeader(
-            from_agent_id=self.id,
-            to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-            response_routing_key=response_route,
-            agent_signature="",
-        ),
-        msg_meta=MessageMeta(
-            from_agent_name=self.name,
-            to_agent_name=target_agent_name,
-            to_named_agent_type=named_agent_type,
-            msg_correlation_id=correlation_id,
-            requester_type=RequesterType.AGENT_REQUESTER,
-            is_response_requested=True,
-        ),
-    )
-    try:
-        await self._send_operational_message(envelope)
-        self._logger.debug(
-            "[%s] event=agent_status_probe_published correlation_id=%s target_named_agent_type=%s "
-            "operational_exchange=%s response_queue=%s timeout_seconds=%s",
-            self.id,
-            correlation_id,
-            named_agent_type,
-            operational_exchange,
-            response_route,
-            timeout,
-        )
-        return await asyncio.wait_for(future, timeout=timeout)
-    except asyncio.TimeoutError:
-        self._logger.debug(
-            "[%s] event=agent_status_probe_timeout correlation_id=%s target_named_agent_type=%s "
-            "timeout_seconds=%s",
-            self.id,
-            correlation_id,
-            named_agent_type,
-            timeout,
-        )
-        return None
-    except Exception as exc:
-        self._logger.exception(
-            "[%s] Live AgentStatus probe for %s failed: %s "
-            "event=agent_status_probe_failed correlation_id=%s target_named_agent_type=%s "
-            "operational_exchange=%s response_queue=%s timeout_seconds=%s",
-            self.id,
-            named_agent_type,
-            exc,
-            correlation_id,
-            named_agent_type,
-            operational_exchange,
-            response_route,
-            timeout,
-        )
-        return None
-    finally:
-        self._pending_agent_status_futures.pop(correlation_id, None)
+    return status
 
 
 def _delegation_type_is_registered(self, named_agent_type: str) -> bool:

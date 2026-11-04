@@ -6,7 +6,6 @@ from tests.memory_support import SYSTEM_MEMORY_WRITER
 from tests.team_services_support import InProcessTeamServices
 import asyncio
 import contextlib
-import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -49,11 +48,9 @@ from custom_messages.enums import (
 from custom_messages.system_schedules import (
     COREMEM_AUDIT_SCHEDULE_NAME_PREFIX,
 )
-from custom_tools.providers.agent_management import query_agent_state
-from tests.task_work_support import set_agent_ref
-from custom_transport.base import SubscriptionDelivery, TransportPublishOptions
+from custom_transport.base import SubscriptionDelivery
 from custom_transport.subjects import NatsSubjectMapper
-from id_generation import new_id, new_id_suffix
+from id_generation import new_id
 from runtime_settings.projection import _project_transport
 from runtime_settings.transport import TransportSettings
 from storage.pinned_memory_repository import create_pinned_memory_repository
@@ -416,82 +413,6 @@ async def test_live_gateway_discovery_uses_operational_subject_not_presence(tmp_
             with contextlib.suppress(asyncio.CancelledError):
                 await responder_task
             await gateway.close()
-
-
-@pytest.mark.asyncio
-async def test_live_query_agent_state_live_sends_targeted_operational_status_request(live_transport):
-    team_id = new_id("live_tool")
-
-    async with LiveNatsClient(team_id, transport=live_transport) as client:
-        monitor = asyncio.Queue()
-
-        async def monitor_handler(delivery) -> None:
-            await monitor.put(delivery.envelope)
-            await delivery.ack()
-
-        await client.adapter.subscribe_subject(
-            name="query-agent-state-monitor",
-            subject=client.mapper.operational_subject(),
-            handler=monitor_handler,
-            delivery=SubscriptionDelivery.CORE,
-            logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-        )
-        response_route = f"{team_id}_gateway_tool_{new_id_suffix()}_response"
-
-        async def send_operational_message(envelope: MessageEnvelope) -> None:
-            await client.adapter.publish(
-                envelope=envelope,
-                routing_key=str(
-                    envelope.msg_header.to_routing_path
-                    or RoutingType.ALL_AGENTS_ROUTE.value
-                ),
-                options=TransportPublishOptions(operational=True, durable=False),
-            )
-
-        fake_agent = SimpleNamespace(
-            id="live_tool_caller",
-            team_id=team_id,
-            named_agent_type="TeamArchitect",
-            paused=False,
-            is_executing=False,
-            name="live-tool-caller",
-            role="tool-caller",
-            _agent_state_store=None,
-            _agent_id_by_name={"target-manager": "target-manager-id"},
-            _operational_queue_name=response_route,
-            task_manager=SimpleNamespace(
-                operations_runtime=TaskOperationRuntime(),
-                current_task_id=None,
-                get_task_info=lambda task_id: None,
-            ),
-            _has_execution_capacity=lambda: True,
-            _send_operational_message=send_operational_message,
-            # A running agent's loop and owned-work fields: the tool's send runs there.
-            _runtime_loop=asyncio.get_running_loop(),
-            _should_exit=asyncio.Event(),
-            _owned_tasks=set(),
-            _logger=logging.getLogger("test_live_query_agent_state"),
-        )
-
-        set_agent_ref(fake_agent)
-        try:
-            # Strands runs sync tools in a worker thread; the send finishes
-            # on the agent loop before the tool returns.
-            result = json.loads(
-                await asyncio.to_thread(query_agent_state, live="true", target_agent="target-manager")
-            )
-            assert result["live_refresh_requested"] is True
-            assert result["live_refresh_targets"] == ["target-manager"]
-
-            envelope = await asyncio.wait_for(monitor.get(), timeout=5)
-            assert isinstance(envelope.msg_content, AgentStatus)
-            assert envelope.msg_content.status_type == MessageMetaType.REQUEST
-            assert envelope.msg_header.to_routing_path == RoutingType.ALL_AGENTS_ROUTE
-            assert envelope.msg_header.response_routing_key == response_route
-            assert envelope.msg_meta.to_agent_name == "target-manager"
-            assert envelope.msg_header.from_agent_id == "live_tool_caller"
-        finally:
-            set_agent_ref(None)
 
 
 @pytest.mark.asyncio

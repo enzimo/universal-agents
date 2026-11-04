@@ -5208,7 +5208,7 @@
       "authority": "none",
       "body": "bodies/task.probe.schema.json",
       "class": "request_reply",
-      "description": "Whether the holder still has a task, asked by the watchdog.",
+      "description": "Whether the holder still has a task, asked by the watchdog of the agent that delegated it (any agent may delegate, so worker hosts send it too).",
       "expiry_seconds": 30,
       "idempotency": [
         "/message_id"
@@ -5226,6 +5226,7 @@
       "routing": "named",
       "senders": [
         "lead_host",
+        "worker_host",
         "team_services"
       ],
       "topology_edge": "down",

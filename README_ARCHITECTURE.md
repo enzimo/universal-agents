@@ -104,21 +104,12 @@ receiver and pushes (decision of 2026-10-04). Workers of one type share one
 queue and ask for a task only while they are free. The transport adapter
 refuses a push listener on the work stream, and an architecture test fails when
 production code creates a deliver group or subscribes to NATS outside the
-adapter (`tests/test_runtime_architecture_boundaries.py`). Presence records let late
-joiners and the gateway discover live agents without turning presence into
-proof of identity or authority. Agent status requests and snapshots bypass the
-short broadcast age limit: a restarted manager must receive retained presence
-even when startup takes longer than 100 ms. Replay keeps the sender's original
-`last_seen_at`; liveness checks use that time and process evidence, so receiving
-an old snapshot does not make a stopped worker look newly alive.
-An explicit live probe accepts its correlated reply, or a presence snapshot
-whose sender time falls between the probe's start and arrival. Older retained
-snapshots remain discovery data and cannot verify an exact delegation target.
-Before changing discovery or acting on an exit, the receiver calls
-`custom_agents.agent_liveness.reconcile_received_status` to select the newest
-sender-written status from the message, memory and the shared database.
-An old exit cannot fail current work after a newer running status, and an old
-running snapshot cannot restore an agent whose newer status says it exited.
+adapter (`tests/test_runtime_architecture_boundaries.py`). Agents learn who is
+live on their team from the team's signed agent records ("Agent records and who
+is live", "Agents asking each other"), not from presence messages: a record says
+an agent is live only while its host keeps reporting, so an old message can no
+longer make a stopped worker look alive. The gateway still reads presence until
+it moves to the records too (message contract step 7c).
 
 ## Work, scheduling, and recovery
 
@@ -692,11 +683,11 @@ Four repairs keep work from getting stuck in the first place:
   assumes every agent process of a team is a child of one supervisor run on one
   host: a process from another run counts as gone whatever host it names, so
   agent processes of a second runtime sharing the database are not supported.
-  Each agent writes only its own status row as it stops (marked exiting from
-  the moment its exit begins); the team lead stores other agents' presence only
-  when it is newer, never later than its own clock, and removes rows of agents
-  that are gone on its own timer, so a manager-only restart no longer makes
-  running startup agents look gone.
+  Each agent writes only its own status row, including as it stops (marked
+  exiting from the moment its exit begins); nobody else writes it (until step
+  7b the team lead also copied other agents' presence into it). The team lead
+  removes rows of agents that are gone on its own timer, so a manager-only
+  restart does not make running startup agents look gone.
 - A worker stays up while it holds any unfinished task, waiting ones included
   (`strands_team.worker_holds_work`); replies to a waiting task are addressed to
   it.
@@ -3447,9 +3438,11 @@ broker refusal until access or the server changes. Fixed tool groups,
 capability attachments and restart-to-attach were removed for this. Skills provide reusable instructions without loading every
 procedure into the base prompt. A reviewed managed-skill change commits an
 immutable local receipt before TeamArchitect sends an authority-free team
-reload hint. Running specialists verify that receipt, refresh their own SDK
-cache, and republish presence. Heartbeat fingerprint checks repair missed live
-hints without a process restart. External and hosted MCP tools enter through
+reload hint, the `skills.changed` event, which every agent process receives once
+and hands to each agent it runs; only the team lead's own session may send it.
+Running specialists verify that receipt and refresh their own SDK cache.
+Fingerprint checks at each heartbeat and each `agent.status` request repair
+missed hints without a process restart. External and hosted MCP tools enter through
 the same installed registry and the broker's per-call access check.
 
 A model often asks for several tool calls in one step, and Strands runs them
@@ -4359,6 +4352,41 @@ since an expired record gives no change). Whether an agent is the team lead come
 session's `agent_role`, which the team services signed. The view is replaced as a whole on
 each change, so agents on other threads read it without locks. The team lead's process and
 the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+A record the reader cannot verify yet for a reason that can pass (the writer's certificate
+is not readable yet while hosts join, revocations not current, a record dated just ahead
+of its clock) is kept and verified again at each check, since placements and an idle
+agent's record are written only once (`event=team_agents_record_refused retrying=true`).
+
+**Agents asking each other** (step 7b, `custom_agents.agent_host`,
+`custom_agents.live_controls`, `custom_agents.team_directory`): each agent process reads
+the team's live agents once, and keeps every agent's in-memory directory
+(`known_agents`, the name-to-id map the model and messages use) in step with it on the
+agent's own loop. An entry says only what the records say: id, type, name, lead or not,
+paused, busy, and whether it accepts work. When an agent's record said it was exiting, the
+team lead fails the subtasks it asked that agent for by name, as presence's exit did; an
+agent whose host only stopped reporting leaves the directory but is not given up for (the
+subtask watchdog handles work that never comes back). Agents ask each other on
+`ctl.agent.<agent>`, signed with the asking agent's session, through
+`custom_agents.agent_requests` (`ask_agent`, `announce`, `team_view`, which hold this
+process's host apart from the host's own module so the import graph stays free of loops):
+- delegation checks and the maintenance worker check read the directory and send nothing;
+- the team lead's pause, resume and exit tool sends `agent.pause`, `agent.resume` and
+  `agent.exit`, and reports what the agent answered;
+- the live status tool sends `agent.status`. A basic answer, which any allowed sender gets,
+  has the agent's state, queue, context and budget measurements, skills and findings; a full
+  one adds its diagnostics and goes only to the team lead, checked against the sender's
+  session. Tools are left out: the contract names them by catalog ids, which the agent's
+  tool list does not carry;
+- the subtask watchdog sends `task.probe` to the holder, or to every live worker of the
+  task's type, and only a worker that knows the task counts. Any agent may delegate, so
+  worker hosts may send `task.probe` too (plan decision 70);
+- the managed skill hint is the `skills.changed` team event.
+
+Agents no longer subscribe to presence or the broadcast subject, ignore status replies on
+`.operational`, and the team lead no longer writes other agents' rows in `agent_states`.
+Restart approvals name other agents' running work by agent (`<agent id>:unknown-task`),
+since the records do not carry the current task; asking each agent while the change is
+described is a follow-up.
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is

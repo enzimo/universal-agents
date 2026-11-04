@@ -16,7 +16,11 @@ saying so.
 
 How it reads:
 - Each bucket is watched; a record that fails verification is logged and left out
-  (``event=team_agents_record_refused``). The sequence held per key is kept in memory, so
+  (``event=team_agents_record_refused``). A refusal that can pass later (the writer's
+  certificate is not readable yet while hosts join, revocations not current yet, a record
+  dated just ahead of this host's clock) keeps the record and verifies it again at each
+  check: placements and an idle agent's record are written once, so dropping them would
+  hide a live agent until it next changed. The sequence held per key is kept in memory, so
   an older record written back is refused while this reader runs. Agent ids are new at every
   start, so an agent's and its placement's keys never outlive one run; a host's liveness
   record is judged by its own expiry, which the bucket's age limit enforces too.
@@ -44,6 +48,8 @@ from custom_messages.wire.values import parse_timestamp
 
 # Liveness records expire within a minute; this is how soon the view notices one has.
 RECHECK_SECONDS = 5.0
+# Refusals that can pass later; the record is verified again at each check (module docstring).
+RETRYABLE_REFUSALS = frozenset({"unknown_key", "revocations_not_current", "not_yet_valid"})
 _GONE_STATES = frozenset({"exiting", "stopped"})
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,8 +90,10 @@ class TeamAgents:
         self._placements: dict[str, _Held] = {}
         self._hosts: dict[str, _Held] = {}
         self._roles: dict[str, str] = {}
+        # Records refused for a reason that can pass, by (record, name): their key and raw bytes.
+        self._retrying: dict[tuple[str, str], tuple[str, bytes]] = {}
         self._view: Mapping[str, TeamAgent] = MappingProxyType({})
-        self._listeners: list[Callable[[frozenset[str]], None]] = []
+        self._listeners: list[Callable[[frozenset[str], frozenset[str]], None]] = []
         self.ready = asyncio.Event()
 
     # -- reading the view (any thread) ----------------------------------------------------
@@ -109,8 +117,13 @@ class TeamAgents:
         leads = [item for item in self._view.values() if item.is_lead]
         return min(leads, key=lambda a: a.agent) if leads else None
 
-    def listen(self, listener: Callable[[frozenset[str]], None]) -> None:
-        """Call ``listener`` on the reader's loop with the ids whose view changed (appeared, changed or left)."""
+    def listen(self, listener: Callable[[frozenset[str], frozenset[str]], None]) -> None:
+        """Call ``listener`` on the reader's loop with the ids whose view changed (appeared, changed or left),
+        and those of them that left saying so (their record's last state was exiting).
+
+        An agent that drops out because its host stopped reporting is not among the second:
+        its host may only be unreachable for a while, so nothing it was asked is given up for it.
+        """
 
         self._listeners.append(listener)
 
@@ -141,6 +154,7 @@ class TeamAgents:
                 for watch in watches:
                     if watch.done() and not watch.cancelled() and watch.exception() is not None:
                         raise watch.exception()  # type: ignore[misc]
+                await self._retry_refused()
                 if self.ready.is_set():
                     self._rebuild()
         finally:
@@ -152,19 +166,38 @@ class TeamAgents:
         records = self._host.records
         async for key, raw in records.watch(record, keys, caught_up=caught_up):
             name = key.removeprefix(f"{self.team}.") if record != "host" else key
+            self._retrying.pop((record, name), None)  # a newer write replaces the one waiting
             if raw is None:
                 held.pop(name, None)
-            else:
-                verified = await self._verified(record, key, raw, held.get(name))
-                if verified is None:
-                    continue
-                held[name] = _Held(verified.document.sequence, verified.digest, verified)
-                if record == "agent":
-                    await self._learn_role(verified)
+            elif not await self._take(record, key, name, raw, held):
+                continue
             if self.ready.is_set():
                 self._rebuild()
 
-    async def _verified(self, record: str, key: str, raw: bytes, held: Optional[_Held]) -> Optional[VerifiedRecord]:
+    def _held_for(self, record: str) -> dict[str, _Held]:
+        return {"agent": self._agents, "placement": self._placements, "host": self._hosts}[record]
+
+    async def _take(self, record: str, key: str, name: str, raw: bytes, held: dict[str, _Held], *,
+                    again: bool = False) -> bool:
+        verified = await self._verified(record, key, raw, held.get(name), again=again)
+        if verified is None:
+            return False
+        held[name] = _Held(verified.document.sequence, verified.digest, verified)
+        if record == "agent":
+            await self._learn_role(verified)
+        return True
+
+    async def _retry_refused(self) -> None:
+        """Verify again the records refused for a reason that can pass (module docstring)."""
+
+        for (record, name), (key, raw) in list(self._retrying.items()):
+            self._retrying.pop((record, name), None)
+            if await self._take(record, key, name, raw, self._held_for(record), again=True):
+                self._logger.info("A team record refused earlier is now verified. event=team_agents_record_accepted "
+                                  "record=%s key=%s", record, key)
+
+    async def _verified(self, record: str, key: str, raw: bytes, held: Optional[_Held], *,
+                        again: bool = False) -> Optional[VerifiedRecord]:
         now = self._host.clock()
         sequence = None if held is None else (held.sequence, held.digest)
         trust = self._host.live.trust.store
@@ -178,8 +211,16 @@ class TeamAgents:
         except FrameRefused as refused:
             if refused.code == "replayed" and held is not None and _same(raw, held):
                 return None  # the record this reader holds, seen again
-            self._logger.warning("A team record was refused and left out. event=team_agents_record_refused "
-                                 "record=%s key=%s code=%s at=%s", record, key, refused.code, refused.at)
+            name = key.removeprefix(f"{self.team}.") if record != "host" else key
+            retrying = refused.code in RETRYABLE_REFUSALS
+            if retrying:
+                self._retrying[(record, name)] = (key, raw)
+                if again:
+                    return None  # logged when it was first refused
+            self._logger.warning("A team record was refused and left out%s. event=team_agents_record_refused "
+                                 "record=%s key=%s code=%s at=%s retrying=%s",
+                                 " for now" if retrying else "", record, key, refused.code, refused.at,
+                                 str(retrying).lower())
             return None
         return verified
 
@@ -212,11 +253,13 @@ class TeamAgents:
                 view[agent_id] = item
         changed = frozenset(agent_id for agent_id in set(view) | set(self._view)
                             if view.get(agent_id) != self._view.get(agent_id))
+        exited = frozenset(agent_id for agent_id in changed if agent_id not in view and agent_id in self._agents
+                           and self._agents[agent_id].record.body.state in _GONE_STATES)
         self._view = MappingProxyType(view)
         if changed:
             for listener in list(self._listeners):
                 try:
-                    listener(changed)
+                    listener(changed, exited)
                 except Exception:
                     self._logger.exception("A team agents listener failed. event=team_agents_listener_failed")
 
