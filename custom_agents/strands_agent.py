@@ -2580,7 +2580,8 @@ class UniversalAgent(BaseModel):
         report_agent_state(self)
 
     async def _refresh_self_agent_state(self, *, is_exiting: bool = False) -> None:
-        self._report_record_state()
+        # The host writes the agent's signed record when this changed it (custom_agents.agent_host).
+        report_agent_state(self)
         if self._agent_state_store is None:
             return
         try:
