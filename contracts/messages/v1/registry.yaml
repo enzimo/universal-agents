@@ -2401,7 +2401,7 @@ kinds:
     body: bodies/shared_work.extend.schema.json
     reply:
       body: bodies/shared_work.extend.reply.schema.json
-      errors: [not_found, limit_reached, request_closed, runtime_error]
+      errors: [not_allowed, not_found, limit_reached, request_closed, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30

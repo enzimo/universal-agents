@@ -7334,6 +7334,11 @@ class SharedWorkExtendReplyOk(WireModel):
     claim: CoordinationClaim
 
 
+class SharedWorkExtendReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class SharedWorkExtendReplyNotFound(WireModel):
     outcome: Literal['not_found']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
@@ -7458,6 +7463,7 @@ class SharedWorkReleaseReplyRuntimeError(WireModel):
 class SharedWorkWaitBodyOnResource(WireModel):
     type: Literal['resource']
     resource: ResourceKey
+    reason: ShortText
 
 
 class SharedWorkWaitBodyOnRequest(WireModel):
@@ -8808,7 +8814,7 @@ SharedWorkClaimReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkClaimReplyOk
 SharedWorkCountBodyAdapter = TypeAdapter(SharedWorkCountBody)
 SharedWorkCountReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkCountReplyOk, SharedWorkCountReplyNotAllowed, SharedWorkCountReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkExtendBodyAdapter = TypeAdapter(SharedWorkExtendBody)
-SharedWorkExtendReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkExtendReplyOk, SharedWorkExtendReplyNotFound, SharedWorkExtendReplyLimitReached, SharedWorkExtendReplyRequestClosed, SharedWorkExtendReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkExtendReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkExtendReplyOk, SharedWorkExtendReplyNotAllowed, SharedWorkExtendReplyNotFound, SharedWorkExtendReplyLimitReached, SharedWorkExtendReplyRequestClosed, SharedWorkExtendReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkListBodyAdapter = TypeAdapter(SharedWorkListBody)
 SharedWorkListReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkListReplyOk, SharedWorkListReplyNotAllowed, SharedWorkListReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkNoteBodyAdapter = TypeAdapter(SharedWorkNoteBody)

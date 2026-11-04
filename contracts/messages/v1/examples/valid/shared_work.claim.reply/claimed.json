@@ -41,21 +41,21 @@
             }
           },
           {
-            "claim_id": "claim_6",
-            "resource": "file:team/",
-            "relation": "above",
-            "ends_at": "2026-10-22T04:40:00.000Z",
-            "holder": {
-              "whose": "team_maintenance"
-            }
-          },
-          {
             "claim_id": "claim_7",
             "resource": "file:team/reports/q1.md",
             "relation": "below",
             "ends_at": "2026-10-22T04:38:00.000Z",
             "holder": {
               "whose": "another_member"
+            }
+          },
+          {
+            "claim_id": "claim_6",
+            "resource": "file:team/reports/archive/",
+            "relation": "below",
+            "ends_at": "2026-10-22T04:40:00.000Z",
+            "holder": {
+              "whose": "team_maintenance"
             }
           },
           {
@@ -72,10 +72,10 @@
         ]
       }
     ],
-    "message": "Another of your requests is working under team/reports/ until 04:50."
+    "message": "Another of your requests is working under team/reports/ until 04:50, and this request already holds team/reports/q2.md."
   },
   "causation_id": "01928f3a-7b2c-7c0e-8000-000000000c0e",
   "idempotency_key": "shared_work.claim.reply:CFh0YwbkYagK9pXklM5e_lEOaIxFJn0J6Sbq6QdWsqU",
-  "body_digest": "2JptKkdXhTXuvMZPbmXJCN0nPANoWWeuSQipoYQIuMo",
-  "signature": "6aYIz2M-4yWRAjuPOcxyz6kWR1C5e8ad0oHpEcdO8th4gKQPFM90fEIHPvli0LwuuIL-yHwnmrGxoDJhYqFSDQ"
+  "body_digest": "WZ5N8cQWNEgEA2r7QCpQsJsWbayuYXkktsHG4VNmNuk",
+  "signature": "UIWr3P4sQPg05f4v_n8DWDaoPst_m4I5lRHbxGxjfhzcXjA9ad5juMDrTtKFejHA41iYwR2piuLkUEeFyeQYAA"
 }

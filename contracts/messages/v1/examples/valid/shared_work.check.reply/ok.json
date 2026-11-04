@@ -29,18 +29,6 @@
         "can_wait": true,
         "claims": [
           {
-            "claim_id": "claim_1",
-            "resource": "file:team/reports/",
-            "relation": "above",
-            "ends_at": "2026-10-22T04:45:00.000Z",
-            "holder": {
-              "whose": "same_person",
-              "root_task_id": "task_root_8a",
-              "title": "Quarterly report thread",
-              "reason": "Moving the quarterly reports into archive/."
-            }
-          },
-          {
             "claim_id": "claim_2",
             "resource": "file:team/reports/q3.md",
             "relation": "exact",
@@ -63,6 +51,38 @@
             "whose": "another_member"
           }
         ]
+      },
+      {
+        "resource": "file:team/reports/q4/",
+        "can_wait": false,
+        "claims": [
+          {
+            "claim_id": "claim_5",
+            "resource": "file:team/reports/q4/draft.md",
+            "relation": "below",
+            "ends_at": "2026-10-22T04:50:00.000Z",
+            "holder": {
+              "whose": "another_member"
+            }
+          }
+        ],
+        "notes": []
+      },
+      {
+        "resource": "file:team/archive/2025.md",
+        "can_wait": true,
+        "claims": [
+          {
+            "claim_id": "claim_6",
+            "resource": "file:team/archive/",
+            "relation": "above",
+            "ends_at": "2026-10-22T04:38:00.000Z",
+            "holder": {
+              "whose": "team_maintenance"
+            }
+          }
+        ],
+        "notes": []
       },
       {
         "resource": "record:knowledge_page:personal:travel-plans",
@@ -90,6 +110,24 @@
         ]
       },
       {
+        "resource": "record:memory_fact:usermem:42",
+        "can_wait": false,
+        "claims": [],
+        "notes": []
+      },
+      {
+        "resource": "record:schedule:sched_1",
+        "can_wait": false,
+        "claims": [],
+        "notes": []
+      },
+      {
+        "resource": "record:objective:obj_1",
+        "can_wait": false,
+        "claims": [],
+        "notes": []
+      },
+      {
         "resource": "account:cli:google:person",
         "can_wait": true,
         "claims": [
@@ -99,23 +137,10 @@
             "relation": "exact",
             "ends_at": "2026-10-22T04:35:00.000Z",
             "holder": {
-              "whose": "team_maintenance"
-            }
-          }
-        ],
-        "notes": []
-      },
-      {
-        "resource": "file:team/reports/q4/",
-        "can_wait": false,
-        "claims": [
-          {
-            "claim_id": "claim_5",
-            "resource": "file:team/reports/q4/draft.md",
-            "relation": "below",
-            "ends_at": "2026-10-22T04:50:00.000Z",
-            "holder": {
-              "whose": "another_member"
+              "whose": "same_person",
+              "root_task_id": "task_root_8a",
+              "title": "Quarterly report thread",
+              "reason": "Sending the finished report by email."
             }
           }
         ],
@@ -125,6 +150,6 @@
   },
   "causation_id": "01928f3a-7b2c-7c09-8000-000000000c09",
   "idempotency_key": "shared_work.check.reply:LFdjuEh-l6n5EUkOyWF0r-4Z9fyPl7L3QuyH0HRqDmo",
-  "body_digest": "P4lT4c-sJ1a4I_j2iyRbtLNtnFvfSUYr9YF1TUaicSo",
-  "signature": "R3nO53fouLp0Y9S1INX3k7WVnuyErSoBr0OJoExpXkvQWTBKlDdK9pwxExlf8Ae3jkfmrw0s80ILf79V_yOUDA"
+  "body_digest": "K91fv4qOL9H2a96XxHf6f2nSEQKNMYZs97S15ICj22s",
+  "signature": "fuq5nADskhlZCY25GchZ_dmTL0U9aONvdrSNB1hVHRoBxEoM55OCato-nfGyOOBlw17DEieY3e8ZhkJmLq_IAw"
 }

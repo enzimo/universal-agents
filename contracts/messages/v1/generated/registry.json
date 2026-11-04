@@ -4621,6 +4621,7 @@
       "reply": {
         "body": "bodies/shared_work.extend.reply.schema.json",
         "errors": [
+          "not_allowed",
           "not_found",
           "limit_reached",
           "request_closed",

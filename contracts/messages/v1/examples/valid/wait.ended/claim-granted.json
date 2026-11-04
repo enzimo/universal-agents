@@ -27,13 +27,13 @@
     "ended": {
       "why": "claim_granted",
       "claim": {
-        "claim_id": "claim_1",
+        "claim_id": "claim_9",
         "resources": [
-          "file:team/reports/"
+          "file:team/reports/q3.md"
         ],
         "ends_at": "2026-10-22T04:45:00.000Z",
         "extensions_left": 2,
-        "reason": "Moving the quarterly reports into archive/."
+        "reason": "Updating the Q3 figures."
       },
       "notes": [
         {
@@ -57,6 +57,6 @@
     }
   },
   "idempotency_key": "wait.ended:uKQfQIjLgFAUQNw-cFCTAHATKkc-2Z_AJN43-wZO3Jo",
-  "body_digest": "gMhGFcaf67JRyIjq3x0Aeudy4WHo7qNvGcYVz-26jkI",
-  "signature": "TR0x78X33kDfIyw8XtLI2NaSd1RcPgyQV0qhEDkbuKaOlYOUvM-AhydvFIK4WYMUft6cp-NHs9IUjdUDBXj0AA"
+  "body_digest": "rtJSvuetvyDBShLRP1kTEEbUT6JTl6OVP4QeaoustZ8",
+  "signature": "ZCCFGoblMGq88j5iFBm8paFfBaTIg84tM18DeHxX6_KLkTWeNgLE1W6KcE2kUUj7T5P18lnq6lssiucIrHMaBw"
 }

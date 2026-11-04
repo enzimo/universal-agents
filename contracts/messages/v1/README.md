@@ -1989,23 +1989,54 @@ claim and no note.
 - `shared_work.check` reports, for up to eight resources, the live claims on, above or under
   each one, its notes, and whether a wait on it would be accepted now (`can_wait`).
 - `shared_work.claim` claims up to eight resources, all or none, for 15 minutes. It answers
-  `claimed` with every conflict when another request holds a claim on, above or under one of
-  them, or when other requests wait for one after this request's own claim on it ran out. Its
-  answer carries the notes on the resources.
+  `claimed`, listing every conflict, when for one of them:
+  - another request holds a live claim on, above or under it;
+  - another request waits for something on, above or under it. A waiter keeps its place, so
+    claims on the files in a folder never pass over a request that waits for the folder;
+  - this request already holds a live claim on, above or under it, listed as `this_request`.
+    The request uses, extends or releases that claim instead, so it holds a resource for at
+    most 35 minutes at a time.
+
+  Its answer carries the notes on the resources.
 - `shared_work.extend` adds 10 minutes, at most twice (`limit_reached` after that), so a claim
-  lasts at most 35 minutes. Activity never extends a claim.
-- `shared_work.release` ends a claim now. A claim also ends when its request ends, fails or is
-  stopped, without a message.
+  lasts at most 35 minutes. Activity never extends a claim. A claim that has ended answers
+  `not_found`, and a claim on a resource the task may no longer reach answers `not_allowed`.
+- `shared_work.release` ends a claim now. Giving a claim up is never refused: a claim of this
+  request that has already ended answers `ok` with the time it ended, and only a claim id that
+  is not this request's answers `not_found`. A claim also ends, without a message, when its
+  request ends, fails or is stopped, and when its record is deleted.
 - `shared_work.note` leaves up to 500 characters on one resource, at most three per resource
   for each request (`limit_reached`). Notes are checked like knowledge pages for credentials and
   identity numbers (`sensitive_content`), last while their request runs and one day more, and
   are shown to models as quoted text from another request, never as instructions.
-- `shared_work.wait` waits for a claimed resource or for another of the person's requests. In
-  one serialized step it refuses a wait on the request itself or one that would close a loop
+- `shared_work.wait` waits for a claimed resource or for another of the person's requests. A
+  wait on a resource gives the `reason` its claim carries if the wait is granted. In one
+  serialized step it refuses a wait on the request itself or one that would close a loop
   (`would_loop`, naming what this request holds that the other one waits for), and answers
-  `nothing_to_wait_for` when the resource has no claim and nobody waits for it. Otherwise it
-  records the wait, answers with the latest time it ends (`ends_by`), and the host ends the
-  turn with a local wait, freeing the agent's slot.
+  `nothing_to_wait_for` when nothing but this request's own claims and waits is on, above or
+  under the resource. Otherwise it records the wait, answers with the latest time it ends
+  (`ends_by`), and the host ends the turn with a local wait, freeing the agent's slot.
+
+**Waits and grants.** These rules keep every wait finite and free of loops:
+- Every wait lasts at most 35 minutes, on a resource or on a request, and `ends_by` is that
+  limit.
+- The loop check follows who waits for whom. A waiting request waits for every other request
+  that holds a live claim on, above or under what it waits for, for every other request with
+  an earlier wait on, above or under the same resource, since that one is granted first, and,
+  for a wait on a request, for that request. A wait that would make a request wait for itself
+  through these is refused. So a later grant never closes a loop either: the request that gets
+  a claim was already ahead of everyone it now blocks.
+- When a claim ends (released, ran out, its request ended or its record was deleted), the team
+  services look at the waits on, above or under its resources in the order they were recorded.
+  A wait is granted when no other request holds a live claim on, above or under its resource
+  and no other request's earlier wait is on, above or under it. The grant is a new claim of the
+  waiting request, with its own `claim_id`, on exactly the resource it waited for, with the
+  wait's `reason`, for 15 minutes from the grant. The request's other waits on that resource
+  or under it end with the same grant, each with its own `wait.ended`, so a request never
+  waits on its own claim.
+- A wait ends without a message when its task stops, fails or ends, moves to another holder
+  or is handed back, and when its request ends, fails or is stopped. A claim already granted
+  stays with the request, which sees it with `shared_work.list`.
 
 Writes (`claim`, `extend`, `release`, `note`, `wait`) carry the agent's `request_id` as their
 retry key ("Stored outcomes"); `count`, `list` and `check` are reads keyed by the message id.
@@ -2014,11 +2045,12 @@ retry key ("Stored outcomes"); `count`, `list` and `check` are reads keyed by th
 task's current holder (`routing: holder`), so it survives restarts and custody moves. It goes to
 the holder's inbox, since it resumes the task and needs an execution slot. It says why the wait
 ended:
-- `claim_granted`: the claim was released or ran out, and the earliest waiter now holds a claim
-  on the resource, with the notes on it. Its 15 minutes start when it is granted;
+- `claim_granted`: the wait was granted ("Waits and grants"): its new claim, with the notes on
+  the resource. Its 15 minutes start when it is granted;
 - `request_ended`: the request it waited for ended;
-- `limit_reached`: a wait on a request lasts at most 35 minutes; `still` says what the other
-  request is doing, and the model may carry on, wait again or ask the person.
+- `limit_reached`: the wait reached its 35 minutes. `still` says what it waited for is doing:
+  `claimed` for a resource, `running` or `waiting_for_person` for a request. The model may
+  carry on, wait again or ask the person.
 
 **What the requester hears.** A worker's claims, extensions, releases and notes send nothing to
 its lead. When something happened that the lead may need to plan around, trusted code adds
