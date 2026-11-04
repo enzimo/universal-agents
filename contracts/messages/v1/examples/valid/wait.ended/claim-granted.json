@@ -52,11 +52,18 @@
         },
         {
           "whose": "another_member"
+        },
+        {
+          "whose": "team_maintenance",
+          "note_id": "note_7",
+          "text": "The nightly archive index runs at 02:00; files moved before then are indexed tonight.",
+          "written_at": "2026-10-22T04:10:00.000Z"
         }
-      ]
+      ],
+      "notes_total": 4
     }
   },
   "idempotency_key": "wait.ended:uKQfQIjLgFAUQNw-cFCTAHATKkc-2Z_AJN43-wZO3Jo",
-  "body_digest": "rtJSvuetvyDBShLRP1kTEEbUT6JTl6OVP4QeaoustZ8",
-  "signature": "GpvEaDdWDk-E6U0gc3jYyVZx5eu-NWpqHFWhmERIZxU_bydc_BiIeFDCi9a7qv_8JOGL3726YqJN5F-JRrJkAg"
+  "body_digest": "0gFTMvlYLTZYJZ3-Kjc52PI_NGYDZFUBKCOznA6L7UE",
+  "signature": "6sk84qACDfMXfxp9rb1Q-rpXHO2D2P3LlIMOfcxJkoBSKCovlYzaIJf3wouCVDnQ8iT5x5NDKDkg38dhAg7LAg"
 }

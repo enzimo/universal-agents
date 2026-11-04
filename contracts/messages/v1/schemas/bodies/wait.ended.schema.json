@@ -32,13 +32,18 @@
               "items": {
                 "$ref": "../common.schema.json#/$defs/coordination_seen_note"
               },
-              "maxItems": 32
+              "maxItems": 8
+            },
+            "notes_total": {
+              "description": "How many notes on the resource there are in all; the list holds the newest of them.",
+              "$ref": "../common.schema.json#/$defs/count"
             }
           },
           "required": [
             "why",
             "claim",
-            "notes"
+            "notes",
+            "notes_total"
           ],
           "additionalProperties": false
         },

@@ -26,7 +26,6 @@
     "conflicts": [
       {
         "resource": "file:team/reports/",
-        "waiting_requests": 1,
         "claims": [
           {
             "claim_id": "claim_5",
@@ -55,7 +54,8 @@
             "relation": "below",
             "ends_at": "2026-10-22T04:40:00.000Z",
             "holder": {
-              "whose": "team_maintenance"
+              "whose": "team_maintenance",
+              "reason": "Compressing last year's reports."
             }
           },
           {
@@ -69,13 +69,15 @@
               "reason": "Checking the Q2 totals."
             }
           }
-        ]
+        ],
+        "claims_total": 4,
+        "waiting_requests": 1
       }
     ],
     "message": "Another of your requests is working under team/reports/ until 04:50, and this request already holds team/reports/q2.md."
   },
   "causation_id": "01928f3a-7b2c-7c0e-8000-000000000c0e",
   "idempotency_key": "shared_work.claim.reply:CFh0YwbkYagK9pXklM5e_lEOaIxFJn0J6Sbq6QdWsqU",
-  "body_digest": "WZ5N8cQWNEgEA2r7QCpQsJsWbayuYXkktsHG4VNmNuk",
-  "signature": "UIWr3P4sQPg05f4v_n8DWDaoPst_m4I5lRHbxGxjfhzcXjA9ad5juMDrTtKFejHA41iYwR2piuLkUEeFyeQYAA"
+  "body_digest": "JCyrldTE4axrAcqOpVXgVO6MnJI1Pu2CmaRfWssMPY8",
+  "signature": "P9bfxbUqNE56Rhhp90cxiCLPXiGY5jP1luVWqGRay9kM2ZapD5RfKPx-FmtDCVNsOdQnge2nTSYAXZzXQ8IvBQ"
 }

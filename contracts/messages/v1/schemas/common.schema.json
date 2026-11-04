@@ -743,7 +743,7 @@
       "additionalProperties": false
     },
     "coordination_holder": {
-      "description": "Whose claim it is. Only the asking person's own requests are described; another person's is only \"another team member's request\", and system work is team maintenance.",
+      "description": "Whose claim it is. The asking person's own requests are described in full; another person's request only as \"another team member's request\"; work for no person is team maintenance, the team's own work, whose reason every request sees.",
       "oneOf": [
         {
           "type": "object",
@@ -806,10 +806,14 @@
           "properties": {
             "whose": {
               "const": "team_maintenance"
+            },
+            "reason": {
+              "$ref": "#/$defs/short_text"
             }
           },
           "required": [
-            "whose"
+            "whose",
+            "reason"
           ],
           "additionalProperties": false
         }
@@ -851,7 +855,7 @@
       "additionalProperties": false
     },
     "coordination_seen_note": {
-      "description": "A note left on a resource. Another person's note shows only that one exists.",
+      "description": "A note left on a resource. Another person's note shows only that one exists; team maintenance's shows its text to every request.",
       "oneOf": [
         {
           "type": "object",
@@ -924,11 +928,37 @@
             "whose"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "team_maintenance"
+            },
+            "note_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "written_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "whose",
+            "note_id",
+            "text",
+            "written_at"
+          ],
+          "additionalProperties": false
         }
       ]
     },
     "coordination_event": {
-      "description": "Something that happened to a task's coordination that its requester may need to plan around; trusted code adds it (README, \"Coordination between a person's requests\").",
+      "description": "Something that happened to a task's coordination that its requester may need to plan around; trusted code adds it, at most one event of each kind, each listing up to eight cases with how many there were (README, \"Coordination between a person's requests\").",
       "oneOf": [
         {
           "type": "object",
@@ -936,21 +966,40 @@
             "event": {
               "const": "waited_for_resource"
             },
-            "resource": {
-              "$ref": "#/$defs/resource_key"
+            "waits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "resource": {
+                    "$ref": "#/$defs/resource_key"
+                  },
+                  "ended": {
+                    "type": "string",
+                    "enum": [
+                      "claim_granted",
+                      "limit_reached"
+                    ]
+                  }
+                },
+                "required": [
+                  "resource",
+                  "ended"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 8
             },
-            "ended": {
-              "type": "string",
-              "enum": [
-                "claim_granted",
-                "limit_reached"
-              ]
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
             }
           },
           "required": [
             "event",
-            "resource",
-            "ended"
+            "waits",
+            "total"
           ],
           "additionalProperties": false
         },
@@ -960,21 +1009,40 @@
             "event": {
               "const": "waited_for_request"
             },
-            "other_root_task_id": {
-              "$ref": "#/$defs/record_id"
+            "waits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "other_root_task_id": {
+                    "$ref": "#/$defs/record_id"
+                  },
+                  "ended": {
+                    "type": "string",
+                    "enum": [
+                      "request_ended",
+                      "limit_reached"
+                    ]
+                  }
+                },
+                "required": [
+                  "other_root_task_id",
+                  "ended"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 8
             },
-            "ended": {
-              "type": "string",
-              "enum": [
-                "request_ended",
-                "limit_reached"
-              ]
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
             }
           },
           "required": [
             "event",
-            "other_root_task_id",
-            "ended"
+            "waits",
+            "total"
           ],
           "additionalProperties": false
         },
@@ -984,17 +1052,72 @@
             "event": {
               "const": "wait_refused"
             },
-            "reason": {
-              "type": "string",
-              "enum": [
-                "own_request",
-                "loop"
-              ]
+            "refusals": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "on": {
+                        "const": "resource"
+                      },
+                      "resource": {
+                        "$ref": "#/$defs/resource_key"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "own_request",
+                          "loop"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "on",
+                      "resource",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "on": {
+                        "const": "request"
+                      },
+                      "other_root_task_id": {
+                        "$ref": "#/$defs/record_id"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "own_request",
+                          "loop"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "on",
+                      "other_root_task_id",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
             }
           },
           "required": [
             "event",
-            "reason"
+            "refusals",
+            "total"
           ],
           "additionalProperties": false
         },
@@ -1004,13 +1127,23 @@
             "event": {
               "const": "write_refused"
             },
-            "resource": {
-              "$ref": "#/$defs/resource_key"
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/resource_key"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
             }
           },
           "required": [
             "event",
-            "resource"
+            "resources",
+            "total"
           ],
           "additionalProperties": false
         },
@@ -1027,11 +1160,16 @@
               },
               "minItems": 1,
               "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
             }
           },
           "required": [
             "event",
-            "resources"
+            "resources",
+            "total"
           ],
           "additionalProperties": false
         },
@@ -1041,13 +1179,23 @@
             "event": {
               "const": "note_left"
             },
-            "resource": {
-              "$ref": "#/$defs/resource_key"
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/resource_key"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
             }
           },
           "required": [
             "event",
-            "resource"
+            "resources",
+            "total"
           ],
           "additionalProperties": false
         }
@@ -2099,6 +2247,134 @@
         "type",
         "jwt",
         "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "coordination_resource_notes": {
+      "description": "The notes on one resource, newest first.",
+      "type": "object",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/coordination_seen_note"
+          },
+          "maxItems": 8
+        },
+        "notes_total": {
+          "description": "How many notes there are on it in all.",
+          "$ref": "#/$defs/count"
+        }
+      },
+      "required": [
+        "resource",
+        "notes",
+        "notes_total"
+      ],
+      "additionalProperties": false
+    },
+    "coordination_wait_target": {
+      "description": "What a wait of the asking person's work is for: a resource, or another of the person's requests.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "resource"
+            },
+            "resource": {
+              "$ref": "#/$defs/resource_key"
+            }
+          },
+          "required": [
+            "type",
+            "resource"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "request"
+            },
+            "root_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "title": {
+              "$ref": "#/$defs/coordination_request_title"
+            }
+          },
+          "required": [
+            "type",
+            "root_task_id",
+            "title"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "coordination_own_wait": {
+      "description": "One of the asking request's own waits.",
+      "type": "object",
+      "properties": {
+        "wait_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "task_id": {
+          "description": "The task that waits.",
+          "$ref": "#/$defs/record_id"
+        },
+        "on": {
+          "$ref": "#/$defs/coordination_wait_target"
+        },
+        "ends_by": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "wait_id",
+        "task_id",
+        "on",
+        "ends_by"
+      ],
+      "additionalProperties": false
+    },
+    "busy_claim": {
+      "description": "The claim that made a covered change wait (README, \"Covered changes\"): its id and resource, when it ends, whose kind of request holds it, and how many notes are on the resource. The host reads the holder's description and the notes with shared_work.check when it shows the refusal to the model.",
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "ends_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "whose": {
+          "description": "Another of the person's own requests, another team member's request, or team maintenance. A request's own claims never refuse its writes.",
+          "type": "string",
+          "enum": [
+            "same_person",
+            "another_member",
+            "team_maintenance"
+          ]
+        },
+        "notes_total": {
+          "$ref": "#/$defs/count"
+        }
+      },
+      "required": [
+        "claim_id",
+        "resource",
+        "ends_at",
+        "whose",
+        "notes_total"
       ],
       "additionalProperties": false
     }

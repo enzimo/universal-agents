@@ -38,6 +38,7 @@
             }
           }
         ],
+        "claims_total": 1,
         "notes": [
           {
             "whose": "same_person",
@@ -50,7 +51,8 @@
           {
             "whose": "another_member"
           }
-        ]
+        ],
+        "notes_total": 2
       },
       {
         "resource": "file:team/reports/q4/",
@@ -66,7 +68,9 @@
             }
           }
         ],
-        "notes": []
+        "claims_total": 1,
+        "notes": [],
+        "notes_total": 0
       },
       {
         "resource": "file:team/archive/2025.md",
@@ -78,11 +82,21 @@
             "relation": "above",
             "ends_at": "2026-10-22T04:38:00.000Z",
             "holder": {
-              "whose": "team_maintenance"
+              "whose": "team_maintenance",
+              "reason": "Rebuilding the archive index."
             }
           }
         ],
-        "notes": []
+        "claims_total": 1,
+        "notes": [
+          {
+            "whose": "team_maintenance",
+            "note_id": "note_6",
+            "text": "The 2025 index is being rebuilt; leave this file alone until 04:40.",
+            "written_at": "2026-10-22T04:22:00.000Z"
+          }
+        ],
+        "notes_total": 1
       },
       {
         "resource": "record:knowledge_page:personal:travel-plans",
@@ -100,6 +114,7 @@
             }
           }
         ],
+        "claims_total": 1,
         "notes": [
           {
             "whose": "this_request",
@@ -107,25 +122,32 @@
             "text": "Draft headings are final; only the summary changes.",
             "written_at": "2026-10-22T04:25:00.000Z"
           }
-        ]
+        ],
+        "notes_total": 1
       },
       {
         "resource": "record:memory_fact:usermem:42",
         "can_wait": false,
         "claims": [],
-        "notes": []
+        "claims_total": 0,
+        "notes": [],
+        "notes_total": 0
       },
       {
         "resource": "record:schedule:sched_1",
         "can_wait": false,
         "claims": [],
-        "notes": []
+        "claims_total": 0,
+        "notes": [],
+        "notes_total": 0
       },
       {
         "resource": "record:objective:obj_1",
         "can_wait": false,
         "claims": [],
-        "notes": []
+        "claims_total": 0,
+        "notes": [],
+        "notes_total": 0
       },
       {
         "resource": "account:cli:google:person",
@@ -144,12 +166,14 @@
             }
           }
         ],
-        "notes": []
+        "claims_total": 1,
+        "notes": [],
+        "notes_total": 0
       }
     ]
   },
   "causation_id": "01928f3a-7b2c-7c09-8000-000000000c09",
   "idempotency_key": "shared_work.check.reply:LFdjuEh-l6n5EUkOyWF0r-4Z9fyPl7L3QuyH0HRqDmo",
-  "body_digest": "K91fv4qOL9H2a96XxHf6f2nSEQKNMYZs97S15ICj22s",
-  "signature": "fuq5nADskhlZCY25GchZ_dmTL0U9aONvdrSNB1hVHRoBxEoM55OCato-nfGyOOBlw17DEieY3e8ZhkJmLq_IAw"
+  "body_digest": "88gjrYAHM0pLR3V1ilFUITCe0poKcas7XMQDXHjmCHA",
+  "signature": "H1AB_YjBra3wpM7nNxS1Ylz8949QFpg7vaGp5wQZVxTAbNIsiM5bNT_kyO5Ntrr5isn2NmKBx-E89CJWPwQWDA"
 }

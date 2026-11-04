@@ -40,31 +40,69 @@
     "coordination": [
       {
         "event": "waited_for_resource",
-        "resource": "file:team/reports/q3.md",
-        "ended": "claim_granted"
+        "waits": [
+          {
+            "resource": "file:team/reports/q3.md",
+            "ended": "claim_granted"
+          },
+          {
+            "resource": "file:team/archive/2025.md",
+            "ended": "limit_reached"
+          }
+        ],
+        "total": 2
       },
       {
         "event": "waited_for_request",
-        "other_root_task_id": "task_root_8a",
-        "ended": "limit_reached"
+        "waits": [
+          {
+            "other_root_task_id": "task_root_8a",
+            "ended": "limit_reached"
+          },
+          {
+            "other_root_task_id": "run_sched_1_0430",
+            "ended": "request_ended"
+          }
+        ],
+        "total": 2
       },
       {
         "event": "wait_refused",
-        "reason": "loop"
+        "refusals": [
+          {
+            "on": "resource",
+            "resource": "file:team/reports/q4/",
+            "reason": "loop"
+          },
+          {
+            "on": "request",
+            "other_root_task_id": "task_root_1",
+            "reason": "own_request"
+          }
+        ],
+        "total": 2
       },
       {
         "event": "write_refused",
-        "resource": "file:team/reports/q4/draft.md"
+        "resources": [
+          "file:team/reports/q4/draft.md"
+        ],
+        "total": 1
       },
       {
         "event": "claim_ran_out",
         "resources": [
           "file:team/reports/"
-        ]
+        ],
+        "total": 1
       },
       {
         "event": "note_left",
-        "resource": "file:team/reports/"
+        "resources": [
+          "file:team/reports/",
+          "file:team/reports/q3.md"
+        ],
+        "total": 3
       }
     ],
     "outcome": {
@@ -90,6 +128,6 @@
     }
   },
   "idempotency_key": "task.result:z_5YgSSypgJ8HvL_NuX_FL0rxXFDP9y9OSWPzn3MA9c",
-  "body_digest": "WjBaJ16Lfx8ZSsuLLgn3sVzx6YEljJPXF8zyE90KgzU",
-  "signature": "BBnU9z5r6N9EAgCxQURmGJn0ZoXFSIpM0wZl8bsPouLmmvyh87Lh-5fJXJNoK6FTUrZElxenEVa2qw5az29gBA"
+  "body_digest": "RHQjPiyuL8vqrmbmbWZAcebFQMdxwqmmpzkRNuq6djE",
+  "signature": "MV481plIpJAg6OU74F5bkdsXL6AFT1v51E-52HpD4X5qhef04uEpja5InUaraOH2xO-raqTrAJFwbRsrQV2iCA"
 }

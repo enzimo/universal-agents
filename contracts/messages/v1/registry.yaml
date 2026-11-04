@@ -142,7 +142,7 @@ change_refusals:
   - code: needs_person_decision
     meaning: the person must decide before the change is saved
   - code: record_busy
-    meaning: another request is writing the file or sign-in; carries when to try again
+    meaning: another request is writing the file or sign-in, or holds a claim on the record; carries when to try again and, for a claim, the claim
 # The store records whose changes are covered changes: the store-safety code's
 # ChangeRecordKind (a test pins them). No operation changes a file yet; files stay with
 # the host that has the folder, and record_busy covers a file another request writes.
@@ -357,6 +357,8 @@ kinds:
     address: ["work.agent.{agent}", "work.edge.{edge}"]
     copy_to: [work.team]
     body: bodies/task.result.schema.json
+    body_rules:
+      - {unique: /body/coordination, by: event}
     senders: [worker_host, lead_host, edge_adapter, team_services]
     senders_by_address:
       work.edge.{edge}: [worker_host, lead_host, team_services]
@@ -2335,7 +2337,7 @@ kinds:
     rendering: none
 
   shared_work.list:
-    description: The person's other running requests, with their claims and notes.
+    description: The asking request's own claims and waits, and the person's other running requests.
     class: request_reply
     address: svc.team
     body: bodies/shared_work.list.schema.json
@@ -2387,7 +2389,7 @@ kinds:
       - {unique: /body/resources}
     reply:
       body: bodies/shared_work.claim.reply.schema.json
-      errors: [not_allowed, invalid_request, claimed, request_closed, runtime_error]
+      errors: [not_allowed, invalid_request, sensitive_content, claimed, request_closed, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30
@@ -2471,7 +2473,7 @@ kinds:
     body: bodies/shared_work.wait.schema.json
     reply:
       body: bodies/shared_work.wait.reply.schema.json
-      errors: [not_allowed, invalid_request, not_found, nothing_to_wait_for, would_loop, request_closed, runtime_error]
+      errors: [not_allowed, invalid_request, sensitive_content, not_found, nothing_to_wait_for, would_loop, request_closed, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30

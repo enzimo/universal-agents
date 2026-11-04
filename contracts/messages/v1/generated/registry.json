@@ -21,7 +21,7 @@
     },
     {
       "code": "record_busy",
-      "meaning": "another request is writing the file or sign-in; carries when to try again"
+      "meaning": "another request is writing the file or sign-in, or holds a claim on the record; carries when to try again and, for a claim, the claim"
     }
   ],
   "command_token_max_seconds": 300,
@@ -4544,6 +4544,7 @@
         "errors": [
           "not_allowed",
           "invalid_request",
+          "sensitive_content",
           "claimed",
           "request_closed",
           "runtime_error"
@@ -4649,7 +4650,7 @@
       },
       "body": "bodies/shared_work.list.schema.json",
       "class": "request_reply",
-      "description": "The person's other running requests, with their claims and notes.",
+      "description": "The asking request's own claims and waits, and the person's other running requests.",
       "expiry_seconds": 30,
       "idempotency": [
         "/message_id"
@@ -4782,6 +4783,7 @@
         "errors": [
           "not_allowed",
           "invalid_request",
+          "sensitive_content",
           "not_found",
           "nothing_to_wait_for",
           "would_loop",
@@ -5330,6 +5332,12 @@
       },
       "authority": "none",
       "body": "bodies/task.result.schema.json",
+      "body_rules": [
+        {
+          "by": "event",
+          "unique": "/body/coordination"
+        }
+      ],
       "class": "durable",
       "copy_to": [
         "work.team"

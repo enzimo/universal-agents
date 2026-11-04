@@ -1918,7 +1918,11 @@ task id, with `children_total` and `next_child_offset` to continue. Repeat the s
 root window with the next child offset to read a larger graph. Senders may shorten
 either window to fit the frame, but never silently discard members. The maximum
 window is 100 roots or schedules and 200 children per root. Blockers use
-`text_content` so the full waiting reason can be read from a blob when necessary.
+`text_content` so the full waiting reason can be read from a blob when necessary. A root
+also carries the request's live claims (`claims`, newest eight, with `claims_total`) and,
+while one of its tasks waits, what for and until when (`waiting_for`: a resource, or another
+of the person's requests with its title), so Settings → Tasks can show "waiting for Archive
+cleanup until 10:45" ("Coordination between a person's requests").
 Schedule entries retain `objective_id` for scheduled-Objective counts and may omit
 their name, as today. `tasks.list` keeps blockers and latest activity;
 `tasks.list_finished` keeps the owner's display name. Task ids in these lists are
@@ -1958,12 +1962,28 @@ the token of the root task it works on (`authority_binding: {type: root_task}`).
 the agent's `task_id`; the team services check that the agent holds that task and that the
 token is bound to its root task (`bad_authority`). The request is the token's root task, and
 the person is the token's person. A request never waits on its own tasks, and a claim belongs
-to the request, so the lead and every worker of one request act under it. System work holds
-claims with no person.
+to the request, so the lead and every worker of one request act under it. Work for no person
+takes part as team maintenance (below).
 
-**Same person only.** Titles, states, reasons and note texts reach only the same person's
-requests. Another person's claim is `another_member`, its note shows only that one exists, and
-system work's claim is `team_maintenance`. Counts never include other people's requests.
+**What a request learns about others.** Awareness stays within one person, and team
+maintenance is the team's own work:
+- The person's own requests see each other in full: titles, states, reasons and note texts.
+- Another person's request is "another team member's request" (`another_member`). A request
+  learns only that it holds a claim on, above or under a resource the request named and until
+  when; that notes exist there, without their text; how many requests wait for it
+  (`waiting_requests`, a bare number that counts every request, so a refusal always shows its
+  cause); and, when a wait is refused, that it waits for something this request holds
+  (`would_loop`). Never its title, state, reason or note text, and never whether it waits for
+  its person (`holder_waiting_for_person` is sent only for the person's own requests).
+- Work for no person, a run of a schedule that works for nobody, is team maintenance
+  (`team_maintenance`). It runs as the team, not as an administrator: it then keeps no person's
+  access, reaches no person's private space, and does not move or stop when an administrator
+  leaves. It has no private side either, so its claims show their reason and its notes their
+  text to every request, after the same checks as everyone's. It may not name a resource in a
+  person's own space (`not_allowed`) and may wait for resources but not for requests;
+  `shared_work.count` answers zeros for it and `shared_work.list` shows only its own claims
+  and waits.
+- `shared_work.count` counts only the person's own other requests.
 
 **Resource keys.** `resource_key` is one string, built by the host's trusted code from what the
 agent named, never free text:
@@ -1998,8 +2018,11 @@ claim and no note.
 - `shared_work.count` gives the numbers for the line each turn of a person's work shows: the
   person's other running requests, how many of them are scheduled runs or hold claims, and how
   many of this request's tasks wait for another request.
-- `shared_work.list` lists the person's other running requests (at most 64), with their kind,
-  state, last activity, claims and notes.
+- `shared_work.list` gives the asking request's own live claims and waits (`this_request`),
+  whichever of its tasks took them, so a lead sees what its workers hold. It also gives the
+  person's other running requests, a page at a time (`offset`, a `limit` of at most 64,
+  `total`, and `next_offset` while more remain), with their kind, state, last activity, claims
+  and notes.
 - `shared_work.check` reports, for up to eight resources, the live claims on, above or under
   each one, its notes, and whether a wait on it would be accepted now (`can_wait`).
 - `shared_work.claim` claims up to eight resources, all or none, for 15 minutes. It answers
@@ -2011,7 +2034,7 @@ claim and no note.
     The request uses, extends or releases that claim instead, so it holds a resource for at
     most 35 minutes at a time.
 
-  Its answer carries the notes on the resources.
+  Its answer carries the notes on the resources, grouped by resource.
 - `shared_work.extend` adds 10 minutes, at most twice (`limit_reached` after that), so a claim
   lasts at most 35 minutes. Activity never extends a claim. A claim that has ended answers
   `not_found`, and a claim on a resource the task may no longer reach answers `not_allowed`.
@@ -2020,9 +2043,12 @@ claim and no note.
   is not this request's answers `not_found`. A claim also ends, without a message, when its
   request ends, fails or is stopped, and when its record is deleted.
 - `shared_work.note` leaves up to 500 characters on one resource, at most three per resource
-  for each request (`limit_reached`). Notes are checked like knowledge pages for credentials and
-  identity numbers (`sensitive_content`), last while their request runs and one day more, and
-  are shown to models as quoted text from another request, never as instructions.
+  for each request (`limit_reached`). A note lasts while its request runs and one day more.
+
+Notes and the reasons of claims and of waits on a resource are text a model wrote that other
+models read. Both are checked like knowledge pages for credentials and identity numbers
+(`sensitive_content`, from `note`, `claim` and `wait`) and shown to models as quoted text from
+another request, never as instructions.
 - `shared_work.wait` waits for a claimed resource or for another of the person's requests. A
   wait on a resource gives the `reason` its claim carries if the wait is granted. In one
   serialized step it refuses a wait on the request itself or one that would close a loop
@@ -2030,6 +2056,12 @@ claim and no note.
   `nothing_to_wait_for` when nothing but this request's own claims and waits is on, above or
   under the resource. Otherwise it records the wait, answers with the latest time it ends
   (`ends_by`), and the host ends the turn with a local wait, freeing the agent's slot.
+
+**Reply size.** Each list inside a coordination reply holds at most eight items, newest first,
+next to a total that counts them all (`claims_total`, `notes_total`, `waits_total`,
+`holding_total`); `shared_work.list` pages its requests ("Reply size"). A reply that would still
+not fit in `max_frame_bytes` leaves out the oldest notes first, then the claims that end first,
+never a resource it was asked about, and its totals still count everything.
 
 **Waits and grants.** These rules keep every wait finite and free of loops:
 - Every wait lasts at most 35 minutes, on a resource or on a request, and `ends_by` is that
@@ -2093,10 +2125,12 @@ A granted claim's `ends_at` is at most 15 minutes after the message (body rule `
 
 **What the requester hears.** A worker's claims, extensions, releases and notes send nothing to
 its lead. When something happened that the lead may need to plan around, trusted code adds
-`coordination` events to the task's `task.result`: a wait and how it ended, a refused wait, a
-write refused because another request claimed the resource, a claim that ran out after its last
-extension while the work was unfinished, and a note left on a resource. A worker that cannot
-go on asks its lead with `task.question`, like any other blocker.
+`coordination` events to the task's `task.result`, at most one of each kind (body rule
+`unique`), each listing up to eight cases with how many there were in all, so a busy task never
+runs out of room for them: its waits and how they ended, its refused waits and what they were
+for, its writes refused because another request claimed the resource, its claims that ran out
+after their last extension while the work was unfinished, and the resources it left notes on.
+A worker that cannot go on asks its lead with `task.question`, like any other blocker.
 
 ## Covered changes
 
@@ -2170,7 +2204,14 @@ that can happen to it, each with its data:
 - `request_closed` may carry the request's state.
 - `needs_person_decision` may carry the `case_id` the person decides in a change review
   ("Change reviews").
-- `record_busy` carries `retry_at`, when to try again.
+- `record_busy` carries `retry_at`, when to try again. When another request's claim on the
+  record caused it ("Coordination between a person's requests"), it also carries `claim`: the
+  claim's id and resource, when it ends (which is `retry_at`), whose kind of request holds it
+  (the person's own, another team member's, or team maintenance) and how many notes are on
+  the resource. Before the model sees the refusal, the host's trusted code reads the holder's
+  description and the notes with `shared_work.check`, under the same privacy rules, so the
+  model can wait, carry on with other work or ask the person. The refusal itself stays small
+  in every covered operation.
 
 `change_conflict`, `needs_person_decision` and `record_busy` come only from the checks of
 covered records, so the generator refuses them on an operation without `covered_change`.

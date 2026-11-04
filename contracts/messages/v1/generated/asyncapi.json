@@ -4693,7 +4693,7 @@
             }
           ]
         },
-        "summary": "The person's other running requests, with their claims and notes."
+        "summary": "The asking request's own claims and waits, and the person's other running requests."
       },
       "shared_work_list_reply": {
         "name": "shared_work.list.reply",
