@@ -277,7 +277,7 @@ class TaskAccessList(WireModel):
 ContractSha256 = Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
 
 
-ResourceKey = Annotated[str, StringConstraints(pattern='^(?:file:(?:team|agents|users/(?:[^/\\\\.][^/\\\\]*|\\.[^/\\\\.][^/\\\\]*|\\.\\.[^/\\\\]+)|data/(?:[^/\\\\.][^/\\\\]*|\\.[^/\\\\.][^/\\\\]*|\\.\\.[^/\\\\]+))(?:/(?:[^/\\\\.][^/\\\\]*|\\.[^/\\\\.][^/\\\\]*|\\.\\.[^/\\\\]+))*/?|record:knowledge_page:(?:team|personal):[a-z0-9][a-z0-9-]{0,79}|record:memory_fact:(?:coremem|usermem):[1-9][0-9]{0,15}|record:(?:schedule|objective|heartbeat_item):[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}|account:(?:fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}:(?:team|person))$', max_length=1100)]
+ResourceKey = Annotated[str, StringConstraints(pattern='^(?:file:(?:team|agents|users/(?:[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.\\.[^/\\\\\x00-\x1f\x7f]+)|data/(?:[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.\\.[^/\\\\\x00-\x1f\x7f]+))(?:/|(?:/(?:[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.\\.[^/\\\\\x00-\x1f\x7f]+))+/?)|record:knowledge_page:(?:team|personal):[a-z0-9][a-z0-9-]{0,79}|record:memory_fact:(?:coremem|usermem):[1-9][0-9]{0,15}|record:(?:schedule|objective|heartbeat_item):[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}|account:(?:fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}:(?:team|person))$', max_length=1100)]
 
 
 CoordinationRequestTitle = Annotated[str, StringConstraints(min_length=1, max_length=200)]

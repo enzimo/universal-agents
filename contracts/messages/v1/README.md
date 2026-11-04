@@ -1954,16 +1954,31 @@ system work's claim is `team_maintenance`. Counts never include other people's r
 **Resource keys.** `resource_key` is one string, built by the host's trusted code from what the
 agent named, never free text:
 - `file:<folder target>`, with the folder target grammar of access grants (`team/...`,
-  `agents/...`, `users/<folder>/...`, `data/<name>/...`, no empty, `.` or `..` part). A key
-  ending with `/` is a folder: it conflicts with every key under it, so a claim on
+  `agents/...`, `users/<folder>/...`, `data/<name>/...`): no empty, `.` or `..` part, no
+  backslash and no control character. A folder key always ends with `/`, a top folder's too
+  (`file:team/`, `file:users/<folder>/`), and a file key never does, so each file and folder
+  has one spelling. A folder conflicts with every key under it: a claim on
   `file:team/reports/` conflicts with one on `file:team/reports/q3.md` (`relation` `above`
   and `below`);
 - `record:knowledge_page:<space>:<page>`, `record:memory_fact:<bank>:<number>`,
   `record:schedule:<id>`, `record:objective:<id>` and `record:heartbeat_item:<id>`;
 - `account:<tool>:<owner>`, the team's account of a tool or the person's own.
 
-The team services refuse a key that is not in its normal form, for example a folder target
-that is not the way access grants write it, with `invalid_request`.
+The schema checks the spelling. The team services also refuse, with `invalid_request`, a key
+whose spelling is right but whose meaning is not: a folder named without its `/`, or a file
+named with one.
+
+A key in a person's own space (`record:knowledge_page:personal:<page>`,
+`record:memory_fact:usermem:<number>`, `account:<tool>:person`) names the token person's own
+record, since a person's space is never another person's to change. The team services keep and
+compare these keys together with that person, so the same key from two people never conflicts
+and never reveals that the other person works on something. Work for no person has no such
+space and gets `not_allowed` for these keys.
+
+Records are named the way people and agents name them, so a memory fact's number is given to
+the next new fact once the fact is deleted. A claim or a note on a record therefore ends when
+the record is deleted, in the same step, and a number given to a new record starts with no
+claim and no note.
 
 **The operations.**
 - `shared_work.count` gives the numbers for the line each turn of a person's work shows: the
