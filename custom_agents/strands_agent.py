@@ -2574,9 +2574,13 @@ class UniversalAgent(BaseModel):
 
     _agent_state_io: BlockingIOLane = PrivateAttr(default_factory=BlockingIOLane)
 
-    async def _refresh_self_agent_state(self, *, is_exiting: bool = False) -> None:
-        # The host writes the agent's signed record when this changed it (custom_agents.agent_host).
+    def _report_record_state(self) -> None:
+        """Tell this process's host the agent's state; it writes the signed record when it changed."""
+
         report_agent_state(self)
+
+    async def _refresh_self_agent_state(self, *, is_exiting: bool = False) -> None:
+        self._report_record_state()
         if self._agent_state_store is None:
             return
         try:
