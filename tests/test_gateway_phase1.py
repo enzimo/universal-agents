@@ -101,7 +101,6 @@ from custom_messages.system_schedules import (
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.transport import TransportSettings
 from storage.conversation_repository import SqliteConversationRepository
-from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 from custom_messages.contracts.access_v2 import PERSON_REF_PATTERN
 from tests.team_services_support import InProcessTeamServices
 
@@ -4792,19 +4791,20 @@ def test_delivery_presentation_humanizes_raw_tool_setup_result(status: str, mess
 
 def test_delivery_presentation_rejects_manager_control_envelopes() -> None:
     envelope = MessageEnvelope(
-        msg_content=ManagerScheduleCommand(
+        msg_content=ManagerRuntimeWorkCommand(
             command_type=MessageMetaType.RESPONSE,
-            action="list",
+            action="cancel",
+            scope="user",
             success=True,
         ),
         msg_header=MessageHeader(from_agent_id="manager_1234"),
-        msg_meta=MessageMeta(msg_correlation_id="corr_schedule_response"),
+        msg_meta=MessageMeta(msg_correlation_id="corr_control_response"),
     )
 
     assert not GatewayDeliveryPresentation.supports_user_delivery(envelope.msg_content)
     with pytest.raises(
         ValueError,
-        match="Unsupported gateway delivery content type: ManagerScheduleCommand",
+        match="Unsupported gateway delivery content type: ManagerRuntimeWorkCommand",
     ):
         GatewayDeliveryPresentation.render_envelope(envelope)
 
@@ -5786,15 +5786,16 @@ async def test_gateway_drops_unsupported_unsolicited_manager_control(
     )
     session = gateway.application.start_new_session()
     envelope = MessageEnvelope(
-        msg_content=ManagerScheduleCommand(
-            command_id="manager_schedule_late",
+        msg_content=ManagerRuntimeWorkCommand(
+            command_id="manager_control_late",
             command_type=MessageMetaType.RESPONSE,
-            action="list",
+            action="cancel",
+            scope="user",
             success=True,
-            message="schedule_listed",
+            message="cancelled",
         ),
         msg_meta=MessageMeta(
-            msg_correlation_id="corr_schedule_late",
+            msg_correlation_id="corr_control_late",
             conversation_id=session.conversation_id,
             gateway_context=GatewayContext(
                 canonical_user_id=config.user.canonical_user_id,

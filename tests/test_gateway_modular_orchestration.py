@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock
 from assistant_gateway.application.manager_commands import GatewayManagerCommandRequest
 from assistant_gateway.application.request_context import GatewayRequestRoute
 from assistant_gateway.application.private_resources import (
-    PRIVATE_ACTION_DELETE,
-    RESOURCE_SCHEDULE,
+    PRIVATE_ACTION_UPDATE,
+    RESOURCE_OBJECTIVE,
 )
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
@@ -21,7 +21,7 @@ from custom_messages.contracts.credentials_v1 import SecureCredentialCollectionR
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from assistant_gateway.application.request_context import GatewayCommandPerson
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
+from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 
 
 def _config(tmp_path: Path) -> GatewayInstanceConfig:
@@ -275,9 +275,10 @@ async def test_manager_command_authorization_denies_before_publication(
         manager_agent_id="manager_1",
         owner_canonical_user_id="user_1",
     )
-    command = ManagerScheduleCommand(
-        action="remove",
-        schedule_id="schedule_1",
+    command = ManagerRuntimeWorkCommand(
+        action="cancel",
+        scope="objective",
+        target_objective_id="objective_1",
     )
 
     with pytest.raises(PermissionError, match="Private resource"):
@@ -301,9 +302,9 @@ async def test_manager_command_authorization_denies_before_publication(
         {
             "actor_canonical_user_id": "user_1",
             "owner_canonical_user_id": "user_1",
-            "resource_type": RESOURCE_SCHEDULE,
-            "resource_id": "schedule_1",
-            "action": PRIVATE_ACTION_DELETE,
+            "resource_type": RESOURCE_OBJECTIVE,
+            "resource_id": "objective_1",
+            "action": PRIVATE_ACTION_UPDATE,
             "team_id": "team_modular",
             "roles": ("member",),
         }

@@ -15,6 +15,7 @@ from typing import Any, Optional
 from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
 from assistant_gateway.message_host import GatewayHostUnavailable, GatewayMessageHost
 from custom_messages.wire.refusals import FrameRefused
+from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
@@ -58,3 +59,14 @@ class AccessStorePersonReferences:
     def person_id(self, person_ref: str) -> str | None:
         person = AccessRepository(self._storage).team_person_by_ref(self._team_id, person_ref)
         return None if person is None else person.person_id
+
+
+def gateway_delivery_refs(config: Any) -> Optional[DeliveryRefs]:
+    """The instance's delivery reference key, which the launcher creates; None (logged) without it."""
+
+    try:
+        return DeliveryRefs.load(config.layout, config.manager.team_id)
+    except Exception:
+        _LOGGER.warning("The delivery reference key cannot be read; a chat's own schedule list is unavailable until "
+                        "the launcher creates it. event=gateway_delivery_ref_key_missing", exc_info=True)
+        return None

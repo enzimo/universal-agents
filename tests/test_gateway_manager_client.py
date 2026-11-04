@@ -9,8 +9,7 @@ from assistant_gateway.application.manager_client import (
     GatewayManagerClient,
     GatewayManagerClientSettings,
 )
-from custom_messages.contracts.control_v1 import AgentStatus, SystemStatusMessage
-from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
+from custom_messages.contracts.control_v1 import AgentStatus, ManagerRuntimeWorkCommand, SystemStatusMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -124,14 +123,15 @@ def _system_envelope(correlation_id: str) -> MessageEnvelope:
     )
 
 
-def _schedule_response(correlation_id: str) -> MessageEnvelope:
+def _late_control_response(correlation_id: str) -> MessageEnvelope:
     return MessageEnvelope(
-        msg_content=ManagerScheduleCommand(
-            command_id="manager_schedule_response",
+        msg_content=ManagerRuntimeWorkCommand(
+            command_id="manager_runtime_response",
             command_type=MessageMetaType.RESPONSE,
-            action="list",
+            action="cancel",
+            scope="user",
             success=True,
-            message="schedule_listed",
+            message="cancelled",
         ),
         msg_header=MessageHeader(from_agent_id="manager_1"),
         msg_meta=MessageMeta(
@@ -199,7 +199,7 @@ async def test_manager_client_drops_late_manager_control_response(
         logging.WARNING,
         logger="test.gateway.manager_client",
     ):
-        await client.handle_response(_schedule_response("corr_schedule_expired"))
+        await client.handle_response(_late_control_response("corr_control_expired"))
 
     assert unsolicited == []
     assert "event=gateway_unmatched_manager_control_response_dropped" in caplog.text

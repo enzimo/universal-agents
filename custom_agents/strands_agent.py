@@ -130,7 +130,6 @@ from custom_agents.internal_improvement_runtime import (
 )
 from custom_agents.manager_control_runtime import (
     handle_manager_runtime_work_command,
-    handle_manager_schedule_command,
     handle_task_progress_status,
 )
 from custom_agents.manager_bootstrap_runtime import resume_manager_data_cleanups, run_manager_bootstrap
@@ -310,7 +309,6 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_DONE_STATUSES
 from custom_messages.contracts.schedule_v1 import (
     AutomationMessage,
-    ManagerScheduleCommand,
     ScheduledMessage,
 )
 from custom_messages.contracts.task_v1 import (
@@ -4010,13 +4008,6 @@ class UniversalAgent(BaseModel):
             await handle_task_progress_status(
                 self,
                 request=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
-        elif isinstance(msg_content, ManagerScheduleCommand):
-            await handle_manager_schedule_command(
-                self,
-                command=msg_content,
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )

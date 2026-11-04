@@ -17,7 +17,6 @@ from assistant_gateway.application.private_resources import (
     PRIVATE_ACTION_UPDATE,
     RESOURCE_CONVERSATION,
     RESOURCE_OBJECTIVE,
-    RESOURCE_SCHEDULE,
 )
 from assistant_gateway.application.request_context import (
     GatewayCommandPerson,
@@ -31,13 +30,11 @@ from custom_messages.contracts.control_v1 import (
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 from custom_messages.enums import RequesterType
 
 
 GatewayManagerCommand = (
-    ManagerScheduleCommand
-    | ManagerRuntimeWorkCommand
+    ManagerRuntimeWorkCommand
 )
 # PersonStandingCommandV1 is not tied to a chat session; its gateway context
 # carries only the acting administrator's signed context.
@@ -226,21 +223,6 @@ class GatewayManagerCommandService:
         session: SessionRecord,
         person: GatewayCommandPerson,
     ) -> _PrivateResourceTarget:
-        if isinstance(command, ManagerScheduleCommand):
-            return _PrivateResourceTarget(
-                resource_type=RESOURCE_SCHEDULE,
-                resource_id=(
-                    command.schedule_id
-                    or f"session:{command.session_key or session.session_key}"
-                ),
-                action=(
-                    PRIVATE_ACTION_READ
-                    if command.action == "list"
-                    else PRIVATE_ACTION_DELETE
-                    if command.action == "remove"
-                    else PRIVATE_ACTION_UPDATE
-                ),
-            )
         if isinstance(command, ManagerRuntimeWorkCommand):
             if command.scope == "objective":
                 return _PrivateResourceTarget(

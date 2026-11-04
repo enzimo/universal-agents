@@ -109,6 +109,7 @@ TRUST_AUTHORITY_DIRNAME = "authority"
 TRUST_HOSTS_DIRNAME = "hosts"
 TRUST_BOOTSTRAP_FILENAME = "bootstrap.json"
 TRUST_EXPECTED_HOSTS_FILENAME = "expected-hosts.json"
+TRUST_DELIVERY_REF_KEY_FILENAME = "delivery-ref.key.json"
 # A host's runtime id names its key folder: one subject token, so it can never climb out.
 _RUNTIME_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 # Long tool output offloaded from conversation turns (not chat messages); each
@@ -380,6 +381,12 @@ class InstanceLayout:
         """The bootstrap bundle every host starts from: the installation's authority keys and records."""
 
         return self.trust_dir / TRUST_BOOTSTRAP_FILENAME
+
+    @property
+    def trust_delivery_ref_key_path(self) -> Path:
+        """The key that turns a chat session into an opaque delivery reference (``custom_transport.protocol1.delivery_refs``)."""
+
+        return self.trust_dir / TRUST_DELIVERY_REF_KEY_FILENAME
 
     @property
     def trust_expected_hosts_path(self) -> Path:

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from custom_transport.protocol1.bootstrap import read_bundle, write_bundle
+from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from custom_transport.protocol1.host_keys import HOST_KEYS_FILENAME, load_authority_keys, load_host_keys
 from docker import message_hosts
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
@@ -33,17 +34,22 @@ def test_the_first_start_makes_the_keys_the_bundle_and_the_list(tmp_path: Path) 
     assert read_expected_hosts(layout.trust_expected_hosts_path) == {}
     assert stat.S_IMODE(layout.trust_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE((layout.host_trust_dir(AUTHORITY_RUNTIME) / HOST_KEYS_FILENAME).stat().st_mode) == 0o600
+    # The key the gateway and the team services share for people's delivery references.
+    assert stat.S_IMODE(layout.trust_delivery_ref_key_path.stat().st_mode) == 0o600
 
 
 def test_later_starts_keep_the_installation_its_keys_and_the_authoritys_records(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path)
     installation = message_hosts.prepare_message_host_trust(layout)
     key_id = load_authority_keys(layout).key_id
+    delivery_ref = DeliveryRefs.load(layout, "team_one").ref("session_one")
     record = {"record": "revocations", "sequence": 7}
     write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records([record]))
     host = ExpectedHost("team-services", "team-services.0123", "AAAA", frozenset({"team_services"}), frozenset({"team_one"}))
     assert message_hosts.prepare_message_host_trust(layout, {"team-services": host}) == installation
     assert load_authority_keys(layout).key_id == key_id
+    # A chat keeps its reference across starts, so schedules stay listed for it.
+    assert DeliveryRefs.load(layout, "team_one").ref("session_one") == delivery_ref
     assert read_bundle(layout.trust_bootstrap_path).records == (record,)
     assert set(read_expected_hosts(layout.trust_expected_hosts_path)) == {"team-services"}
     # A host the launcher no longer starts loses automatic approval at the next start.
