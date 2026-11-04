@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -47,19 +47,15 @@ class _FakeManagerRuntime:
         self.closed = False
         self.on_response = None
         self.on_operational = None
-        self.on_presence = None
         self.durable: list[tuple[MessageEnvelope, str]] = []
         self.operational: list[tuple[MessageEnvelope, str]] = []
-        self.consumer_result: bool | None = True
-        self.consumer_probes: list[str] = []
         self.put_calls: list[dict[str, object]] = []
         self.operational_publish_hook = None
 
-    async def connect(self, *, on_response, on_operational, on_presence) -> None:
+    async def connect(self, *, on_response, on_operational) -> None:
         self.connected = True
         self.on_response = on_response
         self.on_operational = on_operational
-        self.on_presence = on_presence
 
     async def close(self) -> None:
         self.connected = False
@@ -89,13 +85,6 @@ class _FakeManagerRuntime:
     async def jetstream_usage(self) -> None:
         return None
 
-    async def manager_has_live_consumer(
-        self,
-        manager_id: str,
-    ) -> bool | None:
-        self.consumer_probes.append(manager_id)
-        return self.consumer_result
-
     async def put_object(self, **kwargs) -> object:
         self.put_calls.append(dict(kwargs))
         return object()
@@ -109,9 +98,6 @@ def _settings(*, manager_id: str | None = "manager_1") -> GatewayManagerClientSe
         manager_named_agent_type="TeamArchitect",
         response_route="team_test_gateway_response",
         initial_manager_id=manager_id,
-        liveness_poll_seconds=0.01,
-        presence_stale_seconds=30.0,
-        recovery_discovery_timeout_seconds=0.01,
     )
 
 
@@ -150,7 +136,6 @@ def _client(
     available: list | None = None,
     unavailable: list | None = None,
     clock: _FixedClock | None = None,
-    presence: list[tuple[AgentStatus, datetime | None, str]] | None = None,
 ) -> GatewayManagerClient:
     async def on_unsolicited(envelope: MessageEnvelope) -> None:
         if unsolicited is not None:
@@ -165,11 +150,6 @@ def _client(
         logger=logging.getLogger("test.gateway.manager_client"),
         runtime=runtime,
         on_unsolicited=on_unsolicited,
-        on_agent_presence=(
-            (lambda status, timestamp, source: presence.append((status, timestamp, source)))
-            if presence is not None
-            else None
-        ),
         write_manager_route=(
             (lambda manager_id: route_writes.append(manager_id))
             if route_writes is not None
@@ -270,22 +250,27 @@ async def test_runtime_backed_publish_requires_explicit_connection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_client_presence_timeout_is_clock_deterministic() -> None:
-    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
-    runtime = _FakeManagerRuntime()
-    runtime.consumer_result = None
+async def test_the_lead_from_the_records_sets_and_clears_the_route() -> None:
+    """The team view applies the lead's records (assistant_gateway.team_view); a leaving lead clears the route."""
+
     route_writes: list[str | None] = []
-    client = _client(
-        runtime,
-        route_writes=route_writes,
-        clock=_FixedClock(now),
-    )
-    client.manager_status_updated_at = now - timedelta(seconds=31)
+    available: list = []
+    unavailable: list = []
+    client = _client(_FakeManagerRuntime(), settings=_settings(manager_id=None), route_writes=route_writes,
+                     available=available, unavailable=unavailable)
 
-    await client.check_manager_liveness_once()
+    def lead(agent_id: str, *, exiting: bool = False) -> AgentStatus:
+        return AgentStatus(self_id=agent_id, team_id="team_test", name="TeamLead", named_agent_type="TeamArchitect",
+                           agent_role="team_lead", is_paused=False, is_exiting=exiting,
+                           status_type=MessageMetaType.RESPONSE,
+                           last_seen_at=datetime.now(timezone.utc).isoformat())
 
-    assert route_writes == [None]
-    assert client.manager_id is None
+    await client.apply_manager_status(lead("lead_1"), source="agent_records")
+    await client.apply_manager_status(lead("lead_1", exiting=True), source="agent_records")
+
+    assert route_writes == ["lead_1", None] and client.manager_id is None
+    assert [item.manager_id for item in available] == ["lead_1"]
+    assert [item.manager_id for item in unavailable] == ["lead_1"]
 
 
 @pytest.mark.asyncio

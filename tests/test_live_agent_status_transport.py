@@ -55,7 +55,6 @@ from runtime_settings.projection import _project_transport
 from runtime_settings.transport import TransportSettings
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import context_signer
-from tests.live_nats_support import flush_adapter_fully
 
 pytestmark = [
     pytest.mark.integration,
@@ -329,90 +328,6 @@ async def test_local_memory_schedule_does_not_publish_to_remote_memreview_queue(
                 agent.set_exit_flag()
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(agent_task, timeout=10)
-
-
-@pytest.mark.asyncio
-async def test_live_gateway_discovery_uses_operational_subject_not_presence(tmp_path, live_transport):
-    team_id = new_id("live_gateway")
-
-    async with LiveNatsClient(team_id, transport=live_transport) as responder_client:
-        mapper = responder_client.mapper
-        requests = asyncio.Queue()
-
-        async def responder_handler(delivery) -> None:
-            await requests.put(delivery.envelope)
-            await delivery.ack()
-
-        await responder_client.adapter.subscribe_subject(
-            name="gateway-discovery-responder",
-            subject=mapper.operational_subject(),
-            handler=responder_handler,
-            delivery=SubscriptionDelivery.CORE,
-            logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-        )
-        # The gateway's discovery request comes from its own connection.
-        await flush_adapter_fully(responder_client.adapter)
-
-        async def responder() -> None:
-            while True:
-                request = await asyncio.wait_for(requests.get(), timeout=8)
-                assert isinstance(request.msg_content, AgentStatus)
-                assert request.msg_content.status_type == MessageMetaType.REQUEST
-                response = MessageEnvelope(
-                    msg_content=AgentStatus(
-                        self_id="manager_live_from_operational",
-                        team_id=team_id,
-                        named_agent_type="TeamArchitect",
-                        is_paused=False,
-                        is_executing=False,
-                        has_execution_capacity=True,
-                        is_busy=False,
-                        name="manager-live",
-                        agent_role="manager",
-                        status_type=MessageMetaType.RESPONSE,
-                        info_type=ControlType.STATUS_REQUEST_BASIC,
-                    ),
-                    msg_header=MessageHeader(
-                        from_agent_id="manager_live_from_operational",
-                        to_routing_path=request.msg_header.response_routing_key,
-                        agent_signature="",
-                    ),
-                    msg_meta=MessageMeta(
-                        msg_correlation_id=request.msg_meta.msg_correlation_id
-                    ),
-                )
-                await responder_client.publish(
-                    request.msg_header.response_routing_key, response, durable=True
-                )
-
-        gateway_config = GatewayInstanceConfig.create(
-            instance_name="live_gateway",
-            instance_root=str(tmp_path / "gateway"),
-            team_id=team_id,
-            timezone="America/Chicago",
-            named_agent_type="TeamArchitect",
-        )
-        gateway_config.transport = live_transport.model_copy(deep=True)
-        gateway = UserGateway(
-            gateway_config,
-            output_sink=None,
-            state_store=GatewayStateStore(str(tmp_path / "gateway_state.db")),
-        )
-
-        responder_task = asyncio.create_task(responder())
-        try:
-            await gateway.connect(start_services=False)
-            # This test targets the extracted manager-client transport directly;
-            # manager discovery is intentionally not a UserGateway forwarding API.
-            manager_id = await gateway._manager_client.discover_manager_id(
-                timeout_seconds=5.0
-            )
-            assert manager_id == "manager_live_from_operational"
-        finally:
-            responder_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await responder_task
-            await gateway.close()
 
 
 @pytest.mark.asyncio

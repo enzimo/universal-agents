@@ -47,6 +47,8 @@ from assistant_gateway.delivery import (
     summarize_delivery_batch,
 )
 from assistant_gateway.gateway import UserGateway
+from assistant_gateway.team_view import record_status
+from custom_transport.protocol1.team_agents import TeamAgent
 from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.store import GatewayStateStore
 from assistant_gateway.translation import ChannelInboundMessage
@@ -92,7 +94,6 @@ from custom_messages.enums import (
     ProgressState,
     RecoverablePauseTrigger,
     RequesterType,
-    RoutingType,
     TaskQueryReason,
 )
 from custom_messages.system_schedules import (
@@ -201,14 +202,8 @@ def _gateway_signer():
 
 
 class _FakeGatewayManagerRuntime:
-    def __init__(
-        self,
-        *,
-        has_live_consumer: bool | None = True,
-    ) -> None:
+    def __init__(self) -> None:
         self.connected = True
-        self.has_live_consumer = has_live_consumer
-        self.probes: list[str] = []
         self.put_calls: list[dict[str, object]] = []
         self.durable: list[tuple[MessageEnvelope, str]] = []
         self.operational: list[tuple[MessageEnvelope, str]] = []
@@ -241,16 +236,36 @@ class _FakeGatewayManagerRuntime:
     async def jetstream_usage(self) -> None:
         return None
 
-    async def manager_has_live_consumer(
-        self,
-        manager_id: str,
-    ) -> bool | None:
-        self.probes.append(manager_id)
-        return self.has_live_consumer
-
     async def put_object(self, **kwargs):
         self.put_calls.append(dict(kwargs))
         return SimpleNamespace(name=kwargs.get("object_name"))
+
+
+
+def _lead_record(agent_id: str) -> TeamAgent:
+    return TeamAgent(agent=agent_id, agent_type="TeamArchitect", display_name="TeamLead", state="idle",
+                     accepting_work=True, since=datetime.now(timezone.utc), host="lead", session=f"s-{agent_id}",
+                     is_lead=True)
+
+
+async def _lead_seen(gateway: UserGateway, agent_id: str) -> None:
+    """The lead appears in the team's records, as the gateway's team view applies it (assistant_gateway.team_view)."""
+
+    status = record_status(_lead_record(agent_id), gateway.config.manager.team_id)
+    await gateway._manager_client.apply_manager_status(status, source="agent_records")
+
+
+async def _lead_left(gateway: UserGateway, agent_id: str) -> None:
+    """The lead leaves the team's records (it exited, or its host stopped reporting)."""
+
+    status = record_status(_lead_record(agent_id), gateway.config.manager.team_id, exiting=True)
+    await gateway._manager_client.apply_manager_status(status, source="agent_records")
+
+
+async def _apply_lead_status(gateway: UserGateway, envelope: MessageEnvelope) -> None:
+    """A lead status reaching the manager client as the team view hands it on."""
+
+    await gateway._manager_client.apply_manager_status(envelope.msg_content, source="agent_records")
 
 
 class _FakeIncomingMessage:
@@ -653,11 +668,12 @@ async def test_gateway_drops_unmatched_agent_status_response_without_user_delive
         ),
     )
 
-    with caplog.at_level(logging.INFO, logger="assistant_gateway.gateway"):
+    with caplog.at_level(logging.DEBUG, logger="assistant_gateway.gateway"):
         await gateway._manager_client.handle_response(envelope)
 
+    # Who is live comes from the team's records; a status message is never shown to anyone.
     assert outputs == []
-    assert "gateway_operational_agent_status_unmatched_pending_dropped" in caplog.text
+    assert "event=gateway_agent_status_message_ignored" in caplog.text
     assert "Gateway reply missing gateway_context" not in caplog.text
     assert "Gateway reply routing fell back to default session" not in caplog.text
 
@@ -6196,59 +6212,6 @@ async def test_gateway_automation_reply_still_emits_delivery_receipt(
     assert published.msg_content.delivery_via == "immediate"
 
 
-@pytest.mark.asyncio
-async def test_gateway_discover_manager_id_reads_matching_status_from_iterator(
-    tmp_path: Path,
-):
-    config = _build_test_config(tmp_path)
-    config.manager.named_agent_type = "TeamArchitect"
-    expected_correlation_id = "corr_id_deadbeef"
-
-    gateway: UserGateway
-
-    async def fake_publish(envelope, routing_key):
-        assert envelope.msg_meta.msg_correlation_id == expected_correlation_id
-        assert routing_key == RoutingType.ALL_AGENTS_ROUTE.value
-        response = MessageEnvelope(
-            msg_content=AgentStatus(
-                self_id="manager_live_123",
-                team_id=config.manager.team_id,
-                status_type=MessageMetaType.RESPONSE,
-                info_type=ControlType.STATUS_REQUEST_BASIC,
-                named_agent_type="TeamArchitect",
-                is_paused=False,
-                is_executing=False,
-                has_execution_capacity=True,
-                is_busy=False,
-                name="manager",
-                agent_role="manager",
-            ),
-            msg_meta=MessageMeta(msg_correlation_id=expected_correlation_id),
-            msg_header=MessageHeader(
-                from_agent_id="manager_live_123",
-                to_routing_path=config.manager.response_queue_name,
-                agent_signature="",
-            ),
-        )
-        await gateway._manager_client.get_response_channel(expected_correlation_id).put(
-            response
-        )
-
-    manager_transport = _CaptureGatewayManagerTransport(on_operational=fake_publish)
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        id_generator=_FixedGatewayIds(expected_correlation_id),
-        manager_transport=manager_transport,
-    )
-
-    manager_id = await gateway._manager_client.discover_manager_id(timeout_seconds=0.1)
-
-    assert manager_id == "manager_live_123"
-    assert len(manager_transport.operational) == 1
-
-
 def _manager_status(config, manager_id: str = "manager_live_123") -> AgentStatus:
     return AgentStatus(
         self_id=manager_id,
@@ -6263,233 +6226,6 @@ def _manager_status(config, manager_id: str = "manager_live_123") -> AgentStatus
         name="manager",
         agent_role="manager",
     )
-
-
-@pytest.mark.asyncio
-async def test_gateway_discovery_asks_again_until_a_starting_manager_answers(tmp_path: Path, monkeypatch):
-    """At startup the manager misses the first request; discovery repeats it instead of waiting out the timeout."""
-
-    from assistant_gateway.application import manager_client
-
-    monkeypatch.setattr(manager_client, "DISCOVERY_RESEND_SECONDS", 0.02)
-    config = _build_test_config(tmp_path)
-    config.manager.named_agent_type = "TeamArchitect"
-    gateway: UserGateway
-
-    async def answer_from_the_third_request(envelope, routing_key):
-        if len(manager_transport.operational) < 3:
-            return  # the manager is still starting
-        response = MessageEnvelope(
-            msg_content=_manager_status(config),
-            msg_meta=MessageMeta(msg_correlation_id=envelope.msg_meta.msg_correlation_id),
-            msg_header=MessageHeader(
-                from_agent_id="manager_live_123", to_routing_path=config.manager.response_queue_name, agent_signature=""
-            ),
-        )
-        await gateway._manager_client.get_response_channel(envelope.msg_meta.msg_correlation_id).put(response)
-
-    manager_transport = _CaptureGatewayManagerTransport(on_operational=answer_from_the_third_request)
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        id_generator=_FixedGatewayIds(),
-        manager_transport=manager_transport,
-    )
-
-    started = asyncio.get_running_loop().time()
-    manager_id = await gateway._manager_client.discover_manager_id(timeout_seconds=5)
-
-    assert manager_id == "manager_live_123"
-    assert len(manager_transport.operational) == 3
-    assert asyncio.get_running_loop().time() - started < 1, "found when it answered, not at the timeout"
-
-
-@pytest.mark.asyncio
-async def test_gateway_discovery_ends_when_the_manager_announced_itself(tmp_path: Path, monkeypatch):
-    from assistant_gateway.application import manager_client
-
-    monkeypatch.setattr(manager_client, "DISCOVERY_RESEND_SECONDS", 0.02)
-    config = _build_test_config(tmp_path)
-    config.manager.named_agent_type = "TeamArchitect"
-    gateway: UserGateway
-
-    async def announce_instead_of_answering(envelope, routing_key):
-        await gateway._manager_client.apply_manager_status(_manager_status(config, "manager_announced"), source="presence")
-
-    manager_transport = _CaptureGatewayManagerTransport(on_operational=announce_instead_of_answering)
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        id_generator=_FixedGatewayIds(),
-        manager_transport=manager_transport,
-    )
-
-    assert await gateway._manager_client.discover_manager_id(timeout_seconds=5) == "manager_announced"
-    assert len(manager_transport.operational) == 1
-
-
-@pytest.mark.asyncio
-async def test_gateway_discover_manager_id_times_out_cleanly(tmp_path: Path):
-    config = _build_test_config(tmp_path)
-    config.manager.named_agent_type = "TeamArchitect"
-    manager_transport = _CaptureGatewayManagerTransport()
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        id_generator=_FixedGatewayIds(),
-        manager_transport=manager_transport,
-    )
-
-    with pytest.raises(
-        TimeoutError, match="Timed out waiting for TeamArchitect discovery."
-    ):
-        await gateway._manager_client.discover_manager_id(timeout_seconds=0.01)
-    assert len(manager_transport.operational) == 1
-
-
-@pytest.mark.asyncio
-async def test_gateway_connect_refreshes_stale_manager_id_before_accepting_requests(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "agent_id_stale1234"
-    save_mock = Mock()
-
-    def fake_save(self):
-        save_mock()
-
-    monkeypatch.setattr(type(config), "save", fake_save)
-
-    fake_adapter = _fake_nats_adapter()
-    manager_runtime = NatsGatewayManagerRuntime.from_gateway_config(
-        config,
-        adapter=fake_adapter,
-    )
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        manager_runtime=manager_runtime,
-    )
-    gateway._manager_client.discover_manager_id = AsyncMock(
-        return_value="agent_id_live5678"
-    )
-
-    await gateway.connect(start_services=False)
-
-    assert gateway.config.manager.manager_agent_id == "agent_id_live5678"
-    gateway._manager_client.discover_manager_id.assert_awaited_once()
-    save_mock.assert_called_once()
-    fake_adapter.connect.assert_awaited_once()
-    fake_adapter.subscribe_route.assert_awaited_once()
-    assert fake_adapter.subscribe_subject.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_gateway_connect_skips_config_save_when_manager_id_is_already_current(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "agent_id_live5678"
-    save_mock = Mock()
-
-    def fake_save(self):
-        save_mock()
-
-    monkeypatch.setattr(type(config), "save", fake_save)
-
-    fake_adapter = _fake_nats_adapter()
-    manager_runtime = NatsGatewayManagerRuntime.from_gateway_config(
-        config,
-        adapter=fake_adapter,
-    )
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        manager_runtime=manager_runtime,
-    )
-    gateway._manager_client.discover_manager_id = AsyncMock(
-        return_value="agent_id_live5678"
-    )
-
-    await gateway.connect(start_services=False)
-
-    assert gateway.config.manager.manager_agent_id == "agent_id_live5678"
-    gateway._manager_client.discover_manager_id.assert_awaited_once()
-    save_mock.assert_not_called()
-    fake_adapter.connect.assert_awaited_once()
-    fake_adapter.subscribe_route.assert_awaited_once()
-    assert fake_adapter.subscribe_subject.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_gateway_connect_tolerates_manager_discovery_timeout_without_cached_route(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = None
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    fake_adapter = _fake_nats_adapter()
-    manager_runtime = NatsGatewayManagerRuntime.from_gateway_config(
-        config,
-        adapter=fake_adapter,
-    )
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        manager_runtime=manager_runtime,
-    )
-    gateway._manager_client.discover_manager_id = AsyncMock(
-        side_effect=TimeoutError("Timed out waiting for TeamArchitect discovery.")
-    )
-
-    await gateway.connect(start_services=False)
-
-    assert gateway.config.manager.manager_agent_id is None
-    gateway._manager_client.discover_manager_id.assert_awaited_once()
-    save_mock.assert_not_called()
-    fake_adapter.subscribe_route.assert_awaited_once()
-    assert fake_adapter.subscribe_subject.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_gateway_connect_tolerates_manager_discovery_timeout_and_clears_stale_route(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "agent_id_stale1234"
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    fake_adapter = _fake_nats_adapter()
-    manager_runtime = NatsGatewayManagerRuntime.from_gateway_config(
-        config,
-        adapter=fake_adapter,
-    )
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        manager_runtime=manager_runtime,
-    )
-    gateway._manager_client.discover_manager_id = AsyncMock(
-        side_effect=TimeoutError("Timed out waiting for TeamArchitect discovery.")
-    )
-
-    await gateway.connect(start_services=False)
-
-    assert gateway.config.manager.manager_agent_id is None
-    gateway._manager_client.discover_manager_id.assert_awaited_once()
-    save_mock.assert_called_once()
-    fake_adapter.subscribe_route.assert_awaited_once()
-    assert fake_adapter.subscribe_subject.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -6514,103 +6250,14 @@ async def test_gateway_connect_does_not_subscribe_to_the_old_authorization_strea
 
     await gateway.connect(start_services=False)
 
-    assert fake_adapter.subscribe_subject.await_count == 2
+    # The operational subject only: presence is not followed any more (assistant_gateway.team_view).
+    assert fake_adapter.subscribe_subject.await_count == 1
     subjects = {
         call.kwargs["subject"]
         for call in fake_adapter.subscribe_subject.await_args_list
     }
     assert not any(".authorization." in subject for subject in subjects)
     await gateway.close()
-
-
-@pytest.mark.asyncio
-async def test_gateway_refresh_manager_id_keeps_live_route_learned_from_broadcast_during_discovery_timeout(
-    tmp_path: Path,
-    monkeypatch,
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "agent_id_stale1234"
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-    )
-
-    async def fake_discover_manager_id() -> str:
-        await gateway._manager_client.apply_manager_status(
-            AgentStatus(
-                self_id="agent_id_live5678",
-                team_id=config.manager.team_id,
-                named_agent_type=config.manager.named_agent_type,
-                is_paused=False,
-                is_executing=False,
-                has_execution_capacity=True,
-                is_busy=False,
-                is_exiting=False,
-                name="manager",
-                agent_role="manager",
-                last_seen_at=datetime.now(timezone.utc).isoformat(),
-                status_type=MessageMetaType.RESPONSE,
-                info_type=ControlType.STATUS_REQUEST_BASIC,
-            ),
-            source="broadcast",
-        )
-        raise TimeoutError("Timed out waiting for TeamArchitect discovery.")
-
-    gateway._manager_client.discover_manager_id = fake_discover_manager_id
-
-    await gateway._manager_client.refresh_manager_id()
-
-    assert gateway.config.manager.manager_agent_id == "agent_id_live5678"
-    assert save_mock.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_gateway_refresh_manager_id_keeps_cached_route_when_same_manager_rebroadcasts_during_discovery_timeout(
-    tmp_path: Path,
-    monkeypatch,
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "agent_id_live5678"
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-    )
-
-    async def fake_discover_manager_id() -> str:
-        await gateway._manager_client.apply_manager_status(
-            AgentStatus(
-                self_id="agent_id_live5678",
-                team_id=config.manager.team_id,
-                named_agent_type=config.manager.named_agent_type,
-                is_paused=False,
-                is_executing=False,
-                has_execution_capacity=True,
-                is_busy=False,
-                is_exiting=False,
-                name="manager",
-                agent_role="manager",
-                last_seen_at=datetime.now(timezone.utc).isoformat(),
-                status_type=MessageMetaType.RESPONSE,
-                info_type=ControlType.STATUS_REQUEST_BASIC,
-            ),
-            source="broadcast",
-        )
-        raise TimeoutError("Timed out waiting for TeamArchitect discovery.")
-
-    gateway._manager_client.discover_manager_id = fake_discover_manager_id
-
-    await gateway._manager_client.refresh_manager_id()
-
-    assert gateway.config.manager.manager_agent_id == "agent_id_live5678"
-    save_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -6679,7 +6326,8 @@ async def test_gateway_connect_starts_services_without_manager_route(
         assert gateway.config.manager.manager_agent_id is None
         task_names = {task.get_name() for task in gateway._background_tasks}
         assert "gateway_delivery_loop" in task_names
-        assert "gateway_manager_liveness_loop" in task_names
+        # The team lead's liveness follows its records; there is no polling loop.
+        assert "gateway_manager_liveness_loop" not in task_names
         if gateway._activity_notices.enabled:
             assert "gateway_activity_plan_notice_loop" in task_names
     finally:
@@ -6724,7 +6372,7 @@ async def test_gateway_broadcast_presence_updates_manager_route(
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert gateway.config.manager.manager_agent_id == "manager_live_4321"
     save_mock.assert_called_once()
@@ -6777,7 +6425,7 @@ async def test_gateway_broadcast_presence_installs_heartbeat_schedule_after_mana
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert gateway.config.manager.manager_agent_id == "manager_live_4321"
     gateway._maintenance_schedules.ensure_all.assert_awaited_once()
@@ -6837,7 +6485,7 @@ async def test_gateway_broadcast_shutdown_nulls_manager_route_and_notifies_pendi
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert gateway.config.manager.manager_agent_id is None
     save_mock.assert_called_once()
@@ -6868,7 +6516,7 @@ async def test_send_user_message_returns_standard_notification_when_manager_rout
 
 
 @pytest.mark.asyncio
-async def test_gateway_liveness_probe_marks_manager_unavailable_when_consumer_disappears(
+async def test_gateway_marks_the_lead_unavailable_when_it_leaves_the_records(
     tmp_path: Path, monkeypatch
 ):
     config = _build_test_config(tmp_path)
@@ -6888,7 +6536,7 @@ async def test_gateway_liveness_probe_marks_manager_unavailable_when_consumer_di
         state_store=state_store,
     )
     gateway.manager_transitions.enable_notices()
-    manager_runtime = _FakeGatewayManagerRuntime(has_live_consumer=False)
+    manager_runtime = _FakeGatewayManagerRuntime()
     gateway._manager_client.set_runtime(
         manager_runtime,
         use_for_outbound=False,
@@ -6907,7 +6555,7 @@ async def test_gateway_liveness_probe_marks_manager_unavailable_when_consumer_di
         followup_to_task_id=None,
     )
 
-    await gateway._manager_client.check_manager_liveness_once()
+    await _lead_left(gateway, "manager_live_4321")
 
     assert gateway.config.manager.manager_agent_id is None
     save_mock.assert_called_once()
@@ -6919,7 +6567,6 @@ async def test_gateway_liveness_probe_marks_manager_unavailable_when_consumer_di
     assert delivered_events[0].channel_name == "telegram"
     assert delivered_events[0].chat_id == "-100123"
     assert delivered_events[0].thread_id == "42"
-    assert manager_runtime.probes == ["manager_live_4321"]
     request = state_store.get_request("corr_id_waiting")
     assert request is not None
     assert request.status == "manager_unavailable"
@@ -7017,7 +6664,7 @@ async def test_gateway_manager_transition_notices_use_preferred_delivery_target(
     gateway.manager_transitions.start()
     gateway._maintenance_schedules.ensure_all = AsyncMock()  # type: ignore[method-assign]
 
-    await gateway._manager_client.handle_presence(_manager_status_envelope(config))
+    await _apply_lead_status(gateway, _manager_status_envelope(config))
 
     assert gateway.config.manager.manager_agent_id == "manager_live_4321"
     assert len(delivered_events) == 1
@@ -7114,7 +6761,7 @@ async def test_gateway_available_transition_runs_hook_after_notice(
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert events == [
         f"notice:{_telegram_transition_available_notice(config)}",
@@ -7175,7 +6822,7 @@ async def test_gateway_available_transition_uses_active_telegram_session_when_pr
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert gateway.config.manager.manager_agent_id == "manager_live_4321"
     assert len(delivered_events) == 1
@@ -7275,7 +6922,7 @@ async def test_gateway_available_transition_uses_active_discord_session_when_pre
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert gateway.config.manager.manager_agent_id == "manager_live_4321"
     assert len(delivered_events) == 1
@@ -7375,7 +7022,7 @@ async def test_gateway_available_transition_uses_active_whatsapp_session_when_pr
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert gateway.config.manager.manager_agent_id == "manager_live_4321"
     assert len(delivered_events) == 1
@@ -7450,7 +7097,7 @@ async def test_gateway_available_notice_renders_assistant_name_from_template(
         ),
     )
 
-    await gateway._manager_client.handle_presence(envelope)
+    await _apply_lead_status(gateway, envelope)
 
     assert len(delivered_events) == 1
     assert delivered_events[0].text == "Nova is now available."
@@ -7606,8 +7253,8 @@ async def test_gateway_startup_broadcast_replay_updates_route_without_emitting_n
         ),
     )
 
-    await gateway._manager_client.handle_presence(live_envelope)
-    await gateway._manager_client.handle_presence(exit_envelope)
+    await _apply_lead_status(gateway, live_envelope)
+    await _apply_lead_status(gateway, exit_envelope)
 
     assert gateway.config.manager.manager_agent_id is None
     assert delivered_events == []
@@ -7616,87 +7263,7 @@ async def test_gateway_startup_broadcast_replay_updates_route_without_emitting_n
 
 
 @pytest.mark.asyncio
-async def test_gateway_liveness_probe_keeps_live_manager_route_when_consumer_exists(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "manager_live_4321"
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    state_store = GatewayStateStore(str(tmp_path / "state.db"))
-    gateway = UserGateway(config, output_sink=None, state_store=state_store)
-    manager_runtime = _FakeGatewayManagerRuntime(has_live_consumer=True)
-    gateway._manager_client.set_runtime(
-        manager_runtime,
-        use_for_outbound=False,
-    )
-
-    await gateway._manager_client.check_manager_liveness_once()
-
-    assert gateway.config.manager.manager_agent_id == "manager_live_4321"
-    save_mock.assert_not_called()
-    assert manager_runtime.probes == ["manager_live_4321"]
-
-
-@pytest.mark.asyncio
-async def test_gateway_liveness_probe_keeps_manager_route_when_presence_is_recent(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "manager_live_4321"
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-    )
-    gateway._manager_client.set_runtime(
-        _FakeGatewayManagerRuntime(has_live_consumer=None),
-        use_for_outbound=False,
-    )
-    gateway._manager_client.manager_status_updated_at = datetime.now(
-        timezone.utc
-    ) - timedelta(seconds=29)
-
-    await gateway._manager_client.check_manager_liveness_once()
-
-    assert gateway.config.manager.manager_agent_id == "manager_live_4321"
-    save_mock.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_gateway_liveness_probe_marks_manager_unavailable_when_presence_is_stale(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = "manager_live_4321"
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-    )
-    gateway._manager_client.set_runtime(
-        _FakeGatewayManagerRuntime(has_live_consumer=None),
-        use_for_outbound=False,
-    )
-    gateway._manager_client.manager_status_updated_at = datetime.now(
-        timezone.utc
-    ) - timedelta(seconds=31)
-
-    await gateway._manager_client.check_manager_liveness_once()
-
-    assert gateway.config.manager.manager_agent_id is None
-    save_mock.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_gateway_liveness_probe_rediscovers_manager_and_sends_recovery_notice(
+async def test_gateway_lead_returning_in_the_records_sends_the_recovery_notice(
     tmp_path: Path, monkeypatch
 ):
     config = _build_test_config(tmp_path)
@@ -7718,13 +7285,10 @@ async def test_gateway_liveness_probe_rediscovers_manager_and_sends_recovery_not
     gateway.manager_transitions.start()
     gateway.manager_transitions.enable_notices()
     gateway._manager_client.set_runtime(
-        _FakeGatewayManagerRuntime(has_live_consumer=None),
+        _FakeGatewayManagerRuntime(),
         use_for_outbound=False,
     )
     gateway._maintenance_schedules.ensure_all = AsyncMock()  # type: ignore[method-assign]
-    gateway._manager_client.discover_manager_id = AsyncMock(
-        return_value="manager_live_4321"
-    )
     gateway.manager_transitions.set_hooks(
         on_manager_available=lambda: events.append("hook:resume"),
     )
@@ -7735,12 +7299,9 @@ async def test_gateway_liveness_probe_rediscovers_manager_and_sends_recovery_not
         thread_id="42",
     )
 
-    await gateway._manager_client.check_manager_liveness_once()
+    await _lead_seen(gateway, "manager_live_4321")
 
     assert gateway.config.manager.manager_agent_id == "manager_live_4321"
-    gateway._manager_client.discover_manager_id.assert_awaited_once_with(
-        timeout_seconds=gateway_module.MANAGER_RECOVERY_DISCOVERY_TIMEOUT_SECONDS
-    )
     gateway._maintenance_schedules.ensure_all.assert_awaited_once()
     save_mock.assert_called_once()
     assert len(delivered_events) == 1

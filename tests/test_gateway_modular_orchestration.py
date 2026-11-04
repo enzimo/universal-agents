@@ -147,7 +147,6 @@ async def test_credential_form_completion_is_recovered_after_gateway_restart(tmp
     if first_attempt == "closing_error":
         monkeypatch.setattr(restarted._credential_workflow, "_post_closing", AsyncMock(side_effect=RuntimeError("Chat output unavailable.")))
     monkeypatch.setattr(restarted._manager_client, "connect", AsyncMock())
-    monkeypatch.setattr(restarted._manager_client, "refresh_manager_id", AsyncMock())
     monkeypatch.setattr(restarted._maintenance_schedules, "ensure_all", AsyncMock())
     try:
         await restarted.connect()

@@ -844,37 +844,6 @@ class NatsTransportAdapter:
             ready=ready,
         )
 
-    async def consumer_is_listening(
-        self, *, stream_name: str, durable_name: str
-    ) -> Optional[bool]:
-        """Whether a durable pull consumer has a receiver asking for messages.
-
-        False when the consumer does not exist (its owner never started, or a
-        process-scoped consumer was removed after its process stopped asking).
-        True when a pull request is open. None otherwise: a receiver that is
-        handling a message has no request open for a moment, so the caller
-        falls back to presence heartbeats.
-        """
-
-        if self._nc is None:
-            await self.connect()
-        if self._js is None:
-            return None
-        try:
-            info = await self._js.consumer_info(stream_name, durable_name)
-        except Exception as exc:
-            message = str(exc).lower()
-            if "not found" in message:
-                return False
-            self._logger.debug(
-                "NATS consumer liveness probe failed for stream=%s durable=%s: %s",
-                stream_name,
-                durable_name,
-                exc,
-            )
-            return None
-        return True if int(getattr(info, "num_waiting", 0) or 0) > 0 else None
-
     async def subscribe_subject(
         self,
         *,

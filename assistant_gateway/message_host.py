@@ -65,6 +65,13 @@ class GatewayMessageHost:
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _task: Optional[asyncio.Task[None]] = None
+    # Who is live and who leads, read once joined (assistant_gateway.team_view).
+    team_view: Optional[Any] = None
+
+    def observe_team(self, view: Any) -> None:
+        """Read the team's agent records into ``view`` once joined (``GatewayTeamView.run``)."""
+
+        self.team_view = view
 
     def start(self, nc: Any) -> None:
         """Join and keep the host up in the background; returns at once."""
@@ -86,7 +93,10 @@ class GatewayMessageHost:
         if self._stop.is_set():
             return
         self._ready.set()
-        await self.host.keep_up(self._stop)
+        if self.team_view is None:
+            await self.host.keep_up(self._stop)
+            return
+        await asyncio.gather(self.host.keep_up(self._stop), self.team_view.run(self.host, self._stop))
 
     async def ready(self, timeout: float) -> MessageHost:
         if self.host is None:
