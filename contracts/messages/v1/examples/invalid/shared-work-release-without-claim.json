@@ -1,0 +1,13 @@
+{
+  "description": "shared_work.release names the claim it ends.",
+  "refusal": "invalid_body",
+  "at": "/body/claim_id",
+  "base": "shared_work.release/full.json",
+  "changes": [
+    {
+      "remove": "/body/claim_id"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"shared_work.release\", \"message_id\": \"01928f3a-7b2c-7c1b-8000-000000000c1b\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"agent\": \"researcher-2\", \"session\": \"s-researcher-2-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.svc.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7c1b-9000-000000000c1b\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"wgWz3AETRZxsGANCT23GKUg00D9JzdcqpjWkOgE_US5GiMsxR77Ef3fPhzUIKzk32DREo5XRj0K_TFwRFkTmDg\"}, \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"release_req_1\", \"task_id\": \"task_sub_7f_1\"}, \"idempotency_key\": \"shared_work.release:-yO-NsXgx0_lqUEM6hOIStLvMkMPaLAvuTrCEuk99ww\", \"body_digest\": \"HEVYI9dBspOo0lU-2DbyVWI4cA8eSbC1DHcztEUSfts\", \"signature\": \"OpQksrS2-eIVxLo0EeKh4BdhYcv97zcwWdCqlZ7Mdi2RMmUo2WsYTbUf39-FNRySS-XDUb4zEWXHovMVHxEwDw\"}"
+}

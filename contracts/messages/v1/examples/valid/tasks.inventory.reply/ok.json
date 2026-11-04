@@ -47,7 +47,27 @@
             "agent_type": "ResearcherAgent"
           }
         ],
-        "children_total": 1
+        "children_total": 1,
+        "claims": [
+          {
+            "claim_id": "claim_10",
+            "resources": [
+              "file:team/reports/q3.md"
+            ],
+            "ends_at": "2026-10-22T04:44:00.000Z",
+            "extensions_left": 1,
+            "reason": "Updating the Q3 figures."
+          }
+        ],
+        "claims_total": 1,
+        "waiting_for": {
+          "on": {
+            "type": "request",
+            "root_task_id": "root_task_id_2",
+            "title": "Quarterly report thread"
+          },
+          "ends_by": "2026-10-22T05:05:00.000Z"
+        }
       }
     ],
     "schedules": [
@@ -62,6 +82,6 @@
     "total": 2
   },
   "causation_id": "01928f3a-7b2c-7401-8000-000000000401",
-  "body_digest": "gWGAdevoUrTUdgo8h-orA8w4XfzwQjpAOcUk3oY0S2w",
-  "signature": "Ft5qq9lFaJlx-otcgI921qxX-45PQMrZrUO8mHM0h4FGs3h3wtYSN8GI9cRK9XAEbmbesVfLceUosEdIvlXbAQ"
+  "body_digest": "QLHlx9OpxZMc_MEM6gyLG0pNV7QKRAQ1FN7pQQ-eNt4",
+  "signature": "HM0IAEzBvRDxpYs7klP4waQICVaENr2VXMhmehaEDlvtyKGkAVSAj0bROpl7U9TiflVfhl-TSw7YM2beBILSAQ"
 }

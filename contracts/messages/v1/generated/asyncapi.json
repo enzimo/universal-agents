@@ -329,6 +329,30 @@
         "schedules_update_reply": {
           "$ref": "#/components/messages/schedules_update_reply"
         },
+        "shared_work_check_reply": {
+          "$ref": "#/components/messages/shared_work_check_reply"
+        },
+        "shared_work_claim_reply": {
+          "$ref": "#/components/messages/shared_work_claim_reply"
+        },
+        "shared_work_count_reply": {
+          "$ref": "#/components/messages/shared_work_count_reply"
+        },
+        "shared_work_extend_reply": {
+          "$ref": "#/components/messages/shared_work_extend_reply"
+        },
+        "shared_work_list_reply": {
+          "$ref": "#/components/messages/shared_work_list_reply"
+        },
+        "shared_work_note_reply": {
+          "$ref": "#/components/messages/shared_work_note_reply"
+        },
+        "shared_work_release_reply": {
+          "$ref": "#/components/messages/shared_work_release_reply"
+        },
+        "shared_work_wait_reply": {
+          "$ref": "#/components/messages/shared_work_wait_reply"
+        },
         "staged_changes_apply_reply": {
           "$ref": "#/components/messages/staged_changes_apply_reply"
         },
@@ -610,6 +634,30 @@
         "schedules_update": {
           "$ref": "#/components/messages/schedules_update"
         },
+        "shared_work_check": {
+          "$ref": "#/components/messages/shared_work_check"
+        },
+        "shared_work_claim": {
+          "$ref": "#/components/messages/shared_work_claim"
+        },
+        "shared_work_count": {
+          "$ref": "#/components/messages/shared_work_count"
+        },
+        "shared_work_extend": {
+          "$ref": "#/components/messages/shared_work_extend"
+        },
+        "shared_work_list": {
+          "$ref": "#/components/messages/shared_work_list"
+        },
+        "shared_work_note": {
+          "$ref": "#/components/messages/shared_work_note"
+        },
+        "shared_work_release": {
+          "$ref": "#/components/messages/shared_work_release"
+        },
+        "shared_work_wait": {
+          "$ref": "#/components/messages/shared_work_wait"
+        },
         "staged_changes_apply": {
           "$ref": "#/components/messages/staged_changes_apply"
         },
@@ -737,6 +785,9 @@
         },
         "task_stop": {
           "$ref": "#/components/messages/task_stop"
+        },
+        "wait_ended": {
+          "$ref": "#/components/messages/wait_ended"
         }
       },
       "parameters": {
@@ -4450,6 +4501,350 @@
           ]
         }
       },
+      "shared_work_check": {
+        "name": "shared_work.check",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.check.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.check"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Live claims on, above or under each resource, the notes left on it, and whether waiting on it is possible."
+      },
+      "shared_work_check_reply": {
+        "name": "shared_work.check.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.check.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.check.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "shared_work_claim": {
+        "name": "shared_work.claim",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.claim.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.claim"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Claim up to eight resources for this request, all or none, for one period."
+      },
+      "shared_work_claim_reply": {
+        "name": "shared_work.claim.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.claim.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.claim.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "shared_work_count": {
+        "name": "shared_work.count",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.count.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.count"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "The number of the person's other running requests, for the line in each turn."
+      },
+      "shared_work_count_reply": {
+        "name": "shared_work.count.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.count.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.count.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "shared_work_extend": {
+        "name": "shared_work.extend",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.extend.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.extend"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Add ten minutes to one of this request's claims, at most twice."
+      },
+      "shared_work_extend_reply": {
+        "name": "shared_work.extend.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.extend.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.extend.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "shared_work_list": {
+        "name": "shared_work.list",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.list.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.list"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "The asking request's own claims and waits, and the person's other running requests."
+      },
+      "shared_work_list_reply": {
+        "name": "shared_work.list.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.list.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.list.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "shared_work_note": {
+        "name": "shared_work.note",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.note.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.note"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Leave a note on a resource for whoever works on it next."
+      },
+      "shared_work_note_reply": {
+        "name": "shared_work.note.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.note.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.note.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "shared_work_release": {
+        "name": "shared_work.release",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.release.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.release"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "End one of this request's claims now."
+      },
+      "shared_work_release_reply": {
+        "name": "shared_work.release.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.release.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.release.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "shared_work_wait": {
+        "name": "shared_work.wait",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.wait.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.wait"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Pause this request until a claimed resource or another of the person's requests is free."
+      },
+      "shared_work_wait_reply": {
+        "name": "shared_work.wait.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/shared_work.wait.reply.schema.json"
+                },
+                "kind": {
+                  "const": "shared_work.wait.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
       "skills_changed": {
         "name": "skills.changed",
         "payload": {
@@ -5402,6 +5797,28 @@
             }
           ]
         }
+      },
+      "wait_ended": {
+        "name": "wait.ended",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/wait.ended.schema.json"
+                },
+                "kind": {
+                  "const": "wait.ended"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit."
       }
     }
   },
@@ -7237,6 +7654,174 @@
         ]
       }
     },
+    "receive_shared_work_check_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_check"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_check_reply"
+          }
+        ]
+      }
+    },
+    "receive_shared_work_claim_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_claim"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_claim_reply"
+          }
+        ]
+      }
+    },
+    "receive_shared_work_count_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_count"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_count_reply"
+          }
+        ]
+      }
+    },
+    "receive_shared_work_extend_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_extend"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_extend_reply"
+          }
+        ]
+      }
+    },
+    "receive_shared_work_list_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_list"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_list_reply"
+          }
+        ]
+      }
+    },
+    "receive_shared_work_note_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_note"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_note_reply"
+          }
+        ]
+      }
+    },
+    "receive_shared_work_release_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_release"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_release_reply"
+          }
+        ]
+      }
+    },
+    "receive_shared_work_wait_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_wait"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_wait_reply"
+          }
+        ]
+      }
+    },
     "receive_skills_changed_team": {
       "action": "receive",
       "channel": {
@@ -7944,6 +8529,17 @@
           }
         ]
       }
+    },
+    "receive_wait_ended_agent": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/work_control"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_control/messages/wait_ended"
+        }
+      ]
     },
     "send_access_decision_agent": {
       "action": "send",
@@ -9771,6 +10367,174 @@
         ]
       }
     },
+    "send_shared_work_check_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_check"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_check_reply"
+          }
+        ]
+      }
+    },
+    "send_shared_work_claim_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_claim"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_claim_reply"
+          }
+        ]
+      }
+    },
+    "send_shared_work_count_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_count"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_count_reply"
+          }
+        ]
+      }
+    },
+    "send_shared_work_extend_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_extend"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_extend_reply"
+          }
+        ]
+      }
+    },
+    "send_shared_work_list_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_list"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_list_reply"
+          }
+        ]
+      }
+    },
+    "send_shared_work_note_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_note"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_note_reply"
+          }
+        ]
+      }
+    },
+    "send_shared_work_release_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_release"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_release_reply"
+          }
+        ]
+      }
+    },
+    "send_shared_work_wait_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/shared_work_wait"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/shared_work_wait_reply"
+          }
+        ]
+      }
+    },
     "send_skills_changed_team": {
       "action": "send",
       "channel": {
@@ -10478,6 +11242,17 @@
           }
         ]
       }
+    },
+    "send_wait_ended_agent": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/work_control"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/work_control/messages/wait_ended"
+        }
+      ]
     }
   }
 }

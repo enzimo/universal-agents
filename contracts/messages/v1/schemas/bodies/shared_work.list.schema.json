@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.list.schema.json",
+  "title": "shared_work.list request",
+  "description": "The asking request's own claims and waits, and the person's other running requests, a page at a time.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "description": "The task the agent acts for; the team services check that the agent holds it and that the token is bound to its root task.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    }
+  },
+  "required": [
+    "task_id",
+    "offset",
+    "limit"
+  ],
+  "additionalProperties": false
+}

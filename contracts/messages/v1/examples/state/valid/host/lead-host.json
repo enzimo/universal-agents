@@ -22,6 +22,7 @@
     "session_limit": 4,
     "sessions_active": 1,
     "protocol": "1.0-pre",
+    "contract_sha256": "c734d95cdcb5b0081997c039906cf13cf3eeef0e0ef105160fb1138c5f6a2f60",
     "state": "accepting",
     "health": "healthy",
     "components": [
@@ -48,6 +49,6 @@
     }
   },
   "algorithm": "ed25519",
-  "body_digest": "lVY0NQ_FdFUf0NBjCFAw7_lvunVQ6KFcLORLBXCBbrQ",
-  "signature": "qW92fkXJ8Umihv6m7S60bcUcMPwRVdCAlgDjtgqvXPm5_EL9SkKAfmdGTa8pCZczE7mseubY-ubI906calHUBA"
+  "body_digest": "SJcuEE8gGzfLbGH_a4S09mMMfBj_J-5KMh8ERohbP_o",
+  "signature": "0HvPFuSdu3gnsdrd9INa4VuEM1drb5SS-7gFYuQ1B313ihK2EtRUpV3Qqq9jJ_xO4K4m6PJEuBakFYlEEOJtCA"
 }

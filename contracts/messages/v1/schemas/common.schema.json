@@ -662,6 +662,545 @@
       ],
       "additionalProperties": false
     },
+    "contract_sha256": {
+      "description": "The contract digest of the compatibility record (README, \"Versions\"): lowercase hexadecimal SHA-256.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "resource_key": {
+      "description": "Something a person's requests may both change, which coordination claims, checks, notes and waits name (README, \"Coordination between a person's requests\"). The host's trusted code builds it from what the agent named; it is never free text. file:<folder target>, with the folder target grammar of access grants (team/..., agents/..., users/<folder>/... or data/<name>/...; no empty, . or .. part, no backslash and no control character): a folder always ends with a slash, a top folder too (file:team/), and covers everything under it; a file never does. record:<kind>:<id> for a knowledge page (record:knowledge_page:<space>:<page>), a memory fact (record:memory_fact:<bank>:<number>), a schedule, an Objective or a heartbeat item. account:<tool>:<owner> for the team's or the person's account of a tool. A key in a person's own space (a personal page, a usermem fact, the person's account) names the token person's own record.",
+      "type": "string",
+      "pattern": "^(?:file:(?:team|agents|users/(?:[^/\\\\.\u0000-\u001f][^/\\\\\u0000-\u001f]*|\\.[^/\\\\.\u0000-\u001f][^/\\\\\u0000-\u001f]*|\\.\\.[^/\\\\\u0000-\u001f]+)|data/(?:[^/\\\\.\u0000-\u001f][^/\\\\\u0000-\u001f]*|\\.[^/\\\\.\u0000-\u001f][^/\\\\\u0000-\u001f]*|\\.\\.[^/\\\\\u0000-\u001f]+))(?:/|(?:/(?:[^/\\\\.\u0000-\u001f][^/\\\\\u0000-\u001f]*|\\.[^/\\\\.\u0000-\u001f][^/\\\\\u0000-\u001f]*|\\.\\.[^/\\\\\u0000-\u001f]+))+/?)|record:knowledge_page:(?:team|personal):[a-z0-9][a-z0-9-]{0,79}|record:memory_fact:(?:coremem|usermem):[1-9][0-9]{0,15}|record:(?:schedule|objective|heartbeat_item):[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}|account:(?:fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}:(?:team|person))$",
+      "maxLength": 1100
+    },
+    "coordination_request_title": {
+      "description": "A request's title: its thread's subject preview, or its schedule's or Objective's name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "coordination_claim": {
+      "description": "One of the asking person's claims, as its own requests see it.",
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resource_key"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "ends_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "extensions_left": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "reason": {
+          "$ref": "#/$defs/short_text"
+        }
+      },
+      "required": [
+        "claim_id",
+        "resources",
+        "ends_at",
+        "extensions_left",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "coordination_note": {
+      "description": "A note one of the asking person's requests left.",
+      "type": "object",
+      "properties": {
+        "note_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "written_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "note_id",
+        "resource",
+        "text",
+        "written_at"
+      ],
+      "additionalProperties": false
+    },
+    "coordination_holder": {
+      "description": "Whose claim it is. The asking person's own requests are described in full; another person's request only as \"another team member's request\"; work for no person is team maintenance, the team's own work, whose reason every request sees.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "this_request"
+            },
+            "agent": {
+              "$ref": "#/$defs/agent_id"
+            },
+            "reason": {
+              "$ref": "#/$defs/short_text"
+            }
+          },
+          "required": [
+            "whose",
+            "agent",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "same_person"
+            },
+            "root_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "title": {
+              "$ref": "#/$defs/coordination_request_title"
+            },
+            "reason": {
+              "$ref": "#/$defs/short_text"
+            }
+          },
+          "required": [
+            "whose",
+            "root_task_id",
+            "title",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "another_member"
+            }
+          },
+          "required": [
+            "whose"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "team_maintenance"
+            },
+            "reason": {
+              "$ref": "#/$defs/short_text"
+            }
+          },
+          "required": [
+            "whose",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "coordination_seen_claim": {
+      "description": "A live claim on, above or under a resource.",
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "relation": {
+          "description": "Where the claimed resource sits: the resource asked about, a folder above it, or something under it.",
+          "type": "string",
+          "enum": [
+            "exact",
+            "above",
+            "below"
+          ]
+        },
+        "ends_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "holder": {
+          "$ref": "#/$defs/coordination_holder"
+        }
+      },
+      "required": [
+        "claim_id",
+        "resource",
+        "relation",
+        "ends_at",
+        "holder"
+      ],
+      "additionalProperties": false
+    },
+    "coordination_seen_note": {
+      "description": "A note left on a resource. Another person's note shows only that one exists; team maintenance's shows its text to every request.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "this_request"
+            },
+            "note_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "written_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "whose",
+            "note_id",
+            "text",
+            "written_at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "same_person"
+            },
+            "note_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "root_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "title": {
+              "$ref": "#/$defs/coordination_request_title"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "written_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "whose",
+            "note_id",
+            "root_task_id",
+            "title",
+            "text",
+            "written_at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "another_member"
+            }
+          },
+          "required": [
+            "whose"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "team_maintenance"
+            },
+            "note_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "written_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          },
+          "required": [
+            "whose",
+            "note_id",
+            "text",
+            "written_at"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "coordination_event": {
+      "description": "Something that happened to a task's coordination that its requester may need to plan around; trusted code adds it, at most one event of each kind, each listing up to eight cases with how many there were (README, \"Coordination between a person's requests\").",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "waited_for_resource"
+            },
+            "waits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "resource": {
+                    "$ref": "#/$defs/resource_key"
+                  },
+                  "ended": {
+                    "type": "string",
+                    "enum": [
+                      "claim_granted",
+                      "limit_reached"
+                    ]
+                  }
+                },
+                "required": [
+                  "resource",
+                  "ended"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
+            }
+          },
+          "required": [
+            "event",
+            "waits",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "waited_for_request"
+            },
+            "waits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "other_root_task_id": {
+                    "$ref": "#/$defs/record_id"
+                  },
+                  "ended": {
+                    "type": "string",
+                    "enum": [
+                      "request_ended",
+                      "limit_reached"
+                    ]
+                  }
+                },
+                "required": [
+                  "other_root_task_id",
+                  "ended"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
+            }
+          },
+          "required": [
+            "event",
+            "waits",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "wait_refused"
+            },
+            "refusals": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "on": {
+                        "const": "resource"
+                      },
+                      "resource": {
+                        "$ref": "#/$defs/resource_key"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "own_request",
+                          "loop"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "on",
+                      "resource",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "on": {
+                        "const": "request"
+                      },
+                      "other_root_task_id": {
+                        "$ref": "#/$defs/record_id"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "own_request",
+                          "loop"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "on",
+                      "other_root_task_id",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
+            }
+          },
+          "required": [
+            "event",
+            "refusals",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "write_refused"
+            },
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/resource_key"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
+            }
+          },
+          "required": [
+            "event",
+            "resources",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "claim_ran_out"
+            },
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/resource_key"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
+            }
+          },
+          "required": [
+            "event",
+            "resources",
+            "total"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "note_left"
+            },
+            "resources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/resource_key"
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "total": {
+              "description": "How many times it happened, at least as many as listed.",
+              "$ref": "#/$defs/count"
+            }
+          },
+          "required": [
+            "event",
+            "resources",
+            "total"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "attachment": {
       "type": "object",
       "description": "A file sent with a message, held in the object store.",
@@ -1708,6 +2247,134 @@
         "type",
         "jwt",
         "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "coordination_resource_notes": {
+      "description": "The notes on one resource, newest first.",
+      "type": "object",
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/coordination_seen_note"
+          },
+          "maxItems": 8
+        },
+        "notes_total": {
+          "description": "How many notes there are on it in all.",
+          "$ref": "#/$defs/count"
+        }
+      },
+      "required": [
+        "resource",
+        "notes",
+        "notes_total"
+      ],
+      "additionalProperties": false
+    },
+    "coordination_wait_target": {
+      "description": "What a wait of the asking person's work is for: a resource, or another of the person's requests.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "resource"
+            },
+            "resource": {
+              "$ref": "#/$defs/resource_key"
+            }
+          },
+          "required": [
+            "type",
+            "resource"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "request"
+            },
+            "root_task_id": {
+              "$ref": "#/$defs/record_id"
+            },
+            "title": {
+              "$ref": "#/$defs/coordination_request_title"
+            }
+          },
+          "required": [
+            "type",
+            "root_task_id",
+            "title"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "coordination_own_wait": {
+      "description": "One of the asking request's own waits.",
+      "type": "object",
+      "properties": {
+        "wait_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "task_id": {
+          "description": "The task that waits.",
+          "$ref": "#/$defs/record_id"
+        },
+        "on": {
+          "$ref": "#/$defs/coordination_wait_target"
+        },
+        "ends_by": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "wait_id",
+        "task_id",
+        "on",
+        "ends_by"
+      ],
+      "additionalProperties": false
+    },
+    "busy_claim": {
+      "description": "The claim that made a covered change wait (README, \"Covered changes\"): its id and resource, when it ends, whose kind of request holds it, and how many notes are on the resource. The host reads the holder's description and the notes with shared_work.check when it shows the refusal to the model.",
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "ends_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "whose": {
+          "description": "Another of the person's own requests, another team member's request, or team maintenance. A request's own claims never refuse its writes.",
+          "type": "string",
+          "enum": [
+            "same_person",
+            "another_member",
+            "team_maintenance"
+          ]
+        },
+        "notes_total": {
+          "$ref": "#/$defs/count"
+        }
+      },
+      "required": [
+        "claim_id",
+        "resource",
+        "ends_at",
+        "whose",
+        "notes_total"
       ],
       "additionalProperties": false
     }

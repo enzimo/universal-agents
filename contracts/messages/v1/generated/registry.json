@@ -21,7 +21,7 @@
     },
     {
       "code": "record_busy",
-      "meaning": "another request is writing the file or sign-in; carries when to try again"
+      "meaning": "another request is writing the file or sign-in, or holds a claim on the record; carries when to try again and, for a claim, the claim"
     }
   ],
   "command_token_max_seconds": 300,
@@ -4467,6 +4467,338 @@
       "topology_edge": "none",
       "wakes_model": "never"
     },
+    "shared_work.check": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.check.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/resources"
+        }
+      ],
+      "class": "request_reply",
+      "description": "Live claims on, above or under each resource, the notes left on it, and whether waiting on it is possible.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.check.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "invalid_request",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "shared_work.claim": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.claim.schema.json",
+      "body_rules": [
+        {
+          "unique": "/body/resources"
+        }
+      ],
+      "class": "request_reply",
+      "description": "Claim up to eight resources for this request, all or none, for one period.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.claim.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "invalid_request",
+          "sensitive_content",
+          "claimed",
+          "request_closed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "shared_work.count": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.count.schema.json",
+      "class": "request_reply",
+      "description": "The number of the person's other running requests, for the line in each turn.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.count.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "shared_work.extend": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.extend.schema.json",
+      "class": "request_reply",
+      "description": "Add ten minutes to one of this request's claims, at most twice.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.extend.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "not_found",
+          "limit_reached",
+          "request_closed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "shared_work.list": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.list.schema.json",
+      "class": "request_reply",
+      "description": "The asking request's own claims and waits, and the person's other running requests.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/message_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.list.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "shared_work.note": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.note.schema.json",
+      "class": "request_reply",
+      "description": "Leave a note on a resource for whoever works on it next.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.note.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "invalid_request",
+          "sensitive_content",
+          "limit_reached",
+          "request_closed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "shared_work.release": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.release.schema.json",
+      "class": "request_reply",
+      "description": "End one of this request's claims now.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "none",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.release.reply.schema.json",
+        "errors": [
+          "not_found",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
+    "shared_work.wait": {
+      "address": "svc.team",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "normal"
+      },
+      "authority": "required",
+      "authority_binding": {
+        "type": "root_task"
+      },
+      "body": "bodies/shared_work.wait.schema.json",
+      "class": "request_reply",
+      "description": "Pause this request until a claimed resource or another of the person's requests is free.",
+      "expiry_seconds": 30,
+      "idempotency": [
+        "/body/request_id"
+      ],
+      "ledger": "coordination_wait_open",
+      "receivers": [
+        "team_services"
+      ],
+      "rendering": "none",
+      "reply": {
+        "body": "bodies/shared_work.wait.reply.schema.json",
+        "errors": [
+          "not_allowed",
+          "invalid_request",
+          "sensitive_content",
+          "not_found",
+          "nothing_to_wait_for",
+          "would_loop",
+          "request_closed",
+          "runtime_error"
+        ]
+      },
+      "routing": "team",
+      "senders": [
+        "lead_host",
+        "worker_host"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "never"
+    },
     "skills.changed": {
       "address": "evt.skills_changed",
       "admission": {
@@ -5000,6 +5332,12 @@
       },
       "authority": "none",
       "body": "bodies/task.result.schema.json",
+      "body_rules": [
+        {
+          "by": "event",
+          "unique": "/body/coordination"
+        }
+      ],
       "class": "durable",
       "copy_to": [
         "work.team"
@@ -5607,7 +5945,7 @@
         "gateway"
       ],
       "topology_edge": "none",
-      "wakes_model": "never"
+      "wakes_model": "always"
     },
     "topics.find_threads": {
       "address": "svc.team",
@@ -5722,6 +6060,41 @@
       ],
       "topology_edge": "none",
       "wakes_model": "never"
+    },
+    "wait.ended": {
+      "address": "work.control.{agent}",
+      "admission": {
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
+      },
+      "authority": "none",
+      "body": "bodies/wait.ended.schema.json",
+      "body_rules": [
+        {
+          "ends_within": "/body/ended/claim/ends_at",
+          "of": "/issued_at",
+          "seconds": 900
+        }
+      ],
+      "class": "durable",
+      "description": "A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit.",
+      "expiry_seconds": 604800,
+      "idempotency": [
+        "/body/wait_id"
+      ],
+      "ledger": "coordination_wait_closed",
+      "receivers": [
+        "lead_host",
+        "worker_host"
+      ],
+      "rendering": "summary",
+      "routing": "holder",
+      "senders": [
+        "team_services"
+      ],
+      "topology_edge": "none",
+      "wakes_model": "always"
     }
   },
   "max_frame_bytes": 262144,

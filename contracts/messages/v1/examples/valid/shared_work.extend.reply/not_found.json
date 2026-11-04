@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.extend.reply",
+  "message_id": "01928f3a-7b2c-7c17-8000-000000000c17",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
+  },
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7c15-8000-000000000c15",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "not_found",
+    "message": "This request holds no live claim claim_1."
+  },
+  "causation_id": "01928f3a-7b2c-7c15-8000-000000000c15",
+  "idempotency_key": "shared_work.extend.reply:ZFBuJ_9SFyU1cn3g4e-O_aX7bVIo6TrpInpg1PtuQLI",
+  "body_digest": "b0Ee7a_Fii_TZJGfbxQpGzPu8wlxclC4_190GNYh5Mg",
+  "signature": "t5b7ssC4WW-vt4rv53_h7kUw8DBbmPJ7Zb6RgsgGMUIlwKohCbI6RfmPi8oznb3e91yRvAv6l0X0Khag7VsNBQ"
+}

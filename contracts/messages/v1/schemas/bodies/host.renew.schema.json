@@ -17,6 +17,10 @@
     "profile_sha256": {
       "$ref": "../common.schema.json#/$defs/sha256_digest"
     },
+    "contract_sha256": {
+      "description": "The host's contract digest; while the label is a pre-release, the authority answers protocol_mismatch when it differs from its own.",
+      "$ref": "../common.schema.json#/$defs/contract_sha256"
+    },
     "software": {
       "$ref": "../common.schema.json#/$defs/software"
     },
@@ -45,7 +49,8 @@
     "renew_id",
     "certificate_id",
     "membership_epoch",
-    "profile_sha256"
+    "profile_sha256",
+    "contract_sha256"
   ],
   "additionalProperties": false
 }

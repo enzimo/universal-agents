@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.count.reply.schema.json",
+  "title": "shared_work.count reply",
+  "description": "The number of the person's other running requests, for the line in each turn.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "other_requests": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "scheduled_runs": {
+          "description": "How many of the other requests are scheduled runs.",
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "holding_claims": {
+          "description": "How many of the other requests hold claims.",
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "waiting_in_this_request": {
+          "description": "How many of this request's tasks wait for another request.",
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "outcome",
+        "other_requests",
+        "scheduled_runs",
+        "holding_claims",
+        "waiting_in_this_request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

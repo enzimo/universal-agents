@@ -1,0 +1,60 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.claim",
+  "message_id": "01928f3a-7b2c-7c0e-8000-000000000c0e",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "agent": "researcher-2",
+    "session": "s-researcher-2-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.svc.team",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "authority": {
+    "token_id": "01928f3a-7b2c-7c0e-9000-000000000c0e",
+    "issuer": {
+      "installation": "install_example",
+      "runtime": "gateway-1",
+      "membership_epoch": 1,
+      "key_id": "test-gateway-key-1"
+    },
+    "audience": {
+      "installation": "install_example",
+      "team": "team_example"
+    },
+    "person": "person_7c1",
+    "bound_to": {
+      "type": "root_task",
+      "id": "task_root_7f"
+    },
+    "issued_at": "2026-10-22T04:29:00.000Z",
+    "expires_at": "2026-10-23T04:29:00.000Z",
+    "algorithm": "ed25519",
+    "signature": "1TH7cJ1XR664-zRYI205XeQvnrnydobt6IVOkkMplToeQd7DJiZU6XC31DJhBxOaQKViPWQoMaWGWXLloGoADw"
+  },
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "claim_req_1",
+    "task_id": "task_sub_7f_1",
+    "resources": [
+      "file:team/reports/",
+      "file:users/person-7c1/notes/archive-plan.md",
+      "file:team/archive/2025.md"
+    ],
+    "reason": "Moving the quarterly reports into archive/."
+  },
+  "idempotency_key": "shared_work.claim:TDPKAlaEBlzT9PdGsTZ4YgdiJliOh5xfxbBTPChTu1w",
+  "body_digest": "VCEDSBtr4lmUVK0wrj0FnjXWNqtQZ_sNgbcxLM1oz9k",
+  "signature": "8W4DxyodlwV63TKB1bAQ1YB4pQAU7-8vgfJf7VCN_xz9WrZz9tKgCrmp7n24k9xNsBX4tBLetphVchynzwmeAg"
+}

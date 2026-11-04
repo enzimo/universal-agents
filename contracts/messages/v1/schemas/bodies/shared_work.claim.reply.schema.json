@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.claim.reply.schema.json",
+  "title": "shared_work.claim reply",
+  "description": "Claim up to eight resources for this request, all or none, for one period.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "claim": {
+          "$ref": "../common.schema.json#/$defs/coordination_claim"
+        },
+        "notes": {
+          "description": "The notes on each claimed resource that has any.",
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/coordination_resource_notes"
+          },
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "outcome",
+        "claim",
+        "notes"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "sensitive_content"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "claimed"
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource": {
+                "$ref": "../common.schema.json#/$defs/resource_key"
+              },
+              "claims": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/coordination_seen_claim"
+                },
+                "maxItems": 8
+              },
+              "waiting_requests": {
+                "description": "How many other requests wait for it or for something on, above or under it, whoever's they are: a bare number, so a refusal always shows its cause.",
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "claims_total": {
+                "description": "How many conflicting claims there are in all; the list holds the newest of them.",
+                "$ref": "../common.schema.json#/$defs/count"
+              }
+            },
+            "required": [
+              "resource",
+              "claims",
+              "claims_total",
+              "waiting_requests"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "conflicts"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "request_closed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
