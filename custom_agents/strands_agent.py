@@ -129,7 +129,6 @@ from custom_agents.internal_improvement_runtime import (
     publish_internal_improvement_schedule_ensure,
 )
 from custom_agents.manager_control_runtime import (
-    handle_manager_memory_command,
     handle_manager_runtime_work_command,
     handle_manager_schedule_command,
     handle_manager_topic_command,
@@ -288,7 +287,6 @@ from custom_messages.contracts.control_v1 import (
     AgentStatusMap,
     ControlInstruction,
     ManagerKnowledgeCommand,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
     PersonStandingCommandV1,
@@ -4026,13 +4024,6 @@ class UniversalAgent(BaseModel):
             )
         elif isinstance(msg_content, ManagerRuntimeWorkCommand):
             await handle_manager_runtime_work_command(
-                self,
-                command=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
-        elif isinstance(msg_content, ManagerMemoryCommand):
-            await handle_manager_memory_command(
                 self,
                 command=msg_content,
                 msg_header=msg_header,

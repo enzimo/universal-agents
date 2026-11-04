@@ -541,11 +541,10 @@ class PinnedMemoryScopePayload(BaseModel):
 
 
 class PinnedMemoryFactPayload(BaseModel):
-    """An active pinned-memory fact as manager-control replies show it.
+    """An active pinned-memory fact as the gateway's memory controls show it.
 
-    Built from named fields (``custom_agents.pinned_memory_runtime``:
-    ``public_pinned_memory_fact`` then ``pinned_memory_reply``). Where a fact
-    came from (source chat, session, conversation, task, creator) and its
+    Built from a ``memory.*`` reply's fact (``assistant_gateway.pinned_memory_commands``).
+    Where a fact came from (source chat, session, conversation, task, creator) and its
     internal UUID never leave storage: a Signal chat id is a phone number.
     Free-form metadata is left out of replies too; agent tools show it.
     """
@@ -564,7 +563,7 @@ class PinnedMemoryFactPayload(BaseModel):
 
 
 class PinnedMemoryCommandResultPayload(BaseModel):
-    """Typed action result returned by the manager's pinned-memory owner."""
+    """A memory command's result as the gateway renders it, built from the team services' typed reply."""
 
     ok: bool
     bank: Literal["coremem", "usermem"]
@@ -589,7 +588,7 @@ PINNED_MEMORY_SORT_NEWEST = "newest"
 
 
 class PinnedMemoryCommandPayload(BaseModel):
-    """Transport form of a parsed pinned-memory command."""
+    """A parsed pinned-memory command in the gateway (chat grammar or Settings), before it becomes a ``memory.*`` body."""
 
     bank: Literal["coremem", "usermem"]
     action: Literal["list", "show", "create", "replace", "delete", "undo"]
@@ -609,29 +608,6 @@ class PinnedMemoryCommandPayload(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
-
-
-class ManagerMemoryCommand(BaseModel):
-    """Durable gateway-to-manager pinned-memory command."""
-
-    message_class: Literal["ManagerMemoryCommand"] = "ManagerMemoryCommand"
-    command_id: str = Field(default_factory=lambda: new_id("manager_memory"))
-    command_type: MessageMetaType = MessageMetaType.REQUEST
-    command: PinnedMemoryCommandPayload
-    success: Optional[bool] = None
-    rendered_result: str = ""
-    result: Optional[PinnedMemoryCommandResultPayload] = None
-    error_code: Optional[
-        Literal[
-            "authorization_denied",
-            "conflict",
-            "invalid_request",
-            "runtime_error",
-        ]
-    ] = None
-
-    def get_id(self) -> str:
-        return self.command_id
 
 
 class ManagerTopicCommand(BaseModel):

@@ -152,8 +152,9 @@ memory appears at the top of the first page.
 
 In chat apps other than Web Chat, `/usermem list` shows your personal memories
 and `/coremem list` the team's; `/help` lists their add, replace and delete
-forms, and the same rules apply as in Settings. You can also just ask the
-assistant "What do you remember about me?" or "Forget that".
+forms, and the same rules apply as in Settings. A list shows at most 100
+memories at once; ask for later ones with a range such as `range=101-200`. You
+can also just ask the assistant "What do you remember about me?" or "Forget that".
 
 The assistant changes or deletes a memory only as it last read it. If the
 memory changed in the meantime, for example from another chat or in Settings,

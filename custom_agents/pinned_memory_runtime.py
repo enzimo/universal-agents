@@ -28,15 +28,16 @@ from custom_agents.memory_plugins.config import bank_agent_write_tools_enabled, 
 from custom_agents.pinned_memory_metadata import public_pinned_memory_metadata
 from custom_messages.contracts.control_v1 import (
     PINNED_MEMORY_SORT_NEWEST,
-    PinnedMemoryCommandResultPayload,
     PinnedMemoryFactPayload,
 )
 from storage.change_ledger import ChangeWriter
+from storage.operation_outcomes import CommandOutcome
 from storage.pinned_memory_changes import MemoryWriter
 from storage.pinned_memory_repository import (
     COREMEM_BANK,
     USERMEM_BANK,
     PinnedMemoryFactRow,
+    PinnedMemoryNotFoundError,
     PinnedMemoryRepository,
     pinned_memory_record_digest,
     pinned_memory_record_digest_values,
@@ -151,7 +152,15 @@ class PinnedMemoryService:
             timezone_name=context.request_timezone,
         )
 
-    def execute(self, command: PinnedMemoryCommand, *, context: PinnedMemoryRequestContext) -> dict[str, Any]:
+    def execute(
+        self,
+        command: PinnedMemoryCommand,
+        *,
+        context: PinnedMemoryRequestContext,
+        command_outcome: Optional[CommandOutcome] = None,
+    ) -> dict[str, Any]:
+        """Run one parsed command; ``command_outcome`` stores a change's reply with it (team services)."""
+
         bank = _normalize_bank(command.bank)
         if command.action == "list":
             return self.list(bank=bank, context=context, sort=command.sort, range_start=command.range_start, range_end=command.range_end)
@@ -172,6 +181,7 @@ class PinnedMemoryService:
                 invalid_after_utc=command.invalid_after_utc,
                 timezone_name=command.timezone_name,
                 source_key=command.source_key,
+                command_outcome=command_outcome,
             )
         if command.action == "replace":
             if command.memory_id is None:
@@ -187,6 +197,7 @@ class PinnedMemoryService:
                 invalid_after_utc=command.invalid_after_utc,
                 timezone_name=command.timezone_name,
                 expected_record_digest=command.expected_record_digest,
+                command_outcome=command_outcome,
             )
         if command.action == "delete":
             if command.memory_id is None:
@@ -196,11 +207,12 @@ class PinnedMemoryService:
                 context=context,
                 memory_id=command.memory_id,
                 expected_record_digest=command.expected_record_digest,
+                command_outcome=command_outcome,
             )
         if command.action == "undo":
             if not command.event_id:
                 raise ValueError(f"{bank} undo requires a memory event id.")
-            return self.undo(bank=bank, context=context, event_id=command.event_id)
+            return self.undo(bank=bank, context=context, event_id=command.event_id, command_outcome=command_outcome)
         raise ValueError(f"Unsupported {bank} action: {command.action}")
 
     def list(
@@ -242,7 +254,7 @@ class PinnedMemoryService:
                     "memory_id": int(memory_id),
                     "fact": public_pinned_memory_fact(row),
                 }
-        raise ValueError(f"{bank} #{memory_id} was not found.")
+        raise PinnedMemoryNotFoundError(f"{bank} #{memory_id} was not found.")
 
     def create(
         self,
@@ -256,6 +268,7 @@ class PinnedMemoryService:
         invalid_after_utc: Optional[str] = None,
         timezone_name: Optional[str] = None,
         source_key: Optional[str] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> dict[str, Any]:
         self._ensure_write_allowed(bank=bank, action="create")
         scope = self._resolve_scope(bank, context)
@@ -277,6 +290,7 @@ class PinnedMemoryService:
                 actor=context.actor.payload(),
                 writer=_memory_writer(context),
                 source_key=source_key,
+                command_outcome=command_outcome,
             )
         else:
             write = self.repository.create_usermem(
@@ -291,6 +305,7 @@ class PinnedMemoryService:
                 actor=context.actor.payload(),
                 writer=_memory_writer(context),
                 source_key=source_key,
+                command_outcome=command_outcome,
             )
         return self._result_with_fact(bank=bank, action="create", scope=scope, row=write.fact, event_id=write.event_id)
 
@@ -307,6 +322,7 @@ class PinnedMemoryService:
         invalid_after_utc: Optional[str] = None,
         timezone_name: Optional[str] = None,
         expected_record_digest: Optional[str] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> dict[str, Any]:
         self._ensure_write_allowed(bank=bank, action="replace")
         scope = self._resolve_scope(bank, context)
@@ -331,6 +347,7 @@ class PinnedMemoryService:
                 actor=context.actor.payload(),
                 writer=_memory_writer(context),
                 expected_record_digest=expected_version,
+                command_outcome=command_outcome,
             )
         else:
             write = self.repository.replace_usermem(
@@ -346,9 +363,10 @@ class PinnedMemoryService:
                 actor=context.actor.payload(),
                 writer=_memory_writer(context),
                 expected_record_digest=expected_version,
+                command_outcome=command_outcome,
             )
         if write is None:
-            raise ValueError(f"{bank} #{memory_id} was not found.")
+            raise PinnedMemoryNotFoundError(f"{bank} #{memory_id} was not found.")
         return self._result_with_fact(bank=bank, action="replace", scope=scope, row=write.fact, event_id=write.event_id)
 
     def delete(
@@ -358,6 +376,7 @@ class PinnedMemoryService:
         context: PinnedMemoryRequestContext,
         memory_id: int,
         expected_record_digest: Optional[str] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> dict[str, Any]:
         self._ensure_write_allowed(bank=bank, action="delete")
         scope = self._resolve_scope(bank, context)
@@ -370,6 +389,7 @@ class PinnedMemoryService:
                 actor=context.actor.payload(),
                 writer=_memory_writer(context),
                 expected_record_digest=expected_version,
+                command_outcome=command_outcome,
             )
         else:
             write = self.repository.delete_usermem(
@@ -379,9 +399,10 @@ class PinnedMemoryService:
                 actor=context.actor.payload(),
                 writer=_memory_writer(context),
                 expected_record_digest=expected_version,
+                command_outcome=command_outcome,
             )
         if write is None:
-            raise ValueError(f"{bank} #{memory_id} was not found.")
+            raise PinnedMemoryNotFoundError(f"{bank} #{memory_id} was not found.")
         return {
             "ok": True,
             "bank": bank,
@@ -393,12 +414,19 @@ class PinnedMemoryService:
             "message": f"{_bank_label(bank)} deleted: {bank} #{memory_id}",
         }
 
-    def undo(self, *, bank: str, context: PinnedMemoryRequestContext, event_id: str) -> dict[str, Any]:
+    def undo(
+        self,
+        *,
+        bank: str,
+        context: PinnedMemoryRequestContext,
+        event_id: str,
+        command_outcome: Optional[CommandOutcome] = None,
+    ) -> dict[str, Any]:
         self._ensure_write_allowed(bank=bank, action="undo")
         scope = self._resolve_scope(bank, context)
         event = self.repository.get_event(event_id)
         if event is None:
-            raise ValueError(f"{bank} event {event_id!r} was not found.")
+            raise PinnedMemoryNotFoundError(f"{bank} event {event_id!r} was not found.")
         if event.bank != bank:
             raise ValueError(f"Event {event_id!r} belongs to {event.bank}, not {bank}.")
         if bank == COREMEM_BANK and event.team_id != scope["team_id"]:
@@ -410,6 +438,7 @@ class PinnedMemoryService:
             source=context.source.payload(),
             actor=context.actor.payload(),
             writer=_memory_writer(context),
+            command_outcome=command_outcome,
         )
         fact_payload = result.get("fact")
         fact = public_pinned_memory_fact_from_dict(fact_payload) if isinstance(fact_payload, dict) else None
@@ -752,8 +781,8 @@ def public_pinned_memory_fact(row: PinnedMemoryFactRow) -> dict[str, Any]:
     ``onboarding:user_context:v1``; ``manager_bootstrap_runtime`` finds its
     earlier imports by it), timestamps and the revision digest. Where the fact came from (source chat, session,
     conversation, task, creator) and its internal UUID stay in storage: a Signal
-    chat id is a phone number. Manager-control replies narrow it further
-    (``pinned_memory_reply``).
+    chat id is a phone number. The team services' ``memory.*`` replies narrow it
+    further (``team_services.memory``): no metadata and no import key.
     """
 
     return _public_fact(
@@ -780,42 +809,6 @@ def _public_fact(*, metadata: dict[str, Any], source_key: Optional[str], **field
     return view
 
 
-def pinned_memory_reply(result: dict[str, Any]) -> PinnedMemoryCommandResultPayload:
-    """The manager-control reply for a service result, built from named fields.
-
-    The Settings memory controls show facts without metadata
-    (``PinnedMemoryFactPayload``), so each fact is narrowed to the reply
-    model's declared fields here rather than by Pydantic dropping the rest.
-    """
-
-    def reply_fact(fact: Any) -> PinnedMemoryFactPayload | None:
-        if not isinstance(fact, dict):
-            return None
-        return PinnedMemoryFactPayload(**{name: fact[name] for name in REPLY_FACT_FIELDS if name in fact})
-
-    return PinnedMemoryCommandResultPayload(
-        ok=bool(result.get("ok")),
-        bank=result["bank"],
-        action=result["action"],
-        scope=result.get("scope") or {},
-        memory_id=result.get("memory_id"),
-        event_id=result.get("event_id"),
-        fact_preview=result.get("fact_preview"),
-        fact=reply_fact(result.get("fact")),
-        facts=[fact for fact in (reply_fact(item) for item in result.get("facts") or []) if fact is not None],
-        range=list(result.get("range") or []),
-        sort=result.get("sort"),
-        total=result.get("total"),
-        returned=result.get("returned"),
-        deleted=bool(result.get("deleted")),
-        undone_event_id=result.get("undone_event_id"),
-        undone_event_type=result.get("undone_event_type"),
-        message=result.get("message"),
-    )
-
-
-# The fields a manager-control reply shows for each fact.
-REPLY_FACT_FIELDS = tuple(PinnedMemoryFactPayload.model_fields)
 
 
 def public_pinned_memory_fact_from_dict(row: dict[str, Any]) -> dict[str, Any]:
