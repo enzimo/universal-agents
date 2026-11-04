@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
+from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import SqlDialect
 
 OUTCOMES_TABLE = "protocol1_operation_outcomes"
@@ -66,8 +67,13 @@ def outcome_table_statements() -> tuple[str, ...]:
 
 
 def ensure_outcome_table(conn: Any) -> None:
-    """Create the table on an open connection inside a store's own setup (the caller commits)."""
+    """Create the table on an open connection inside a store's own setup (the caller commits).
 
+    Several stores create it inside their own setup, so it takes its own setup lock
+    (``storage.schema_setup``) after the store's, as the change ledger's tables do.
+    """
+
+    begin_schema_setup(conn, __name__)
     for statement in outcome_table_statements():
         conn.execute(statement)
 
