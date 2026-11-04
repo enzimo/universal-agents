@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from nats.js.errors import NotFoundError
-from custom_transport.subjects import NatsSubjectMapper
+from custom_transport.subjects import NatsSubjectMapper, encode_durable_name
 
 if TYPE_CHECKING:
     from custom_transport.nats_adapter import NatsTransportConfig
@@ -54,9 +54,6 @@ class NatsStreamTopology:
             f"{self.mapper.prefix}.type.*.work",
             f"{self.mapper.prefix}.gateway.*.response",
         ]
-        presence_subjects = [
-            f"{self.mapper.prefix}.presence.*",
-        ]
         specifications.append(
             StreamConfig(
                 name=self.mapper.work_stream_name(),
@@ -69,21 +66,6 @@ class NatsStreamTopology:
                 max_age=(
                     float(self.config.work_max_age_seconds)
                     if self.config.work_max_age_seconds
-                    else None
-                ),
-            )
-        )
-        specifications.append(
-            StreamConfig(
-                name=self.mapper.presence_stream_name(),
-                subjects=presence_subjects,
-                retention=RetentionPolicy.LIMITS,
-                storage=storage,
-                num_replicas=int(self.config.replicas or 1),
-                max_msgs_per_subject=1,
-                max_age=(
-                    float(self.config.presence_max_age_seconds)
-                    if self.config.presence_max_age_seconds
                     else None
                 ),
             )
@@ -109,6 +91,25 @@ class NatsStreamTopology:
             )
         )
         return specifications
+
+    def retired_stream_names(self) -> tuple[str, ...]:
+        """Streams earlier versions created that nothing uses now; the topology owner deletes them.
+
+        ``<PREFIX>_PRESENCE`` held the presence heartbeat until message contract step 7d
+        (who is live comes from the team's signed agent records); deleting it also removes the
+        gateway's durable presence consumer on it.
+        """
+
+        return (encode_durable_name(f"{self.mapper.prefix}_PRESENCE").upper(),)
+
+    async def _delete_retired_streams(self, jetstream: Any, logger: logging.Logger) -> None:
+        for name in self.retired_stream_names():
+            try:
+                await jetstream.delete_stream(name)
+            except NotFoundError:
+                continue
+            logger.info("Deleted a stream this version no longer uses. event=nats_retired_stream_deleted stream=%s",
+                        name)
 
     @staticmethod
     def differences(expected: Any, actual: Any) -> dict[str, tuple[Any, Any]]:
@@ -145,6 +146,7 @@ class NatsStreamTopology:
                 )
 
     async def reconcile(self, jetstream: Any, logger: logging.Logger) -> None:
+        await self._delete_retired_streams(jetstream, logger)
         for expected in self.specifications():
             try:
                 actual = (await jetstream.stream_info(expected.name)).config

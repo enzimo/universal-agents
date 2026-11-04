@@ -242,36 +242,12 @@ def test_a_mailbox_stops_asking_when_its_inbox_is_full():
     assert not mailbox_has_room(_agent(deferred_inbox=_Inbox(100, 100)))
 
 
-def test_an_ephemeral_push_listener_on_the_work_stream_is_refused():
-    from custom_transport.base import SubscriptionDelivery
-    from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
-    from custom_transport.subjects import NatsSubjectMapper
+def test_jetstream_has_no_push_listener_at_all():
+    """Durable work is pulled (ADR-019); presence replay, the one JetStream push listener, was removed in step 7d."""
 
-    adapter = NatsTransportAdapter(
-        config=NatsTransportConfig(),
-        mapper=NatsSubjectMapper(team_id="team_t"),
-        logger=logging.getLogger("test"),
-    )
-    adapter._js = object()
-    work_subject = adapter.mapper.named_type_work_subject("WebResearchAgent")
-    with pytest.raises(ValueError, match="ADR-019"):
-        adapter._validate_subscription_request(
-            name="x",
-            subject=work_subject,
-            delivery=SubscriptionDelivery.JETSTREAM_EPHEMERAL,
-            durable_name=None,
-            fetch_policy=FetchPolicy.CONTINUOUS,
-            ready=None,
-        )
-    # Presence replay keeps its ephemeral listener.
-    adapter._validate_subscription_request(
-        name="presence",
-        subject=f"{adapter.mapper.prefix}.presence.*",
-        delivery=SubscriptionDelivery.JETSTREAM_EPHEMERAL,
-        durable_name=None,
-        fetch_policy=FetchPolicy.CONTINUOUS,
-        ready=None,
-    )
+    from custom_transport.base import SubscriptionDelivery
+
+    assert {delivery.name for delivery in SubscriptionDelivery} == {"CORE", "JETSTREAM_DURABLE"}
 
 
 # -- one message must never stop a receiver ---------------------------------------

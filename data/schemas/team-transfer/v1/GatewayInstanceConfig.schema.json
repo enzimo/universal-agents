@@ -4212,18 +4212,6 @@
           "default": null,
           "title": "Nats User"
         },
-        "presence_max_age_seconds": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": 600.0,
-          "title": "Presence Max Age Seconds"
-        },
         "process_consumer_inactive_threshold_seconds": {
           "default": 300.0,
           "exclusiveMinimum": 0,

@@ -156,7 +156,6 @@ async def test_parallel_sdk_turns_keep_their_context_and_artifacts_then_main_con
     # Run the queue steps explicitly so a release cannot start an unobserved drain.
     agent._execution_lanes.on_release = None
     object.__setattr__(agent, "_refresh_self_agent_state", AsyncMock())
-    object.__setattr__(agent, "_publish_presence_status", AsyncMock())
     epochs = {label: _seed_conversation(agent, label) for label in ("A", "B")}
     _add_request(agent, "task-a", label="A", parallel=False)
     _add_request(agent, "task-b", label="B", parallel=True)

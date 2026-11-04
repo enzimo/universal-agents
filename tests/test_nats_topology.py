@@ -15,7 +15,8 @@ async def test_consumers_validate_without_mutating_and_owner_surfaces_update_fai
     configurations = {item.name: item for item in topology.specifications()}
     async def info(name):
         return SimpleNamespace(config=configurations[name])
-    js = SimpleNamespace(stream_info=info, add_stream=AsyncMock(), update_stream=AsyncMock())
+    js = SimpleNamespace(stream_info=info, add_stream=AsyncMock(), update_stream=AsyncMock(),
+                         delete_stream=AsyncMock(side_effect=NotFoundError()))
     await topology.validate(js)
     configurations[topology.mapper.work_stream_name()].num_replicas = 3
     with pytest.raises(NatsTopologyMismatch, match="num_replicas"):
@@ -25,6 +26,33 @@ async def test_consumers_validate_without_mutating_and_owner_surfaces_update_fai
     js.update_stream.side_effect = RuntimeError("operator lacks update permission")
     with pytest.raises(RuntimeError, match="operator lacks"):
         await topology.reconcile(js, __import__("logging").getLogger(__name__))
+
+
+@pytest.mark.asyncio
+async def test_the_owner_deletes_the_retired_presence_stream_once(caplog):
+    """The presence stream left in message contract step 7d; an upgraded installation still has it."""
+
+    topology = NatsStreamTopology(NatsTransportConfig(), NatsSubjectMapper(team_id="test"))
+    configurations = {item.name: item for item in topology.specifications()}
+
+    async def info(name):
+        return SimpleNamespace(config=configurations[name])
+
+    deleted: list[str] = []
+
+    async def delete_stream(name):
+        if name in deleted:
+            raise NotFoundError()
+        deleted.append(name)
+
+    js = SimpleNamespace(stream_info=info, add_stream=AsyncMock(), update_stream=AsyncMock(), delete_stream=delete_stream)
+    with caplog.at_level(__import__("logging").INFO):
+        await topology.reconcile(js, __import__("logging").getLogger(__name__))
+        await topology.reconcile(js, __import__("logging").getLogger(__name__))
+
+    assert deleted == ["TEST_PRESENCE"] == list(topology.retired_stream_names())
+    assert "PRESENCE" not in " ".join(configurations)
+    assert caplog.text.count("event=nats_retired_stream_deleted") == 1
 
 
 @pytest.mark.asyncio

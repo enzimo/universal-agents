@@ -103,7 +103,6 @@ transport:
   max_deliver: 5                                # Maximum redelivery attempts before termination.
   duplicate_window_seconds: 600.0               # JetStream duplicate message-id window.
   work_max_age_seconds: 604800.0                # Durable work/reply retention age.
-  presence_max_age_seconds: 600.0               # Replayable presence retention age.
   process_consumer_inactive_threshold_seconds: 300.0  # Delete unbound process-scoped JetStream consumers after this delay.
   nats_user: null                               # NATS username. For the managed local server, leave NATS_USER/NATS_PASSWORD unset to use generated credentials stored under the NATS service root; prefer NATS_USER or NATS_USER_FILE when setting your own.
   credentials_file: null                        # Optional NATS user credentials file.

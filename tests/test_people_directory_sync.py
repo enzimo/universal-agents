@@ -241,7 +241,6 @@ async def test_gateway_start_copies_everyone_before_sending_maintenance_schedule
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
         manager_runtime=NatsGatewayManagerRuntime.from_gateway_config(config, adapter=adapter),
     )
-    gateway._manager_client.discover_manager_id = AsyncMock(side_effect=TimeoutError("no manager"))
     access = AccessRepository(config.manager_storage_settings)
     seen_when_schedules_sent: list[object] = []
 

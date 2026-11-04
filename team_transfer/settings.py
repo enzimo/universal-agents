@@ -92,7 +92,8 @@ class SettingsSection:
     # 6: agent.request_conflict_checks (checks between a person's separate requests) joined it.
     # 7: tool_policy.output_retention_days (how long saved tool outputs are kept) joined it.
     # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
-    schema_version: ClassVar[int] = 8
+    # 9: transport.presence_max_age_seconds left it (the presence stream was removed, message contract step 7d).
+    schema_version: ClassVar[int] = 9
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -677,7 +678,14 @@ __all__ = [
 # V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
 # and V8 gateway.storage_warnings. Their records keep the same shape and carry
 # only values that differ from defaults, so old choices pass on unchanged and
-# settings absent from an older export use the current defaults.
-SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records
-SECTION_UPGRADES[(SettingsSection.name, 6, SettingsSection.schema_version)] = lambda records: records
-SECTION_UPGRADES[(SettingsSection.name, 7, SettingsSection.schema_version)] = lambda records: records
+# settings absent from an older export use the current defaults. V9 removed
+# transport.presence_max_age_seconds: an older export's value for it is dropped.
+_RETIRED_SETTING_PATHS = frozenset({("transport", "presence_max_age_seconds")})
+
+
+def _without_retired_settings(records: SectionRecords) -> SectionRecords:
+    return [record for record in records if tuple(record.get("path", ())) not in _RETIRED_SETTING_PATHS]
+
+
+for _source in (5, 6, 7, 8):
+    SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _without_retired_settings

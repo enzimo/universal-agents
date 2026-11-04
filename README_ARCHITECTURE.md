@@ -24,7 +24,7 @@ channel adapters and assistant gateway
           |                                        v
           |                                specialist runtimes
           |
-          +----> replies, control, and presence
+          +----> replies and control; signed agent and host records
 
 execution state ----> deterministic execution controller
                               |
@@ -41,8 +41,8 @@ The execution controller is a side service. Normal user requests travel from
 the gateway through NATS to the manager and specialists.
 
 NATS and JetStream are the inter-process transport. They carry work, replies,
-control messages, and presence, but they are not the business-state,
-authorization, or credential database.
+control messages, and the signed records of which agents and hosts are live, but
+they are not the business-state, authorization, or credential database.
 
 ## Component ownership
 
@@ -51,7 +51,7 @@ authorization, or credential database.
 | Assistant gateway | Canonical user identity, human channels, sessions, accepted requests, attachments, presentation history, and delivery |
 | `TeamArchitect` | Root Tasks, Plans, Objectives, schedules that require reasoning, delegation, recovery, and final synthesis |
 | Specialists | One assigned Task and its model and tool loop |
-| NATS and JetStream | Typed message delivery, shared worker queues read by pull consumers, routing, redelivery, control, and presence |
+| NATS and JetStream | Typed message delivery, shared worker queues read by pull consumers, routing, redelivery, control, and the signed agent and host records |
 | Domain repositories | Durable workflow, conversation, memory, authorization, gateway, and execution state |
 | Secure tool broker | Credential catalog, secret-free references, credential hydration and use, external provider access, and redaction. It always runs: every credentialed tool call (web research, GitHub, Google, Hugging Face, X, MCP servers) goes through it, so no setting turns it off |
 | Execution controller | Immutable code revisions, deterministic jobs, fenced attempts, and managed-service reconciliation |
@@ -108,8 +108,9 @@ adapter (`tests/test_runtime_architecture_boundaries.py`). Agents learn who is
 live on their team from the team's signed agent records ("Agent records and who
 is live", "Agents asking each other"), not from presence messages: a record says
 an agent is live only while its host keeps reporting, so an old message can no
-longer make a stopped worker look alive. The gateway still reads presence until
-it moves to the records too (message contract step 7c).
+longer make a stopped worker look alive. The gateway reads the same records (step
+7c), and the presence stream, the heartbeat and the broadcast subject were removed in
+step 7d.
 
 ## Work, scheduling, and recovery
 
@@ -743,8 +744,9 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    after the lease was lost; then they fail with an explanation to the requester,
    their pending subtasks are asked to stop, and an access request they were
    waiting on is withdrawn so the reviewer is not left with an open item.
-4. It exits once it holds no unfinished task. Until then it keeps publishing
-   presence, so a starting worker of the same type does not adopt its tasks.
+4. It exits once it holds no unfinished task. Until then it keeps refreshing its own
+   status row and its record says it takes no work, so a starting worker of the same
+   type does not adopt its tasks (adoption is decided by launch records).
 
 The TeamLead accepts a handback only when the sender owns the stated launch, and
 saves it (`storage/worker_handback_repository.py`) before acting on it. Its runtime
@@ -789,7 +791,7 @@ original reply route so the result reaches the original requester:
 
 Runs of one schedule never overlap across workers. When a schedule comes due
 while an earlier run of it is unfinished on this agent, or on another worker
-whose presence is still live, the new occurrence is recorded as coalesced into
+whose own status row is still fresh, the new occurrence is recorded as coalesced into
 that run instead of starting a second task. A crashed worker's leftover receipt
 does not count, so it cannot block the schedule.
 
@@ -3955,8 +3957,8 @@ stores, reverse proxies, and adapter hosts. Process separation and external
 services require operators to supply the corresponding network and workload
 identity controls.
 
-Runtime logs, task history, execution digests, schedule telemetry, presence,
-and anomaly records support diagnosis. The activity collector consumes curated
+Runtime logs, task history, execution digests, schedule telemetry, agent and host
+records, and anomaly records support diagnosis. The activity collector consumes curated
 events into a separate read model. It does not route Tasks or treat manager
 tables as its control plane.
 
@@ -4384,6 +4386,23 @@ process's host apart from the host's own module so the import graph stays free o
 
 Agents no longer subscribe to presence or the broadcast subject, ignore status replies on
 `.operational`, and the team lead no longer writes other agents' rows in `agent_states`.
+
+**The end of presence and fan-out** (step 7d): agents no longer publish presence. Each
+agent refreshes its own `agent_states` row and checks its skill catalog every 20 seconds
+(`UniversalAgent._self_refresh_loop`, `custom_agents.liveness_observation.SELF_REFRESH_SECONDS`):
+the row is the heartbeat the liveness rules read, and the check picks up a missed
+`skills.changed`. The presence stream, the broadcast subject, `TeamComms.broadcast_message`,
+the publish options for them and the JetStream push listener that only presence used are
+removed, so nothing on JetStream is pushed. The topology owner deletes an existing
+`<PREFIX>_PRESENCE` stream at start (`event=nats_retired_stream_deleted`), which also removes
+the gateway's old durable consumer on it. `transport.presence_max_age_seconds` is retired:
+an older configuration still loads, with a warning, and the team transfer's settings
+section (version 9) drops it from older exports. The operational subject now carries only
+the gateway's task progress, parent-task probe and thread guidance, with their replies
+(plan decision 68); a lead's guidance for a delegated task goes to the worker holding it
+through its control mailbox (`agent.<id>.control`, durable, read while it works; plan
+decision 59), and a subtask no worker has taken yet gets none. The skill hint is no longer
+a message type.
 Restart approvals name other agents' running work by agent (`<agent id>:unknown-task`),
 since the records do not carry the current task; asking each agent while the change is
 described is a follow-up.

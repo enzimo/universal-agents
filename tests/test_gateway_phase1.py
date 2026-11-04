@@ -6246,8 +6246,6 @@ async def test_gateway_connect_does_not_subscribe_to_the_old_authorization_strea
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
         manager_runtime=manager_runtime,
     )
-    gateway._manager_client.discover_manager_id = AsyncMock(return_value=None)
-
     await gateway.connect(start_services=False)
 
     # The operational subject only: presence is not followed any more (assistant_gateway.team_view).
@@ -6317,10 +6315,6 @@ async def test_gateway_connect_starts_services_without_manager_route(
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
         manager_runtime=manager_runtime,
     )
-    gateway._manager_client.discover_manager_id = AsyncMock(
-        side_effect=TimeoutError("Timed out waiting for TeamArchitect discovery.")
-    )
-
     await gateway.connect(start_services=True)
     try:
         assert gateway.config.manager.manager_agent_id is None

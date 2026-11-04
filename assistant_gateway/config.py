@@ -387,7 +387,6 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "transport.max_deliver": "Maximum redelivery attempts before termination.",
     "transport.duplicate_window_seconds": "JetStream duplicate message-id window.",
     "transport.work_max_age_seconds": "Durable work/reply retention age.",
-    "transport.presence_max_age_seconds": "Replayable presence retention age.",
     "transport.process_consumer_inactive_threshold_seconds": "Expiry delay for unbound process-scoped JetStream consumers.",
     "mcp": "Installed MCP connection, transport, authorization, and managed-host settings.",
     "mcp.enabled": "Run the brokered MCP control/data plane before the first dynamic proposal exists.",

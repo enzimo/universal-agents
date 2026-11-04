@@ -6,9 +6,9 @@ import re
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import GATEWAY_MANAGER_CONTROL_TYPES, MessageEnvelope
 from custom_messages.enums import RoutingType
+from custom_messages.contracts.task_v1 import TaskSteering
 from custom_messages.enums import MessageMetaType
 
 _SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9_-]+")
@@ -16,7 +16,17 @@ _MANAGER_CONTROL_TYPES = GATEWAY_MANAGER_CONTROL_TYPES
 
 
 def _is_manager_control_request(envelope: Optional[MessageEnvelope]) -> bool:
-    if envelope is None or not isinstance(envelope.msg_content, _MANAGER_CONTROL_TYPES):
+    """What goes to an agent's control mailbox (``agent.<id>.control``), which it reads while it works.
+
+    The gateway's commands to the team lead, and a lead's guidance passed on to the worker
+    holding a delegated task (plan decision 59, until phase 3's ``task.steer``).
+    """
+
+    if envelope is None:
+        return False
+    if isinstance(envelope.msg_content, TaskSteering):
+        return True
+    if not isinstance(envelope.msg_content, _MANAGER_CONTROL_TYPES):
         return False
     return envelope.msg_content.command_type == MessageMetaType.REQUEST
 
@@ -73,7 +83,9 @@ class NatsSubjectMapper:
     def route_subject(self, routing_key: str, *, envelope: Optional[MessageEnvelope] = None) -> str:
         route = str(routing_key or "").strip()
         if route == RoutingType.ALL_AGENTS_ROUTE:
-            return self.broadcast_subject(envelope=envelope)
+            # Nothing goes to every agent's mailbox (message contract step 7d); the only
+            # all-agents subject left is the operational one, published with ``operational``.
+            raise ValueError("There is no all-agents mailbox; send to one agent, a type or the lead.")
         if route == self.team_id:
             return self.lead_work_subject()
         if route == self.user_queue_name:
@@ -112,7 +124,7 @@ class NatsSubjectMapper:
         logical_agent_route = _logical_agent_route(suffix)
         if logical_agent_route is not None:
             return logical_agent_route
-        if suffix in {"operational", "broadcast"} or suffix.startswith("presence."):
+        if suffix == "operational":
             return RoutingType.ALL_AGENTS_ROUTE.value
         return subject
 
@@ -151,20 +163,8 @@ class NatsSubjectMapper:
     def operational_subject(self) -> str:
         return f"{self.prefix}.operational"
 
-    def broadcast_subject(self, *, envelope: Optional[MessageEnvelope] = None) -> str:
-        if envelope is not None and isinstance(envelope.msg_content, AgentStatus):
-            source = envelope.msg_content.self_id or envelope.msg_header.from_agent_id or "unknown"
-            return self.presence_subject(source)
-        return f"{self.prefix}.broadcast"
-
-    def presence_subject(self, agent_id: str) -> str:
-        return f"{self.prefix}.presence.{encode_subject_token(agent_id)}"
-
     def work_stream_name(self) -> str:
         return encode_durable_name(f"{self.prefix}_WORK").upper()
-
-    def presence_stream_name(self) -> str:
-        return encode_durable_name(f"{self.prefix}_PRESENCE").upper()
 
     def dead_letter_stream_name(self) -> str:
         """Messages set aside after their last allowed delivery (``custom_transport.nats_pull``)."""

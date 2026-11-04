@@ -170,10 +170,7 @@ class NatsConsumerReconciler:
         return count, maximum
 
     def _stream_names(self) -> tuple[str, ...]:
-        return (
-            self._mapper.work_stream_name(),
-            self._mapper.presence_stream_name(),
-        )
+        return (self._mapper.work_stream_name(),)
 
     async def _list_consumers(self, stream_name: str) -> list[Any]:
         consumers: list[Any] = []
@@ -272,10 +269,6 @@ class NatsConsumerReconciler:
                 self._mapper.work_stream_name(),
                 self._mapper.agent_work_subject(owner_agent_id),
             ),
-            "presence_snapshot": (
-                self._mapper.presence_stream_name(),
-                f"{self._mapper.prefix}.presence.*",
-            ),
         }.get(consumer_role)
         if not owner_agent_id or expected_route != (stream_name, filter_subject):
             return None, None, None
@@ -305,29 +298,7 @@ class NatsConsumerReconciler:
                 if consumer_name == self._mapper.durable_name(f"agent_{agent_id}"):
                     return agent_id, "agent_direct"
 
-        for role, route_prefix, expected_stream, expected_filter in (
-            (
-                "presence_snapshot",
-                "presence",
-                self._mapper.presence_stream_name(),
-                f"{self._mapper.prefix}.presence.*",
-            ),
-        ):
-            if stream_name != expected_stream or filter_subject != expected_filter:
-                continue
-            name_match = re.fullmatch(
-                self._durable_name_pattern(route_prefix),
-                consumer_name,
-            )
-            if name_match:
-                return name_match.group(1), role
         return None, None
-
-    def _durable_name_pattern(self, route_prefix: str) -> str:
-        marker = "UAIDTOKEN"
-        template = self._mapper.durable_name(f"{route_prefix}_{marker}")
-        prefix, suffix = template.split(marker, maxsplit=1)
-        return re.escape(prefix) + f"({GENERATED_AGENT_ID_PATTERN})" + re.escape(suffix)
 
     @staticmethod
     def _old_enough(

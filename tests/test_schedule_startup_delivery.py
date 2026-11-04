@@ -158,8 +158,7 @@ async def test_startup_finishes_manager_data_cleanups_after_recovery_before_read
     agent.user_name_postfix = "user"
     agent.user_queue_postfix = "user"
     agent._worker_ready = False
-    agent._publish_presence_status = AsyncMock()
-    agent._presence_heartbeat_loop = AsyncMock()
+    agent._self_refresh_loop = AsyncMock()
     agent._subscribe_type_queue = AsyncMock()
     events = []
 
@@ -201,7 +200,7 @@ async def test_startup_finishes_manager_data_cleanups_after_recovery_before_read
     with pytest.raises(SubscriptionProbeComplete):
         await agent._connect_nats()
     agent._cleanup_nats_runtime_on_exit.assert_awaited_once()
-    await agent._presence_task
+    await agent._self_refresh_task
 
 
 @pytest.mark.live

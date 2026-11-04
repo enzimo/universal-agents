@@ -1907,7 +1907,6 @@ async def manager(config):
             replicas=transport.replicas,
             duplicate_window_seconds=transport.duplicate_window_seconds,
             work_max_age_seconds=transport.work_max_age_seconds,
-            presence_max_age_seconds=transport.presence_max_age_seconds,
             user=transport.nats_user,
             password=transport.nats_password,
         ),
@@ -1943,7 +1942,7 @@ def _delete_streams(nats_url: str, settings, mapper) -> None:
         connection = await nats.connect(servers=[nats_url], user=settings.nats_user, password=settings.nats_password)
         try:
             jetstream = connection.jetstream()
-            for name in (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name()):
+            for name in (mapper.work_stream_name(), mapper.dead_letter_stream_name()):
                 try:
                     await jetstream.delete_stream(name)
                 except NotFoundError:
@@ -2349,7 +2348,7 @@ def test_stream_setup_creates_the_streams_participants_check_and_a_repeat_change
         connection = await nats.connect(servers=[env["NATS_URL"]], user=settings.nats_user, password=settings.nats_password)
         try:
             jetstream = connection.jetstream()
-            names = (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name())
+            names = (mapper.work_stream_name(), mapper.dead_letter_stream_name())
             return {name: (await jetstream.stream_info(name)).created for name in names}
         finally:
             await connection.close()
@@ -2361,7 +2360,7 @@ def test_stream_setup_creates_the_streams_participants_check_and_a_repeat_change
 
     try:
         names = prepare_message_streams(config_path, env)
-        assert names == (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name())
+        assert names == (mapper.work_stream_name(), mapper.dead_letter_stream_name())
         asyncio.run(participant_check())
         first = asyncio.run(created_times())
         assert prepare_message_streams(config_path, env) == names

@@ -527,7 +527,7 @@ def test_the_account_reports_its_stored_messages_and_its_limit_when_it_has_one(
         )
         await adapter.connect(reconcile_topology=True)
         try:
-            await adapter._js.publish(f"{adapter.mapper.prefix}.presence.lead", b"x" * 4000)
+            await adapter._js.publish(adapter.mapper.agent_work_subject("lead"), b"x" * 4000)
             return await adapter.jetstream_account_usage()
         finally:
             await adapter.close()

@@ -186,23 +186,13 @@ async def _hydrate_skill_plugins(
     return reloaded_plugin_count, available_skill_names
 
 
-async def _publish_refresh_presence(agent: Any, *, publish_presence: bool) -> None:
-    if (
-        publish_presence
-        and getattr(agent, "team_id", None)
-        and getattr(agent, "_runtime_loop", None) is not None
-    ):
-        await agent._publish_presence_status(is_exiting=False)
-
-
 async def refresh_agent_skill_catalog(
     agent: Any,
     *,
     force: bool,
-    publish_presence: bool,
     reason: str,
 ) -> SkillCatalogRefreshResult:
-    """Rescan local sources, hydrate SDK caches, and optionally publish presence."""
+    """Rescan local sources and hydrate SDK caches; the gateway reads the skills with ``agent.status``."""
 
     refresh = getattr(agent, "_refresh_skills_plugins", None)
     if not callable(refresh):
@@ -238,7 +228,6 @@ async def refresh_agent_skill_catalog(
     refresh_state = getattr(agent, "_refresh_self_agent_state", None)
     if callable(refresh_state):
         await refresh_state()
-    await _publish_refresh_presence(agent, publish_presence=publish_presence)
     getattr(agent, "_logger", logger).info(
         "[%s] Reloaded %s AgentSkills plugin(s). "
         "event=managed_skill_catalog_reloaded reason=%s available_skill_count=%s",
@@ -333,7 +322,6 @@ async def apply_managed_skill_catalog_change(
         await refresh_agent_skill_catalog(
             agent,
             force=True,
-            publish_presence=True,
             reason=f"managed_{notification.operation}_notification",
         )
     except Exception as exc:
@@ -372,12 +360,11 @@ async def repair_agent_skill_catalog(agent: Any, *, reason: str) -> bool:
         result = await refresh_agent_skill_catalog(
             agent,
             force=False,
-            publish_presence=False,
             reason=reason,
         )
     except Exception as exc:
         getattr(agent, "_logger", logger).warning(
-            "Managed skill catalog repair failed; stale presence will remain visible. "
+            "Managed skill catalog repair failed; the agent keeps its earlier skills until the next check. "
             "event=managed_skill_catalog_repair_failed agent_id=%s reason=%s "
             "error_type=%s error=%s",
             getattr(agent, "id", "unknown"),

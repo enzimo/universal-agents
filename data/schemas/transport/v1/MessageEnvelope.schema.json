@@ -2057,90 +2057,6 @@
       "title": "Instruction",
       "type": "object"
     },
-    "ManagedSkillCatalogChangedV1": {
-      "additionalProperties": false,
-      "description": "Authority-free hint that a trusted managed-skill receipt was committed.\n\nThe receiver must verify the referenced immutable receipt from its own\ninstance storage before refreshing. The message never carries a path,\ninstructions, executable content, or permission.",
-      "properties": {
-        "change_id": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Change Id",
-          "type": "string"
-        },
-        "created_at_utc": {
-          "format": "date-time",
-          "title": "Created At Utc",
-          "type": "string"
-        },
-        "installed_tree_sha256": {
-          "maxLength": 64,
-          "minLength": 64,
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Installed Tree Sha256",
-          "type": "string"
-        },
-        "message_class": {
-          "const": "ManagedSkillCatalogChangedV1",
-          "default": "ManagedSkillCatalogChangedV1",
-          "title": "Message Class",
-          "type": "string"
-        },
-        "notification_id": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Notification Id",
-          "type": "string"
-        },
-        "operation": {
-          "enum": [
-            "install",
-            "uninstall"
-          ],
-          "title": "Operation",
-          "type": "string"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "skill_name": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Skill Name",
-          "type": "string"
-        },
-        "source_agent_id": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Source Agent Id",
-          "type": "string"
-        },
-        "source_named_agent_type": {
-          "const": "TeamArchitect",
-          "default": "TeamArchitect",
-          "title": "Source Named Agent Type",
-          "type": "string"
-        },
-        "team_id": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Team Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "team_id",
-        "source_agent_id",
-        "operation",
-        "change_id",
-        "skill_name",
-        "installed_tree_sha256"
-      ],
-      "title": "ManagedSkillCatalogChangedV1",
-      "type": "object"
-    },
     "ManagerEscalationContext": {
       "description": "Worker-origin metadata for manager-mediated escalation tasks.",
       "properties": {
@@ -7678,7 +7594,6 @@
           "DelegatedTaskClaimedV1": "#/$defs/DelegatedTaskClaimedV1",
           "DeliveryReceipt": "#/$defs/DeliveryReceipt",
           "Instruction": "#/$defs/Instruction",
-          "ManagedSkillCatalogChangedV1": "#/$defs/ManagedSkillCatalogChangedV1",
           "ManagerRuntimeWorkCommand": "#/$defs/ManagerRuntimeWorkCommand",
           "NoOpMessage": "#/$defs/NoOpMessage",
           "PersonStandingCommandV1": "#/$defs/PersonStandingCommandV1",
@@ -7732,9 +7647,6 @@
         },
         {
           "$ref": "#/$defs/ManagerRuntimeWorkCommand"
-        },
-        {
-          "$ref": "#/$defs/ManagedSkillCatalogChangedV1"
         },
         {
           "$ref": "#/$defs/NoOpMessage"
