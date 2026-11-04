@@ -16,6 +16,15 @@ from default_values import TRANSPORT_DEFAULTS
 from id_generation import new_id
 
 
+def _process_host_runtime() -> Optional[str]:
+    """This process's message host id (``custom_agents.agent_host``), or None without the launcher."""
+
+    from custom_agents.agent_host import process_host
+
+    host = process_host()
+    return None if host is None else host.profile.runtime
+
+
 class TeamComms(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -121,6 +130,9 @@ class TeamComms(BaseModel):
                     user=self.nats_user,
                     password=self.nats_password,
                     credentials_file=self.nats_credentials_file,
+                    # Protocol 1 replies to this process's host arrive under its own inbox
+                    # (_INBOX.<host>.): the host joins and opens sessions on this connection.
+                    reply_inbox_runtime=_process_host_runtime(),
                 ),
                 mapper=self._nats_mapper(team_id),
                 logger=self._logger,
