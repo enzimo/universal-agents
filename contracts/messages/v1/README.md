@@ -2066,11 +2066,6 @@ claim and no note.
   request ends, fails or is stopped, and when its record is deleted.
 - `shared_work.note` leaves up to 500 characters on one resource, at most three per resource
   for each request (`limit_reached`). A note lasts while its request runs and one day more.
-
-Notes and the reasons of claims and of waits on a resource are text a model wrote that other
-models read. Both are checked like knowledge pages for credentials and identity numbers
-(`sensitive_content`, from `note`, `claim` and `wait`) and shown to models as quoted text from
-another request, never as instructions.
 - `shared_work.wait` waits for a claimed resource or for another of the person's requests. A
   wait on a resource gives the `reason` its claim carries if the wait is granted. In one
   serialized step it refuses a wait on the request itself or one that would close a loop
@@ -2078,6 +2073,11 @@ another request, never as instructions.
   `nothing_to_wait_for` when nothing but this request's own claims and waits is on, above or
   under the resource. Otherwise it records the wait, answers with the latest time it ends
   (`ends_by`), and the host ends the turn with a local wait, freeing the agent's slot.
+
+Notes and the reasons of claims and of waits on a resource are text a model wrote that other
+models read. Both are checked like knowledge pages for credentials and identity numbers
+(`sensitive_content`, from `note`, `claim` and `wait`) and shown to models as quoted text from
+another request, never as instructions.
 
 **Reply size.** Each list inside a coordination reply holds at most eight items, newest first,
 next to a total that counts them all (`claims_total`, `notes_total`, `waits_total`,
@@ -2089,15 +2089,16 @@ never a resource it was asked about, and its totals still count everything.
 - Every wait lasts at most 35 minutes, on a resource or on a request, and `ends_by` is that
   limit.
 - The loop check follows who waits for whom. A waiting request waits for every other request
-  that holds a live claim on, above or under what it waits for, for every other request with
-  an earlier wait on, above or under the same resource, since that one is granted first, and,
+  that holds a live claim on, above or under what it waits for, for every other request whose
+  earlier wait is on, above or under what it waits for, since that one is granted first, and,
   for a wait on a request, for that request. A wait that would make a request wait for itself
   through these is refused. So a later grant never closes a loop either: the request that gets
   a claim was already ahead of everyone it now blocks.
-- When a claim ends (released, ran out, its request ended or its record was deleted), the team
-  services look at the waits on, above or under its resources in the order they were recorded.
-  A wait is granted when no other request holds a live claim on, above or under its resource
-  and no other request's earlier wait is on, above or under it. The grant is a new claim of the
+- Whenever a claim ends (released, ran out, its request ended or its record was deleted) or a
+  wait ends without a grant (its limit, or its task or request ended), the team services look
+  at the waits on, above or under that resource in the order they were recorded. A wait is
+  granted when no other request holds a live claim on, above or under its resource and no
+  other request's earlier wait is on, above or under it. The grant is a new claim of the
   waiting request, with its own `claim_id`, on exactly the resource it waited for, with the
   wait's `reason`, for 15 minutes from the grant. The request's other waits on that resource
   or under it end with the same grant, each with its own `wait.ended`, so a request never

@@ -27,7 +27,8 @@
       "claim_id": "claim_1",
       "resources": [
         "file:team/reports/",
-        "file:users/person-7c1/notes/archive-plan.md"
+        "file:users/person-7c1/notes/archive-plan.md",
+        "file:team/archive/2025.md"
       ],
       "ends_at": "2026-10-22T04:45:00.000Z",
       "extensions_left": 2,
@@ -73,6 +74,6 @@
   },
   "causation_id": "01928f3a-7b2c-7c0e-8000-000000000c0e",
   "idempotency_key": "shared_work.claim.reply:CFh0YwbkYagK9pXklM5e_lEOaIxFJn0J6Sbq6QdWsqU",
-  "body_digest": "k1D55aVqxF5-vIEF1jbBoJQPUvVpMXtX6d5_JEIS74A",
-  "signature": "Ui3Wf-wO6t3PWqodkhTcqCCvwBOo1NgrZPezRjqP9G5JbraAa8dLFbXzF41IFauRBpVOO1EOXvKeDqpeZzc5Bg"
+  "body_digest": "RoLo-PcTzK0MRdCpl3N3ijb4JhbWVB9lhJRDaI7Xcpw",
+  "signature": "nPWmv7mQneAkMSwOARL3gFPCYWKNFBKJg9AI-PmNEv5tWYQAc2mcegm0g6n8yoAILn5XFs_DWToW4lkoqfUiCQ"
 }

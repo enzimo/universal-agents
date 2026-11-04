@@ -1399,6 +1399,93 @@ def test_every_kind_and_reply_has_a_valid_example() -> None:
     assert expected <= examples, sorted(expected - examples)
 
 
+# README, "Coordination between a person's requests": for these messages every fixed value and every
+# true/false field appears in an example too, not only each oneOf alternative, so the other
+# implementations check the same corpus. task.result counts only its coordination events.
+COORDINATION_KINDS = sorted([
+    *(name for name in REGISTRY["kinds"] if name.startswith("shared_work.")),
+    *(f"{name}.reply" for name in REGISTRY["kinds"] if name.startswith("shared_work.")),
+    "wait.ended",
+    "task.result",
+])
+
+
+def fixed_values(file: str, node: dict, path: str, found: dict, depth: int = 0) -> None:
+    """Each enum and boolean in a body schema: its JSON path and every value it may hold."""
+
+    while "$ref" in node:
+        file, fragment = RESOLVER.resolve(file, node["$ref"])
+        node = RESOLVER.node(file, fragment)
+    if depth > 32:
+        raise AssertionError(f"{file}{path}: schema nesting exceeds the frame limit; example coverage cannot skip it")
+    if "enum" in node:
+        found.setdefault(path, set()).update(node["enum"])
+    if node.get("type") == "boolean":
+        found.setdefault(path, set()).update({True, False})
+    for variant in node.get("oneOf", []):
+        fixed_values(file, variant, path, found, depth + 1)
+    if node.get("type") == "array":
+        fixed_values(file, node["items"], path + "[]", found, depth + 1)
+    for name, child in node.get("properties", {}).items():
+        fixed_values(file, child, f"{path}.{name}", found, depth + 1)
+
+
+@pytest.mark.parametrize("kind", COORDINATION_KINDS)
+def test_every_value_of_a_coordination_message_has_a_valid_example(kind: str) -> None:
+    file = body_schema_file(kind)
+    wanted: dict = {}
+    fixed_values(file, json.loads((CONTRACT / "schemas" / file).read_text(encoding="utf-8")), "", wanted)
+    if kind == "task.result":
+        wanted = {place: values for place, values in wanted.items() if place.startswith(".coordination")}
+    seen: dict = {}
+    for path in (EXAMPLES / "valid" / kind).glob("*.json"):
+        example_values(json.loads(path.read_text(encoding="utf-8"))["body"], "", wanted, seen)
+    missing = {place: sorted(map(str, values - seen.get(place, set()))) for place, values in wanted.items()
+               if values - seen.get(place, set())}
+    assert not missing, missing
+
+
+def test_coordination_replies_at_their_limits_fit_in_one_frame() -> None:
+    """README, "Coordination between a person's requests" ("Reply size"): the caps were chosen to fit a frame.
+
+    With every list at its cap and every text at its longest in ASCII, a check, a refused claim,
+    one page of a list and a granted wait each fit in max_frame_bytes. Longer text in other
+    scripts is what the rule to leave out the oldest notes first is for.
+    """
+
+    keys = [f"file:team/{n}" + "k" * 1089 for n in range(8)]
+    assert all(len(key) == 1100 for key in keys)
+    rid, text, title, at = "r" * 128, "t" * 500, "T" * 200, "2026-10-22T04:30:00.000Z"
+    holder = {"whose": "same_person", "root_task_id": rid, "title": title, "reason": text}
+    note = {"whose": "same_person", "note_id": rid, "root_task_id": rid, "title": title, "text": text, "written_at": at}
+    seen_claim = {"claim_id": rid, "resource": keys[0], "relation": "below", "ends_at": at, "holder": holder}
+    own_claim = {"claim_id": rid, "resources": keys, "ends_at": at, "extensions_left": 2, "reason": text}
+    wait = {"wait_id": rid, "task_id": rid, "on": {"type": "request", "root_task_id": rid, "title": title}, "ends_by": at}
+    bodies = {
+        "shared_work.check.reply": {"outcome": "ok", "resources": [
+            {"resource": key, "can_wait": True, "claims": [seen_claim] * 8, "claims_total": 8, "notes": [note] * 8,
+             "notes_total": 8} for key in keys]},
+        "shared_work.claim.reply": {"outcome": "claimed", "message": text, "conflicts": [
+            {"resource": key, "claims": [seen_claim] * 8, "claims_total": 8, "waiting_requests": 3} for key in keys]},
+        "shared_work.list.reply": {
+            "outcome": "ok",
+            "this_request": {"claims": [own_claim] * 8, "claims_total": 8, "waits": [wait] * 8, "waits_total": 8},
+            "requests": [{"root_task_id": rid, "title": title, "kind": "chat", "state": "running", "last_activity": text,
+                          "last_activity_at": at, "claims": [own_claim] * 8, "claims_total": 8,
+                          "notes": [{"note_id": rid, "resource": keys[0], "text": text, "written_at": at}] * 8,
+                          "notes_total": 8}],
+            "total": 64, "next_offset": 1},
+        "wait.ended": {"wait_id": rid, "root_task_id": rid, "task_id": rid,
+                       "ended": {"why": "claim_granted", "claim": own_claim, "notes": [note] * 8, "notes_total": 8}},
+    }
+    for kind, body in bodies.items():
+        validator(body_schema_file(kind)).validate(body)
+        frame = json.loads(next((EXAMPLES / "valid" / kind).glob("*.json")).read_text(encoding="utf-8"))
+        frame["body"] = body
+        size = len(json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        assert size <= kinds.MAX_FRAME_BYTES, (kind, size)
+
+
 # -- state records, installation traffic and dead letters ---------------------------------------------
 
 STATE_EXAMPLES = EXAMPLES / "state"
