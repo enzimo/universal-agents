@@ -129,6 +129,10 @@ def start_lease_loss_wind_down(
         deadline=now + timedelta(seconds=limits.lease_loss_wait_timeout_seconds),
     )
     agent._lease_loss_wind_down = state
+    # Its record says at once that it takes no more work (custom_agents.agent_host).
+    from custom_agents.agent_host import report_agent_state
+
+    report_agent_state(agent)
     agent._logger.warning(
         "Worker lost its launch lease and is winding down. "
         "event=worker_wind_down_started agent_id=%s launch_id=%s reason=%s "

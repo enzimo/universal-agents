@@ -24,6 +24,14 @@ Why it is shaped this way:
 - **The agent's own loop does the work.** A request for a thread worker arrives on the
   host's loop and runs on the worker's loop (``run_coroutine_threadsafe``), where its task
   manager lives.
+- **Each agent's record.** The host signs each agent's state (``UA1_AGENTS``, key
+  ``<team>.<agent>``: starting, idle, busy, paused or exiting, whether it accepts work, and
+  its name) when it changes, at most every 2 seconds, so a burst of busy and idle turns
+  costs one write; readers join it with the agent's placement and the host's liveness
+  (``custom_transport.protocol1.team_agents``). "Exiting" is written at once as the agent
+  leaves, before its session closes, and the record is then removed: agent ids are new at
+  every start, so records left behind would only pile up. A host's start removes the
+  records its earlier run left, with their sessions.
 """
 
 from __future__ import annotations
@@ -34,8 +42,10 @@ import concurrent.futures
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
+from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
@@ -52,6 +62,8 @@ AGENT_ADDRESS = "ctl.agent.{agent}"
 RETRY_SECONDS = (0.5, 1.0, 2.0, 5.0, 10.0)
 # Renew each agent's session daily; sessions last 7 days (team_services.sessions).
 SESSION_RENEW_SECONDS = 24 * 3600.0
+# An agent's record is written when its state changes, at most this often (README "State records").
+AGENT_RECORD_INTERVAL_SECONDS = 2.0
 _PLACEMENT_BUCKET = "UA1_PLACEMENT"
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,8 +108,21 @@ class _HostedAgent:
     agent: Any
     agent_type: str
     definition: str
+    display_name: str = ""
     session: Optional[str] = None
     subscription: Any = None
+    # The agent's state as last reported, and what its record last said (module docstring).
+    state: str = "starting"
+    accepting_work: bool = True
+    since: Optional[datetime] = None
+    written: Optional[tuple[str, bool]] = None
+    written_at: float = float("-inf")
+    record_sequence: int = 0
+    write_due: Optional[asyncio.TimerHandle] = None
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def key(self, team: str) -> str:
+        return f"{team}.{self.agent.id}"
 
 
 @dataclass
@@ -118,7 +143,8 @@ class AgentProcessHost:
 
     # -- the agent's side (called on the agent's own loop) --------------------------------
 
-    def attach(self, agent: Any, *, agent_type: str, definition: str, nc: Any) -> None:
+    def attach(self, agent: Any, *, agent_type: str, definition: str, nc: Any,
+               state: tuple[str, bool] = ("starting", True)) -> None:
         """Start the host on the first agent's connection, and open this agent's session; returns at once."""
 
         if self.loop is None:
@@ -127,8 +153,19 @@ class AgentProcessHost:
             self.host = MessageHost(self.layout, self.profile, nc, logger=self.logger,
                                     sessions_active=lambda: sum(1 for item in self.agents.values() if item.session))
             self._task = self.loop.create_task(self._run(), name="agent_process_host")
-        hosted = _HostedAgent(agent, agent_type, definition)
+        hosted = _HostedAgent(agent, agent_type, definition, display_name=str(getattr(agent, "name", "") or "")[:80],
+                              state=state[0], accepting_work=state[1])
         self.loop.call_soon_threadsafe(self._spawn, self._open(hosted))
+
+    def report(self, agent_id: str, state: str, accepting_work: bool) -> None:
+        """The agent's state now, from any thread; its record follows (module docstring)."""
+
+        if self.loop is None or self.loop.is_closed():
+            return
+        try:
+            self.loop.call_soon_threadsafe(self._noted, agent_id, state, accepting_work)
+        except RuntimeError:  # the host's loop closed meanwhile
+            return
 
     def detach(self, agent_id: str, *, failed: bool = False) -> Optional[concurrent.futures.Future[None]]:
         """Close this agent's session; the caller may wait on the returned future while its connection is up."""
@@ -158,6 +195,7 @@ class AgentProcessHost:
         if not await self._retrying("join", self.host.start):
             return
         await self._close_earlier_sessions()
+        await self._remove_earlier_records()
         self._joined.set()
         self.logger.info("This process joined as a protocol 1 host. event=agent_host_joined runtime=%s",
                          self.profile.runtime)
@@ -264,6 +302,7 @@ class AgentProcessHost:
                                                          agent=agent_id)
         self.logger.info("An agent has its protocol 1 session. event=agent_host_session_opened runtime=%s agent=%s "
                          "agent_type=%s", self.profile.runtime, agent_id, hosted.agent_type)
+        await self._write_record(hosted)
 
     def _handler_for(self, hosted: _HostedAgent) -> Callable[[VerifiedFrame], Awaitable[dict[str, Any]]]:
         async def handle(verified: VerifiedFrame) -> dict[str, Any]:
@@ -290,6 +329,12 @@ class AgentProcessHost:
                 self.logger.debug("The agent's address was already closed. agent=%s", agent_id, exc_info=True)
         if hosted.session is None:
             return
+        if hosted.write_due is not None:
+            hosted.write_due.cancel()
+            hosted.write_due = None
+        # Readers learn it is leaving before its session ends (the lead fails what it was asked).
+        hosted.state, hosted.accepting_work, hosted.since = "exiting", False, self.host.clock()
+        await self._write_record(hosted)
         try:
             await self._request("sessions.close", {"request_id": f"close-{hosted.session}"[:128],
                                                    "session": hosted.session, "reason": reason})
@@ -299,6 +344,104 @@ class AgentProcessHost:
                                 "event=agent_host_session_close_failed runtime=%s agent=%s", self.profile.runtime,
                                 agent_id, exc_info=True)
         self.host.live.identity = self.host.live.identity.without_session(agent_id)
+        await self._remove_record(hosted.key(self.team), agent_id)
+
+    # -- each agent's record (module docstring) -----------------------------------------
+
+    def _noted(self, agent_id: str, state: str, accepting_work: bool) -> None:
+        hosted = self.agents.get(agent_id)
+        if hosted is None or hosted.state == "exiting" or (state, accepting_work) == (hosted.state, hosted.accepting_work):
+            return
+        hosted.state, hosted.accepting_work = state, accepting_work
+        hosted.since = self.host.clock() if self.host is not None else None
+        self._record_soon(hosted)
+
+    def _record_soon(self, hosted: _HostedAgent) -> None:
+        """Write the record now, or when the interval since the last write has passed."""
+
+        assert self.loop is not None
+        if hosted.session is None or hosted.write_due is not None:
+            return  # the session's opening writes it, or a write is already due
+        wait = hosted.written_at + AGENT_RECORD_INTERVAL_SECONDS - self.loop.time()
+        if wait <= 0:
+            self._spawn(self._write_record(hosted))
+            return
+
+        def due() -> None:
+            hosted.write_due = None
+            self._spawn(self._write_record(hosted))
+
+        hosted.write_due = self.loop.call_later(wait, due)
+
+    async def _write_record(self, hosted: _HostedAgent) -> None:
+        """Sign and store the agent's record as its state is now; a failed write is tried again."""
+
+        assert self.host is not None and self.host.records is not None and self.loop is not None
+        async with hosted.write_lock:
+            current = (hosted.state, hosted.accepting_work)
+            if hosted.session is None or current == hosted.written:
+                return
+            now = self.host.clock()
+            # Above every earlier sequence for the key, also if the agent's id were ever used again.
+            hosted.record_sequence = max(hosted.record_sequence + 1, int(now.timestamp() * 1000))
+            body: dict[str, Any] = {"team": self.team, "agent": str(hosted.agent.id), "agent_type": hosted.agent_type,
+                                    "session": hosted.session, "state": hosted.state,
+                                    "accepting_work": hosted.accepting_work,
+                                    "since": format_timestamp(hosted.since or now)}
+            if hosted.display_name:
+                body["display_name"] = hosted.display_name
+            key = hosted.key(self.team)
+            try:
+                document = self.host.records.signed("agent", key, body, sequence=hosted.record_sequence, issued_at=now)
+                await self.host.records.put("agent", key, document)
+            except Exception:
+                self.logger.warning("An agent's record could not be written; trying again. "
+                                    "event=agent_record_write_failed runtime=%s agent=%s state=%s",
+                                    self.profile.runtime, hosted.agent.id, hosted.state, exc_info=True)
+                if hosted.state != "exiting" and hosted.write_due is None:
+                    hosted.write_due = self.loop.call_later(AGENT_RECORD_INTERVAL_SECONDS,
+                                                            lambda: self._retry_record(hosted))
+                return
+            hosted.written, hosted.written_at = current, self.loop.time()
+        if (hosted.state, hosted.accepting_work) != current:
+            self._record_soon(hosted)  # it changed while this one was written
+
+    def _retry_record(self, hosted: _HostedAgent) -> None:
+        hosted.write_due = None
+        if str(hosted.agent.id) in self.agents:
+            self._spawn(self._write_record(hosted))
+
+    async def _remove_record(self, key: str, agent_id: str) -> None:
+        assert self.host is not None and self.host.records is not None
+        try:
+            await self.host.records.delete("agent", key)
+        except Exception:
+            self.logger.warning("An agent's record could not be removed; the host's next start removes it. "
+                                "event=agent_record_remove_failed runtime=%s agent=%s", self.profile.runtime, agent_id,
+                                exc_info=True)
+
+    async def _remove_earlier_records(self) -> None:
+        """Remove the records of agents this host ran before it restarted (module docstring)."""
+
+        assert self.host is not None and self.host.records is not None
+        try:
+            keys = await self.host.records.keys("agent")
+        except Exception as error:
+            self.logger.debug("No earlier agent records to read. runtime=%s error=%s", self.profile.runtime, error)
+            return
+        for key in keys:
+            agent_id = key.removeprefix(f"{self.team}.")
+            if agent_id == key or agent_id in self.agents:
+                continue
+            raw = await self.host.records.raw("agent", key)
+            try:
+                writer = json.loads(raw or b"{}").get("writer", {}).get("runtime")
+            except ValueError:
+                continue
+            if writer == self.profile.runtime:
+                await self._remove_record(key, agent_id)
+                self.logger.info("Removed an agent record an earlier run of this host left behind. "
+                                 "event=agent_record_stale_removed runtime=%s agent=%s", self.profile.runtime, agent_id)
 
     async def _renew_sessions(self) -> None:
         while True:
@@ -359,10 +502,37 @@ def attach_agent(agent: Any, adapter: Any) -> None:
         return
     try:
         host.attach(agent, agent_type=str(agent.named_agent_type), definition=agent_definition_sha256(agent),
-                    nc=adapter.nats_connection)
+                    nc=adapter.nats_connection, state=agent_record_state(agent))
     except Exception:
         host.logger.exception("An agent could not join this process's protocol 1 host. event=agent_host_attach_failed "
                               "agent=%s", getattr(agent, "id", None))
+
+
+def agent_record_state(agent: Any) -> tuple[str, bool]:
+    """The agent's state for its record: paused, busy or idle, and whether it accepts work."""
+
+    from custom_agents.lease_loss_wind_down import is_winding_down
+
+    if getattr(agent, "paused", False):
+        state = "paused"
+    elif getattr(agent, "is_executing", False):
+        state = "busy"
+    else:
+        state = "idle"
+    return state, not is_winding_down(agent)
+
+
+def report_agent_state(agent: Any) -> None:
+    """Tell this process's host the agent's state (it writes the record when it changed)."""
+
+    host = process_host()
+    if host is None:
+        return
+    try:
+        host.report(str(agent.id), *agent_record_state(agent))
+    except Exception:
+        host.logger.warning("An agent's state could not be reported to its host. event=agent_state_report_failed "
+                            "agent=%s", getattr(agent, "id", None), exc_info=True)
 
 
 async def detach_agent(agent: Any, *, timeout_seconds: float = 5.0) -> None:

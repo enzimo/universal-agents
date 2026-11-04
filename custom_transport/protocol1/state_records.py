@@ -15,12 +15,13 @@ one (registry write rules).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
 
-from nats.js.errors import KeyNotFoundError
+from nats.js.errors import KeyNotFoundError, NoKeysError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import PROTOCOL, STATE_RECORDS
@@ -120,11 +121,35 @@ class StateRecords:
             return None
         return entry if entry.value else None
 
-    async def watch(self, record: str, keys: str = ">") -> AsyncIterator[tuple[str, Optional[bytes]]]:
-        """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or expired.
+    async def delete(self, record: str, key: str) -> None:
+        """Remove one of this host's own records (an agent's record when it has left); absent is fine."""
+
+        bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
+        await bucket.delete(key)
+
+    async def keys(self, record: str) -> list[str]:
+        """Every key in the record's bucket; none when it is empty."""
+
+        bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
+        try:
+            return list(await bucket.keys())
+        except NoKeysError:
+            return []
+
+    async def raw(self, record: str, key: str) -> Optional[bytes]:
+        """One record as stored, unverified (to find which host wrote it before removing it)."""
+
+        entry = await self._get(record, key)
+        return None if entry is None else bytes(entry.value)
+
+    async def watch(self, record: str, keys: str = ">", *,
+                    caught_up: Optional[asyncio.Event] = None) -> AsyncIterator[tuple[str, Optional[bytes]]]:
+        """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or purged.
 
         The caller verifies each record it uses, as ``read_report`` does, keeping the
-        sequence it holds per key.
+        sequence it holds per key. ``caught_up`` is set once the bucket's current values
+        have all been given. A record that expires by its bucket's age limit (host
+        liveness) gives no change: readers judge those by the record's own expiry.
         """
 
         bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
@@ -132,7 +157,9 @@ class StateRecords:
         try:
             async for entry in watcher:
                 if entry is None:
-                    continue  # the end of the initial values
+                    if caught_up is not None:
+                        caught_up.set()  # the end of the initial values
+                    continue
                 yield entry.key, (entry.value or None)
         finally:
             await watcher.stop()

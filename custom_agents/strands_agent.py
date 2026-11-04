@@ -209,7 +209,7 @@ from custom_agents.strands_model_factory import (
     build_strands_model,
     resolve_context_window_tokens,
 )
-from custom_agents.agent_host import attach_agent, detach_agent
+from custom_agents.agent_host import attach_agent, detach_agent, report_agent_state
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.context_engine import (
     ContextEngine,
@@ -2575,6 +2575,8 @@ class UniversalAgent(BaseModel):
     _agent_state_io: BlockingIOLane = PrivateAttr(default_factory=BlockingIOLane)
 
     async def _refresh_self_agent_state(self, *, is_exiting: bool = False) -> None:
+        # The host writes the agent's signed record when this changed it (custom_agents.agent_host).
+        report_agent_state(self)
         if self._agent_state_store is None:
             return
         try:

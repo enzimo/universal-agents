@@ -750,6 +750,7 @@ class AgentState(WireModel):
     team: TeamId
     agent: AgentId
     agent_type: AgentType
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=80)], MISSING] = Field(default=MISSING)
     session: TokenId
     state: Literal['starting', 'idle', 'busy', 'paused', 'exiting', 'stopped']
     accepting_work: bool

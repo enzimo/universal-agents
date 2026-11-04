@@ -4343,6 +4343,23 @@ for different grants gets a new certificate (a join asking for exactly the same 
 certificate back). A host that meets a relayed frame whose token another host signed reads
 that host's certificate from `UA1_CERTS` too.
 
+**Agent records and who is live** (step 7a): each agent's host signs the agent's state into
+`UA1_AGENTS` (key `<team>.<agent>`: starting, idle, busy, paused or exiting, whether it
+accepts work, and its name, plan decision 69) when the agent reports a change
+(`custom_agents.agent_host.report_agent_state`, called wherever the agent refreshes its own
+state row and when a worker starts winding down after losing its launch lease). It writes at
+most every 2 seconds, so a burst of busy and idle turns costs one write. "Exiting" is
+written at once as the agent leaves, before its session closes, and the record is then
+removed, since agent ids are new at every start; a host's start also removes the records
+its earlier run left. Readers use `custom_transport.protocol1.team_agents.TeamAgents`, which
+watches `UA1_AGENTS`, `UA1_PLACEMENT` and `UA1_HOSTS`, verifies each record, and counts an
+agent live while its record is not exiting, its placement names the host that signed the
+record, and that host's liveness record has not expired (checked again every 5 seconds,
+since an expired record gives no change). Whether an agent is the team lead comes from its
+session's `agent_role`, which the team services signed. The view is replaced as a whole on
+each change, so agents on other threads read it without locks. The team lead's process and
+the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is
 retried. The store that makes the change checks for a stored reply under its write
