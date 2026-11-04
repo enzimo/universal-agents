@@ -22,7 +22,7 @@ from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import active_task_context, get_agent_ref
 from custom_tools.tool_results import failed
 from knowledge_base.records import CODE_DISABLED, KnowledgeActor, KnowledgeError, KnowledgePage, SearchHit
-from knowledge_base.service import DraftInput, KnowledgeService, PageView, WriteResult
+from knowledge_base.service import DraftInput, KnowledgeService, PageView, WriteResult, knowledge_service_for
 from knowledge_base.vocabulary import ActorKind
 from runtime_settings.knowledge import knowledge_settings
 
@@ -44,9 +44,8 @@ def _error(code: str, message: str) -> str:
 def knowledge_service(agent: Any) -> KnowledgeService:
     """The knowledge service for an agent's store and settings.
 
-    One builder for the agent tools, the curator's tools, after-action report
-    lessons and the manager's Knowledge page commands, so all of them apply
-    the same settings and the person's memories to the overlap check.
+    The agent tools, the curator's tools and after-action report lessons use it;
+    the team services build theirs with the same ``knowledge_service_for``.
     """
 
     settings = knowledge_settings(getattr(agent, "knowledge_config", None))
@@ -55,17 +54,10 @@ def knowledge_service(agent: Any) -> KnowledgeService:
         raise KnowledgeError(CODE_DISABLED, "The knowledge base is turned off (agent.knowledge.enabled).")
     if repository is None:
         raise KnowledgeError("knowledge_unavailable", "The knowledge base is not available to this agent.")
-    pinned = getattr(agent, "_pinned_memory_repository", None)
-
-    def personal_texts(person_id: str) -> list[str]:
-        if pinned is None:
-            return []
-        return [fact.fact_text for fact in pinned.list_usermem(canonical_user_id=person_id)]
-
-    return KnowledgeService(
+    return knowledge_service_for(
         repository,
         settings=settings,
-        personal_texts=personal_texts,
+        personal_memory=getattr(agent, "_pinned_memory_repository", None),
         logger=getattr(agent, "_logger", None),
     )
 

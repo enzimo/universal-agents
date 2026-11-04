@@ -108,7 +108,6 @@ from runtime_settings.transport import TransportSettings
 from storage.conversation_repository import SqliteConversationRepository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from storage.knowledge_repository import create_knowledge_repository
-from custom_agents.knowledge_command_runtime import handle_manager_knowledge_command
 from tests.team_services_support import InProcessTeamServices
 
 
@@ -253,20 +252,7 @@ def _attach_in_process_manager_control(
             ),
         )
         header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway")
-        if command.message_class == "ManagerKnowledgeCommand":
-            await handle_manager_knowledge_command(
-                manager,
-                command=command,
-                msg_header=header,
-                msg_meta=meta,
-            )
-        else:
-            await handle_manager_topic_command(
-                manager,
-                command=command,
-                msg_header=header,
-                msg_meta=meta,
-            )
+        await handle_manager_topic_command(manager, command=command, msg_header=header, msg_meta=meta)
         return comms.messages[-1].msg_content
 
     gateway._manager_commands.request = request_manager  # type: ignore[method-assign]
@@ -4153,12 +4139,12 @@ async def test_settings_memory_operation_reaches_the_team_services_as_the_signed
 
 
 @pytest.mark.asyncio
-async def test_knowledge_page_requests_reach_the_manager_as_the_signed_person(
+async def test_knowledge_page_requests_reach_the_team_services_as_the_signed_person(
     tmp_path: Path, gateway_signed_commands: None
 ):
     """The Knowledge page runs end to end through the real gateway: the route's
-    person resolves a session, the manager runs as that gateway-signed person,
-    and the gateway names the editor before answering the browser."""
+    person is named by reference, the team services act for that person, and
+    the gateway names the editor before answering the browser."""
 
     from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefused
     from assistant_gateway.application.route_context import GatewayRouteContextV1
@@ -4170,8 +4156,8 @@ async def test_knowledge_page_requests_reach_the_manager_as_the_signed_person(
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=InProcessTeamServices(config),
     )
-    _attach_in_process_manager_control(gateway, config)
     person = config.user.canonical_user_id
     context = GatewayRouteContextV1(
         session_key="website:web-chat:knowledge", channel_name="website", user_id=person,

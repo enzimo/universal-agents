@@ -14,7 +14,7 @@ command does is unchanged (plan 13B.4). What changed:
   them for chats and the Settings page.
 - **A change is carried out once per command.** Its reply is stored with the change, in
   the same transaction, under the command's retry key, and a repeat gets it back
-  (``storage.operation_outcomes``); refusals are stored too.
+  (``storage.operation_outcomes``, ``team_services.outcomes``); refusals are stored too.
 - **Where a fact came from** is no longer recorded for people's commands: the command
   names no chat, so the fact's events record the person only.
 
@@ -53,7 +53,7 @@ from custom_messages.enums import ChangeRefusal
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
 from storage.change_ledger import ChangeRefused, ChangeWriter, ChangeWriterKind
-from storage.operation_outcomes import CommandOutcome, OutcomeAlreadyStored
+from storage.operation_outcomes import CommandOutcome
 from storage.pinned_memory_repository import (
     COREMEM_BANK,
     PinnedMemoryCapacityError,
@@ -62,6 +62,7 @@ from storage.pinned_memory_repository import (
     PinnedMemoryRepository,
     PinnedMemoryWriteResult,
 )
+from team_services.outcomes import carried_out_once
 from team_services.people import CommandPerson, command_person
 
 MEMORY_ACTIONS = ("list", "show", "create", "replace", "delete", "undo")
@@ -112,27 +113,26 @@ class MemoryOperations:
                                  "action=%s reason=%s", person.person_id, body["bank"], action, decision.reason)
             return _message_reply("not_allowed", "Only administrators change team memory."
                                   if body["bank"] == COREMEM_BANK else "This memory is not yours.")
+        if action not in _CHANGES:
+            try:
+                result = self._service.execute(_service_command(action, body), context=_context(person))
+            except Exception as error:  # noqa: BLE001 - every failure is answered and logged in _refusal
+                return self._refusal(action, body, person, error)
+            return _read_reply(action, body, result)
         replies: list[dict[str, Any]] = []
-        outcome = None
-        if action in _CHANGES:
-            outcome = CommandOutcome(
-                team_id=person.team_id, retry_key=str(verified.raw["idempotency_key"]), kind=verified.frame.kind,
-                body_digest=str(verified.raw["body_digest"]), now=self._clock(),
-                reply_for=lambda result: _kept(replies, _change_reply(action, result)), logger=self._logger,
-            )
-        try:
-            command = _service_command(action, body)
-            result = self._service.execute(command, context=_context(person), command_outcome=outcome)
-        except OutcomeAlreadyStored as stored:
-            return stored.reply
-        except Exception as error:  # noqa: BLE001 - every failure is answered and logged in _refusal
-            reply = self._refusal(action, body, person, error)
-            if outcome is not None:
-                self._store_refusal(outcome, reply)
-            return reply
-        if outcome is not None:
+        outcome = CommandOutcome(
+            team_id=person.team_id, retry_key=str(verified.raw["idempotency_key"]), kind=verified.frame.kind,
+            body_digest=str(verified.raw["body_digest"]), now=self._clock(),
+            reply_for=lambda result: _kept(replies, _change_reply(action, result)), logger=self._logger,
+        )
+
+        def attempt() -> dict[str, Any]:
+            self._service.execute(_service_command(action, body), context=_context(person), command_outcome=outcome)
             return replies[-1]
-        return _read_reply(action, body, result)
+
+        return carried_out_once(self._repository, outcome, attempt,
+                                refusal_for=lambda error: self._refusal(action, body, person, error),
+                                logger=self._logger)
 
     def _refusal(self, action: str, body: dict[str, Any], person: CommandPerson, error: Exception) -> dict[str, Any]:
         if isinstance(error, PinnedMemoryNotFoundError):
@@ -166,15 +166,6 @@ class MemoryOperations:
             return _message_reply("not_found", str(error))
         return {"outcome": "changed_since_read", "current_version": current["fact"]["record_digest"],
                 "message": _clip(message)}
-
-    def _store_refusal(self, outcome: CommandOutcome, reply: dict[str, Any]) -> None:
-        try:
-            self._repository.save_command_refusal(outcome, reply)
-        except Exception:
-            # The refusal still answers; a retry is decided again, and refused again, without it.
-            self._logger.exception("Could not store a refused command's reply. event=team_memory_refusal_not_stored "
-                                   "kind=%s retry_key=%s outcome=%s", outcome.kind, outcome.retry_key,
-                                   reply.get("outcome"))
 
 
 def _kept(replies: list[dict[str, Any]], reply: dict[str, Any]) -> dict[str, Any]:

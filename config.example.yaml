@@ -588,7 +588,7 @@ agent:
       edit_war_freeze_minutes: 60               # How long a frozen page refuses agent edits (agents add notes instead).
       max_title_chars: 120
       max_summary_chars: 300
-      max_body_chars: 24000                     # Longer pages should be split into linked pages.
+      max_body_chars: 24000                     # Longer pages should be split into linked pages; Web Chat shows at most 32768 until long text travels as a file.
       max_note_chars: 2000
       max_tags: 10
     sensitive_content:

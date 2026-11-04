@@ -10,7 +10,7 @@ Like the other Web Chat routes, these have no tool catalog entries: they are
 people's own controls, protected by the session, the write checks and the
 ownership rule (``access_control.knowledge_access``), not agent operations.
 
-What a request may do is decided by the manager's knowledge service; a
+What a request may do is decided by the team services' knowledge service; a
 refusal comes back with its stable code, plain words, and, for content held
 for review or never stored, where it is (never the text itself).
 """
@@ -24,6 +24,7 @@ from typing import Any, Mapping
 from aiohttp import web
 from pydantic import ValidationError
 
+from assistant_gateway.application.team_commands import TeamServicesUnavailable
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefused
 from assistant_gateway.application.website_application import WebsiteGatewayApplication
 from assistant_gateway.interactive_apps.website_handlers.operations import WebsiteKnowledgeHandlersOperations
@@ -36,7 +37,7 @@ from custom_messages.contracts.control_v1 import (
 
 LOGGER = logging.getLogger(__name__)
 
-# HTTP status for each refusal code of ManagerKnowledgeCommand.
+# HTTP status for each Knowledge page refusal code (application.knowledge_wire.REFUSAL_CODES).
 REFUSAL_STATUS = {
     "authorization_denied": 403,
     "conflict": 409,
@@ -66,8 +67,8 @@ NOT_VALID_TEXT = (
     "Nothing was saved because the request was not valid (a value is missing, too long or of the wrong kind). "
     "Check the fields and try again."
 )
-MANAGER_SILENT_TEXT = (
-    "The manager did not answer in time, so the result is unknown. Refresh to see whether the change was saved."
+TEAM_SERVICES_SILENT_TEXT = (
+    "The team services did not answer, so the result is unknown. Refresh to see whether the change was saved."
 )
 NOT_ALLOWED_TEXT = "You cannot open or change this. Only the person whose pages or proposals these are can."
 
@@ -186,7 +187,7 @@ class WebsiteKnowledgeHandlers:
     async def _answer(
         self, request: web.Request, web_session: WebChatSession, session_key: str, fields: Mapping[str, Any]
     ) -> KnowledgeCommandResultPayload | web.Response:
-        """The manager's result for one request, or the refusal to send the browser."""
+        """The team services' result for one request, or the refusal to send the browser."""
 
         session_key = session_key.strip()
         if not session_key:
@@ -222,16 +223,17 @@ class WebsiteKnowledgeHandlers:
             )
         except PermissionError:
             return self._refused("authorization_denied", NOT_ALLOWED_TEXT)
-        except TimeoutError:
+        except TeamServicesUnavailable as exc:
             LOGGER.warning(
-                "The manager did not answer a Knowledge page request. event=web_knowledge_timeout "
-                "person_id=%s action=%s",
+                "The team services did not answer a Knowledge page request. event=web_knowledge_unanswered "
+                "person_id=%s action=%s reason=%s",
                 context.canonical_user_id,
                 payload.action.value,
+                exc,
             )
-            return self._refused("runtime_error", MANAGER_SILENT_TEXT)
+            return self._refused("runtime_error", TEAM_SERVICES_SILENT_TEXT)
         except RuntimeError as exc:
-            # The manager is not running (GatewayManagerCommandService's unavailable text).
+            # The team services refused the request itself (team_commands.TeamCommandRefused).
             return self._refused("runtime_error", str(exc))
         return result
 

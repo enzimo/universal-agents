@@ -6,7 +6,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from access_control.knowledge_access import knowledge_target
 from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.ports import (
     GatewayIdGenerator,
@@ -28,7 +27,6 @@ from assistant_gateway.application.request_context import (
 )
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.control_v1 import (
-    ManagerKnowledgeCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
     PersonStandingCommandV1,
@@ -41,7 +39,6 @@ from custom_messages.enums import RequesterType
 
 GatewayManagerCommand = (
     ManagerScheduleCommand
-    | ManagerKnowledgeCommand
     | ManagerRuntimeWorkCommand
     | ManagerTopicCommand
 )
@@ -78,7 +75,7 @@ class _PrivateResourceTarget:
     resource_type: str
     resource_id: str
     action: str
-    # False for records every team member shares (team knowledge pages).
+    # False for records every team member shares.
     owned_by_person: bool = True
 
 
@@ -252,15 +249,6 @@ class GatewayManagerCommandService:
                     if command.action == "remove"
                     else PRIVATE_ACTION_UPDATE
                 ),
-            )
-        if isinstance(command, ManagerKnowledgeCommand):
-            # The same rule the manager applies (access_control.knowledge_access).
-            knowledge = knowledge_target(command.command, person_id=person.canonical_user_id)
-            return _PrivateResourceTarget(
-                resource_type=knowledge.resource_type,
-                resource_id=knowledge.resource_id,
-                action=knowledge.action,
-                owned_by_person=knowledge.owner_person_id is not None,
             )
         if isinstance(command, ManagerRuntimeWorkCommand):
             if command.action in {"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"}:

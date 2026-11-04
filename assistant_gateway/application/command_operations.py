@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 import shlex
 from dataclasses import dataclass
@@ -40,10 +39,8 @@ from assistant_gateway.application.session_service import (
     with_parallel_mark_notice,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from assistant_gateway.application.route_context import GatewayRouteContextV1
 from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from custom_messages.contracts.control_v1 import (
-    ManagerKnowledgeCommand,
     ManagerTopicCommand,
     PinnedMemoryCommandPayload,
     PinnedMemoryCommandResultPayload,
@@ -637,40 +634,6 @@ class GatewayCommandOperationsApplication:
         if not isinstance(result, ManagerTopicCommand):
             raise TypeError("Manager returned the wrong command result type.")
         return result
-
-    async def execute_knowledge_command(
-        self, command: ManagerKnowledgeCommand, *, context: GatewayRouteContextV1
-    ) -> ManagerKnowledgeCommand:
-        """Send one Knowledge page request to the manager for the route's signed-in person.
-
-        Resolving the session and the person reads the gateway's records, so
-        it runs in a worker thread (website_handlers.off_loop).
-        """
-
-        route = GatewayRequestRoute(
-            channel_name=context.channel_name,
-            user_id=context.user_id,
-            chat_id=context.chat_id,
-            canonical_user_id=context.canonical_user_id,
-        )
-
-        def session_and_person() -> tuple[SessionRecord, GatewayCommandPerson]:
-            session = self.resolve_session(
-                session_key=context.session_key,
-                channel_name=route.channel_name,
-                user_id=route.user_id,
-                chat_id=route.chat_id,
-                canonical_user_id=route.canonical_user_id,
-            )
-            return session, self._principal(session, route)
-
-        session, person = await asyncio.to_thread(session_and_person)
-        response = await self._manager_commands.request(
-            GatewayManagerCommandRequest(command=command, session=session, person=person, route=route)
-        )
-        if not isinstance(response, ManagerKnowledgeCommand):
-            raise TypeError("Manager returned the wrong knowledge result type.")
-        return response
 
     async def execute_pinned_memory_command(
         self,

@@ -1,19 +1,17 @@
 """Whose knowledge records a person's Knowledge page request may touch.
 
-One rule for both sides of ``ManagerKnowledgeCommand``: the gateway checks it
-before sending (``GatewayManagerCommandService``) and the manager again with
-the gateway-signed person (``custom_agents.knowledge_command_runtime``).
-The decisions themselves are ``access_control.ownership``'s:
+The team services check it for each ``knowledge.*`` command, with the person
+the command's authority token names (``team_services.knowledge``). The
+decisions themselves are ``access_control.ownership``'s:
 
 - team pages: every active team member reads, creates and edits them
   (``RESOURCE_KNOWLEDGE_TEAM_PAGE``; archiving is an edit, nobody deletes);
 - personal pages: only their owner, and ``personal`` always names the signed-in
   person's own space, so the owner is that person;
-- pending contributions: only the person whose work proposed them. The
-  gateway cannot see a contribution's owner, so it checks the request as the
-  person's own; the manager's knowledge service checks the stored owner
-  (``KnowledgeService.get_contribution``) and answers "not found" for anyone
-  else's, so ids reveal nothing.
+- pending contributions: only the person whose work proposed them. The rule
+  checks the request as the person's own; the knowledge service then checks
+  the stored owner (``KnowledgeService.get_contribution``) and answers "not
+  found" for anyone else's, so ids reveal nothing.
 """
 
 from __future__ import annotations
