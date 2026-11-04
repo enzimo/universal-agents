@@ -1754,7 +1754,9 @@ def binding_text(entry: dict[str, Any]) -> str:
 
 
 def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], transport: dict[str, Any],
-                  topologies: dict[str, Any]) -> dict[Path, str]:
+                  topologies: dict[str, Any], digest: str) -> dict[Path, str]:
+    """models.py and kinds.py; ``digest`` is the contract's own digest, which kinds.py names (README, "Versions")."""
+
     writer = ModelWriter(schemas)
     for fragment in schemas["common.schema.json"]["$defs"]:
         writer.named("common.schema.json", f"/$defs/{fragment}")
@@ -1845,6 +1847,10 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         "from custom_messages.wire import models\n"
         "from custom_messages.wire.spec import KindSpec, StateSpec, TokenBinding\n\n"
         f"PROTOCOL = {registry['protocol']!r}\n"
+        "# The digest of the contract these files were generated from, which a host compares with a\n"
+        "# peer's while the label is a pre-release (README, \"Versions\"). Generated files are not\n"
+        "# contract sources, so naming it here does not change it.\n"
+        f"CONTRACT_SHA256 = {digest!r}\n"
         f"SIGNING_DOMAIN = {registry['signing_domain']!r}\n"
         f"STATE_SIGNING_DOMAIN = {registry['state_signing_domain']!r}\n"
         f"AUTHORITY_TOKEN_DOMAIN = {registry['authority_token_domain']!r}\n"
@@ -1896,11 +1902,13 @@ def render() -> dict[Path, str]:
     }
     for role, document in permissions(registry, transport).items():
         files[GENERATED / "permissions" / f"{role}.json"] = json_text(document)
-    files.update(render_python(registry, schemas, transport, topologies))
     # Examples are sources whose digests and signatures this run fills in; the
-    # contract digest and the manifest record them as rendered.
+    # contract digest and the manifest record them as rendered. The Python files
+    # name the digest, and lie outside the sources, so they follow it.
     files.update(render_examples(registry))
-    files[GENERATED / "compatibility.json"] = json_text(compatibility(registry, contract_sha256(files)))
+    digest = contract_sha256(files)
+    files.update(render_python(registry, schemas, transport, topologies, digest))
+    files[GENERATED / "compatibility.json"] = json_text(compatibility(registry, digest))
     sources = contract_sources()
     entries = {path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
     entries.update({path.relative_to(REPO_ROOT).as_posix(): hashlib.sha256(text.encode("utf-8")).hexdigest()

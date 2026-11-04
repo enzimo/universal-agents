@@ -11,8 +11,8 @@ installation or an outside agent can implement them without reading UA's Python 
 
 The protocol is labelled `1.0-pre` while the messages are being moved onto it. It becomes
 `1.0` when the last kind is live. Until then a fix may change these files under the same
-label. Hosts refuse peers whose label differs, and are to refuse peers whose contract digest
-differs once joins and host records carry it; no message carries it yet ("Versions").
+label. Hosts refuse peers whose label differs and, while the label is a pre-release, hosts of
+one installation also refuse peers whose contract digest differs ("Versions").
 
 ## Layout
 
@@ -985,7 +985,8 @@ its session names when it is an agent; the time is
 replay record is empty; and a reply answers the valid example whose message id it names.
 Joins, renewals and host records carry the fixed example digest
 `c734d95cdcb5b0081997c039906cf13cf3eeef0e0ef105160fb1138c5f6a2f60`, not the digest of the
-contract they belong to, which would change with them.
+contract they belong to, which would change with them, and the examples' receivers run that
+digest. A `protocol_mismatch` answer names another one, the authority's in that example.
 
 Each file in `examples/invalid/` describes one refusal:
 - `refusal` and `at`: the code and the JSON pointer of the field the refusal is about
@@ -1222,19 +1223,40 @@ files go in order of their paths relative to that folder, with `/` between folde
 compared as UTF-8 bytes. For each file the digest takes its relative path in UTF-8, a zero
 byte, the file's size in bytes as decimal digits, a zero byte, and the file's bytes. While
 the label ends in `-pre`, a fix may change the contract without changing the label, so
-hosts refuse a peer whose digest differs from their own:
-- `host.join` and `host.renew` carry the host's `contract_sha256`. While the label ends in
-  `-pre`, the installation authority answers a join or renewal whose digest differs from its
-  own with `protocol_mismatch`, so a host upgraded in place gets no new certificate until it
-  runs the authority's contract;
-- each host liveness record carries it too. While the label ends in `-pre`, a reader sends no
-  work to a host whose record names another digest and places no agent on it, and logs the
-  host and both digests. The record itself is authentic, so `TrustStore.verify` still accepts
-  it; the comparison is the reader's decision, not a refusal of the record.
+hosts of one installation refuse a peer whose digest differs from their own. The generated
+code names its own digest (`custom_messages.wire.kinds.CONTRACT_SHA256`).
+- **Where it travels.** `host.join`, `host.renew` and each host liveness record carry the
+  host's `contract_sha256`. Another revision of the contract may shape these bodies
+  differently, so the digest is read before the rest of the body: the installation authority
+  reads a join's or renewal's `protocol` and `contract_sha256` first, and `TrustStore.verify`
+  reads a host record's digest after its signature, writer and times and before its body.
+  Otherwise a host of another revision would be refused as malformed and never learn why.
+- **The authority.** While the label ends in `-pre`, it answers a join or renewal whose digest
+  differs from its own with `protocol_mismatch`, naming the digest it runs
+  (`accepted_contract_sha256`) and what to install. It still answers a renewal that only gives
+  up agents or pools ("Credentials follow placement"), so a host on another contract can hand
+  its agents over. A host upgraded in place renews with a new `renew_id`, since a repeated one
+  gets its stored outcome back ("Stored outcomes").
+- **Readers of host records.** A host record that names another digest is authentic, so
+  `TrustStore.verify` accepts it without reading the rest of its body and marks it
+  (`other_contract`, with `their_contract_sha256`). A reader sends that host no new work,
+  places no agent on it and logs the host and both digests, but still sends it control
+  messages for the tasks it holds (stops, custody, access decisions, the ends of waits). The
+  team services keep counting its custody windows from its records, so its tasks never get a
+  second holder without a person's override ("Custody windows").
+- **The host on another contract.** A host learns that its digest differs from the team
+  services' host record, which it reads when it starts and whenever it changes, or from
+  `protocol_mismatch`. It then stops pulling from worker pool queues and from its agents'
+  inboxes, keeps reading their control queues, finishes the turns in progress and hands back
+  (`task.handback`) every task it has not finished, holding every action outside the team
+  meanwhile, and renews only to give up its agents and pools. Messages either side can no
+  longer read are set aside as dead letters, as usual.
 
-A released label (no `-pre`) compares only the label and its minor ("Versions" above), so the
-digest is then informational. `--check` regenerates the record, so a changed source with a
-stale digest fails it.
+The digest is compared only within one installation: frames from another installation
+(`x-<installation>`) carry none, and federation agreements gain it before two installations
+connect. A released label (no `-pre`) compares only the label and its minor ("Versions"
+above), so the digest is then informational. `--check` regenerates the record, so a changed
+source with a stale digest fails it.
 
 ## Operation inputs and outcomes
 

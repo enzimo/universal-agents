@@ -2118,6 +2118,7 @@ class HostJoinReplyDenied(WireModel):
 class HostJoinReplyProtocolMismatch(WireModel):
     outcome: Literal['protocol_mismatch']
     accepted: ProtocolLabel
+    accepted_contract_sha256: ContractSha256
     install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
@@ -2168,6 +2169,7 @@ class HostRenewReplyNeedsApproval(WireModel):
 class HostRenewReplyProtocolMismatch(WireModel):
     outcome: Literal['protocol_mismatch']
     accepted: ProtocolLabel
+    accepted_contract_sha256: ContractSha256
     install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 

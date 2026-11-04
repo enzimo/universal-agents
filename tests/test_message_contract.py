@@ -1478,6 +1478,64 @@ def test_a_host_cannot_write_another_hosts_liveness() -> None:
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/runtime")
 
 
+OTHER_CONTRACT = "5d1f8a0c6b7e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a"
+
+
+def host_record_of_another_contract() -> dict:
+    """A host record from a pre-release revision whose host record has other fields than this one's."""
+
+    document = state_example("host/lead-host.json")
+    document["body"]["contract_sha256"] = OTHER_CONTRACT
+    del document["body"]["health"]
+    document["body"]["queue_depths"] = {"inbox": 3}
+    return document
+
+
+def test_a_host_record_of_another_contract_is_accepted_without_its_body() -> None:
+    """README, "Versions": the digest is read before the body, so the reader can tell the host runs another contract.
+
+    The record stays authentic, so the team services keep counting the host's custody windows
+    from it and its tasks never get a second holder without a person's override.
+    """
+
+    record = fixtures.verify_state(signed_state(host_record_of_another_contract()))
+    assert record.other_contract and record.their_contract_sha256 == OTHER_CONTRACT
+    assert record.body is None and record.document.record == "host"
+    assert record.signer is not None and record.signer.runtime == "lead-host-1"
+
+
+def test_a_host_record_of_this_contract_is_still_read_strictly() -> None:
+    document = host_record_of_another_contract()
+    document["body"]["contract_sha256"] = fixtures.EXAMPLE_CONTRACT_SHA256
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert refused.value.code == "invalid_body"
+
+
+def test_a_host_record_of_another_contract_is_still_checked_for_its_signature() -> None:
+    document = host_record_of_another_contract()
+    data = json.loads(signed_state(document))
+    data["sequence"] += 1
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(json.dumps(data).encode())
+    assert refused.value.code == "bad_signature"
+
+
+def test_a_released_label_reads_every_host_record_strictly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A released label compares only the label and its minor, so the digest no longer decides how a record is read."""
+
+    monkeypatch.setattr(wire_trust, "PROTOCOL", "1.0")
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(host_record_of_another_contract()))
+    assert refused.value.code == "invalid_body"
+
+
+def test_the_generated_code_names_the_contract_digest() -> None:
+    record = json.loads((CONTRACT / "generated" / "compatibility.json").read_text(encoding="utf-8"))
+    assert kinds.CONTRACT_SHA256 == record["contract_sha256"]
+    assert wire_trust.TrustStore("install_example", []).contract_sha256 == kinds.CONTRACT_SHA256
+
+
 def test_a_certificate_names_its_connection_class_and_a_remote_hosts_tools() -> None:
     """README, "Access on remote hosts": a host with a tool list decides from signed lists; one without reads the store."""
 
