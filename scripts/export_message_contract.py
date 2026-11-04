@@ -361,6 +361,7 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         check_reply_errors(where, entry, schemas)
         check_covered_change(where, entry, registry, schemas)
     check_shared_addresses(registry, transport)
+    check_ledger_waits(registry)
     names: dict[str, str] = {}
     for name in registry["kinds"]:
         # Generated model and adapter names come from the kind name; two kinds
@@ -368,6 +369,20 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         other = names.setdefault(class_name(name), name)
         if other != name:
             raise ContractError(f"registry.yaml: kinds {other} and {name} generate the same model names")
+
+
+def check_ledger_waits(registry: dict[str, Any]) -> None:
+    """A wait one kind's ledger entry closes is one another kind's entry opens, and the other way round.
+
+    A work ledger that closes a wait nothing opened, or opens one nothing closes, would
+    lose or keep a waiting task's state with no record of why (registry header, ``ledger``).
+    """
+
+    ledgers = {entry["ledger"] for entry in registry["kinds"].values()}
+    for value in sorted(ledgers):
+        for end, other in (("_wait_closed", "_wait_open"), ("_wait_open", "_wait_closed")):
+            if value.endswith(end) and value[:-len(end)] + other not in ledgers:
+                raise ContractError(f"registry.yaml: ledger {value} has no {value[:-len(end)] + other} in any kind")
 
 
 def check_entry_fields(where: str, name: str, entry: dict[str, Any], registry: dict[str, Any],

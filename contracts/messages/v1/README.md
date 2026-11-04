@@ -750,15 +750,16 @@ pulls from an agent's inbox only while the agent can take more work, and stops w
 agent's local waiting list is full or the agent is paused. A message about work the agent
 already holds must not wait there behind tasks it cannot start yet: a stop or a hold for
 the task that holds the slot, the renewal of its custody window, a smaller access list, or
-the access decision one of its steps waits for. So each agent has two queues
-(`agent_queues` in `transport.yaml`), each with its own consumer in
+the access decision or the end of a coordination wait one of its tasks waits for. So each
+agent has two queues (`agent_queues` in `transport.yaml`), each with its own consumer in
 `UA1_AGENT_WORK_<team>`:
 - the **inbox**, `work.agent.<agent>`, holds the kinds that need an execution slot: new
-  tasks, results, questions, answers, closed questions, credential form and tool setup
-  results, and the ends of coordination waits;
+  tasks, results, questions, answers, closed questions, and credential form and tool setup
+  results;
 - the **control queue**, `work.control.<agent>`, holds every other kind sent to an agent:
   stops, steering, custody moves and confirmations, progress, claims, handbacks, hold
-  accounts, reports, access decisions, refusals and ledger facts.
+  accounts, reports, access decisions, the ends of coordination waits, refusals and ledger
+  facts.
 
 The host reads the control queue whenever it runs the agent, paused or not, and admits each
 message at once, since none needs a slot. Like all queued work, it waits only while the
@@ -781,6 +782,19 @@ a task stopped before it started never starts; it forgets the message once the m
 own lifetime ends. Worker pools need no second queue, since a pool receives only new tasks.
 An edge's reader, a gateway route or an outside agent's adapter, passes each message on and
 runs no task itself, so it reads its one queue whenever it runs.
+
+**Waking the model.** Each kind's `wakes_model` says what a message does to the model of the
+agent that receives it:
+- `always`: the host gives the task a model turn as soon as it can. A task paused on a local
+  wait (a Strands interrupt) resumes, and a task with no turn running gets one;
+- `next_turn`: the model sees the message at the task's next turn, together with other news.
+  It starts no turn;
+- `never`: the message only changes records, such as the work ledger or custody.
+
+A kind that ends a local wait is `always` wherever it ends it, since resuming the paused tool
+call continues the model's turn: an access decision (except `waiting`, which leaves the wait
+open), a tool setup's result and the end of a coordination wait. A credential form's result
+ends no local wait: the lead goes on, and sees the result at its next turn.
 
 **Credentials follow placement.** A host's NATS credential names the agents and pools it
 runs, so it changes when the host gains or loses one. NATS checks a user's permissions only
@@ -2041,16 +2055,41 @@ claim and no note.
 Writes (`claim`, `extend`, `release`, `note`, `wait`) carry the agent's `request_id` as their
 retry key ("Stored outcomes"); `count`, `list` and `check` are reads keyed by the message id.
 
-**The end of a wait.** `wait.ended` is durable work from the team services to the waiting
-task's current holder (`routing: holder`), so it survives restarts and custody moves. It goes to
-the holder's inbox, since it resumes the task and needs an execution slot. It says why the wait
-ended:
+**The end of a wait.** `wait.ended` is durable work from the team services to the holder of
+the task that recorded the wait (`routing: holder`), so it survives restarts. It is sent once:
+a wait ends without a message when its task moves or is handed back, so no other holder ever
+needs it, and its key names the wait alone. It goes to the holder's control queue, which the
+host reads even while every slot is busy or the agent is paused, like an access decision: the
+host takes it at once and resumes the task ahead of new work as soon as a slot is free. It
+wakes the model ("Waking the model"). It says why the wait ended:
 - `claim_granted`: the wait was granted ("Waits and grants"): its new claim, with the notes on
   the resource. Its 15 minutes start when it is granted;
 - `request_ended`: the request it waited for ended;
 - `limit_reached`: the wait reached its 35 minutes. `still` says what it waited for is doing:
   `claimed` for a resource, `running` or `waiting_for_person` for a request. The model may
   carry on, wait again or ask the person.
+
+A granted claim's `ends_at` is at most 15 minutes after the message (body rule `ends_within`).
+
+**What the host does with a wait.**
+- It repeats a `shared_work` write with the same `request_id` until it gets an outcome
+  ("Stored outcomes"), before the model is told anything, so no wait or claim is recorded that
+  the host does not know about. A repeated `wait` whose wait has already ended gets its stored
+  `ok`, and the host then finds the `wait.ended` it kept.
+- A `wait.ended` can arrive before the task's turn has ended with its wait, for example when
+  the reply was slow. The host keeps it under the task and applies it when the turn ends with
+  that wait, as it does for a stop that comes before its task.
+- When it resumes a task whose granted claim's `ends_at` has passed, it tells the model that
+  the claim has already ended.
+- If no `wait.ended` has come by `ends_by` plus the clock tolerance, the host resumes the task
+  as if the wait reached its limit, with what it waited for unknown, logs the task and the
+  wait id, and ignores a later `wait.ended` for it. A lost or set-aside message then delays a
+  task by the clock tolerance at most, never forever.
+- The holder's work ledger opens the wait when `shared_work.wait` answers `ok`
+  (`coordination_wait_open`) and closes it on `wait.ended` (`coordination_wait_closed`). For a
+  delegated task, the team services also tell its requester with `ledger.fact` (`type: wait`,
+  `kind` `claimed_resource` or `other_request`, `case_id` the wait id) when the wait opens and
+  when it is resolved, so the requester's stand-in shows the held-up work.
 
 **What the requester hears.** A worker's claims, extensions, releases and notes send nothing to
 its lead. When something happened that the lead may need to plan around, trusted code adds

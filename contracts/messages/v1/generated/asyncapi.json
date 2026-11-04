@@ -733,9 +733,6 @@
         },
         "tool_setup_result": {
           "$ref": "#/components/messages/tool_setup_result"
-        },
-        "wait_ended": {
-          "$ref": "#/components/messages/wait_ended"
         }
       },
       "parameters": {
@@ -788,6 +785,9 @@
         },
         "task_stop": {
           "$ref": "#/components/messages/task_stop"
+        },
+        "wait_ended": {
+          "$ref": "#/components/messages/wait_ended"
         }
       },
       "parameters": {
@@ -5818,7 +5818,7 @@
             }
           ]
         },
-        "summary": "A request's wait ended; it now holds the claim, the other request ended, or the wait reached its limit."
+        "summary": "A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit."
       }
     }
   },
@@ -8533,11 +8533,11 @@
     "receive_wait_ended_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/wait_ended"
+          "$ref": "#/channels/work_control/messages/wait_ended"
         }
       ]
     },
@@ -11246,11 +11246,11 @@
     "send_wait_ended_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/wait_ended"
+          "$ref": "#/channels/work_control/messages/wait_ended"
         }
       ]
     }

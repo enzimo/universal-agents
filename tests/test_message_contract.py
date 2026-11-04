@@ -683,9 +683,29 @@ def test_outside_agents_cannot_publish_into_worker_pools() -> None:
 
 # README, "An agent's two queues": the inbox holds what needs a free slot, the control queue the rest.
 INBOX_KINDS = {"task.request", "task.result", "task.question", "task.answer", "question.closed", "credential.form.result",
-               "tool.setup.result", "wait.ended"}
+               "tool.setup.result"}
 CONTROL_KINDS = {"task.stop", "task.steer", "custody.moved", "custody.confirmed", "access.decision", "task.progress",
-                 "task.claimed", "task.handback", "task.account", "task.report", "delivery.refused", "ledger.fact"}
+                 "task.claimed", "task.handback", "task.account", "task.report", "delivery.refused", "ledger.fact",
+                 "wait.ended"}
+
+# README, "Waking the model": these end a wait the task paused on with a local Strands interrupt.
+LOCAL_WAIT_ENDS = {"access.decision", "tool.setup.result", "wait.ended"}
+
+
+def test_a_kind_that_ends_a_local_wait_wakes_the_model() -> None:
+    """Resuming the paused tool call continues the model's turn, so these kinds are ``always`` wherever they end it."""
+
+    for name in LOCAL_WAIT_ENDS:
+        entry = REGISTRY["kinds"][name]
+        assert entry["ledger"].endswith("_wait_closed"), name
+        wakes = entry["wakes_model"]
+        if isinstance(wakes, dict):
+            # Only an access decision's ``waiting`` state leaves the wait open, so only it stays quiet.
+            assert {state for state, value in wakes["values"].items() if value != "always"} == {"waiting"}, name
+        else:
+            assert wakes == "always", name
+    # A credential form's result ends no local wait: the lead goes on and sees it at its next turn.
+    assert REGISTRY["kinds"]["credential.form.result"]["wakes_model"] == "next_turn"
 
 
 def test_an_agents_control_queue_holds_every_kind_its_host_takes_at_once() -> None:
@@ -807,6 +827,8 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
      "is not a unique"),
     ({"idempotency": ["/body/summary"]}, "names no part every frame carries"),
     ({"senders": ["gateway"], "senders_by_address": {}}, "not a topology check"),
+    # A work ledger never closes a wait no kind opens.
+    ({"ledger": "orphan_wait_closed"}, "has no orphan_wait_open in any kind"),
 ])
 def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change: dict, problem: str) -> None:
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))

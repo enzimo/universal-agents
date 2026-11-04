@@ -4772,7 +4772,7 @@
       "idempotency": [
         "/body/request_id"
       ],
-      "ledger": "none",
+      "ledger": "coordination_wait_open",
       "receivers": [
         "team_services"
       ],
@@ -5937,7 +5937,7 @@
         "gateway"
       ],
       "topology_edge": "none",
-      "wakes_model": "never"
+      "wakes_model": "always"
     },
     "topics.find_threads": {
       "address": "svc.team",
@@ -6054,21 +6054,28 @@
       "wakes_model": "never"
     },
     "wait.ended": {
-      "address": "work.agent.{agent}",
+      "address": "work.control.{agent}",
       "admission": {
-        "accepted_while_paused": false,
-        "execution_slot": true,
-        "priority": "normal"
+        "accepted_while_paused": true,
+        "execution_slot": false,
+        "priority": "high"
       },
       "authority": "none",
       "body": "bodies/wait.ended.schema.json",
+      "body_rules": [
+        {
+          "ends_within": "/body/ended/claim/ends_at",
+          "of": "/issued_at",
+          "seconds": 900
+        }
+      ],
       "class": "durable",
-      "description": "A request's wait ended; it now holds the claim, the other request ended, or the wait reached its limit.",
+      "description": "A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/wait_id"
       ],
-      "ledger": "wait_closed",
+      "ledger": "coordination_wait_closed",
       "receivers": [
         "lead_host",
         "worker_host"
@@ -6079,7 +6086,7 @@
         "team_services"
       ],
       "topology_edge": "none",
-      "wakes_model": "never"
+      "wakes_model": "always"
     }
   },
   "max_frame_bytes": 262144,

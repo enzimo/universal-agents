@@ -3414,7 +3414,7 @@ class LedgerFactBodyFactSteeringSeen(WireModel):
 
 class LedgerFactBodyFactWait(WireModel):
     type: Literal['wait']
-    kind: Literal['change_conflict', 'other_request_form']
+    kind: Literal['change_conflict', 'other_request_form', 'claimed_resource', 'other_request']
     case_id: Union[RecordId, MISSING] = Field(default=MISSING)
     state: Literal['open', 'resolved']
     until: Union[Timestamp, MISSING] = Field(default=MISSING)

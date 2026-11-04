@@ -49,9 +49,14 @@
 #                  when it is not a topology check: sent to the team services, only by hosts, or
 #                  back to a refused frame's sender; a kind that agent hosts send to an agent,
 #                  pool or edge address names its edges (team-topologies.yaml)
-#   ledger         the entry the receiver's work ledger records, or none
+#   ledger         the entry the receiver's work ledger records, or none; for a request/reply
+#                  operation, the entry the sender's work ledger records when the reply is ok. A
+#                  wait a ledger closes (<name>_wait_closed) is one some kind opens (<name>_wait_open)
 #   wakes_model    never | always | next_turn, or {by: <body oneOf constant>, values: {<alternative>: ...}}
-#                  giving every alternative its own value
+#                  giving every alternative its own value (README, "Waking the model"): always gives
+#                  the task a model turn as soon as it can, resuming a turn paused on a local wait;
+#                  next_turn shows it at the task's next turn with other news; never only changes
+#                  records. A kind that ends a local wait is always
 #   rendering      how a model sees it: none | sender_line | summary | full
 #   covered_change request/reply only: {record_kind, seen_version}, the store record it changes
 #                  (one of covered_record_kinds) and whether the writer sends the version it
@@ -795,24 +800,26 @@ kinds:
     routing: requester
     topology_edge: none
     ledger: setup_wait_closed
-    wakes_model: never
+    wakes_model: always
     rendering: summary
 
   wait.ended:
-    description: A request's wait ended; it now holds the claim, the other request ended, or the wait reached its limit.
+    description: A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit.
     class: durable
-    address: work.agent.{agent}
+    address: work.control.{agent}
     body: bodies/wait.ended.schema.json
+    body_rules:
+      - {ends_within: /body/ended/claim/ends_at, of: /issued_at, seconds: 900}
     senders: [team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 604800
     authority: none
     idempotency: [/body/wait_id]
-    admission: {execution_slot: true, accepted_while_paused: false, priority: normal}
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
     routing: holder
     topology_edge: none
-    ledger: wait_closed
-    wakes_model: never
+    ledger: coordination_wait_closed
+    wakes_model: always
     rendering: summary
 
   ledger.fact:
@@ -2474,7 +2481,7 @@ kinds:
     admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
     routing: team
     topology_edge: none
-    ledger: none
+    ledger: coordination_wait_open
     wakes_model: never
     rendering: none
 
