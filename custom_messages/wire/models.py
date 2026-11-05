@@ -868,7 +868,7 @@ class HostStateComponentsItem(WireModel):
 
 
 class HostState(WireModel):
-    "A runtime host's liveness and capacity, written by the host itself every 20 seconds and expiring within 60. Its roles, teams and agent types are the ones its certificate states; the record names that certificate."
+    "A runtime host's liveness and capacity, written by the host itself every 10 seconds and expiring within 60. Its roles, teams and agent types are the ones its certificate states; the record names that certificate."
 
     runtime: RuntimeId
     certificate: CertificateRef

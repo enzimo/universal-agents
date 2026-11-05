@@ -24,10 +24,27 @@ here, with no model, on the same database and the same service
   page as readers see it then: its links in, open notes and proposals
   (``team_services.outcomes``).
 
-Replies carry page text inline. The contract's inline text holds 32,768 characters;
-longer text needs the object store, which phase 2 does not have yet, so a page over that
-size is answered ``runtime_error`` with a plain message (the default page limit,
-``agent.knowledge.max_body_chars``, is 24,000).
+Replies carry page text inline. The contract's inline text holds 32,768 characters
+(``knowledge_base.records.INLINE_TEXT_MAX``); longer text needs the object store, which
+phase 2 does not have yet. Agents' tools still read and write longer pages (up to
+``agent.knowledge.limits.max_body_chars``, at most 500,000; 24,000 by default), so the
+Knowledge page meets them, and no knowledge may be lost or cut because of the limit:
+
+- A read that would show longer text (a page, an earlier revision, an open note, a
+  proposal or the team page a proposal changes) is answered ``runtime_error`` with a
+  plain message (``PageTooLong``) that says nothing was changed or cut and that agents
+  can still use the whole text.
+- A change is refused the same way, before anything is stored, when it would replace,
+  hide or decide text the person could not open here, or when its reply could not show
+  the result: saving, noting or archiving a longer page, reverting it or reverting to a
+  longer revision, and publishing or withdrawing a proposal that is longer or changes a
+  longer page (``_require_page_fits``, ``_require_proposal_fits``). The text stays as it
+  was, every revision with it, and proposals keep waiting.
+- The gateway refuses longer typed text before sending it
+  (``assistant_gateway.application.knowledge_wire``), and the editor keeps the text.
+
+Administrators see how much stored knowledge is longer on the Status page
+(``custom_agents.long_knowledge``).
 """
 
 from __future__ import annotations
@@ -49,6 +66,7 @@ from knowledge_base.records import (
     CODE_INVALID,
     CODE_MERGED,
     CODE_NOT_FOUND,
+    INLINE_TEXT_MAX,
     KnowledgeActor,
     KnowledgeContribution,
     KnowledgeError,
@@ -57,7 +75,7 @@ from knowledge_base.records import (
     KnowledgeRevision,
 )
 from knowledge_base.sensitive_content import REVIEW_KIND_LABELS, SensitiveContentRules
-from knowledge_base.service import PERSONAL_OVERLAP_KIND, DraftInput, KnowledgeService, knowledge_service_for
+from knowledge_base.service import PERSONAL_OVERLAP_KIND, DraftInput, KnowledgeService, PageView, knowledge_service_for
 from knowledge_base.vocabulary import ActorKind, ContributionKind, KnowledgeSpace, PageStatus
 from runtime_settings.knowledge import KnowledgeSettings
 from storage.operation_outcomes import CommandOutcome
@@ -80,12 +98,22 @@ RUNTIME_ERROR_TEXT = (
     "administrator can find the reason in the team services' log."
 )
 NOT_YOURS_TEXT = "Only the person whose pages or proposals these are can open or change them."
-TOO_LONG_TEXT = (
-    "This page is too long to send ({length} characters; at most {limit}). Shorten it, or ask an administrator "
-    "to lower agent.knowledge.max_body_chars."
+# Text longer than Web Chat can carry (module docstring): what it is, its length, and who can still use it.
+TOO_LONG_TEXT = "{subject} has {length:,} characters, more than the {limit:,} Web Chat can show. {still}"
+PAGE_TEXT = "This page's text"
+REVISION_TEXT = "The text of revision {revision} of this page"
+NOTE_TEXT = "An open note on this page"
+PROPOSAL_TEXT = "This proposal's text"
+PROPOSED_PAGE_TEXT = "The text of the team page this proposal changes"
+AGENTS_STILL = (
+    "Nothing was changed and nothing was cut. Agents can still read and change all of it, for example to split "
+    "the page into smaller linked pages."
 )
-# The contract's inline text (long_text) and short messages.
-INLINE_TEXT_MAX = 32768
+CURATOR_STILL = (
+    "Nothing was changed and nothing was cut. The knowledge curator, working for you, can still read all of it "
+    "and publish or reject the proposal."
+)
+# The contract's short messages.
 _MESSAGE_MAX = 500
 # The newest revisions a history shows (the store returns at most 50).
 HISTORY_MAX = 50
@@ -95,7 +123,11 @@ _OUTCOMES = {CODE_INVALID: "invalid_request", CODE_DISABLED: "feature_off", CODE
 
 
 class PageTooLong(ValueError):
-    """Page text longer than the contract's inline text (module docstring)."""
+    """Knowledge text longer than the contract's inline text: nothing was changed (module docstring)."""
+
+    def __init__(self, subject: str, length: int, still: str) -> None:
+        super().__init__(TOO_LONG_TEXT.format(subject=subject, length=length, limit=INLINE_TEXT_MAX, still=still))
+        self.length = length
 
 
 @dataclass(frozen=True)
@@ -196,6 +228,9 @@ class KnowledgeOperations:
         kind = f"knowledge.{request.action}"
         allowed = set(KINDS[kind].reply_errors)
         if isinstance(error, PageTooLong):
+            self._logger.info("A Knowledge page request met text longer than Web Chat can show; nothing was changed. "
+                              "event=team_knowledge_too_long person=%s action=%s length=%s limit=%s",
+                              person.person_id, request.action, error.length, INLINE_TEXT_MAX)
             return _message_reply("runtime_error", str(error))
         if isinstance(error, KnowledgeError):
             outcome = _OUTCOMES.get(error.code, error.code)
@@ -355,14 +390,19 @@ _READS: dict[str, Callable[[_Request], dict[str, Any]]] = {
 def _write(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...], dict[str, Any]]:
     body = request.body
     # A new page is named after its title unless the page names itself.
-    name = body.get("page") or body.get("title", "")
-    result = request.service.write(request.actor, f"{body['space']}/{name}", _draft(body),
-                                   base_revision=_version(body.get("seen_version")),
+    reference = f"{body['space']}/{body.get('page') or body.get('title', '')}"
+    base_revision = _version(body.get("seen_version"))
+    if base_revision:
+        # An edit replaces the page's text (or keeps it with new details); either way the person must have seen it.
+        _require_page_fits(request, reference)
+    result = request.service.write(request.actor, reference, _draft(body), base_revision=base_revision,
                                    confirm_review=bool(body["confirm_review"]), command_outcome=outcome)
     return result.review_kinds, _page_receipt(result.page)
 
 
 def _add_note(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...], dict[str, Any]]:
+    # The reply shows the page with the new note.
+    _require_page_fits(request, request.reference)
     result = request.service.add_note(request.actor, request.reference, _text(request.body["note"]),
                                       confirm_review=bool(request.body["confirm_review"]), command_outcome=outcome)
     assert result.note is not None and result.page is not None
@@ -370,6 +410,8 @@ def _add_note(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ..
 
 
 def _archive(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...], dict[str, Any]]:
+    # Archiving takes the page out of lists and searches: never one the person could not open.
+    _require_page_fits(request, request.reference)
     result = request.service.archive(request.actor, request.reference,
                                      base_revision=_version(request.body["seen_version"]),
                                      reason=request.body["reason"], command_outcome=outcome)
@@ -378,6 +420,8 @@ def _archive(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...
 
 def _revert(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...], dict[str, Any]]:
     body = request.body
+    # Both the current text and the revision that replaces it must be texts the person could open.
+    _require_page_fits(request, request.reference, revision=int(body["to_revision"]))
     result = request.service.revert(request.actor, request.reference, to_revision=int(body["to_revision"]),
                                     base_revision=_version(body["seen_version"]), reason=body["reason"],
                                     command_outcome=outcome)
@@ -387,6 +431,13 @@ def _revert(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...]
 def _publish_contribution(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...], dict[str, Any]]:
     body = request.body
     edited = bool(body["edited"])
+    contribution = _proposal(request)
+    if contribution is not None:
+        _require_proposal_fits(request, contribution)
+        if contribution.kind is ContributionKind.CREATE and _version(body.get("seen_version")):
+            # A proposed new page published as an edit of a page that took its name replaces that page's text.
+            _require_page_fits(request, _published_name(body, contribution), subject=PROPOSED_PAGE_TEXT,
+                               still=CURATOR_STILL)
     result = request.service.publish_contribution(
         request.actor, body["contribution_id"],
         draft=_draft(body) if edited else None,
@@ -405,9 +456,33 @@ def _publish_contribution(request: _Request, outcome: CommandOutcome) -> tuple[t
 
 
 def _withdraw_contribution(request: _Request, outcome: CommandOutcome) -> tuple[tuple[str, ...], dict[str, Any]]:
+    contribution = _proposal(request)
+    if contribution is not None:
+        # Nobody drops a proposal they could not read.
+        _require_proposal_fits(request, contribution)
     withdrawn = request.service.withdraw_contribution(request.actor, request.body["contribution_id"],
                                                       command_outcome=outcome)
     return (), {"contribution_id": withdrawn.contribution_id}
+
+
+def _proposal(request: _Request) -> Optional[KnowledgeContribution]:
+    """The proposal a decision names, or None when the decision itself refuses it, with its own reason."""
+
+    try:
+        return request.service.get_contribution(request.actor, request.body["contribution_id"])
+    except KnowledgeError:
+        return None
+
+
+def _published_name(body: dict[str, Any], contribution: KnowledgeContribution) -> str:
+    """The team page a proposed new page is published under, named as ``KnowledgeService.publish_contribution``
+    names it: the reviewer's ``page``, or else the reviewed title (a title is always a name)."""
+
+    page = str(body.get("page") or "").strip()
+    if page:
+        return page if "/" in page else f"{KnowledgeSpace.TEAM.value}/{page}"
+    title = (body.get("title") if body["edited"] else "") or contribution.title
+    return f"{KnowledgeSpace.TEAM.value}/{title}"
 
 
 _CHANGERS: dict[str, Callable[[_Request, CommandOutcome], tuple[tuple[str, ...], dict[str, Any]]]] = {
@@ -476,11 +551,10 @@ def _page(request: _Request, reference: str, *, revision: int = 0) -> dict[str, 
     """The page as the Knowledge page shows it: text, links in, open notes, last change."""
 
     view = request.service.read(request.actor, reference, revision=revision)
+    _require_shown(view)
     page, shown = view.page, view.revision
     _page_latest, latest = request.service.history(request.actor, page.reference(), limit=1)
     source = shown or page
-    if len(source.body) > INLINE_TEXT_MAX:
-        raise PageTooLong(TOO_LONG_TEXT.format(length=len(source.body), limit=INLINE_TEXT_MAX))
     detail = {
         "type": "inline",
         **_summary(page),
@@ -549,6 +623,7 @@ def _contribution(request: _Request, contribution: KnowledgeContribution, *, ful
     }
     if not full:
         return shown
+    _require_proposal_fits(request, contribution)
     if contribution.body:
         shown["content"] = {"type": "inline", "text": contribution.body}
     if contribution.kind is not ContributionKind.CREATE:
@@ -558,6 +633,57 @@ def _contribution(request: _Request, contribution: KnowledgeContribution, *, ful
             if error.code != CODE_NOT_FOUND:
                 raise
     return shown
+
+
+# -- text longer than Web Chat can carry (module docstring) ------------------------------
+
+
+def _require_fits(text: str, subject: str, still: str) -> None:
+    if len(text) > INLINE_TEXT_MAX:
+        raise PageTooLong(subject, len(text), still)
+
+
+def _require_shown(view: PageView, *, subject: str = PAGE_TEXT, still: str = AGENTS_STILL) -> None:
+    """What ``_page`` shows of a page: the revision asked for, or else the current text, and the open notes."""
+
+    if view.revision is not None:
+        _require_fits(view.revision.body, REVISION_TEXT.format(revision=view.revision.revision), still)
+    else:
+        _require_fits(view.page.body, subject, still)
+    for note in view.open_notes:
+        _require_fits(note.body, NOTE_TEXT, still)
+
+
+def _require_page_fits(request: _Request, reference: str, *, revision: int = 0, subject: str = PAGE_TEXT,
+                       still: str = AGENTS_STILL) -> None:
+    """Before a change: the page's text and open notes, and the revision a revert restores, all fit.
+
+    Checked before anything is stored, so a person never replaces, hides or reverts
+    text they could not open here, and the change's reply can show its result. A page
+    that cannot be read is not checked: the change itself then refuses, with its reason.
+    """
+
+    try:
+        view = request.service.read(request.actor, reference, revision=revision)
+    except KnowledgeError:
+        return
+    if view.revision is not None:
+        # A revert replaces the current text with the revision's.
+        _require_fits(view.page.body, subject, still)
+    _require_shown(view, subject=subject, still=still)
+
+
+def _require_proposal_fits(request: _Request, contribution: KnowledgeContribution) -> None:
+    """A proposal as Web Chat shows it (``_contribution``): its text, and the team page it changes, fit.
+
+    Checked before the person reads, publishes or withdraws it, so nobody decides a
+    proposal they could not read.
+    """
+
+    _require_fits(contribution.body, PROPOSAL_TEXT, CURATOR_STILL)
+    if contribution.kind is not ContributionKind.CREATE:
+        _require_page_fits(request, f"{KnowledgeSpace.TEAM.value}/{contribution.slug}", subject=PROPOSED_PAGE_TEXT,
+                           still=CURATOR_STILL)
 
 
 def _review_flags(kinds: Iterable[str]) -> list[dict[str, Any]]:
