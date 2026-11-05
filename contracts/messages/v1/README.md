@@ -519,7 +519,7 @@ holder, and the custody window says when.
 follows the `connection_class` in the certificate of the holder's host:
 - A `connected` host (the installation's main machine, a server) gets
   `{renewed_by: host_record, seconds}`: standard 300, at least 60 and at most 3,600. The host
-  record that the host writes every 20 seconds renews it.
+  record that the host writes every 10 seconds renews it.
 - An `intermittent` host (an edge device, a laptop) gets `{renewed_by: reconnection, ends_at}`:
   standard 5 days after the confirmation, and never more than 7 days after the frame that
   carries it was issued (body rule `ends_within`, refused as `invalid_body` at

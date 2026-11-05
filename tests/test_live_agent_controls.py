@@ -3,9 +3,11 @@
 The installation authority, the team services, the team lead's process (host ``lead``) and a
 startup worker's process (its own host) run on a real NATS server, each agent a stand-in with
 the parts the handlers use. The lead asks the worker for its status, pauses and resumes it
-and probes a task with the contract's kinds, signed with the lead's session; the worker gets
-the lead's ``skills.changed`` event; each agent's directory follows the records, and the lead
-fails what it asked the worker for by name when the worker leaves.
+and probes a task with the contract's kinds, signed with the lead's session; an ``all``
+restart's capture names the worker's running task from the worker's own answer, and shows a
+worker that does not answer in time as not answering; the worker gets the lead's
+``skills.changed`` event; each agent's directory follows the records, and the lead fails what it
+asked the worker for by name when the worker leaves.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from custom_agents import agent_requests, runtime_restart_service
 from custom_agents.agent_host import (
     LEAD_HOST_RUNTIME,
     AgentProcessHost,
@@ -27,6 +30,7 @@ from custom_agents.agent_host import (
     startup_agent_host_profile,
 )
 from custom_agents.live_controls import LIVE_CONTROL_HANDLERS
+from custom_agents.runtime_restart_service import capture_runtime_restart_impact
 from custom_messages.contracts.control_v1 import AgentStatus, AgentStatusMap
 from custom_messages.enums import MessageMetaType
 from custom_transport.protocol1.host_runtime import MessageHost
@@ -53,7 +57,7 @@ async def _until(condition, timeout: float = 20.0) -> None:
 def stand_in(agent_id: str, name: str, agent_type: str, *, is_lead: bool, pending: list | None = None):
     agent = SimpleNamespace(
         id=agent_id, name=name, named_agent_type=agent_type, team_id=TEAM, is_team_lead=is_lead, paused=False,
-        is_executing=False, _should_exit=asyncio.Event(), _runtime_loop=asyncio.get_running_loop(),
+        is_executing=False, current_task=None, _should_exit=asyncio.Event(), _runtime_loop=asyncio.get_running_loop(),
         known_agents=AgentStatusMap(), _agent_id_by_name={}, _logger=logging.getLogger(f"test.{agent_id}"),
         _fail_subtask_and_reconcile_parent=AsyncMock(), tasks={},
     )
@@ -67,12 +71,13 @@ def stand_in(agent_id: str, name: str, agent_type: str, *, is_lead: bool, pendin
     agent.pause, agent.resume, agent.exit_agent = pause, resume, AsyncMock()
     agent.get_self_status = lambda info_type=None: AgentStatus(
         self_id=agent_id, team_id=TEAM, name=name, named_agent_type=agent_type, agent_role="worker",
-        is_paused=agent.paused, is_executing=False, has_execution_capacity=True, accepting_work=True,
+        is_paused=agent.paused, is_executing=agent.current_task is not None, current_task_id=agent.current_task,
+        current_task_age_seconds=7 if agent.current_task else None, has_execution_capacity=True, accepting_work=True,
         status_type=MessageMetaType.RESPONSE, is_team_lead=is_lead, diagnostic={"llm_model": "model-x"})
     subtasks = list(pending or [])
     operations = SimpleNamespace(run=AsyncMock(side_effect=lambda function, *args: function(*args)))
     agent.task_manager = SimpleNamespace(
-        operations_runtime=operations, get_task_info=lambda task_id: agent.tasks.get(task_id),
+        current_task_id="", operations_runtime=operations, get_task_info=lambda task_id: agent.tasks.get(task_id),
         get_pending_subtasks=lambda: subtasks, get_parent_task_id=lambda task_id: "root")
     return agent
 
@@ -139,6 +144,35 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
         lead.tasks["delegated_1"] = SimpleNamespace(state="in_progress", task=SimpleNamespace(task_state=[]))
         held = await worker_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1", sender_agent="worker_1")
         assert (held["known"], held["state"]) == (True, "in_progress")
+
+        # An 'all' restart's capture asks the worker what it runs, from a tool's worker thread as the
+        # restart tools run, and names its task; the lead itself is not asked.
+        monkeypatch.setattr(agent_requests, "_PROCESS_HOST", lead_host)
+        worker.current_task = "task_research_1"
+        snapshot = await asyncio.to_thread(capture_runtime_restart_impact, lead, "all")
+        [seen] = snapshot.known_team_agents
+        assert (seen.agent_id, seen.name, seen.answered) == ("worker_1", "Researcher-1", True)
+        assert (seen.is_executing, seen.current_task_id, seen.current_task_age_seconds) == (True, "task_research_1", 7)
+        assert snapshot.interrupted_work() == {"task_research_1": "running on Researcher-1"}
+        # A worker that does not answer in time is shown as not answering, within the one short wait.
+        monkeypatch.setattr(runtime_restart_service, "TEAM_STATUS_TIMEOUT_SECONDS", 1.0)
+        released = asyncio.Event()
+
+        async def late_status(agent, verified):
+            await released.wait()
+            return await LIVE_CONTROL_HANDLERS["agent.status"](agent, verified)
+
+        worker_host.handlers["agent.status"] = late_status
+        started = asyncio.get_running_loop().time()
+        snapshot = await asyncio.to_thread(capture_runtime_restart_impact, lead, "all")
+        assert asyncio.get_running_loop().time() - started < 3.0
+        [silent] = snapshot.known_team_agents
+        assert (silent.answered, silent.is_executing) == (False, None)
+        assert snapshot.interrupted_work() == {
+            "worker_1:not-answering": "Researcher-1 did not answer, so its work is unknown"}
+        released.set()
+        worker_host.handlers["agent.status"] = LIVE_CONTROL_HANDLERS["agent.status"]
+        worker.current_task = None
 
         # The lead's skill change reaches every agent process once, marked as the lead's.
         body = {"operation": "install", "change_id": "skill_install_0123456789ab", "skill_name": "grill-me",
