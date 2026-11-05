@@ -8,8 +8,10 @@ over time", "State records"):
   ``UA1_CERTS`` at start and every half hour (the authority signs one every six hours
   and each lasts a day), so the host never refuses other hosts' frames for lack of one;
 - **renew** its certificate when two thirds of its life are gone;
-- **report liveness**: write its own host record every 20 seconds, expiring within 60, so
-  a host that stops shows as gone within a minute. Nothing moves because of that.
+- **report liveness**: write its own host record every 10 seconds, each lasting 30, so a
+  host that stops shows as gone within 30 seconds of its last write, as the presence
+  heartbeat did, and one or two lost writes do not make a running host look gone.
+  Nothing moves because of that.
 """
 
 from __future__ import annotations
@@ -34,8 +36,9 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
-LIVENESS_INTERVAL = timedelta(seconds=20)
-LIVENESS_LIFETIME = timedelta(seconds=60)
+# How often a host writes its liveness record, and how long each record lasts (module docstring).
+LIVENESS_INTERVAL = timedelta(seconds=10)
+LIVENESS_LIFETIME = timedelta(seconds=30)
 TRUST_REFRESH_INTERVAL = timedelta(minutes=30)
 _LOGGER = logging.getLogger(__name__)
 
@@ -145,7 +148,7 @@ class MessageHost:
         }
 
     async def publish_liveness(self, state: str = "accepting") -> None:
-        """Write this host's own record, which expires within a minute unless written again."""
+        """Write this host's own record, which expires after ``LIVENESS_LIFETIME`` unless written again."""
 
         assert self.records is not None
         now = self.clock()
@@ -184,7 +187,7 @@ class MessageHost:
                          certificate.runtime, renewed.membership_epoch)
 
     async def keep_up(self, stop: asyncio.Event) -> None:
-        """Liveness every 20 seconds, trust every half hour and renewal when due, until ``stop`` is set."""
+        """Liveness every 10 seconds, trust every half hour and renewal when due, until ``stop`` is set."""
 
         while not stop.is_set():
             try:
