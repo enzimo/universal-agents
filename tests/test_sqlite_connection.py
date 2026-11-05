@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -572,6 +573,50 @@ def test_every_connection_commits_to_the_disk_before_returning(tmp_path, monkeyp
     with sqlite_connection.connect_sqlite(path) as conn:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+
+
+@pytest.mark.parametrize(("setting", "level"), [("FULL", 2), ("NORMAL", 1)])
+def test_the_brokers_credential_catalog_commits_like_every_other_store(tmp_path, monkeypatch, setting, level):
+    """The broker opens its credential catalog itself, not through this module, and still follows its setting.
+
+    SQLite's own default depends on how it was built, so NORMAL is checked too: the store sets the
+    level rather than relying on the default.
+    """
+
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore
+
+    monkeypatch.setattr(sqlite_connection, "SQLITE_SYNCHRONOUS", setting)
+    store = CredentialCatalogStore(tmp_path / "credential_catalog.db")
+    with closing(store._connect()) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == level
+
+
+def test_product_code_opens_sqlite_for_writing_only_with_the_shared_setting():
+    """Every database the product writes commits with SQLITE_SYNCHRONOUS (module docstring).
+
+    Stores open SQLite through this module. The few files that call ``sqlite3.connect`` themselves
+    either read only or apply the shared setting; a new one has to do the same.
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    skipped = {"tests", "node_modules", "target", "__pycache__"}
+    opening = []
+    for folder, folders, files in os.walk(root):
+        folders[:] = [name for name in folders if name not in skipped and not name.startswith(".")]
+        for name in files:
+            path = Path(folder) / name
+            if name.endswith(".py") and "sqlite3.connect(" in path.read_text(encoding="utf-8", errors="replace"):
+                opening.append(path.relative_to(root).as_posix())
+    assert sorted(opening) == [
+        "custom_agents/pinned_memory_source.py",
+        "secure_tool_broker/credential_catalog_store.py",
+        "storage/sqlite_connection.py",
+    ]
+    assert "?mode=ro" in (root / "custom_agents/pinned_memory_source.py").read_text(encoding="utf-8")
+    assert "sqlite_connection.SQLITE_SYNCHRONOUS" in (
+        root / "secure_tool_broker/credential_catalog_store.py"
+    ).read_text(encoding="utf-8")
 
 
 def test_a_lock_failure_names_the_process_also_without_a_caller_logger(tmp_path, caplog):

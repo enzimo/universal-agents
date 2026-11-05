@@ -845,8 +845,13 @@ transaction, and the covered stores write the change ledger inside their own
 transactions, so these tables share `dbs/task_history.db`: SQLite keeps a
 transaction atomic within one file, not across files in WAL mode. The setting
 is per connection and the database path is configurable, so it applies to every
-database the module opens. It costs a few milliseconds per commit on a local
-SSD; the hermetic tests lower it in their own process (`tests/conftest.py`).
+database the module opens. The secure tool broker's credential catalog
+(`secure_tool_broker.credential_catalog_store`) opens SQLite itself and applies
+the same setting, so every database the product writes commits this way; a
+test fails when product code opens SQLite another way without it
+(`tests/test_sqlite_connection.py`). It costs a few milliseconds per commit on
+a local SSD; the hermetic tests lower it in their own process
+(`tests/conftest.py`).
 The bundled NATS server matches it: its generated configuration sets
 `jetstream { sync_interval: always }`, so a confirmed JetStream write is on the
 disk too, and a `max_control_line` that fits the largest host credential the

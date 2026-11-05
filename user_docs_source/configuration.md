@@ -870,10 +870,11 @@ JetStream-backed delivery where configured. Verify:
   `limits.max_credential_bytes`, plus 4,096 bytes for the rest of the
   connection line). The runtime logs an error at start when the bundled server
   is older than 2.15.1.
-- The runtime's SQLite databases commit with `synchronous=FULL`: every commit
-  is on the disk before it returns, so a power loss cannot undo a task that was
-  saved before its message was acknowledged. On a local SSD this adds a few
-  milliseconds per commit.
+- The runtime's SQLite databases, the secure tool broker's credential catalog
+  included, commit with `synchronous=FULL`: every commit is on the disk before
+  it returns, so a power loss cannot undo a task that was saved before its
+  message was acknowledged. On a local SSD this adds a few milliseconds per
+  commit.
 
 Process-scoped consumers use this crash-cleanup delay:
 

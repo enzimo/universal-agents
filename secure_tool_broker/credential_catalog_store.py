@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from storage import sqlite_connection
+
 
 _SCOPE_KINDS = {"user", "team", "system"}
 
@@ -79,6 +81,11 @@ class CredentialCatalogStore:
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # Commit as every other store does (storage.sqlite_connection.SQLITE_SYNCHRONOUS):
+        # a saved credential is on the disk before the broker reports it stored. Set
+        # here because this store opens SQLite itself, and SQLite's own default depends
+        # on how it was built.
+        conn.execute(f"PRAGMA synchronous={sqlite_connection.SQLITE_SYNCHRONOUS}")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 

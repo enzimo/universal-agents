@@ -50,8 +50,9 @@ behaviors made that pattern block callers for seconds:
   treated as stored or delivered. ``NORMAL`` in WAL mode can lose the last
   commits on power loss. The setting is per connection, and the task history
   path is a setting, so it applies to every database this module opens rather
-  than to one file name. Measured on a local disk, about 2.7 ms more per commit
-  (a few per model turn); on a network share, about 0.1 ms.
+  than to one file name. The broker's credential catalog opens SQLite itself
+  and applies the same setting. Measured on a local disk, about 2.7 ms more per
+  commit (a few per model turn); on a network share, about 0.1 ms.
 - While several processes create their tables at once, a statement can fail
   with "database schema has changed": SQLite retries only once when the schema
   changes while a statement is prepared. Such a statement has not run, so it
