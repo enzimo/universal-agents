@@ -337,6 +337,22 @@ class CoordinationSeenClaim(WireModel):
     holder: CoordinationHolder
 
 
+class CoordinationOwnSeenClaimHolder(WireModel):
+    whose: Literal['this_request']
+    agent: AgentId
+    reason: ShortText
+
+
+class CoordinationOwnSeenClaim(WireModel):
+    "One of the asking request's own live claims on, above or under a resource it asked about, as shared_work.claim lists its own (holder this_request), so the model sees which claim to use, extend or release."
+
+    claim_id: RecordId
+    resource: ResourceKey
+    relation: Literal['exact', 'above', 'below']
+    ends_at: Timestamp
+    holder: CoordinationOwnSeenClaimHolder
+
+
 class CoordinationSeenNoteThisRequest(WireModel):
     whose: Literal['this_request']
     note_id: RecordId
@@ -369,7 +385,7 @@ CoordinationSeenNote = Annotated[Union[CoordinationSeenNoteThisRequest, Coordina
 
 class CoordinationEventWaitedForResourceWaitsItem(WireModel):
     resource: ResourceKey
-    ended: Literal['claim_granted', 'limit_reached']
+    ended: Literal['claim_granted', 'record_removed', 'limit_reached']
 
 
 class CoordinationEventWaitedForResource(WireModel):
@@ -392,7 +408,7 @@ class CoordinationEventWaitedForRequest(WireModel):
 class CoordinationEventWaitRefusedRefusalsItemResource(WireModel):
     on: Literal['resource']
     resource: ResourceKey
-    reason: Literal['own_request', 'loop']
+    reason: Literal['own_request', 'loop', 'holds_claim']
 
 
 class CoordinationEventWaitRefusedRefusalsItemRequest(WireModel):
@@ -6254,6 +6270,12 @@ class SchedulesGetBody(WireModel):
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
 
 
+class SchedulesGetReplyOkAction(WireModel):
+    "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn. Every page carries it, outside the detail text."
+
+    type: Literal['task', 'fixed_message']
+
+
 class SchedulesGetReplyOkDetail(WireModel):
     text: Annotated[str, StringConstraints(min_length=0, max_length=4000)]
     offset: Annotated[int, Field(ge=0, le=9007199254740991)]
@@ -6266,6 +6288,7 @@ class SchedulesGetReplyOk(WireModel):
     outcome: Literal['ok']
     schedule_id: RecordId
     seen_version: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
+    action: SchedulesGetReplyOkAction
     detail: SchedulesGetReplyOkDetail
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
@@ -6673,6 +6696,12 @@ class SchedulesListBody(WireModel):
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
 
 
+class SchedulesListReplyOkSchedulesItemUserAction(WireModel):
+    "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn."
+
+    type: Literal['task', 'fixed_message']
+
+
 class SchedulesListReplyOkSchedulesItemUserTimingInterval(WireModel):
     kind: Literal['interval']
     interval_ms: Annotated[int, Field(ge=1, le=9007199254740991)]
@@ -6729,6 +6758,7 @@ class SchedulesListReplyOkSchedulesItemUser(WireModel):
     management_class: Literal['user']
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     instruction_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    action: SchedulesListReplyOkSchedulesItemUserAction
     timing: Annotated[Union[SchedulesListReplyOkSchedulesItemUserTimingInterval, SchedulesListReplyOkSchedulesItemUserTimingCron, SchedulesListReplyOkSchedulesItemUserTimingOnce], Field(discriminator='kind')]
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -6739,6 +6769,12 @@ class SchedulesListReplyOkSchedulesItemUser(WireModel):
     worker: SchedulesListReplyOkSchedulesItemUserWorker
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
     run_notes: Union[SchedulesListReplyOkSchedulesItemUserRunNotes, MISSING] = Field(default=MISSING)
+
+
+class SchedulesListReplyOkSchedulesItemSystemAction(WireModel):
+    "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn."
+
+    type: Literal['task', 'fixed_message']
 
 
 class SchedulesListReplyOkSchedulesItemSystemTimingInterval(WireModel):
@@ -6798,6 +6834,7 @@ class SchedulesListReplyOkSchedulesItemSystem(WireModel):
     system_schedule_kind: Union[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team'], MISSING] = Field(default=MISSING)
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     instruction_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    action: SchedulesListReplyOkSchedulesItemSystemAction
     timing: Annotated[Union[SchedulesListReplyOkSchedulesItemSystemTimingInterval, SchedulesListReplyOkSchedulesItemSystemTimingCron, SchedulesListReplyOkSchedulesItemSystemTimingOnce], Field(discriminator='kind')]
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -7175,6 +7212,12 @@ class SchedulesSetWorkerReplyScheduleWorkerPolicyRevisionConflict(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class SchedulesUpdateBodyAction(WireModel):
+    "Switch what each run does: task gives the schedule's text to a model turn, fixed_message sends it as it is, without a model turn. The stored text stays; instruction replaces it in either case."
+
+    type: Literal['task', 'fixed_message']
+
+
 class SchedulesUpdateBodyTimingInterval(WireModel):
     kind: Literal['interval']
     interval_ms: Annotated[int, Field(ge=1, le=9007199254740991)]
@@ -7214,13 +7257,14 @@ class SchedulesUpdateBodyRunNotes(WireModel):
 
 
 class SchedulesUpdateBody(WireModel):
-    "Change a schedule's name, instruction, timing, controls or run notes."
+    "Change a schedule's name, instruction, action type, timing, controls or run notes."
 
     request_id: RecordId
     schedule_id: RecordId
     seen_version: RecordVersion
     name: Union[Annotated[str, StringConstraints(min_length=0, max_length=16384)], MISSING] = Field(default=MISSING)
     instruction: Union[TextContent, MISSING] = Field(default=MISSING)
+    action: Union[SchedulesUpdateBodyAction, MISSING] = Field(default=MISSING)
     timing: Union[Annotated[Union[SchedulesUpdateBodyTimingInterval, SchedulesUpdateBodyTimingCron, SchedulesUpdateBodyTimingOnce], Field(discriminator='kind')], MISSING] = Field(default=MISSING)
     expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
@@ -7636,6 +7680,13 @@ class SharedWorkWaitReplySensitiveContent(WireModel):
 
 class SharedWorkWaitReplyNotFound(WireModel):
     outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyHoldsClaim(WireModel):
+    outcome: Literal['holds_claim']
+    claims: Annotated[list[CoordinationOwnSeenClaim], Field(min_length=1, max_length=8)]
+    claims_total: Count
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -8777,18 +8828,24 @@ class WaitEndedBodyEndedRequestEnded(WireModel):
     other_root_task_id: RecordId
 
 
+class WaitEndedBodyEndedRecordRemoved(WireModel):
+    "The record it waited for was deleted, or removed by its store after its end, so the wait ends without a grant. A record that later takes the same number is another resource."
+
+    why: Literal['record_removed']
+
+
 class WaitEndedBodyEndedLimitReached(WireModel):
     why: Literal['limit_reached']
     still: Literal['claimed', 'running', 'waiting_for_person']
 
 
 class WaitEndedBody(WireModel):
-    "A request's wait ended: it now holds the claim, the other request ended, or the wait reached its limit."
+    "A request's wait ended: it now holds the claim, the other request ended, the record it waited for was removed, or the wait reached its limit."
 
     wait_id: RecordId
     root_task_id: RecordId
     task_id: RecordId
-    ended: Annotated[Union[WaitEndedBodyEndedClaimGranted, WaitEndedBodyEndedRequestEnded, WaitEndedBodyEndedLimitReached], Field(discriminator='why')]
+    ended: Annotated[Union[WaitEndedBodyEndedClaimGranted, WaitEndedBodyEndedRequestEnded, WaitEndedBodyEndedRecordRemoved, WaitEndedBodyEndedLimitReached], Field(discriminator='why')]
 
 
 AccessDecisionBodyAdapter = TypeAdapter(AccessDecisionBody)
@@ -8972,7 +9029,7 @@ SharedWorkNoteReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkNoteReplyOk, 
 SharedWorkReleaseBodyAdapter = TypeAdapter(SharedWorkReleaseBody)
 SharedWorkReleaseReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkReleaseReplyOk, SharedWorkReleaseReplyNotFound, SharedWorkReleaseReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkWaitBodyAdapter = TypeAdapter(SharedWorkWaitBody)
-SharedWorkWaitReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkWaitReplyOk, SharedWorkWaitReplyNotAllowed, SharedWorkWaitReplyInvalidRequest, SharedWorkWaitReplySensitiveContent, SharedWorkWaitReplyNotFound, SharedWorkWaitReplyNothingToWaitFor, SharedWorkWaitReplyWouldLoop, SharedWorkWaitReplyRequestClosed, SharedWorkWaitReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkWaitReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkWaitReplyOk, SharedWorkWaitReplyNotAllowed, SharedWorkWaitReplyInvalidRequest, SharedWorkWaitReplySensitiveContent, SharedWorkWaitReplyNotFound, SharedWorkWaitReplyHoldsClaim, SharedWorkWaitReplyNothingToWaitFor, SharedWorkWaitReplyWouldLoop, SharedWorkWaitReplyRequestClosed, SharedWorkWaitReplyRuntimeError], Field(discriminator='outcome')])
 SkillsChangedBodyAdapter = TypeAdapter(Annotated[Union[SkillsChangedBodyInstall, SkillsChangedBodyUninstall], Field(discriminator='operation')])
 StagedChangesApplyBodyAdapter = TypeAdapter(StagedChangesApplyBody)
 StagedChangesApplyReplyAdapter = TypeAdapter(Annotated[Union[StagedChangesApplyReplyOk, StagedChangesApplyReplyFailed, StagedChangesApplyReplyWaiting, StagedChangesApplyReplyAgreementRequired, StagedChangesApplyReplyAlreadyApplied, StagedChangesApplyReplyNotFound, StagedChangesApplyReplyNotAllowed, StagedChangesApplyReplyDenied, StagedChangesApplyReplyWithdrawn, StagedChangesApplyReplyChangedSinceRead, StagedChangesApplyReplyChangeConflict, StagedChangesApplyReplyRequestClosed, StagedChangesApplyReplyNeedsPersonDecision, StagedChangesApplyReplyRecordBusy, StagedChangesApplyReplyRuntimeError, StagedChangesApplyReplyRefused], Field(discriminator='outcome')])

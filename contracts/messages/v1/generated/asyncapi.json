@@ -4478,7 +4478,7 @@
             }
           ]
         },
-        "summary": "Change a schedule's name, instruction, timing, controls or run notes."
+        "summary": "Change a schedule's name, instruction, action type, timing, controls or run notes."
       },
       "schedules_update_reply": {
         "name": "schedules.update.reply",
@@ -5818,7 +5818,7 @@
             }
           ]
         },
-        "summary": "A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit."
+        "summary": "A request's wait ended; it now holds a new claim, the other request ended, the record it waited for was removed, or the wait reached its limit."
       }
     }
   },

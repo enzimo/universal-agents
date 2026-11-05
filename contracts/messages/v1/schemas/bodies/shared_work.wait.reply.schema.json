@@ -93,6 +93,36 @@
       "type": "object",
       "properties": {
         "outcome": {
+          "const": "holds_claim"
+        },
+        "claims": {
+          "description": "This request's own live claims on, above or under the resource, newest first: the request uses, extends or releases them instead of waiting.",
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/coordination_own_seen_claim"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "claims_total": {
+          "description": "How many such claims there are in all; the list holds the newest of them.",
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "claims",
+        "claims_total"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
           "const": "nothing_to_wait_for"
         },
         "message": {

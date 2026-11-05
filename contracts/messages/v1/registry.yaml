@@ -806,7 +806,7 @@ kinds:
     rendering: summary
 
   wait.ended:
-    description: A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit.
+    description: A request's wait ended; it now holds a new claim, the other request ended, the record it waited for was removed, or the wait reached its limit.
     class: durable
     address: work.control.{agent}
     body: bodies/wait.ended.schema.json
@@ -1359,7 +1359,7 @@ kinds:
     covered_change: {record_kind: schedule, seen_version: required_for_request_writers}
 
   schedules.update:
-    description: Change a schedule's name, instruction, timing, controls or run notes.
+    description: Change a schedule's name, instruction, action type, timing, controls or run notes.
     class: request_reply
     address: svc.team
     body: bodies/schedules.update.schema.json
@@ -2473,7 +2473,7 @@ kinds:
     body: bodies/shared_work.wait.schema.json
     reply:
       body: bodies/shared_work.wait.reply.schema.json
-      errors: [not_allowed, invalid_request, sensitive_content, not_found, nothing_to_wait_for, would_loop, request_closed, runtime_error]
+      errors: [not_allowed, invalid_request, sensitive_content, not_found, holds_claim, nothing_to_wait_for, would_loop, request_closed, runtime_error]
     senders: [lead_host, worker_host]
     receivers: [team_services]
     expiry_seconds: 30

@@ -4433,7 +4433,7 @@
         "record_kind": "schedule",
         "seen_version": "required"
       },
-      "description": "Change a schedule's name, instruction, timing, controls or run notes.",
+      "description": "Change a schedule's name, instruction, action type, timing, controls or run notes.",
       "expiry_seconds": 30,
       "idempotency": [
         "/body/request_id"
@@ -4785,6 +4785,7 @@
           "invalid_request",
           "sensitive_content",
           "not_found",
+          "holds_claim",
           "nothing_to_wait_for",
           "would_loop",
           "request_closed",
@@ -6078,7 +6079,7 @@
         }
       ],
       "class": "durable",
-      "description": "A request's wait ended; it now holds a new claim, the other request ended, or the wait reached its limit.",
+      "description": "A request's wait ended; it now holds a new claim, the other request ended, the record it waited for was removed, or the wait reached its limit.",
       "expiry_seconds": 604800,
       "idempotency": [
         "/body/wait_id"

@@ -25,6 +25,9 @@
     "outcome": "ok",
     "schedule_id": "schedule_id_1",
     "seen_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "action": {
+      "type": "task"
+    },
     "detail": {
       "text": " the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the bui\", \"record_digest\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"repeat_count\": 0, \"schedule_id\": \"schedule_id_1\", \"schedule_memory\": {\"ledger\": {\"recent_runs\": [{\"result\": \"Build R2 is saved.\", \"task_id\": \"run_r2\"}, {\"result\": \"Build R3 is saved.\", \"task_id\": \"run_r3\"}], \"total_runs\": 9}, \"policy\": {\"notify\": \"on_change\"}, \"schedule_kind\": \"build_review\", \"state\": {\"summary\": \"Build R2 is saved.\"}}, \"schedule_name\": \"Build review\", \"system_schedule_kind\": null}",
       "offset": 8000,
@@ -36,6 +39,6 @@
   },
   "causation_id": "01928f3a-7b2c-7e60-8000-0000000003f4",
   "idempotency_key": "schedules.get.reply:a31rFDUvO8eBQHCU9IMMngwVZdnvTgR_1ZooIabrS50",
-  "body_digest": "QtNRJK3avcPoTNWYGJIKk8ZIjTu2TlQSzep9grSujWM",
-  "signature": "iuCo9UNeQC4MiWMCu-NNhyGDi285RwAtvbetDMD3HFEMPpz82wzUpWD7LESg8Fb9D05acmKzErEoJ34PkQcsCg"
+  "body_digest": "lWS0jjJJmfyo7ATSDYLHshy3Hf3zAc6YBanR_OoIzGA",
+  "signature": "8du1uoqmYu3f067mhskUZDRNsR3pbqDcL-0mEi2pY3jw6TLX-aSVvC53V8-lwFm1g3AUCpShOkXoNFU8OdCwCA"
 }

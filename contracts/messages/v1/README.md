@@ -1734,8 +1734,16 @@ and `schedule_worker_inspection`. The team services check ownership through the 
 task context or command token. A schedule's name and assigned agent type may be absent.
 The page then displays its id or an unspecified assignment, as today.
 
+A schedule's action says what each run does: `task` gives its instruction to a model turn, and
+`fixed_message` sends its text as it is, without a model turn, so a plain reminder needs no
+model. `schedules.install` sets it (`action`). `schedules.list` rows and the `schedules.get`
+reply carry its type (`action.type`, with the same values), so the person's schedule views can
+mark the schedules that run without a model, and `schedules.update` switches it. Today's
+runtime runs every schedule as a model turn, so its schedules read as `task`.
+
 `schedules.list` pages the schedules the caller may see. Each row returns the schedule's
-listing digest as `seen_version`, timing, repeat limit, run notes and worker assignment.
+listing digest as `seen_version`, action type, timing, repeat limit, run notes and worker
+assignment; `instruction_preview` shows the start of the instruction or of the fixed message.
 The assignment keeps `automatic_creation` as `not_configured`, `enabled`, `disabled` or
 `default_policy`, plus `review_agent_type`, `upgrade_required`, `desired_agent_type` and
 `reassignment_pending`. `not_running_since` and `not_running_explanation` explain a stuck
@@ -1755,7 +1763,8 @@ This read has no covered change, stores no outcome and uses `/message_id` as its
 The request's `offset` and `max_chars` map to `details_offset` and `details_max_chars`.
 The wire accepts 1..4,000 characters per page, the runtime's existing excerpt limit.
 The reply's `detail` keeps `text`, `offset`, `total_chars`, `sha256` and, only when more
-text remains, `next_offset`. An offset at the end returns an empty final page. Offsets
+text remains, `next_offset`. Every page also carries the schedule's `action.type`, outside
+the detail text. An offset at the end returns an empty final page. Offsets
 and lengths count Unicode characters, not UTF-8 bytes, and allow 0..2^53 - 1. The
 receiver serializes the complete safe projection with `ensure_ascii=False` and sorted
 keys before paging. `sha256` is the lowercase hexadecimal SHA-256 of that complete
@@ -1814,7 +1823,11 @@ Confidence is a string label in 0.9.8, for example `high` or `unknown`, so it st
 Omitted fields use the runtime defaults on install. The execution ledger remains
 runtime-owned; a policy edit must not replace state or ledger entries a run just wrote.
 
-`schedules.update` accepts a partial edit. `clear_name` clears the optional name;
+`schedules.update` accepts a partial edit. `action.type` switches what each run does and
+keeps the stored text: a fixed message's text becomes the model's instruction, or an
+instruction becomes the message sent as it is. `instruction` replaces that text for either
+type. The listing digest covers the action type, so a switch changes `seen_version` like any
+other edit. `clear_name` clears the optional name;
 `clear_expires_at` clears expiration. `time_zone` alone changes an existing cron
 schedule's zone, and `next_fire_at` explicitly moves its next run. `enabled`,
 `paused_until` and `clear_pause` keep the update tool's combined edits; the separate
@@ -2032,9 +2045,14 @@ and never reveals that the other person works on something. Work for no person h
 space and gets `not_allowed` for these keys.
 
 Records are named the way people and agents name them, so a memory fact's number is given to
-the next new fact once the fact is deleted. A claim or a note on a record therefore ends when
-the record is deleted, in the same step, and a number given to a new record starts with no
-claim and no note.
+the next new fact once the fact is gone. A record is removed when it is deleted, and when its
+store removes it after its end: a memory fact past its expiry time (`expires`), a schedule past
+its end date (`expires_at`) or after its last run. In the step that removes a record, the
+claims and notes on it end and every wait on it ends without a grant (`record_removed`, "Waits
+and grants"). A record that later takes the same number is another resource and starts with no
+claim, note or wait. Nothing is above or under a record key, so a removal ends nothing on
+another key. A file key names a path, not a record: a file deleted and written again at the
+same path is the same resource, and the claims, notes and waits on it go on.
 
 **The operations.**
 - `shared_work.count` gives the numbers for the line each turn of a person's work shows: the
@@ -2063,16 +2081,24 @@ claim and no note.
 - `shared_work.release` ends a claim now. Giving a claim up is never refused: a claim of this
   request that has already ended answers `ok` with the time it ended, and only a claim id that
   is not this request's answers `not_found`. A claim also ends, without a message, when its
-  request ends, fails or is stopped, and when its record is deleted.
+  request ends, fails or is stopped, and when its record is removed ("Resource keys").
 - `shared_work.note` leaves up to 500 characters on one resource, at most three per resource
   for each request (`limit_reached`). A note lasts while its request runs and one day more.
 - `shared_work.wait` waits for a claimed resource or for another of the person's requests. A
   wait on a resource gives the `reason` its claim carries if the wait is granted. In one
-  serialized step it refuses a wait on the request itself or one that would close a loop
-  (`would_loop`, naming what this request holds that the other one waits for), and answers
-  `nothing_to_wait_for` when nothing but this request's own claims and waits is on, above or
-  under the resource. Otherwise it records the wait, answers with the latest time it ends
-  (`ends_by`), and the host ends the turn with a local wait, freeing the agent's slot.
+  serialized step, in this order, it:
+  - refuses a wait on a resource while this request holds a live claim on, above or under it
+    (`holds_claim`), listing those claims as `shared_work.claim` lists its own (`this_request`).
+    A grant would be a second claim over what the request already holds and would keep it held
+    for up to 35 minutes more, so the request uses, extends or releases its claim instead, and
+    waits only once it holds nothing there;
+  - refuses a wait on the request itself or one that would close a loop (`would_loop`, naming
+    what this request holds that the other one waits for);
+  - answers `nothing_to_wait_for` when nothing but this request's own waits is on, above or
+    under the resource.
+
+  Otherwise it records the wait, answers with the latest time it ends (`ends_by`), and the host
+  ends the turn with a local wait, freeing the agent's slot.
 
 Notes and the reasons of claims and of waits on a resource are text a model wrote that other
 models read. Both are checked like knowledge pages for credentials and identity numbers
@@ -2094,15 +2120,19 @@ never a resource it was asked about, and its totals still count everything.
   for a wait on a request, for that request. A wait that would make a request wait for itself
   through these is refused. So a later grant never closes a loop either: the request that gets
   a claim was already ahead of everyone it now blocks.
-- Whenever a claim ends (released, ran out, its request ended or its record was deleted) or a
-  wait ends without a grant (its limit, or its task or request ended), the team services look
-  at the waits on, above or under that resource in the order they were recorded. A wait is
+- Whenever a claim ends (released, ran out or its request ended) or a wait ends without a
+  grant (its limit, or its task or request ended), the team services look at the waits on,
+  above or under that resource in the order they were recorded. A wait is
   granted when no other request holds a live claim on, above or under its resource and no
   other request's earlier wait is on, above or under it. The grant is a new claim of the
   waiting request, with its own `claim_id`, on exactly the resource it waited for, with the
   wait's `reason`, for 15 minutes from the grant. The request's other waits on that resource
   or under it end with the same grant, each with its own `wait.ended`, so a request never
   waits on its own claim.
+- When a record is removed ("Resource keys"), every wait on it ends without a grant, in the
+  same step as the claims on it, each with its own `wait.ended` (`record_removed`). A wait on a
+  removed record is never granted: the record it waited for is gone, and a record that later
+  takes the same number is another resource, which the waiting request never asked for.
 - A wait ends without a message when its task stops, fails or ends, moves to another holder
   or is handed back, and when its request ends, fails or is stopped. A claim already granted
   stays with the request, which sees it with `shared_work.list`.
@@ -2120,6 +2150,9 @@ wakes the model ("Waking the model"). It says why the wait ended:
 - `claim_granted`: the wait was granted ("Waits and grants"): its new claim, with the notes on
   the resource. Its 15 minutes start when it is granted;
 - `request_ended`: the request it waited for ended;
+- `record_removed`: the record it waited for was deleted, or removed by its store after its end
+  ("Resource keys"). The host knows the record from its wait. The model reads again before it
+  changes anything there, since a record that later takes the same number is another record;
 - `limit_reached`: the wait reached its 35 minutes. `still` says what it waited for is doing:
   `claimed` for a resource, `running` or `waiting_for_person` for a request. The model may
   carry on, wait again or ask the person.
