@@ -4253,8 +4253,16 @@ it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, hol
 30-second lease renewed every 10 seconds. The lock names the process instance, not only
 the runtime, so a second copy of the same host, or a restart while the old process still
 runs, waits as a standby, logs which instance serves, and takes over when the lease runs
-out or the first releases it on a clean stop. An instance that loses the lock stops at
-once. They serve the team's address (`svc.team`) and answer, so far:
+out or the first releases it on a clean stop. An instance that finds another holding the
+lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
+short outage) is tried again every 2 seconds while the lease lasts, each failure logged
+(`team_services_lock_renew_failed`), and the instance keeps serving: its lease still keeps
+others out, and stopping would stop the whole team, because the launcher stops every
+service when one exits. Only when the lease runs out unrenewed does it stop
+(`team_services_lock_lease_ended`), since a standby may take over from then on. A renewal
+whose write reached NATS but whose answer was lost is recognised by the lock still naming
+this instance, not taken as a lost lock. They serve the team's address (`svc.team`) and
+answer, so far:
 
 - `sessions.open`: the host's certificate must allow the agent's type and have room under
   its session limit, and the agent must not run on another host (agents stay on their
