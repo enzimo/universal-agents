@@ -2525,7 +2525,7 @@ A restart's approval covers the tasks the restart interrupts
 (`custom_agents/runtime_restart_service.py`). The plan records the runtime
 state and, from it, the tasks the restart would interrupt or delay: every
 request execution root the manager holds, whatever its state, and for an `all` restart
-the work other agents report running. Work on a task the manager delegated
+the work other agents are running. Work on a task the manager delegated
 counts as that task. Locally runnable plan-step and recovery tasks are grouped
 under that same root too: they have no `parent_task_id`, but the manager's
 execution graph records which request owns them. Finishing one step and
@@ -2541,12 +2541,45 @@ current task and other agents' queue counts, so any scheduled run, heartbeat
 item, finished worker or new message made an approved restart unusable, and
 with background work running a restart could rarely be applied. A refusal uses
 the approval up, as for any plan that no longer applies, and names the new
-tasks, so TeamArchitect stages a fresh plan that lists them. Plans need schema
-3: plans staged under the earlier rule are refused rather than converted,
-because their approval text promised the stricter rule. The review lists the
+tasks, so TeamArchitect stages a fresh plan that lists them. The review lists the
 tasks in one line of at most 1000 characters, naming them while they fit and
 always giving the exact count; a busy manager used to produce a longer line,
 which could not be shown for review at all.
+
+Other agents' work comes from their own answers. The team's agent records say
+which agents are live, but not which task each runs, so while it captures an
+`all` restart's state (when staging, before a person is asked, when applying,
+and for `get_runtime_restart_status`) the team lead sends every other live agent
+a full `agent.status` request and names each one's work by the task it reports.
+It asks them all at once and waits at most five seconds in total
+(`TEAM_STATUS_TIMEOUT_SECONDS`), however many agents there are. An agent that
+does not answer in time, refuses or cannot be reached is recorded as not
+answering (`answered: false`, with its task, counts and running flag left empty
+rather than false or zero) and counts as `<agent id>:not-answering`: the person
+approves interrupting whatever it runs, and the review lists those agents on a
+line of their own. The approval keys stay free of ages, counts and clocks, so the
+same work gives the same `runtime_state_digest`. On a re-check the same rule as
+for tasks applies: an agent that answered and no longer does is refused (it may
+now run a task nobody approved), one that did not answer and now reports a task
+outside the approved ones is refused (nobody can tell whether it started after
+planning), and one that did not answer either time keeps the approval, since a
+team with an agent that hangs is when a restart is needed most. When the team
+lead's process cannot see the team's agents yet (it has not joined), an `all`
+restart is refused with that reason rather than shown as interrupting no other
+agent's work; a `manager` restart does not need the team.
+
+The capture runs in the tool's worker thread (Strands runs synchronous tools
+there; `apply_change` describes and applies plans there). It runs the requests
+on a private event loop in that thread, and they reach the other agents through
+the process's host, which works on the team lead's own loop; that loop is free
+while the tool waits, so the capture never waits on a loop it blocks. A capture
+on an event loop is refused (`event=runtime_restart_capture_on_event_loop`).
+
+Plans need schema 4, which records whether each other agent answered. Plans of
+earlier schemas are refused with a message to stage a fresh plan, rather than
+converted: schema 3 plans took other agents' work from what they reported on
+their own, and their review never said an agent was not answering. Plans last
+an hour, so only a plan staged just before an upgrade is affected.
 
 An installed MCP server is one team tool, `mcp:<name>`, in the `mcp_servers`
 tool set that members hold as a standard set (`access_catalog/catalog.py`,
@@ -4384,9 +4417,10 @@ process's host apart from the host's own module so the import graph stays free o
 
 Agents no longer subscribe to presence or the broadcast subject, ignore status replies on
 `.operational`, and the team lead no longer writes other agents' rows in `agent_states`.
-Restart approvals name other agents' running work by agent (`<agent id>:unknown-task`),
-since the records do not carry the current task; asking each agent while the change is
-described is a follow-up.
+Restart approvals name other agents' running work by task: the team lead asks each live
+agent for its full status while it captures an `all` restart's state, and shows an agent
+that does not answer as not answering (see the restart approvals under "Authorization and
+credentials").
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is

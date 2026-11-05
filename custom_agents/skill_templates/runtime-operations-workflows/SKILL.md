@@ -682,21 +682,28 @@ heartbeat.
 
 1. Call `plan_runtime_restart(reason=..., scope=...)` with exact scope
    `manager`, `gateway`, or `all`. Review the returned affected processes,
-   current/queued/waiting task counts and ids/states, team-visible active work,
+   current/queued/waiting task counts and ids/states, other agents' work (for
+   `all`, each agent's answer about what it runs; `answered: false` means it did
+   not answer and its work is unknown, never that it is idle),
    unavailable gateway-session visibility, state digest, and expiry.
 2. Present that state and impact to the person, then call
    `apply_change(change_id, reason)`. With authorization on, a person approves
    the exact restart in the Inbox and your task waits; with it off, get their
    agreement and pass `confirmed=true`. The person approves interrupting the
    tasks the plan lists: every task you hold (running, queued or waiting) and,
-   for `all`, the work other agents are running. A worker's work on a task
-   you delegated counts as that task. Plan-step and recovery tasks also count
+   for `all`, the work other agents are running, plus whatever the agents that
+   did not answer are running (`<agent id>:not-answering`; tell the person
+   which agents did not answer). A worker's work on a task you delegated
+   counts as that task. Plan-step and recovery tasks also count
    as their original request, so ordinary progress needs no new approval.
 3. Applying captures the runtime state again. The approval still holds when
    listed tasks finished, changed state, or moved on to another part of the
    same task. When a new task arrived that the restart would interrupt (a
-   message, a scheduled run, a worker's own task), the restart is refused and
-   names the new task; stage a fresh plan and ask again. Plans last one hour.
+   message, a scheduled run, a worker's own task), or an agent that answered
+   no longer answers, the restart is refused and names them;
+   stage a fresh plan and ask again. When your process cannot see the team's
+   agents yet, an `all` restart is refused; try again in a minute. Plans last
+   one hour.
 4. Use `get_runtime_restart_status(change_id)` to check dispatch. `requested`
    means the supervisor has not accepted it yet; `dispatched` includes the
    supervisor's receipt. For a plan not yet applied, `still_applies` and
