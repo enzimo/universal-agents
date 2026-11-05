@@ -6280,7 +6280,7 @@
     "host": {
       "body": "state/host.schema.json",
       "bucket": "UA1_HOSTS",
-      "description": "A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.",
+      "description": "A runtime host's liveness and capacity, written by the host itself every 10 seconds and naming its certificate.",
       "key": "<runtime>",
       "signer": "host",
       "signer_roles": [
@@ -6293,7 +6293,7 @@
         "scheduler"
       ],
       "ttl_seconds": 60,
-      "write_rule": "written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
+      "write_rule": "written by the host itself every 10 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
       "writers": [
         "gateway",
         "lead_host",
