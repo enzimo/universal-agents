@@ -3722,7 +3722,9 @@ each read from the launcher's list of environment overrides (names only,
 configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
-schedules for administrators, receive loops that stopped), whether TeamLead
+schedules for administrators, receive loops that stopped, and knowledge too long
+to open in Web Chat, which only the team lead counts, at most every ten minutes and
+in a thread of its own, `custom_agents/long_knowledge.py`), whether TeamLead
 reports, its own configuration and receive loops, and storage filling up
 (`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
@@ -4280,9 +4282,17 @@ once. They serve the team's address (`svc.team`) and answer, so far:
   (`team_services.knowledge`), the durable `ManagerKnowledgeCommand` until phase 2, on the
   same knowledge service (`knowledge_base.service.knowledge_service_for`, shared with the
   agents' tools). Replies name a person editor by reference. Page text travels inline, at
-  most 32,768 characters, until the contract's object store exists: a longer page is
-  answered with a plain refusal, and the gateway refuses a longer text before sending
-  (the default page limit is 24,000).
+  most 32,768 characters (`knowledge_base.records.INLINE_TEXT_MAX`), until the contract's
+  object store exists, while agents' tools read and write whole pages up to
+  `agent.knowledge.limits.max_body_chars` (24,000 by default, at most 500,000). No
+  knowledge may be lost or cut because of the limit: reading longer text (a page, an
+  earlier revision, an open note, a proposal or the page it changes) is answered
+  `runtime_error` with a plain message saying nothing was changed or cut, and a change
+  that would replace, hide, revert or decide text the person could not open, or whose
+  reply could not show its result, is refused the same way before anything is stored.
+  The gateway refuses longer typed text before sending, and the editor keeps it. The team
+  lead counts the stored pages, earlier revisions, pending proposals and open notes over
+  the limit and reports them as a note on the Status page (`custom_agents.long_knowledge`).
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.
