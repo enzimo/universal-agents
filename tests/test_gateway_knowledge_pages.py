@@ -22,6 +22,7 @@ from assistant_gateway.application.knowledge_pages import (
     YOU_LABEL,
     GatewayKnowledgePages,
 )
+from assistant_gateway.application.knowledge_wire import INLINE_TEXT_MAX
 from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from assistant_gateway.store import GatewayStateStore
 from tests.test_gateway_website_app import (
@@ -255,3 +256,41 @@ async def test_editors_are_named_and_person_ids_never_reach_the_browser(site) ->
         assert json.loads(text)["page"]["last_editor"]["label"] == label
         assert not person_id or person_id not in text
         assert not person_id or REFERENCES.get(person_id, person_id) not in text
+
+
+@pytest.mark.asyncio
+async def test_text_longer_than_web_chat_carries_is_refused_plainly(site) -> None:
+    """Longer typed text is refused before anything is sent; the team services' refusal of longer stored text reaches the browser as written."""
+
+    exact, over = "x" * INLINE_TEXT_MAX, "x" * (INLINE_TEXT_MAX + 1)
+    too_long = (
+        "This page's text has 40,000 characters, more than the 32,768 Web Chat can show. Nothing was changed and "
+        "nothing was cut. Agents can still read and change all of it, for example to split the page into smaller "
+        "linked pages."
+    )
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        headers = await _signed_in(client)
+        save = "/api/web-chat/knowledge/pages/team/deploys/save"
+        refused_save = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
+                                                                      "body": over})
+        refused_note = await client.post("/api/web-chat/knowledge/pages/team/deploys/notes", headers=headers,
+                                         json={"session_key": SESSION_KEY, "note": over})
+        typed = [(response.status, await response.json()) for response in (refused_save, refused_note)]
+        assert site.team.calls == []
+        sent = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
+                                                              "body": exact})
+        site.team.refuse("runtime_error", too_long)
+        refused_read = await client.get(f"/api/web-chat/knowledge/pages/team/handbook?session_key={SESSION_KEY}")
+        refused_payload = await refused_read.json()
+
+    for status, payload in typed:
+        assert status == 400
+        assert payload["error"] == {
+            "code": "invalid_request",
+            "message": f"The text is {INLINE_TEXT_MAX + 1} characters long; at most {INLINE_TEXT_MAX} can be sent. Shorten it.",
+        }
+    assert sent.status == 200
+    [(kind, body, _person), _read] = site.team.calls
+    assert kind == "knowledge.write" and body["content"]["text"] == exact
+    assert refused_read.status == 503
+    assert refused_payload["error"] == {"code": "runtime_error", "message": too_long}

@@ -64,6 +64,7 @@ from knowledge_base.records import (
     KnowledgeRevision,
     KnowledgeWriteKey,
     KnowledgeWriteReceipt,
+    LongTextCounts,
     PageChange,
     PageKey,
     PageMerge,
@@ -268,6 +269,8 @@ class KnowledgeRepository(Protocol):
     ) -> None: ...
 
     def page_problems(self, *, team_id: str, stale_before: datetime, limit: int) -> PageProblems: ...
+
+    def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts: ...
 
     def export_rows(self, table: str) -> list[dict[str, Any]]: ...
 
@@ -1752,6 +1755,45 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
             stale_pages=[(f"{team}/{row[0]}", str(row[1])) for row in stale],
             pages_with_open_notes=[(f"{team}/{row[0]}", int(row[1])) for row in noted],
             duplicate_pages=[(f"{team}/{row[0]}", f"{team}/{row[1]}") for row in duplicates],
+        )
+
+    def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts:
+        """Pages, earlier revisions, pending contributions and open notes whose text has more than ``longer_than`` characters.
+
+        For administrators' Status page (``custom_agents.long_knowledge``): counts only,
+        never names or text, because personal pages and proposals are their person's own.
+        Every text is measured in the database. The byte size comes first because
+        PostgreSQL reads it without decompressing the text, and a text longer than
+        ``longer_than`` characters is always longer than that many bytes; LENGTH then
+        counts characters on both databases, as Python's ``len`` does.
+        """
+
+        p = self._dialect.bind
+
+        def longer(column: str) -> str:
+            return f"{self._dialect.text_bytes(column)} > {p} AND LENGTH({column}) > {p}"
+
+        limit = (int(longer_than), int(longer_than))
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                  (SELECT COUNT(*) FROM knowledge_pages WHERE team_id = {p} AND {longer("body")}),
+                  (SELECT COUNT(*) FROM knowledge_revisions r JOIN knowledge_pages pg ON pg.page_id = r.page_id
+                   WHERE r.team_id = {p} AND r.revision < pg.revision AND {longer("r.body")}),
+                  (SELECT COUNT(*) FROM knowledge_contributions WHERE team_id = {p} AND status = {p}
+                   AND {longer("body")}),
+                  (SELECT COUNT(*) FROM knowledge_notes WHERE team_id = {p} AND status = {p} AND {longer("body")})
+                """,
+                (
+                    team_id, *limit,
+                    team_id, *limit,
+                    team_id, ContributionStatus.PENDING.value, *limit,
+                    team_id, NoteStatus.OPEN.value, *limit,
+                ),
+            ).fetchone()
+        return LongTextCounts(
+            pages=int(row[0]), earlier_revisions=int(row[1]), pending_contributions=int(row[2]), open_notes=int(row[3])
         )
 
     # -- write helpers ---------------------------------------------------------------------

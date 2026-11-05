@@ -9,7 +9,8 @@ and names editors. tests/test_live_team_memory.py covers signing and verifying o
 The person comes only from the command token's reference; ``personal`` is always that
 person's own space; a person's team edit publishes directly; the never-stored rules and
 review confirmation apply; a person publishes or withdraws only their own proposals; a
-retried change is carried out once.
+retried change is carried out once; knowledge longer than Web Chat carries is refused
+plainly on every path and nothing stored changes (on SQLite and PostgreSQL).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Iterator, Optional, get_args
 from uuid import uuid4
 
 import pytest
@@ -37,14 +38,22 @@ from custom_messages.contracts.control_v1 import (
     KnowledgeCommandResultPayload,
     KnowledgeReviewFlagPayload,
 )
+from knowledge_base.records import INLINE_TEXT_MAX
 from knowledge_base.service import DraftInput, knowledge_service_for
 from knowledge_base.vocabulary import ContributionStatus
 from runtime_settings.knowledge import knowledge_settings
-from storage.config import resolve_storage_settings
-from storage.knowledge_repository import create_knowledge_repository
+from storage.config import StorageSettings, resolve_storage_settings
+from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES, create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
-from team_services.knowledge import KnowledgeOperations
-from tests.knowledge_support import TEAM
+from team_services.knowledge import (
+    NOTE_TEXT,
+    PAGE_TEXT,
+    PROPOSAL_TEXT,
+    PROPOSED_PAGE_TEXT,
+    REVISION_TEXT,
+    KnowledgeOperations,
+)
+from tests.knowledge_support import BACKENDS, TEAM, knowledge_storage
 from tests.knowledge_support import agent as agent_actor
 from tests.people_directory_support import access_store_at
 from tests.team_services_support import checked_reply, stand_in_frame
@@ -92,8 +101,12 @@ class _InProcess:
 
 
 class Team:
-    def __init__(self, tmp_path: Path, *, enabled: bool = True) -> None:
-        storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
+    """The team services and the gateway on one store; ``knowledge`` is the shared ``agent.knowledge`` setting."""
+
+    def __init__(self, tmp_path: Path, *, enabled: bool = True, storage: Optional[StorageSettings] = None,
+                 knowledge: Optional[dict] = None) -> None:
+        storage = storage or resolve_storage_settings(
+            {"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
         access = access_store_at(tmp_path)
         now = datetime.now(timezone.utc)
         for person in PEOPLE:
@@ -101,11 +114,13 @@ class Team:
                                               standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=now))
         self.repository = create_knowledge_repository(storage)
         memory = create_pinned_memory_repository(storage)
-        settings = knowledge_settings({"enabled": enabled})
+        settings = knowledge_settings({**(knowledge or {}), "enabled": enabled})
         self.operations = KnowledgeOperations(self.repository if enabled else None, PeopleDirectory(access, TEAM),
                                               settings, lambda: datetime.now(timezone.utc),
                                               logging.getLogger("test.team_knowledge"), personal_memory=memory)
-        self.service = knowledge_service_for(self.repository, settings=knowledge_settings({}), personal_memory=memory)
+        # Agents' side: the same settings (both read agent.knowledge).
+        self.service = knowledge_service_for(self.repository, settings=knowledge_settings(knowledge or {}),
+                                             personal_memory=memory)
         references = AccessStorePersonReferences(access.settings, TEAM)
         self.pages = GatewayKnowledgePages(
             team_commands=GatewayTeamCommandService(team_services=_InProcess(self.operations), references=references,
@@ -478,3 +493,194 @@ async def test_a_change_whose_reply_was_not_stored_yet_is_answered_from_its_rece
     assert (await team.send("alice", action=A.READ, page="runbook")).result.page.revision == 2
     # The rebuilt reply is now stored.
     assert _answer(team, edit, request_id="cmd-edit") == retried
+
+
+# -- text longer than Web Chat can carry (team_services.knowledge) ----------------------
+#
+# Agents write whole pages up to agent.knowledge.limits.max_body_chars (at most 500,000);
+# Web Chat carries at most INLINE_TEXT_MAX characters. Every Web Chat path that meets
+# longer text is refused with a plain message and changes nothing that is stored: not the
+# page, not one of its revisions, notes or links, and no proposal (owner's decision of
+# 2026-11-05: no knowledge is lost now or later). On SQLite and PostgreSQL.
+
+# Agents and the team services read the same agent.knowledge settings; these allow the longest pages.
+LONG_PAGES = {"limits": {"max_body_chars": 500_000, "max_note_chars": 50_000, "writes_per_agent_per_hour": 1000,
+                         "page_edits_per_agent": 100, "new_pages_per_work": 100}}
+LONG = 40_000
+NOTHING_CUT = "Nothing was changed and nothing was cut."
+
+
+def long_text(name: str, length: int = LONG, phrase: str = "drain the node, check «queues» — then restart ✓ 🚀") -> str:
+    """``length`` characters of distinct multi-line text, with characters of one to four bytes."""
+
+    line = f"{name}: {phrase}\n"
+    return (line * (length // len(line) + 1))[: length - 1] + "."
+
+
+@dataclass
+class LongWorld:
+    """Knowledge agents stored, longer than Web Chat can show, and the proposals among it."""
+
+    team: Team
+    texts: dict[str, str]
+    proposals: dict[str, str]
+
+
+def long_world(team: Team) -> LongWorld:
+    texts = {name: long_text(name) for name in ("handbook", "runbook", "grown", "journal", "note", "later",
+                                                "proposal", "edit")}
+    svc = team.service
+
+    def system(number: int):
+        # Work for nobody changes team pages directly.
+        return team.worker(f"sys_{number}")
+
+    svc.write(system(1), "team/handbook", DraftInput(title="Handbook", body=texts["handbook"]))
+    svc.write(system(2), "team/runbook", DraftInput(title="Runbook", body=texts["runbook"]))
+    svc.write(system(2), "team/runbook", DraftInput(body="Restart the worker."), base_revision=1)
+    svc.write(system(3), "team/grown", DraftInput(title="Grown", body="Short at first."))
+    svc.write(system(3), "team/grown", DraftInput(body=texts["grown"]), base_revision=1)
+    svc.write(system(4), "team/noted", DraftInput(title="Noted", body="A short page with a long note."))
+    svc.add_note(system(4), "team/noted", texts["note"])
+    # An agent working for alice: her own pages change directly, team pages wait for her as proposals.
+    alice = team.worker("alice_1", person="alice")
+    svc.write(alice, "personal/journal", DraftInput(title="Journal", body=texts["journal"]))
+    later = svc.write(alice, "team/later", DraftInput(title="Later", body="Proposed while the name was free."))
+    svc.write(system(5), "team/later", DraftInput(title="Later", body=texts["later"]))
+    proposals = {
+        "new_long": svc.write(alice, "team/proposal", DraftInput(title="Proposal", body=texts["proposal"])),
+        "short_on_long": svc.write(alice, "team/handbook", DraftInput(body="A shorter handbook."), base_revision=1),
+        "long_on_short": svc.write(alice, "team/runbook", DraftInput(body=texts["edit"]), base_revision=2),
+        "note_on_long": svc.add_note(alice, "team/handbook", "Mention the backup."),
+        "archive_long": svc.archive(alice, "team/handbook", base_revision=1, reason="Superseded."),
+        "new_named_like_long": later,
+    }
+    return LongWorld(team, texts, {name: result.contribution.contribution_id for name, result in proposals.items()})
+
+
+def stored(team: Team) -> dict[str, list[str]]:
+    """Every stored knowledge row, as exact text: pages, revisions, notes, links, merged names and proposals."""
+
+    return {table: sorted(json.dumps(row, sort_keys=True, default=str) for row in team.repository.export_rows(table))
+            for table in KNOWLEDGE_TRANSFER_TABLES}
+
+
+@pytest.fixture(params=BACKENDS)
+def world(request, tmp_path: Path) -> Iterator[LongWorld]:
+    with knowledge_storage(request.param, tmp_path) as storage:
+        yield long_world(Team(tmp_path, storage=storage, knowledge=LONG_PAGES))
+
+
+def _proposal(name: str, action: KnowledgeCommandAction, **fields: Any) -> Callable[[LongWorld], dict]:
+    return lambda world: dict(action=action, contribution_id=world.proposals[name], **fields)
+
+
+# Each Web Chat path that can meet longer text: (path, the request, what the refusal names).
+LONG_TEXT_PATHS: list[tuple[str, Callable[[LongWorld], dict], str]] = [
+    ("open a long page", lambda w: dict(action=A.READ, page="handbook"), PAGE_TEXT),
+    ("open a long personal page", lambda w: dict(action=A.READ, space="personal", page="journal"), PAGE_TEXT),
+    ("view a long earlier revision", lambda w: dict(action=A.READ, page="runbook", revision=1),
+     REVISION_TEXT.format(revision=1)),
+    ("open a page with a long open note", lambda w: dict(action=A.READ, page="noted"), NOTE_TEXT),
+    ("history of a long page", lambda w: dict(action=A.HISTORY, page="handbook"), PAGE_TEXT),
+    ("save over a long page", lambda w: dict(action=A.WRITE, page="handbook", base_revision=1, title="Handbook",
+                                             body="Replaced."), PAGE_TEXT),
+    ("save new details of a long page", lambda w: dict(action=A.WRITE, page="handbook", base_revision=1,
+                                                       title="Renamed", tags=["ops"]), PAGE_TEXT),
+    ("save over a long personal page", lambda w: dict(action=A.WRITE, space="personal", page="journal",
+                                                      base_revision=1, body="Replaced."), PAGE_TEXT),
+    ("save a page with a long open note", lambda w: dict(action=A.WRITE, page="noted", base_revision=1,
+                                                         body="Replaced."), NOTE_TEXT),
+    ("add a note to a long page", lambda w: dict(action=A.ADD_NOTE, page="handbook", note="Check the backup."),
+     PAGE_TEXT),
+    ("archive a long page", lambda w: dict(action=A.ARCHIVE, page="handbook", base_revision=1), PAGE_TEXT),
+    ("revert to a long earlier revision", lambda w: dict(action=A.REVERT, page="runbook", revision=1,
+                                                         base_revision=2), REVISION_TEXT.format(revision=1)),
+    ("revert a long page to a short revision", lambda w: dict(action=A.REVERT, page="grown", revision=1,
+                                                              base_revision=2), PAGE_TEXT),
+    ("review a long proposal", _proposal("new_long", A.READ_CONTRIBUTION), PROPOSAL_TEXT),
+    ("review a proposal for a long page", _proposal("short_on_long", A.READ_CONTRIBUTION), PROPOSED_PAGE_TEXT),
+    ("publish a long proposal", _proposal("new_long", A.PUBLISH_CONTRIBUTION), PROPOSAL_TEXT),
+    ("publish a long proposal after editing it", _proposal("new_long", A.PUBLISH_CONTRIBUTION, edited=True,
+                                                           title="Proposal", body="Edited."), PROPOSAL_TEXT),
+    ("publish a long edit of a short page", _proposal("long_on_short", A.PUBLISH_CONTRIBUTION, base_revision=2),
+     PROPOSAL_TEXT),
+    ("publish a short edit of a long page", _proposal("short_on_long", A.PUBLISH_CONTRIBUTION, base_revision=1),
+     PROPOSED_PAGE_TEXT),
+    ("publish a note on a long page", _proposal("note_on_long", A.PUBLISH_CONTRIBUTION, base_revision=1),
+     PROPOSED_PAGE_TEXT),
+    ("publish the archive of a long page", _proposal("archive_long", A.PUBLISH_CONTRIBUTION, base_revision=1),
+     PROPOSAL_TEXT),
+    ("publish a new page as an edit of a long page that took its name",
+     _proposal("new_named_like_long", A.PUBLISH_CONTRIBUTION, base_revision=1), PROPOSED_PAGE_TEXT),
+    ("withdraw a long proposal", _proposal("new_long", A.WITHDRAW_CONTRIBUTION), PROPOSAL_TEXT),
+    ("withdraw a proposal for a long page", _proposal("short_on_long", A.WITHDRAW_CONTRIBUTION),
+     PROPOSED_PAGE_TEXT),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "request_for", "subject"), LONG_TEXT_PATHS, ids=[path[0] for path in LONG_TEXT_PATHS])
+async def test_web_chat_refuses_knowledge_longer_than_it_can_show_and_changes_nothing(
+    world: LongWorld, path: str, request_for: Callable[[LongWorld], dict], subject: str
+) -> None:
+    before = stored(world.team)
+
+    refused = await world.team.send("alice", **request_for(world))
+
+    assert (refused.success, refused.error_code) == (False, "runtime_error"), path
+    assert refused.error_message.startswith(
+        f"{subject} has {LONG:,} characters, more than the {INLINE_TEXT_MAX:,} Web Chat can show. {NOTHING_CUT}"
+    ), refused.error_message
+    assert stored(world.team) == before, f"{path} changed stored knowledge"
+
+
+def test_agents_stored_and_still_read_every_long_text_whole(world: LongWorld) -> None:
+    svc, texts, ids = world.team.service, world.texts, world.proposals
+    system, alice = world.team.worker("sys_9"), world.team.worker("alice_9", person="alice")
+
+    assert svc.read(system, "team/handbook").page.body == texts["handbook"]
+    assert svc.read(system, "team/runbook", revision=1).revision.body == texts["runbook"]
+    assert svc.read(system, "team/grown").page.body == texts["grown"]
+    assert [note.body for note in svc.read(system, "team/noted").open_notes] == [texts["note"]]
+    assert svc.read(alice, "personal/journal").page.body == texts["journal"]
+    assert svc.get_contribution(alice, ids["new_long"]).body == texts["proposal"]
+    assert svc.get_contribution(alice, ids["long_on_short"]).body == texts["edit"]
+    assert svc.get_contribution(alice, ids["archive_long"]).body == texts["handbook"]
+
+
+@pytest.mark.asyncio
+async def test_web_chat_shows_and_saves_text_up_to_its_limit_and_lists_longer_knowledge(world: LongWorld) -> None:
+    team = world.team
+    # Words of its own: text from alice's personal page would wait for her confirmation.
+    exact = long_text("exact", INLINE_TEXT_MAX, phrase="rotate the logs, compress «archives» — then upload ✓ 📦")
+
+    saved = await team.write("alice", title="Exact", body=exact)
+    opened = await team.send("alice", action=A.READ, page="exact")
+    before = stored(team)
+    # The gateway refuses longer typed text before sending it; the editor keeps the text.
+    over = await team.write("alice", page="exact", base_revision=1, body=exact + "!")
+
+    assert saved.success is True and opened.result.page.body == exact
+    assert (over.success, over.error_code) == (False, "invalid_request")
+    assert over.error_message == f"The text is {INLINE_TEXT_MAX + 1} characters long; at most {INLINE_TEXT_MAX} can be sent. Shorten it."
+    assert stored(team) == before
+    # Lists, counts and revision lists carry no page text, so longer knowledge still appears in them.
+    listed = await team.send("alice", action=A.LIST)
+    history = await team.send("alice", action=A.HISTORY, page="runbook")
+    proposals = await team.send("alice", action=A.LIST_CONTRIBUTIONS)
+    count = await team.send("alice", action=A.COUNT_CONTRIBUTIONS)
+    # A short earlier revision of a long page opens.
+    earlier = await team.send("alice", action=A.READ, page="grown", revision=1)
+    assert {"handbook", "grown", "later", "exact"} <= {page.page for page in listed.result.pages}
+    assert [revision.revision for revision in history.result.revisions] == [2, 1]
+    assert proposals.result.total == count.result.total == len(world.proposals)
+    assert earlier.result.page.body == "Short at first." and earlier.result.page.shown_revision == 1
+
+
+def test_web_chat_and_the_team_services_use_the_contracts_inline_text_limit() -> None:
+    from assistant_gateway.application import knowledge_wire
+    from custom_messages.wire.models import LongText
+
+    contract = next(arg.max_length for arg in get_args(LongText)[1:] if getattr(arg, "max_length", None))
+    assert knowledge_wire.INLINE_TEXT_MAX == INLINE_TEXT_MAX == contract == 32768

@@ -276,6 +276,17 @@ on (`agent.knowledge.enabled`).
   working for you) can publish your proposals; a proposal with private details
   asks for a second click before it reaches the team.
 
+Web Chat shows and saves at most 32,768 characters of text at a time, while
+agents may write longer pages when an administrator raises
+`agent.knowledge.limits.max_body_chars` (24,000 characters by default). Web Chat
+says so instead of opening a page, earlier revision, note or proposal with
+longer text, and refuses to save over it, revert it, archive it, publish it or
+withdraw it. Nothing is changed and nothing is cut: agents still read and change
+the whole text, the Knowledge Curator still reviews long proposals, and a team
+transfer carries all of it. If you type more than 32,768 characters, nothing is
+saved and your text stays in the editor. Administrators see how much knowledge
+is too long for Web Chat as a note on the Status page.
+
 ### Conversations
 
 Use the agent from the browser Web Chat, local CLI, Telegram, WhatsApp,
@@ -1193,8 +1204,9 @@ disappears once it is fixed:
   default), or people's stored-data totals that are out of date, so they get
   no storage notices.
 - **Note**: a deliberate choice worth knowing, such as access checks turned
-  off, people whose work goes to their own model provider, or a message
-  server that sets no limit for stored messages.
+  off, people whose work goes to their own model provider, a message
+  server that sets no limit for stored messages, or knowledge pages, revisions,
+  notes or proposals too long to open in Web Chat.
 
 When new problems appear, administrators also get one Inbox notice that
 links to the page. Storage nearing its limit is told the same way, although
