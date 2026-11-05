@@ -2,9 +2,11 @@
 
 It runs as host ``team-services``: it joins the installation, waits for the team's
 single-instance lock, serves the team's address, and keeps its host upkeep (liveness,
-trust, renewal) and the lock's lease until it is stopped. Losing the lock stops the
-process with an error, so the launcher stops the team rather than letting two
-instances serve.
+trust, renewal) and the lock's lease until it is stopped. Losing the lock (another
+instance holds it, or its lease ran out without a successful renewal) stops the process
+with an error, so the launcher stops the team rather than letting two instances serve. A
+renewal that only failed, such as NATS not answering for a few seconds, is tried again
+while the lease lasts and does not stop anything (``team_services.lock``).
 """
 
 from __future__ import annotations
