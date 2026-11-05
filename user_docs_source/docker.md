@@ -260,6 +260,13 @@ postponing stream and consumer scaling or moves until every node is upgraded,
 and downgrading only to 2.14.7 or later. The included single-server deployment
 does not perform a rolling cluster upgrade.
 
+Since 0.10 every process signs the messages it sends and checks who signed what it
+receives (the message contract). For this the runtime keeps its own streams and
+key-value buckets (named `UA1_...`) and, at the first start, deletes the stream the
+old presence heartbeat used. With an external NATS server, the account the runtime
+uses must be allowed to create streams and buckets, and the server must run 2.15.1
+or later. The included server already meets both.
+
 ### Keep the databases on local disk
 
 The SQLite databases in `dbs/` belong on a disk local to the host, not on a
