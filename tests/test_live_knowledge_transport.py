@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefused
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
@@ -25,10 +26,10 @@ from assistant_gateway.store import GatewayStateStore
 from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.control_v1 import KnowledgeCommandAction, KnowledgeCommandPayload
 from custom_transport.protocol1.host_runtime import MessageHost
-from knowledge_base.service import KnowledgeService
-from runtime_settings.knowledge import KnowledgeSettings
+from knowledge_base.service import DraftInput, KnowledgeService
+from runtime_settings.knowledge import KnowledgeSettings, KnowledgeWriteLimits
 from storage.access_repository import AccessRepository
-from storage.knowledge_repository import create_knowledge_repository
+from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES, create_knowledge_repository
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_operations, team_services_profile
 from tests.knowledge_support import agent as worker_actor
 from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
@@ -108,6 +109,25 @@ async def test_gateway_reviews_notes_and_restores_archives_over_nats(
             assert final.total == 101 and len(final.contributions) == 1
             counted = await request(KnowledgeCommandAction.COUNT_CONTRIBUTIONS)
             assert counted.total == 101 and counted.contributions == []
+
+            # Text longer than Web Chat carries (agents may write it) is refused plainly over the
+            # wire too, and nothing changes (team_services.knowledge).
+            writer = replace(worker_actor("long_writer"), team_id=TEAM)
+            long_pages = KnowledgeService(
+                repository, settings=KnowledgeSettings(limits=KnowledgeWriteLimits(max_body_chars=500_000))
+            )
+            long_pages.write(writer, "team/handbook", DraftInput(title="Handbook", body="Long handbook line. " * 2_500))
+            long_pages.write(writer, "team/handbook", DraftInput(body="Short now."), base_revision=1)
+            before = [repository.export_rows(table) for table in KNOWLEDGE_TRANSFER_TABLES]
+            for action, fields in (
+                (KnowledgeCommandAction.READ, {"revision": 1}),
+                (KnowledgeCommandAction.REVERT, {"revision": 1, "base_revision": 2}),
+            ):
+                with pytest.raises(GatewayKnowledgeRefused) as refused:
+                    await request(action, page="handbook", **fields)
+                assert refused.value.code == "runtime_error"
+                assert refused.value.message.startswith("The text of revision 1 of this page has 49,999 characters")
+            assert [repository.export_rows(table) for table in KNOWLEDGE_TRANSFER_TABLES] == before
         finally:
             await gateway.close()
             stop.set()

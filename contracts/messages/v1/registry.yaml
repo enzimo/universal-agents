@@ -212,7 +212,7 @@ state_records:
     max_lifetime_seconds: 31622400  # 366 days
     write_rule: rewritten with a higher sequence to change, renew or end it; only the receiver's own authority signs it; deleted once receivers forget it (README, "Trust over time")
   host:
-    description: A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.
+    description: A runtime host's liveness and capacity, written by the host itself every 10 seconds and naming its certificate.
     bucket: UA1_HOSTS
     key: "<runtime>"
     signer: host
@@ -220,7 +220,7 @@ state_records:
     writers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     body: state/host.schema.json
     ttl_seconds: 60
-    write_rule: written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
+    write_rule: written by the host itself every 10 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
   agent:
     description: An agent's state, written by the host it is placed on when the state changes.
     bucket: UA1_AGENTS

@@ -8,8 +8,11 @@ what the gateway already acts on:
 
 - **The team lead.** Each change to the lead's record, its arrival, or its leaving reaches
   the manager client's ``apply_manager_status`` in order, through one queue, so the
-  existing "available" and "unavailable" transitions run as before. The lead leaving, or
-  its host no longer reporting, makes it unavailable within the reader's 5-second check.
+  existing "available" and "unavailable" transitions run as before. The lead saying it
+  leaves makes it unavailable at once. A lead whose host stopped reporting (a crash) is
+  unavailable at most 35 seconds after the host's last liveness write: the record's 30
+  seconds plus the reader's 5-second check, about the 30 seconds after which the presence
+  heartbeat counted the lead gone.
 - **The team's members.** Each live agent's state goes to the Team page and the Status
   page's records (``GatewayTeamPresence``) as it changes. What the records do not carry
   (skills, Status page findings, whether a busy agent could start more) is asked with
