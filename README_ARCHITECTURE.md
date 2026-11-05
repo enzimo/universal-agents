@@ -4355,7 +4355,8 @@ its earlier run left. Readers use `custom_transport.protocol1.team_agents.TeamAg
 watches `UA1_AGENTS`, `UA1_PLACEMENT` and `UA1_HOSTS`, verifies each record, and counts an
 agent live while its record is not exiting, its placement names the host that signed the
 record, and that host's liveness record has not expired (checked again every 5 seconds,
-since an expired record gives no change). Whether an agent is the team lead comes from its
+since an expired record gives no change), so a stopped host's agents drop out at most 35
+seconds after its last liveness write. Whether an agent is the team lead comes from its
 session's `agent_role`, which the team services signed. The view is replaced as a whole on
 each change, so agents on other threads read it without locks. The team lead's process and
 the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.

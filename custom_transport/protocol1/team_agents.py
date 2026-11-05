@@ -5,14 +5,16 @@ Three buckets together say it, each record verified as it is read:
   accepts work and its name, written by the host it runs on when it changes
   (``custom_agents.agent_host``);
 - ``UA1_PLACEMENT``: which host runs each agent, written by the team services;
-- ``UA1_HOSTS``: each host's liveness, written every 20 seconds and expiring within a minute.
+- ``UA1_HOSTS``: each host's liveness, written every 10 seconds, each record lasting 30
+  (``custom_transport.protocol1.host_runtime``).
 
 An agent is live while its record is not exiting, its placement names the host that signed
 the record, and that host's liveness record has not expired and names a certificate of the
 placement's membership epoch or later. Whether it is the team lead comes from its session
 (``agent_role``), which the team services signed. This replaces the presence heartbeat:
-nothing is broadcast, and a stopped host's agents drop out within a minute without anyone
-saying so.
+nothing is broadcast, and a stopped host's agents drop out without anyone saying so, at
+most 35 seconds after its last write: its record's 30 seconds plus this reader's 5-second
+check, about the 30 seconds after which the presence heartbeat counted an agent gone.
 
 How it reads:
 - Each bucket is watched; a record that fails verification is logged and left out
@@ -42,7 +44,8 @@ from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import VerifiedRecord
 from custom_messages.wire.values import parse_timestamp
 
-# Liveness records expire within a minute; this is how soon the view notices one has.
+# How soon after a host's liveness record expires the view notices: an expired record gives
+# no change in the bucket.
 RECHECK_SECONDS = 5.0
 _GONE_STATES = frozenset({"exiting", "stopped"})
 _LOGGER = logging.getLogger(__name__)

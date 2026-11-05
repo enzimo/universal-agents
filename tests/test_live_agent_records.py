@@ -22,7 +22,7 @@ import pytest
 from assistant_gateway.message_host import GATEWAY_RUNTIME, GatewayMessageHost, gateway_profile
 from custom_agents import agent_host as agent_host_module
 from custom_agents.agent_host import AgentProcessHost, definition_sha256, lead_host_profile, startup_agent_host_profile
-from custom_transport.protocol1.host_runtime import MessageHost
+from custom_transport.protocol1.host_runtime import LIVENESS_LIFETIME, MessageHost
 from custom_transport.protocol1.team_agents import TeamAgents
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
@@ -116,9 +116,11 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         assert await restarted.host.records.raw("agent", f"{TEAM}.researcher_2") is None
         assert set(reader.live()) == {"researcher_3"}
 
-        # A host that stops writing its liveness: its agents drop out once its record has expired.
+        # A host that stops writing its liveness: its agents drop out once its record has expired,
+        # LIVENESS_LIFETIME (30 seconds) after its last write. Seen a second later than that from
+        # now, even the newest record has.
         reader_clock = gateway.host.clock
-        monkeypatch.setattr(gateway.host, "clock", lambda: reader_clock() + timedelta(minutes=2))
+        monkeypatch.setattr(gateway.host, "clock", lambda: reader_clock() + LIVENESS_LIFETIME + timedelta(seconds=1))
         await _until(lambda: reader.agent("researcher_3") is None, timeout=5)
         monkeypatch.setattr(gateway.host, "clock", reader_clock)
         await _until(lambda: reader.agent("researcher_3") is not None, timeout=5)
