@@ -2527,7 +2527,7 @@ A restart's approval covers the tasks the restart interrupts
 (`custom_agents/runtime_restart_service.py`). The plan records the runtime
 state and, from it, the tasks the restart would interrupt or delay: every
 request execution root the manager holds, whatever its state, and for an `all` restart
-the work other agents report running. Work on a task the manager delegated
+the work other agents are running. Work on a task the manager delegated
 counts as that task. Locally runnable plan-step and recovery tasks are grouped
 under that same root too: they have no `parent_task_id`, but the manager's
 execution graph records which request owns them. Finishing one step and
@@ -2543,12 +2543,45 @@ current task and other agents' queue counts, so any scheduled run, heartbeat
 item, finished worker or new message made an approved restart unusable, and
 with background work running a restart could rarely be applied. A refusal uses
 the approval up, as for any plan that no longer applies, and names the new
-tasks, so TeamArchitect stages a fresh plan that lists them. Plans need schema
-3: plans staged under the earlier rule are refused rather than converted,
-because their approval text promised the stricter rule. The review lists the
+tasks, so TeamArchitect stages a fresh plan that lists them. The review lists the
 tasks in one line of at most 1000 characters, naming them while they fit and
 always giving the exact count; a busy manager used to produce a longer line,
 which could not be shown for review at all.
+
+Other agents' work comes from their own answers. The team's agent records say
+which agents are live, but not which task each runs, so while it captures an
+`all` restart's state (when staging, before a person is asked, when applying,
+and for `get_runtime_restart_status`) the team lead sends every other live agent
+a full `agent.status` request and names each one's work by the task it reports.
+It asks them all at once and waits at most five seconds in total
+(`TEAM_STATUS_TIMEOUT_SECONDS`), however many agents there are. An agent that
+does not answer in time, refuses or cannot be reached is recorded as not
+answering (`answered: false`, with its task, counts and running flag left empty
+rather than false or zero) and counts as `<agent id>:not-answering`: the person
+approves interrupting whatever it runs, and the review lists those agents on a
+line of their own. The approval keys stay free of ages, counts and clocks, so the
+same work gives the same `runtime_state_digest`. On a re-check the same rule as
+for tasks applies: an agent that answered and no longer does is refused (it may
+now run a task nobody approved), one that did not answer and now reports a task
+outside the approved ones is refused (nobody can tell whether it started after
+planning), and one that did not answer either time keeps the approval, since a
+team with an agent that hangs is when a restart is needed most. When the team
+lead's process cannot see the team's agents yet (it has not joined), an `all`
+restart is refused with that reason rather than shown as interrupting no other
+agent's work; a `manager` restart does not need the team.
+
+The capture runs in the tool's worker thread (Strands runs synchronous tools
+there; `apply_change` describes and applies plans there). It runs the requests
+on a private event loop in that thread, and they reach the other agents through
+the process's host, which works on the team lead's own loop; that loop is free
+while the tool waits, so the capture never waits on a loop it blocks. A capture
+on an event loop is refused (`event=runtime_restart_capture_on_event_loop`).
+
+Plans need schema 4, which records whether each other agent answered. Plans of
+earlier schemas are refused with a message to stage a fresh plan, rather than
+converted: schema 3 plans took other agents' work from what they reported on
+their own, and their review never said an agent was not answering. Plans last
+an hour, so only a plan staged just before an upgrade is affected.
 
 An installed MCP server is one team tool, `mcp:<name>`, in the `mcp_servers`
 tool set that members hold as a standard set (`access_catalog/catalog.py`,
@@ -3717,7 +3750,9 @@ each read from the launcher's list of environment overrides (names only,
 configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
-schedules for administrators, receive loops that stopped), whether TeamLead
+schedules for administrators, receive loops that stopped, and knowledge too long
+to open in Web Chat, which only the team lead counts, at most every ten minutes and
+in a thread of its own, `custom_agents/long_knowledge.py`), whether TeamLead
 reports, its own configuration and receive loops, and storage filling up
 (`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
@@ -4235,11 +4270,12 @@ keys. The hosts still share one NATS login, so a join returns no NATS credential
 **Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
 reads the authority's newest revocations record at start and every half hour, renews its
 certificate when two thirds of its life are gone, and writes its own liveness record
-(`UA1_HOSTS`) every 20 seconds, expiring within 60, so a stopped host shows as gone within
-a minute and nothing moves because of it. When a frame or record names a certificate or
-an agent session this host does not hold yet, it reads it from `UA1_CERTS`, where the
-authority and the team services publish them, verifies it, and checks the frame again,
-once.
+(`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
+within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
+writes do not make a running host look gone; nothing moves because of it. When a frame or
+record names a certificate or an agent session this host does not hold yet, it reads it
+from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
+checks the frame again, once.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
 `team-services` with the `team_services` and `scheduler` roles (plan decisions 44 and 58),
@@ -4248,8 +4284,16 @@ it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, hol
 30-second lease renewed every 10 seconds. The lock names the process instance, not only
 the runtime, so a second copy of the same host, or a restart while the old process still
 runs, waits as a standby, logs which instance serves, and takes over when the lease runs
-out or the first releases it on a clean stop. An instance that loses the lock stops at
-once. They serve the team's address (`svc.team`) and answer, so far:
+out or the first releases it on a clean stop. An instance that finds another holding the
+lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
+short outage) is tried again every 2 seconds while the lease lasts, each failure logged
+(`team_services_lock_renew_failed`), and the instance keeps serving: its lease still keeps
+others out, and stopping would stop the whole team, because the launcher stops every
+service when one exits. Only when the lease runs out unrenewed does it stop
+(`team_services_lock_lease_ended`), since a standby may take over from then on. A renewal
+whose write reached NATS but whose answer was lost is recognised by the lock still naming
+this instance, not taken as a lost lock. They serve the team's address (`svc.team`) and
+answer, so far:
 
 - `sessions.open`: the host's certificate must allow the agent's type and have room under
   its session limit, and the agent must not run on another host (agents stay on their
@@ -4275,9 +4319,17 @@ once. They serve the team's address (`svc.team`) and answer, so far:
   (`team_services.knowledge`), the durable `ManagerKnowledgeCommand` until phase 2, on the
   same knowledge service (`knowledge_base.service.knowledge_service_for`, shared with the
   agents' tools). Replies name a person editor by reference. Page text travels inline, at
-  most 32,768 characters, until the contract's object store exists: a longer page is
-  answered with a plain refusal, and the gateway refuses a longer text before sending
-  (the default page limit is 24,000);
+  most 32,768 characters (`knowledge_base.records.INLINE_TEXT_MAX`), until the contract's
+  object store exists, while agents' tools read and write whole pages up to
+  `agent.knowledge.limits.max_body_chars` (24,000 by default, at most 500,000). No
+  knowledge may be lost or cut because of the limit: reading longer text (a page, an
+  earlier revision, an open note, a proposal or the page it changes) is answered
+  `runtime_error` with a plain message saying nothing was changed or cut, and a change
+  that would replace, hide, revert or decide text the person could not open, or whose
+  reply could not show its result, is refused the same way before anything is stored.
+  The gateway refuses longer typed text before sending, and the editor keeps it. The team
+  lead counts the stored pages, earlier revisions, pending proposals and open notes over
+  the limit and reports them as a note on the Status page (`custom_agents.long_knowledge`);
 - the chat's topic commands, `topics.list_tags`, `.find_threads` and `.tag_thread`
   (`team_services.topics`, the durable `ManagerTopicCommand` until phase 2), on the same
   conversation store. Tagging can be done again with the same effect, so its outcome is
@@ -4350,7 +4402,8 @@ its earlier run left. Readers use `custom_transport.protocol1.team_agents.TeamAg
 watches `UA1_AGENTS`, `UA1_PLACEMENT` and `UA1_HOSTS`, verifies each record, and counts an
 agent live while its record is not exiting, its placement names the host that signed the
 record, and that host's liveness record has not expired (checked again every 5 seconds,
-since an expired record gives no change). Whether an agent is the team lead comes from its
+since an expired record gives no change), so a stopped host's agents drop out at most 35
+seconds after its last liveness write. Whether an agent is the team lead comes from its
 session's `agent_role`, which the team services signed. The view is replaced as a whole on
 each change, so agents on other threads read it without locks. The team lead's process and
 the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
@@ -4386,6 +4439,10 @@ process's host apart from the host's own module so the import graph stays free o
 
 Agents no longer subscribe to presence or the broadcast subject, ignore status replies on
 `.operational`, and the team lead no longer writes other agents' rows in `agent_states`.
+Restart approvals name other agents' running work by task: the team lead asks each live
+agent for its full status while it captures an `all` restart's state, and shows an agent
+that does not answer as not answering (see the restart approvals under "Authorization and
+credentials").
 
 **The end of presence and fan-out** (step 7d): agents no longer publish presence. Each
 agent refreshes its own `agent_states` row and checks its skill catalog every 20 seconds
@@ -4403,16 +4460,16 @@ the gateway's task progress, parent-task probe and thread guidance, with their r
 through its control mailbox (`agent.<id>.control`, durable, read while it works; plan
 decision 59), and a subtask no worker has taken yet gets none. The skill hint is no longer
 a message type.
-Restart approvals name other agents' running work by agent (`<agent id>:unknown-task`),
-since the records do not carry the current task; asking each agent while the change is
-described is a follow-up.
 
 **The gateway follows its team** (step 7c, `assistant_gateway.team_view`): the gateway's
 host reads the team's live agents once it has joined, and hands the team lead's arrival,
 changes and leaving, in order, to the manager client's `apply_manager_status`, so the
 "available" and "unavailable" transitions (notices, maintenance schedules, failing waiting
-replies, pausing Telegram polling) run as before. The lead leaving, or its host no longer
-reporting, makes it unavailable within the reader's 5-second check. Every member's state
+replies, pausing Telegram polling) run as before. The lead saying it leaves makes it
+unavailable at once; a lead whose host stopped reporting is unavailable at most 35 seconds
+after the host's last liveness write (its record's 30 seconds plus the reader's 5-second
+check), about the 30 seconds after which the presence heartbeat counted it gone. Every
+member's state
 goes to the Team page's records as it changes; skills, Status page findings and whether a
 busy agent could start more, which records do not carry, are asked with `agent.status`
 (basic) from each live agent every 20 seconds and merged in. At start the gateway waits up
