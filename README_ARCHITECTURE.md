@@ -4446,8 +4446,11 @@ credentials").
 host reads the team's live agents once it has joined, and hands the team lead's arrival,
 changes and leaving, in order, to the manager client's `apply_manager_status`, so the
 "available" and "unavailable" transitions (notices, maintenance schedules, failing waiting
-replies, pausing Telegram polling) run as before. The lead leaving, or its host no longer
-reporting, makes it unavailable within the reader's 5-second check. Every member's state
+replies, pausing Telegram polling) run as before. The lead saying it leaves makes it
+unavailable at once; a lead whose host stopped reporting is unavailable at most 35 seconds
+after the host's last liveness write (its record's 30 seconds plus the reader's 5-second
+check), about the 30 seconds after which the presence heartbeat counted it gone. Every
+member's state
 goes to the Team page's records as it changes; skills, Status page findings and whether a
 busy agent could start more, which records do not carry, are asked with `agent.status`
 (basic) from each live agent every 20 seconds and merged in. At start the gateway waits up
