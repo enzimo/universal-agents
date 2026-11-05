@@ -4239,11 +4239,12 @@ keys. The hosts still share one NATS login, so a join returns no NATS credential
 **Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
 reads the authority's newest revocations record at start and every half hour, renews its
 certificate when two thirds of its life are gone, and writes its own liveness record
-(`UA1_HOSTS`) every 20 seconds, expiring within 60, so a stopped host shows as gone within
-a minute and nothing moves because of it. When a frame or record names a certificate or
-an agent session this host does not hold yet, it reads it from `UA1_CERTS`, where the
-authority and the team services publish them, verifies it, and checks the frame again,
-once.
+(`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
+within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
+writes do not make a running host look gone; nothing moves because of it. When a frame or
+record names a certificate or an agent session this host does not hold yet, it reads it
+from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
+checks the frame again, once.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
 `team-services` with the `team_services` and `scheduler` roles (plan decisions 44 and 58),
