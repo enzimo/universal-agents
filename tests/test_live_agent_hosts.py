@@ -78,7 +78,7 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         reply = await gateway.command("tasks.list", body, person_ref=PERSON, request_id="cmd-1")
         assert reply.raw["body"].get("queue_digest") == "digest-1", reply.raw["body"]
         # The agent saw the gateway's token, relayed by the team services.
-        assert asked == [("researcher_1", PERSON, frozenset({"team_services", "scheduler"}))]
+        assert asked == [("researcher_1", PERSON, frozenset({"team_services"}))]
 
         # The agent leaves: its session closes, and a command for it is answered plainly.
         await asyncio.wrap_future(agent_host.detach("researcher_1"))
