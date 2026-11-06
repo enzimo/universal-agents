@@ -13,6 +13,14 @@ team services decide:
   another 7 days.
 - ``sessions.close``: the session's actual end; the placement is removed when the agent
   exited or failed, and kept when it is handed over (the new host's open replaces it).
+
+Every process shares one NATS login in this phase, so any of them can write
+``UA1_PLACEMENT`` and ``UA1_CERTS``. The team services use a placement or session they
+read there only when it verifies: signed by a team services host (the registry's signer
+roles, which the reader checks) and stored under its own key. One that does not verify
+counts as absent and is logged with its key and the refusal
+(``event=team_services_record_refused``); a renewal or close re-signs the session the
+team services hold, never what another process wrote.
 """
 
 from __future__ import annotations
@@ -28,7 +36,8 @@ from nats.js.errors import KeyNotFoundError, KeyWrongLastSequenceError, NoKeysEr
 from custom_messages.contracts.runtime_v1 import MANAGER_AGENT_TYPE
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
-from custom_messages.wire.values import parse_timestamp
+from custom_messages.wire.refusals import FrameRefused
+from custom_messages.wire.trust import AgentSession, VerifiedRecord
 from custom_transport.protocol1.state_records import StateRecords
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 
@@ -62,6 +71,25 @@ class SessionService:
             return None
         return entry if entry.value else None
 
+    def _refused(self, record: str, key: str, refused: FrameRefused) -> None:
+        self.logger.warning("A stored record does not verify and counts as absent. event=team_services_record_refused "
+                            "record=%s key=%s code=%s at=%s", record, key, refused.code, refused.at)
+
+    async def _placement(self, key: str) -> tuple[int, Optional[VerifiedRecord]]:
+        """The key's revision (0 when absent) and its placement, ``None`` when absent or it does not verify.
+
+        The revision of a record that does not verify still lets the next placement
+        replace it with compare-and-set.
+        """
+
+        try:
+            stored = await self.records.read_report("placement", key, now=self.clock())
+        except FrameRefused as refused:
+            self._refused("placement", key, refused)
+            entry = await self._entry(PLACEMENT_BUCKET, key)
+            return (int(entry.revision) if entry is not None else 0), None
+        return (0, None) if stored is None else (stored.revision, stored.record)
+
     async def _host_placements(self, team: str, runtime: str) -> list[str]:
         """The agents of ``team`` placed on ``runtime``."""
 
@@ -72,8 +100,8 @@ class SessionService:
             return []
         agents = []
         for key in keys:
-            entry = await self._entry(PLACEMENT_BUCKET, key)
-            if entry is not None and json.loads(entry.value)["body"]["host"] == runtime:
+            _revision, placement = await self._placement(key)
+            if placement is not None and placement.body.host == runtime:
                 agents.append(key.split(".", 1)[1])
         return agents
 
@@ -85,10 +113,9 @@ class SessionService:
         if agent_type not in certificate.agent_types:
             return {"outcome": "not_allowed", "message": f"This host's certificate does not allow agent type {agent_type}."}
         key = placement_key(team, agent)
-        current = await self._entry(PLACEMENT_BUCKET, key)
-        previous = json.loads(current.value) if current is not None else None
-        if previous is not None and previous["body"]["host"] != certificate.runtime:
-            return {"outcome": "already_placed", "host": previous["body"]["host"],
+        current, previous = await self._placement(key)
+        if previous is not None and previous.body.host != certificate.runtime:
+            return {"outcome": "already_placed", "host": previous.body.host,
                     "message": f"{agent} runs on another host; it moves only by a handover."}
         if previous is None and len(await self._host_placements(team, certificate.runtime)) >= certificate.session_limit:
             return {"outcome": "limit_reached", "message": "This host already runs as many agents as its certificate allows."}
@@ -96,11 +123,15 @@ class SessionService:
         placement = {"team": team, "agent": agent, "agent_type": agent_type, "host": certificate.runtime,
                      "host_epoch": certificate.membership_epoch, "definition_sha256": str(body["definition_sha256"]),
                      "placed_at": format_timestamp(now), "reason": "initial"}
-        sequence = int(previous["sequence"]) + 1 if previous is not None else 1
+        if previous is not None:
+            sequence = previous.document.sequence + 1
+        else:
+            # Over a record that did not verify, at least the time in milliseconds: a reader
+            # still holding the placement it replaced must not take this one for an older copy.
+            sequence = max(1, int(now.timestamp() * 1000)) if current else 1
         try:
             revision = await self.records.put("placement", key, self.records.signed(
-                "placement", key, placement, sequence=sequence, issued_at=now),
-                last_revision=int(current.revision) if current is not None else 0)
+                "placement", key, placement, sequence=sequence, issued_at=now), last_revision=current)
         except KeyWrongLastSequenceError:
             # Another open for this agent won; the asking host may ask again and learn where it went.
             return {"outcome": "runtime_error", "message": "The placement changed at the same time; ask again."}
@@ -120,31 +151,54 @@ class SessionService:
         await self.records.put("agent_session", session_key(self.installation, team, session), record)
         self.trust.add(json.dumps(record).encode(), now=self.clock())
 
-    async def _own_session(self, verified: VerifiedFrame) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    async def _session(self, team: str, session: str) -> Optional[AgentSession]:
+        """The session as the team services' trust store holds it, after taking the bucket's record when it verifies.
+
+        A newer record in ``UA1_CERTS`` that verifies is taken; one that does not is
+        logged, and the one held stays (none after a restart: the session counts as absent).
+        """
+
+        key = session_key(self.installation, team, session)
+        try:
+            await self.records.take_trust_record("agent_session", key, now=self.clock())
+        except FrameRefused as refused:
+            self._refused("agent_session", key, refused)
+        return self.trust.store.agent_session(self.installation, team, session)
+
+    async def _own_session(self, verified: VerifiedFrame) -> tuple[Optional[AgentSession], Optional[dict[str, Any]]]:
         """The session a renewal or close names, when it places an agent on the asking host; else a refusal."""
 
         certificate = verified.certificate
         assert certificate is not None
         team, session = verified.frame.issuer.team, str(verified.raw["body"]["session"])
-        entry = await self._entry(CERTIFICATES_BUCKET, session_key(self.installation, team, session))
-        stored = json.loads(entry.value) if entry is not None else None
-        if stored is None or stored["body"]["runtime"] != certificate.runtime:
+        stored = await self._session(team, session)
+        if stored is None or stored.runtime != certificate.runtime:
             return None, {"outcome": "not_found", "message": f"No session {session} places an agent on this host."}
         return stored, None
+
+    def _signed_again(self, stored: AgentSession, ends_at: datetime, now: datetime) -> dict[str, Any]:
+        """The held session signed again with another end, under the next sequence."""
+
+        key = session_key(stored.installation, stored.team, stored.session)
+        held = self.trust.store.held_record("agent_session", key)
+        assert held is not None  # _session returned it from the store
+        body = {"session": stored.session, "installation": stored.installation, "team": stored.team, "agent": stored.agent,
+                "agent_type": stored.agent_type, "agent_role": stored.agent_role, "runtime": stored.runtime,
+                "placement_revision": stored.placement_revision, "started_at": format_timestamp(stored.started_at),
+                "ends_at": format_timestamp(ends_at)}
+        return self.records.signed("agent_session", key, body, sequence=held[0] + 1, issued_at=now)
 
     async def renew(self, verified: VerifiedFrame) -> dict[str, Any]:
         stored, refusal = await self._own_session(verified)
         if refusal is not None:
             return refusal
         assert stored is not None
-        body, team = stored["body"], verified.frame.issuer.team
-        placement = await self._entry(PLACEMENT_BUCKET, placement_key(team, body["agent"]))
-        if placement is None or json.loads(placement.value)["body"]["host"] != body["runtime"]:
+        _revision, placement = await self._placement(placement_key(stored.team, stored.agent))
+        if placement is None or placement.body.host != stored.runtime:
             return {"outcome": "not_allowed", "message": "The agent is no longer placed on this host."}
         now = self.clock()
-        renewed = self.records.signed("agent_session", stored["key"], {**body, "ends_at": format_timestamp(now + SESSION_LIFETIME)},
-                                      sequence=int(stored["sequence"]) + 1, issued_at=now)
-        await self._store_session(team, body["session"], renewed)
+        renewed = self._signed_again(stored, now + SESSION_LIFETIME, now)
+        await self._store_session(stored.team, stored.session, renewed)
         return {"outcome": "ok", "session": renewed}
 
     async def close(self, verified: VerifiedFrame) -> dict[str, Any]:
@@ -152,24 +206,22 @@ class SessionService:
         if refusal is not None:
             return refusal
         assert stored is not None
-        body, team = stored["body"], verified.frame.issuer.team
         now = self.clock()
-        ended = max(now, parse_timestamp(body["started_at"]) + timedelta(milliseconds=1))
-        closed = self.records.signed("agent_session", stored["key"], {**body, "ends_at": format_timestamp(ended)},
-                                     sequence=int(stored["sequence"]) + 1, issued_at=now)
-        await self._store_session(team, body["session"], closed)
+        ended = max(now, stored.started_at + timedelta(milliseconds=1))
+        closed = self._signed_again(stored, ended, now)
+        await self._store_session(stored.team, stored.session, closed)
         if verified.raw["body"]["reason"] != "handed_over":
-            await self._remove_placement(team, body["agent"], body["runtime"])
+            await self._remove_placement(stored.team, stored.agent, stored.runtime)
         self.logger.info("Recorded an agent session's end. event=agent_session_closed team=%s agent=%s session=%s reason=%s",
-                         team, body["agent"], body["session"], verified.raw["body"]["reason"])
+                         stored.team, stored.agent, stored.session, verified.raw["body"]["reason"])
         return {"outcome": "ok", "ended_at": format_timestamp(ended)}
 
     async def _remove_placement(self, team: str, agent: str, runtime: str) -> None:
-        entry = await self._entry(PLACEMENT_BUCKET, placement_key(team, agent))
-        if entry is None or json.loads(entry.value)["body"]["host"] != runtime:
+        revision, placement = await self._placement(placement_key(team, agent))
+        if placement is None or placement.body.host != runtime:
             return
         try:
-            await (await self.js.key_value(PLACEMENT_BUCKET)).delete(placement_key(team, agent), last=entry.revision)
+            await (await self.js.key_value(PLACEMENT_BUCKET)).delete(placement_key(team, agent), last=revision)
         except KeyWrongLastSequenceError:
             self.logger.warning("A placement changed while its session closed; leaving it. event=placement_kept "
                                 "team=%s agent=%s", team, agent)
