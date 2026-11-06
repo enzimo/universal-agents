@@ -4253,8 +4253,11 @@ the release and the contract digest, so retries keep it and a host upgraded in p
 gets an earlier renewal's stored answer back), and writes its own liveness record
 (`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
 within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
-writes do not make a running host look gone; nothing moves because of it. It signs its
-frames and its records (its host record, and the placements, sessions and agent records it
+writes do not make a running host look gone; nothing moves because of it. The record lists
+the parts of the host that are not healthy (`components`, at most 16, each with a code saying
+why), such as an agent whose session was refused, and then says the host is `degraded`,
+since it still serves the rest; when they change, the host writes its record again at once.
+It signs its frames and its records (its host record, and the placements, sessions and agent records it
 writes) with one identity, so a renewal switches all of them at once: a record still signed
 with the old certificate would name another certificate than its signer, or be refused once
 the old one's overlap ends. A host whose certificate lacks an agent type it now runs, such
@@ -4306,7 +4309,9 @@ They serve the team's address (`svc.team`) and answer, so far:
   session, naming the placement's revision, is signed into `UA1_CERTS`. Only the team
   lead's type on a lead host gets the `lead` role;
 - `sessions.renew` and `sessions.close`, for sessions on the asking host; a close removes
-  the placement unless the agent is handed over.
+  the placement unless the agent is handed over. A renewal is refused (`not_allowed`) for a
+  session that has ended or whose placement is no longer the agent's current one, so a
+  session closed earlier never comes back when its agent is placed on the same host again.
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one at a time.
