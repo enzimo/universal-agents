@@ -253,3 +253,41 @@ def test_a_host_record_names_the_contract_the_host_runs() -> None:
     assert host.liveness_body("accepting")["contract_sha256"] == host_runtime.CONTRACT_SHA256
     host.contract_sha256 = OTHER_CONTRACT
     assert host.liveness_body("draining")["contract_sha256"] == OTHER_CONTRACT
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_that_gives_up_the_agents_and_gets_no_answer_is_asked_again_until_answered(caplog) -> None:
+    """A drained host on another contract must still give its agents up; the upkeep asks again, then stops."""
+
+    from custom_transport.protocol1.live import ServiceUnavailable
+
+    now = [START]
+    profile = HostProfile("worker-host-1", ("team_one",), ("worker_host",), ("researcher",), 2)
+    certificate = SimpleNamespace(installation="install_one", runtime="worker-host-1", certificate_id="cert.worker-host-1.3",
+                                  membership_epoch=3, issued_at=START, expires_at=START + timedelta(days=30),
+                                  agent_types=frozenset({"researcher"}), session_limit=2)
+    host, records = _host(now)
+    host.profile = profile
+    host.renew_if_due = MessageHost.renew_if_due.__get__(host)  # type: ignore[method-assign]
+    live = _MismatchLive(certificate)
+    answers = [ServiceUnavailable("host.renew", "subject", "no answer in time")]
+    answer = live.request
+
+    async def request(kind, body, audience, *, team):
+        if answers:
+            live.bodies.append(body)
+            raise answers.pop(0)
+        return await answer(kind, body, audience, team=team)
+
+    live.request = request  # type: ignore[method-assign]
+    host.live = live  # type: ignore[assignment]
+    host.installation_contract = OTHER_CONTRACT
+    await host.publish_liveness("draining")
+
+    await host.finish_drain()
+    assert "event=protocol1_give_up_renewal_failed" in caplog.text
+    assert records.written[-1]["state"] == "drained" and len(live.bodies) == 1
+    await host.renew_if_due()  # the next upkeep, though no renewal is due: answered now (protocol_mismatch)
+    await host.renew_if_due()
+    assert len(live.bodies) == 2
+    assert all(body["profile_sha256"] == profile.giving_up().digest() for body in live.bodies)
