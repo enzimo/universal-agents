@@ -258,7 +258,7 @@ class TeamAgents:
         held[name] = _Held(verified.document.sequence, verified.digest, verified)
         if record == "agent":
             await self._learn_role(verified)
-        elif verified.other_contract and verified.their_contract_sha256:
+        elif record == "host" and verified.other_contract and verified.their_contract_sha256:
             self._log_other_contract(name, verified.their_contract_sha256)
         return True
 
