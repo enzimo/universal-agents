@@ -4261,8 +4261,13 @@ others out, and stopping would stop the whole team, because the launcher stops e
 service when one exits. Only when the lease runs out unrenewed does it stop
 (`team_services_lock_lease_ended`), since a standby may take over from then on. A renewal
 whose write reached NATS but whose answer was lost is recognised by the lock still naming
-this instance, not taken as a lost lock. They serve the team's address (`svc.team`) and
-answer, so far:
+this instance, not taken as a lost lock. Taking the lock follows the same rule: when NATS
+or the connection to it fails while a standby checks the lock, or while a first instance
+starts during a short outage, the attempt is tried again every 2 seconds until it succeeds
+or the process is stopped, logged the first time and whenever the error changes
+(`team_services_lock_acquire_failed`). The instance serves only after its own write of the
+lock succeeded, and a malformed lock record or a closed NATS connection still stops it.
+They serve the team's address (`svc.team`) and answer, so far:
 
 - `sessions.open`: the host's certificate must allow the agent's type and have room under
   its session limit, and the agent must not run on another host (agents stay on their
