@@ -399,8 +399,10 @@ class MessageHost:
         team created while it runs, whose ``sessions.open`` was refused ``not_allowed``.
         The join asks for the types the host's certificate and profile already name plus
         the requested ones, never fewer, so no running agent loses its type. The authority
-        grants a join only whole: when the launcher's list or the catalog lacks any type
-        asked for, it refuses it and the host keeps its certificate. A granted join gets a
+        keeps the types the host's certificate grants, as a renewal does, also one since
+        removed from the catalog; it grants a join only whole: when the launcher's list and
+        the catalog both lack a new type asked for, it refuses the join and the host keeps
+        its certificate. A granted join gets a
         certificate at the next membership epoch that replaces the old one; frames and
         records are signed with it from then on, and later renewals and joins ask for the
         same types. Requested types the certificate already names need no join. Names no

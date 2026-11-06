@@ -4408,7 +4408,12 @@ record, so a malformed or forged one, or one removed meanwhile, is skipped with 
 lead's host may run any agent type in the instance's catalog, including specialists created
 while it runs: the launcher lists it with `agent_types_from_catalog`, the authority reads the
 catalog at each join, and a join asking for different grants gets a new certificate (a join
-asking for exactly the same gets its certificate back). A host that meets a relayed frame
+asking for exactly the same gets its certificate back). A join with the key of the host's
+current certificate keeps the types that certificate grants, as a renewal does: removing a
+specialist from the catalog leaves its running worker running, and the lead's host asks for
+every type it holds again whenever it joins for a new one, so a removed type no longer gets
+every later join for a new specialist refused. The type leaves the certificate when the
+process restarts and asks for the catalog's types afresh. A host that meets a relayed frame
 whose token another host signed reads that host's certificate from `UA1_CERTS` too.
 
 Every running agent holds a session (plan 13B.5, decided 2026-11-06). Without one an agent
