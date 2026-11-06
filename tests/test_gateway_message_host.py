@@ -100,3 +100,27 @@ async def test_the_gateway_joins_in_the_background_and_sends_a_persons_command(
         await gateway.close()
         stop.set()
         await serving
+
+
+@pytest.mark.integration
+@pytest.mark.live
+@pytest.mark.nats
+@pytest.mark.asyncio
+async def test_a_gateway_on_another_contract_asks_to_join_once_and_says_why_it_cannot(
+    broker: str, tmp_path: Path, caplog,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """README "Versions": the authority answers ``protocol_mismatch``; asking again cannot change that, so the
+    gateway asks once, the host logs both digests once, and a person's command says why at once."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, gateway_profile(TEAM))
+        gateway = GatewayMessageHost(layout, TEAM, contract_sha256="0" * 64)
+        gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        with pytest.raises(GatewayHostUnavailable, match="another message contract"):
+            await gateway.command("memory.list", {}, person_ref="p-AbCdEfGhIjKlMnOpQrStUv", request_id="cmd-1",
+                                  timeout=20)
+        await asyncio.sleep(0.2)
+        assert caplog.text.count("event=protocol1_host_other_contract") == 1
+        assert "event=gateway_host_join_failed" not in caplog.text
+        await gateway.close()

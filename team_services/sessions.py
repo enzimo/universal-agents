@@ -15,6 +15,13 @@ team services decide:
   agent was placed on the same host again (``not_allowed``; the host opens a new one).
 - ``sessions.close``: the session's actual end; the placement is removed when the agent
   exited or failed, and kept when it is handed over (the new host's open replaces it).
+- **A host on another contract** (README "Versions"): while the label is a pre-release,
+  hosts of one installation refuse a peer whose contract digest differs. A host whose
+  record names another digest than the team services' gets no new placement
+  (``sessions.open`` answers ``not_allowed``), logged with both digests. Its sessions are
+  still renewed and closed: it keeps receiving control messages for the tasks it holds
+  while it finishes or hands them back, and renewing an agent it already runs places
+  nothing new.
 
 Every process shares one NATS login in this phase, so any of them can write
 ``UA1_PLACEMENT`` and ``UA1_CERTS``. The team services use a placement or session they
@@ -107,6 +114,22 @@ class SessionService:
                 agents.append(key.split(".", 1)[1])
         return agents
 
+    async def _other_contract(self, runtime: str) -> Optional[str]:
+        """The contract digest ``runtime``'s host record names when it is not the team services' own; else ``None``.
+
+        A record that is absent or does not verify says nothing about it (the host joined
+        on this contract, which the installation authority checked).
+        """
+
+        try:
+            stored = await self.records.read_report("host", runtime, now=self.clock())
+        except FrameRefused as refused:
+            self._refused("host", runtime, refused)
+            return None
+        if stored is None or not stored.record.other_contract:
+            return None
+        return stored.record.their_contract_sha256
+
     async def open(self, verified: VerifiedFrame) -> dict[str, Any]:
         certificate = verified.certificate
         assert certificate is not None  # hosts send it with their certificate
@@ -114,6 +137,14 @@ class SessionService:
         agent, agent_type = str(body["agent"]), str(body["agent_type"])
         if agent_type not in certificate.agent_types:
             return {"outcome": "not_allowed", "message": f"This host's certificate does not allow agent type {agent_type}."}
+        theirs = await self._other_contract(certificate.runtime)
+        if theirs is not None:
+            self.logger.warning("A host on another contract asked to run an agent; it gets no new placement. "
+                                "event=agent_session_refused_other_contract team=%s agent=%s host=%s "
+                                "their_contract_sha256=%s contract_sha256=%s", team, agent, certificate.runtime, theirs,
+                                self.trust.store.contract_sha256)
+            return {"outcome": "not_allowed", "message": "This host runs another message contract than the team "
+                    "services, so no agent is placed on it; install the installation's release there."}
         key = placement_key(team, agent)
         current, previous = await self._placement(key)
         if previous is not None and previous.body.host != certificate.runtime:
