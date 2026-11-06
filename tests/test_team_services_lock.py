@@ -17,7 +17,13 @@ from typing import Callable, Optional
 import pytest
 from nats.errors import ConnectionClosedError, NoRespondersError
 from nats.errors import TimeoutError as NatsTimeoutError
-from nats.js.errors import InvalidKeyError, KeyNotFoundError, KeyWrongLastSequenceError, ServiceUnavailableError
+from nats.js.errors import (
+    BadRequestError,
+    InvalidKeyError,
+    KeyNotFoundError,
+    KeyWrongLastSequenceError,
+    ServiceUnavailableError,
+)
 
 from team_services import lock as lock_module
 from team_services.lock import LEASE, RENEW_EVERY, RETRY_EVERY, LockLost, SingleInstanceLock, lock_key
@@ -85,6 +91,10 @@ class _Bucket:
         return self.entries[key]
 
     async def delete(self, key: str, last: Optional[int] = None) -> None:
+        if last is not None and key in self.entries and self.entries[key].revision != last:
+            # As nats-py reports it: a bad request with JetStream's wrong last sequence code, not
+            # the KeyWrongLastSequenceError it raises for updates.
+            raise BadRequestError(code=400, err_code=10071, description=f"wrong last sequence: {self.entries[key].revision}")
         self.entries.pop(key, None)
 
 
@@ -185,6 +195,20 @@ async def test_losing_the_compare_and_set_to_another_instance_stops_at_once(worl
     assert now[0] - START == RENEW_EVERY
     assert "event=team_services_lock_lost" in caplog.text and other.instance in caplog.text
     assert "event=team_services_lock_renew_failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_instance_that_lost_the_lock_leaves_it_to_the_other_when_it_stops(world) -> None:
+    now, bucket, held = world
+    assert await held.try_acquire() is None
+    other = SingleInstanceLock(_JetStream(bucket), TEAM, "team-services", lambda: now[0] + LEASE * 2)
+    bucket.entries[lock_key(TEAM)] = _Entry(other._lease()[1], bucket.revision + 1)
+    with pytest.raises(LockLost):
+        await held.keep(asyncio.Event())
+
+    await held.release()  # as serve_team does on its way out
+
+    assert _holder(bucket)["instance"] == other.instance
 
 
 @pytest.mark.asyncio
