@@ -4238,7 +4238,13 @@ freshly signed revocations record. The authority:
   the launcher now lists, say), it gets a new one with the next membership epoch that
   replaces it. While
   the contract is a pre-release, a host running another contract digest gets
-  `protocol_mismatch`;
+  `protocol_mismatch`, naming the digest the authority runs. The digest is read before
+  the rest of a join or renewal (`verify_frame` marks such a frame `other_contract`), so
+  a host of another revision learns this even when that revision shapes the body
+  differently. The one exception is a renewal that only gives up the host's agents (its
+  profile without agent types or sessions, `HostProfile.giving_up`): it is answered on
+  any contract, when this revision can read it, with a certificate that grants no agents,
+  so a host on another contract can hand its agents over;
 - keeps every certificate it issued, so a restarted authority still recognises the
   hosts that renew.
 
