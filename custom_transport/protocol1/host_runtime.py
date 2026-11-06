@@ -70,6 +70,8 @@ LIVENESS_LIFETIME = timedelta(seconds=30)
 TRUST_REFRESH_INTERVAL = timedelta(minutes=30)
 # The most components a host record lists (the contract's host record, ``components``).
 HOST_COMPONENTS_MAX = 16
+# The team services' host id: their host record names the contract the installation runs (``follow_contract``).
+TEAM_SERVICES_RUNTIME = "team-services"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -415,7 +417,7 @@ class MessageHost:
                 self.logger.exception("A listener for another contract failed. event=protocol1_contract_listener_failed "
                                       "runtime=%s", self.profile.runtime)
 
-    async def follow_contract(self, runtime: str) -> None:
+    async def follow_contract(self, runtime: str = TEAM_SERVICES_RUNTIME) -> None:
         """Read ``runtime``'s host record (the team services') when it starts and whenever it changes; runs until cancelled.
 
         A record that names another digest than this host's means the installation runs
