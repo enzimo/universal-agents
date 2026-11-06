@@ -28,6 +28,7 @@ from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.service import TeamServices
+from team_services.serving import mark_serving
 from team_services.sessions import SessionService
 
 TEAM_SERVICES_RUNTIME = "team-services"
@@ -72,6 +73,8 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event) -> None:
         await host.publish_liveness("accepting")
         host.logger.info("The team services are serving. event=team_services_ready team=%s operations=%s", team,
                          ",".join(sorted(services.served)))
+        # The launcher waits for this (team_services.serving): it comes with the host record, once they serve.
+        mark_serving(host.layout, lock.instance, host.clock())
         upkeep = asyncio.create_task(host.keep_up(stop, drained=lambda: not lost))
         await lock.keep(stop)
     except LockLost:

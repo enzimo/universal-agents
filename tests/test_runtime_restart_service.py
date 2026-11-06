@@ -471,8 +471,8 @@ def test_the_person_sees_which_tasks_the_restart_interrupts(agent) -> None:
     assert "task_restart (in_progress, Ada on task_child), task_waiting (waiting)." in effect
     assert "finish first, the restart still goes ahead" in effect and "approve it again" in effect
     assert proposal.summary == (
-        "Restart manager, configured_startup_agents, activity_collector, gateway, "
-        "execution_controller_if_enabled; 2 tasks may be interrupted or delayed."
+        "Restart installation_authority, team_services, manager, configured_startup_agents, activity_collector, "
+        "gateway, execution_controller_if_enabled; 2 tasks may be interrupted or delayed."
     )
 
 

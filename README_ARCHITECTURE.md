@@ -4311,6 +4311,24 @@ They serve the team's address (`svc.team`) and answer, so far:
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one at a time.
 
+**Starting and restarting the authority and the team services** (`docker.message_hosts.MessageServices`).
+The launcher starts the team lead, the startup agents and the gateway only once the team
+services serve. Once they hold the lock, answer at `svc.team` and have written their host
+record, they write `runtime/team-services-serving.json` naming their process
+(`team_services.serving`); the
+launcher removes that file before it starts them and waits until it names the process it
+started. A cleanly stopped instance releases the lock, so the next one serves at once.
+After an unclean stop the new instance waits until the stopped one's lease runs out (up to
+38 seconds), and the launcher waits with it, for at most 98 seconds, saying every 10
+seconds what it waits for (`message_service_waiting`); then the launch is refused. A
+restart of everything (the configuration editor's, or an approved `all` restart) stops the
+other processes, then the team services and the authority. It then writes
+`expected-hosts.json` again from the saved configuration, and starts the authority, the
+team services and the rest in that order, each once the one before is ready, with each
+process's copies of saved settings recomputed (`docker.settings_environment`). So the
+authority approves what the saved settings allow now, and the team services read their
+settings again. If either cannot start again, the runtime stops.
+
 ## Certificate trust
 
 Certificate trust spans independent stores. Python certifi and uv use their
