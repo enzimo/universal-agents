@@ -858,6 +858,10 @@ async def test_the_broker_answers_a_start_it_could_not_finish_with_the_reason(mo
         async def change_host_lifecycle(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
             raise HostedMCPPortInUse(PORT_TAKEN)
 
+        async def discover_tools(self, *_args: object, **_kwargs: object) -> Any:
+            # A call to a running server's tools starts its sidecar when it is not running.
+            raise HostedMCPPortInUse(PORT_TAKEN)
+
     service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
     monkeypatch.setattr(service, "_get_mcp_runtime", lambda: Runtime())
     async with TestClient(TestServer(service.build_app())) as client:
@@ -865,8 +869,14 @@ async def test_the_broker_answers_a_start_it_could_not_finish_with_the_reason(mo
             "/v1/mcp/hosted/h1/start", headers=caller_headers(), json={"definition_digest": "0" * 64}
         )
         text = await answer.text()
+        discovery = await client.post(
+            "/v1/mcp/connections/mcp_conn_x/tools", headers=caller_headers(),
+            json={"record_digest": "0" * 64, "named_agent_type": "TeamArchitect"},
+        )
+        refusal = await discovery.json()
 
     assert (answer.status, text) == (409, PORT_TAKEN)
+    assert discovery.status == 403 and refusal["error"] == PORT_TAKEN
 
 
 @pytest.mark.asyncio

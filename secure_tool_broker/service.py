@@ -476,6 +476,20 @@ def _mcp_refusal_response(exc: Exception) -> web.Response:
     return web.json_response(payload, status=403)
 
 
+def _hosted_start_refusal(
+    logger: logging.Logger, connection_id: str, exc: HostedMCPStartError
+) -> web.Response:
+    """A hosted server whose sidecar could not start: the agent's model reads why."""
+
+    logger.warning(
+        "Hosted MCP server did not start for a call. event=mcp_host_sidecar_start_failed "
+        "connection_id=%s reason=%s",
+        connection_id,
+        str(exc),
+    )
+    return _mcp_refusal_response(exc)
+
+
 def _auth_session_team(context_payload: dict[str, Any], team_id: str) -> str:
     """The broker's own team; a session that names another team is refused."""
 
@@ -1086,7 +1100,7 @@ class SecureToolBrokerService:
             )
             return _mcp_refusal_response(exc)
         except HostedMCPStartError as exc:
-            return self._hosted_start_refusal(connection_id, exc)
+            return _hosted_start_refusal(self._logger, connection_id, exc)
         except Exception as exc:
             self._logger.exception(
                 "Brokered MCP discovery failed. event=mcp_broker_discovery_failed"
@@ -1114,7 +1128,7 @@ class SecureToolBrokerService:
             )
             return _mcp_refusal_response(exc)
         except HostedMCPStartError as exc:
-            return self._hosted_start_refusal(connection_id, exc)
+            return _hosted_start_refusal(self._logger, connection_id, exc)
         except Exception as exc:
             self._logger.exception(
                 "Brokered MCP invocation failed. event=mcp_broker_invocation_failed"
@@ -1124,17 +1138,6 @@ class SecureToolBrokerService:
         return web.json_response(
             response.model_dump(mode="json", by_alias=True, exclude_none=True)
         )
-
-    def _hosted_start_refusal(self, connection_id: str, exc: HostedMCPStartError) -> web.Response:
-        """A hosted server whose sidecar could not start: the agent's model reads why."""
-
-        self._logger.warning(
-            "Hosted MCP server did not start for a call. event=mcp_host_sidecar_start_failed "
-            "connection_id=%s reason=%s",
-            connection_id,
-            str(exc),
-        )
-        return _mcp_refusal_response(exc)
 
     async def _handle_mcp_host_lifecycle(
         self,
