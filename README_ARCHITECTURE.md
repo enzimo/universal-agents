@@ -4428,7 +4428,9 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
   (the authority did not add the type), `agent_type_not_certifiable`,
   `session_already_placed`, `session_runtime_error`. A record holds 16 components, so with
   more such agents the last is `more-agents` (`sessions_refused`). The host writes its record
-  again at once when the list changes.
+  again at once when the list changes. Readers of the team pass on what live hosts of the
+  team list (`custom_transport.protocol1.team_agents.TeamAgents.host_components`), since
+  such an agent has no record of its own.
 - Each opening that got an answer is followed by one with a new request id, and each daily
   renewal has its own (the session and the sequence of the record it renews, as a digest),
   kept only for retries of that one request, since a repeated id gets the first answer back
@@ -4442,7 +4444,8 @@ state row and when a worker starts winding down after losing its launch lease). 
 most every 2 seconds, so a burst of busy and idle turns costs one write. "Exiting" is
 written at once as the agent leaves, before its session closes, and the record is then
 removed, since agent ids are new at every start; a host's start also removes the records
-its earlier run left. Readers use `custom_transport.protocol1.team_agents.TeamAgents`, which
+its earlier run left, read verified as its own (one that does not verify is left and
+logged). Readers use `custom_transport.protocol1.team_agents.TeamAgents`, which
 watches `UA1_AGENTS`, `UA1_PLACEMENT` and `UA1_HOSTS`, verifies each record, and counts an
 agent live while its record is not exiting, its placement names the host that signed the
 record, and that host's liveness record has not expired (checked again every 5 seconds,

@@ -26,6 +26,11 @@ How it reads:
   every few seconds and listeners hear about agents whose liveness changed then.
 - The view is rebuilt on the reader's loop and replaced as a whole, so callers on other
   threads (the agents of the team lead's process) read a consistent snapshot without locks.
+
+The hosts' records also say which of their parts are not healthy (``components``), such as
+an agent whose session the team services refused, which has no record of its own and so
+no place in the view; ``host_components`` gives those of the team's live hosts, for the
+gateway's Status page (plan 13B.5).
 """
 
 from __future__ import annotations
@@ -64,6 +69,16 @@ class TeamAgent:
     host: str
     session: str
     is_lead: bool
+
+
+@dataclass(frozen=True)
+class HostComponent:
+    """A part of a live host that its record says is not healthy (``custom_agents.agent_host.REFUSAL_CODES``)."""
+
+    host: str
+    component: str
+    state: str
+    code: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -107,6 +122,25 @@ class TeamAgents:
     def named(self, display_name: str) -> Optional[TeamAgent]:
         matches = [item for item in self._view.values() if item.display_name == display_name]
         return min(matches, key=lambda a: a.agent) if matches else None
+
+    def host_components(self) -> list[HostComponent]:
+        """The components the team's hosts list as not healthy, from their records that have not expired.
+
+        Call it on the reader's loop. A host whose record expired is gone, and so is what it listed.
+        """
+
+        now = self._host.clock()
+        found: list[HostComponent] = []
+        for runtime, held in sorted(self._hosts.items()):
+            record = held.record
+            if record.body is None or record.signer is None or self.team not in record.signer.teams:
+                continue
+            expires_at = _present(record.document.expires_at)
+            if expires_at is None or parse_timestamp(expires_at) <= now:
+                continue
+            found.extend(HostComponent(runtime, str(item.component), str(item.state), _present(item.code))
+                         for item in record.body.components if item.state != "healthy")
+        return found
 
     def lead(self) -> Optional[TeamAgent]:
         leads = [item for item in self._view.values() if item.is_lead]
