@@ -4241,7 +4241,13 @@ freshly signed revocations record. The authority:
   the launcher now lists, say), it gets a new one with the next membership epoch that
   replaces it. While
   the contract is a pre-release, a host running another contract digest gets
-  `protocol_mismatch`;
+  `protocol_mismatch`, naming the digest the authority runs. The digest is read before
+  the rest of a join or renewal (`verify_frame` marks such a frame `other_contract`), so
+  a host of another revision learns this even when that revision shapes the body
+  differently. The one exception is a renewal that only gives up the host's agents (its
+  profile without agent types or sessions, `HostProfile.giving_up`): it is answered on
+  any contract, when this revision can read it, with a certificate that grants no agents,
+  so a host on another contract can hand its agents over;
 - keeps every certificate it issued, so a restarted authority still recognises the
   hosts that renew.
 
@@ -4272,6 +4278,20 @@ carry is not asked for, and the caller is told. When a frame or
 record names a certificate or an agent session this host does not hold yet, it reads it
 from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
 checks the frame again, once.
+
+**A host on another contract.** While the contract's label is a pre-release, hosts of one
+installation refuse a peer whose contract digest differs (`kinds.CONTRACT_SHA256`, the one
+reading of it; joins, renewals and host records carry it). A host learns that it runs
+another contract than the installation from the team services' host record, which it reads
+when it starts and whenever it changes (`MessageHost.follow_contract`), or from a
+`protocol_mismatch` answer to its join or renewal. It logs both digests once
+(`protocol1_host_other_contract`) and tells its listeners, which drain its work; its record
+then says `draining` and, once it holds nothing, `drained`. From then on it renews only to
+give up its agents: a renewal for more is turned away, so it asks for none while it drains,
+and the renewal once drained gets a certificate that grants no agents. Readers cannot read
+the rest of such a host's record, only that it names another digest, and that it is
+authentic. Under one launcher every process starts from the same release, so this happens
+only when a process is restarted on its own after the code under it changed.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
 `team-services` with the `team_services` role (plan decision 44; scheduled runs are still
@@ -4314,7 +4334,11 @@ They serve the team's address (`svc.team`) and answer, so far:
 - `sessions.renew` and `sessions.close`, for sessions on the asking host; a close removes
   the placement unless the agent is handed over. A renewal is refused (`not_allowed`) for a
   session that has ended or whose placement is no longer the agent's current one, so a
-  session closed earlier never comes back when its agent is placed on the same host again;
+  session closed earlier never comes back when its agent is placed on the same host again.
+  A host whose record names another contract digest gets no new placement (`sessions.open`
+  answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
+  its sessions are still renewed and closed, so it keeps receiving control messages for the
+  tasks it holds while it finishes or hands them back;
 - people's memory commands, `memory.list`, `.show`, `.create`, `.replace`, `.delete` and
   `.undo` (`team_services.memory`), which the gateway sent the team lead's process as a
   durable `ManagerMemoryCommand` until phase 2. They run the same memory service on the
@@ -4454,6 +4478,29 @@ seconds after its last liveness write. Whether an agent is the team lead comes f
 session's `agent_role`, which the team services signed. The view is replaced as a whole on
 each change, so agents on other threads read it without locks. The team lead's process and
 the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+
+**An agent process on another contract drains** (`custom_agents.agent_host`,
+`custom_agents.contract_drain`). When its host learns that the process runs another
+contract than the installation (from the team services' host record, which it follows from
+its join on, or from `protocol_mismatch`), it opens no session and asks for no refused one
+again; a join refused that way is not asked for again either. It drains every agent on the
+agent's own loop. Queued task work still runs on today's queues in this phase, so draining
+an agent means: it leaves the queues every agent of its type shares (its type's queue and,
+for the team lead, the team's), whose messages stay there for another agent of the type,
+which the lead's worker pools start when tasks wait, or for the next team lead; the lead's
+process starts no pool or scheduled worker; the turns in progress finish; a pool worker
+starts no task it has not started and, once its running turns ended, winds down as after a
+lost launch lease, returning those tasks to the team lead, which sends them out again on
+the type's queue, then exits. The team lead and startup agents have no way to hand a task
+back yet (that comes with `task.handback` and the queued work of protocol 1), so they
+finish what they already admitted. The host's record says `draining` meanwhile; its
+agents' sessions are still renewed, so requests about the tasks they hold still reach them.
+Once no agent holds an unfinished task or a waiting request, the host closes their sessions
+(`handed_over`), its record says `drained` and it renews only to give its agents up
+(`event=agent_host_drained`). A process that never joined drains its agents the same way,
+with no record to write. Under one launcher this happens only when a process, such as the
+team lead's after a restart of `manager`, starts on code that changed under the running
+installation.
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is

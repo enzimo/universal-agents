@@ -53,6 +53,19 @@ Why it is shaped this way:
   leaves, before its session closes, and the record is then removed: agent ids are new at
   every start, so records left behind would only pile up. A host's start removes the
   records its earlier run left, with their sessions.
+- **A process on another contract drains.** While the contract's label is a pre-release,
+  hosts of one installation refuse a peer whose contract digest differs (contract README
+  "Versions"). The host learns that its process runs another contract from the team
+  services' host record, which it follows from its join on, or from ``protocol_mismatch``
+  (``MessageHost.on_other_contract``). A join refused that way is not asked for again. The
+  host then opens no session, asks for no refused one again, and drains every agent it runs
+  on the agent's own loop (``custom_agents.contract_drain``): no new work, the running
+  turns finish, and what was not finished goes back where this release has a way. Its
+  record says ``draining``; its agents' sessions are still renewed, so requests about the
+  tasks they hold still reach them. Once no agent holds anything, it closes their sessions
+  (``handed_over``), its record says ``drained`` and it renews only to give its agents up
+  (``MessageHost.finish_drain``). A process that never joined drains its agents the same
+  way, with no record to write.
 """
 
 from __future__ import annotations
@@ -71,6 +84,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 import rfc8785
 
 from custom_messages.wire.encoding import b64url, format_timestamp
+from custom_agents.contract_drain import drain_agent, holds_work
 from custom_messages.wire.frame import Receiver, VerifiedFrame
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
@@ -105,6 +119,8 @@ _NOT_IN_TOKEN = re.compile(r"[^A-Za-z0-9_-]")
 SESSION_RENEW_SECONDS = 24 * 3600.0
 # An agent's record is written when its state changes, at most this often (README "State records").
 AGENT_RECORD_INTERVAL_SECONDS = 2.0
+# While the process drains, how often it checks whether its agents still hold work (module docstring).
+DRAIN_POLL_SECONDS = 5.0
 _PLACEMENT_BUCKET = "UA1_PLACEMENT"
 _LOGGER = logging.getLogger(__name__)
 
@@ -191,6 +207,9 @@ class _HostedAgent:
     openings: int = 0
     # A session is being opened for it now; never two at once.
     opening: bool = False
+    # Its drain started (the process runs another contract); whether asking if it holds work failed already.
+    draining: bool = False
+    holds_work_failed: bool = False
     # Set when it leaves, so a wait to ask again ends at once.
     left: Optional[asyncio.Event] = None
     # The agent's state as last reported, and what its record last said (module docstring).
@@ -223,7 +242,15 @@ class AgentProcessHost:
     # each refusal for a type its certificate lacks); a startup agent's process has its own.
     catalog_types: Optional[Callable[[], Iterable[str]]] = None
     refused_retry_seconds: tuple[float, float] = REFUSED_RETRY_SECONDS
+    # Drains one agent on its own loop, and says whether it still holds work, when this process runs another
+    # contract than its installation (module docstring); tests give stand-ins.
+    drain_agent: Callable[[Any, str], Awaitable[None]] = drain_agent
+    holds_work: Callable[[Any], Awaitable[bool]] = holds_work
+    drain_poll_seconds: float = DRAIN_POLL_SECONDS
+    _draining: Optional[asyncio.Task[None]] = None
     _joined: Optional[asyncio.Event] = None
+    # Set when the drain starts: an agent waiting for the join stops waiting then.
+    _drain_started: asyncio.Event = field(default_factory=asyncio.Event)
     _stop: Optional[asyncio.Event] = None
     _task: Optional[asyncio.Task[None]] = None
 
@@ -239,6 +266,7 @@ class AgentProcessHost:
             self.host = MessageHost(self.layout, self.profile, nc, logger=self.logger,
                                     sessions_active=lambda: sum(1 for item in self.agents.values() if item.session),
                                     components=self._components)
+            self.host.on_other_contract(self._other_contract)
             self._task = self.loop.create_task(self._run(), name="agent_process_host")
         hosted = _HostedAgent(agent, agent_type, definition, display_name=str(getattr(agent, "name", "") or "")[:80],
                               state=state[0], accepting_work=state[1])
@@ -286,11 +314,16 @@ class AgentProcessHost:
         self._joined.set()
         self.logger.info("This process joined as a protocol 1 host. event=agent_host_joined runtime=%s",
                          self.profile.runtime)
-        renewals = asyncio.get_running_loop().create_task(self._renew_sessions())
+        loop = asyncio.get_running_loop()
+        renewals = loop.create_task(self._renew_sessions())
+        following = loop.create_task(self.host.follow_contract(), name="agent_host_contract")
         try:
             await self.host.keep_up(self._stop)
         finally:
             renewals.cancel()
+            following.cancel()
+            if self._draining is not None:
+                self._draining.cancel()
 
     async def _retrying(self, what: str, step: Callable[[], Awaitable[Any]]) -> bool:
         """Run ``step`` until it succeeds or the host stops; False when it stopped first."""
@@ -302,6 +335,8 @@ class AgentProcessHost:
                 await step()
                 return True
             except Exception as error:  # noqa: BLE001 - logged, and tried again
+                if self.host is not None and self.host.installation_contract is not None:
+                    return False  # another contract: asking again cannot change it (logged by the host)
                 delay = RETRY_SECONDS[min(attempt, len(RETRY_SECONDS) - 1)]
                 log = self.logger.info if isinstance(error, ServiceUnavailable) else self.logger.warning
                 log("A protocol 1 host step did not succeed yet; trying again. event=agent_host_retry step=%s "
@@ -377,7 +412,17 @@ class AgentProcessHost:
             return
         hosted.left = asyncio.Event()
         self.agents[agent_id] = hosted
-        await self._joined.wait()
+        if self._draining is None:
+            waits = [asyncio.ensure_future(self._joined.wait()), asyncio.ensure_future(self._drain_started.wait())]
+            try:
+                await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for wait in waits:
+                    wait.cancel()
+        if self._draining is not None:
+            # The process runs another contract: no new agent gets a session here (module docstring).
+            self._drain_one(hosted)
+            return
         await self._hold_session(hosted)
 
     async def _hold_session(self, hosted: _HostedAgent) -> None:
@@ -406,8 +451,10 @@ class AgentProcessHost:
         await self._write_record(hosted)
 
     def _attached(self, hosted: _HostedAgent) -> bool:
+        """Whether to keep asking for the agent's session: it is attached, the host runs and does not drain."""
+
         assert self._stop is not None
-        return self.agents.get(str(hosted.agent.id)) is hosted and not self._stop.is_set()
+        return self.agents.get(str(hosted.agent.id)) is hosted and not self._stop.is_set() and self._draining is None
 
     async def _open_session(self, hosted: _HostedAgent) -> bool:
         """Ask for a session until one opens (True), or the agent leaves, the host stops or no certificate can name it."""
@@ -731,8 +778,95 @@ class AgentProcessHost:
         self.logger.warning("An agent's session was not renewed; the host opens a new one. "
                             "event=agent_host_session_renew_refused runtime=%s agent=%s session=%s outcome=%s message=%s",
                             self.profile.runtime, agent_id, session, body.get("outcome"), body.get("message"))
-        if self.agents.get(agent_id) is hosted:
+        if self.agents.get(agent_id) is hosted and self._draining is None:
             self._spawn(self._hold_session(hosted))
+
+    # -- another contract (module docstring) ---------------------------------------------
+
+    def _other_contract(self, theirs: str) -> None:
+        """On the host's loop: the process runs another contract than the installation's ``theirs``; drain once."""
+
+        if self._draining is None and self.loop is not None:
+            self._draining = self.loop.create_task(self._drain(theirs), name="agent_host_drain")
+            self._drain_started.set()
+
+    async def _drain(self, theirs: str) -> None:
+        """Drain every agent, then give them up once none holds work (module docstring)."""
+
+        assert self.host is not None and self._stop is not None
+        joined = self.host.live is not None
+        if joined:
+            await self.host.drain()
+        reason = (f"Its process runs another message contract ({self.host.contract_sha256}) than its installation "
+                  f"({theirs}).")
+        for hosted in list(self.agents.values()):
+            self._drain_one(hosted, reason)
+        while not self._stop.is_set():
+            holding = [str(hosted.agent.id) for hosted in list(self.agents.values()) if await self._still_holds(hosted)]
+            if not holding:
+                break
+            self.logger.debug("Agents still hold work while the process drains. runtime=%s agents=%s",
+                              self.profile.runtime, ",".join(holding))
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self.drain_poll_seconds)
+            except asyncio.TimeoutError:
+                pass
+        if self._stop.is_set():
+            return
+        if not joined:
+            self.logger.warning("The process drained; it never joined, so it holds no session. "
+                                "event=agent_host_drained runtime=%s", self.profile.runtime)
+            return
+        for agent_id in list(self.agents):
+            await self._close(agent_id, "handed_over")
+        await self.host.finish_drain()
+        self.logger.warning("The process drained and gave up its agents. event=agent_host_drained runtime=%s",
+                            self.profile.runtime)
+
+    def _drain_one(self, hosted: _HostedAgent, reason: Optional[str] = None) -> None:
+        """Start draining one agent on its own loop, once."""
+
+        if hosted.draining:
+            return
+        hosted.draining = True
+        assert self.host is not None
+        reason = reason or (f"Its process runs another message contract ({self.host.contract_sha256}) than its "
+                            f"installation ({self.host.installation_contract}).")
+        self._on_agent_loop(hosted, lambda: self.drain_agent(hosted.agent, reason), what="contract_drain")
+
+    async def _still_holds(self, hosted: _HostedAgent) -> bool:
+        """Whether the agent holds work, asked on its own loop; an agent that cannot tell counts as holding it."""
+
+        try:
+            return bool(await self._on_agent_loop_result(hosted, lambda: self.holds_work(hosted.agent)))
+        except Exception:
+            if not hosted.holds_work_failed:
+                hosted.holds_work_failed = True
+                self.logger.exception("Whether an agent still holds work could not be read; the process keeps it "
+                                      "until it can. event=agent_host_holds_work_failed runtime=%s agent=%s",
+                                      self.profile.runtime, hosted.agent.id)
+            return True
+
+    def _on_agent_loop(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]], *, what: str) -> None:
+        agent_loop = getattr(hosted.agent, "_runtime_loop", None)
+
+        def done(future: Any) -> None:
+            if not future.cancelled() and future.exception() is not None:
+                self.logger.error("An agent could not take a team update. event=agent_host_agent_update_failed "
+                                  "runtime=%s agent=%s what=%s", self.profile.runtime, hosted.agent.id, what,
+                                  exc_info=future.exception())
+
+        if agent_loop is None or agent_loop is asyncio.get_running_loop():
+            task = asyncio.get_running_loop().create_task(work())
+            task.add_done_callback(done)
+        elif not agent_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(work(), agent_loop).add_done_callback(done)
+
+    async def _on_agent_loop_result(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]]) -> Any:
+        agent_loop = getattr(hosted.agent, "_runtime_loop", None)
+        if agent_loop is None or agent_loop is asyncio.get_running_loop():
+            return await work()
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(work(), agent_loop))  # type: ignore[arg-type]
 
 
 _PROCESS_HOST: Optional[AgentProcessHost] = None
