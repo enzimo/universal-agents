@@ -10,7 +10,9 @@ team services decide:
   the placement's revision, is signed into ``UA1_CERTS`` for every receiver to read. Only
   the team lead's type (``TeamArchitect``) on a lead host gets the ``lead`` role.
 - ``sessions.renew``: a session that places the agent on the asking host, re-signed for
-  another 7 days.
+  another 7 days. Only one that has not ended and whose placement revision is the
+  agent's current placement: a session closed earlier must not come back because its
+  agent was placed on the same host again (``not_allowed``; the host opens a new one).
 - ``sessions.close``: the session's actual end; the placement is removed when the agent
   exited or failed, and kept when it is handed over (the new host's open replaces it).
 
@@ -193,10 +195,16 @@ class SessionService:
         if refusal is not None:
             return refusal
         assert stored is not None
-        _revision, placement = await self._placement(placement_key(stored.team, stored.agent))
+        now = self.clock()
+        if stored.ends_at <= now:
+            return {"outcome": "not_allowed", "message": f"Session {stored.session} has ended; open a new one."}
+        revision, placement = await self._placement(placement_key(stored.team, stored.agent))
         if placement is None or placement.body.host != stored.runtime:
             return {"outcome": "not_allowed", "message": "The agent is no longer placed on this host."}
-        now = self.clock()
+        if revision != stored.placement_revision:
+            # The agent was placed again after this session (a new session names that placement).
+            return {"outcome": "not_allowed",
+                    "message": f"Session {stored.session} names an earlier placement of the agent; open a new one."}
         renewed = self._signed_again(stored, now + SESSION_LIFETIME, now)
         await self._store_session(stored.team, stored.session, renewed)
         return {"outcome": "ok", "session": renewed}
