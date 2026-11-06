@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
-import subprocess
 import time
 from contextlib import AsyncExitStack
 from datetime import timedelta
@@ -30,6 +28,7 @@ from custom_transport.protocol1.live import LiveHost, RequestRefused, ServiceUna
 from custom_transport.protocol1.state_records import StateRecords
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from tests import message_contract_support as fixtures
+from tests.own_nats_server import own_nats_server
 from tests.test_live_message_contract import nats_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -38,32 +37,10 @@ SERVICES_RECEIVER = Receiver("install_example", TEAM, "team_services", TEAM, "te
 TO_SERVICES = {"installation": "install_example", "team": TEAM, "target": "team_services", "id": TEAM}
 
 
-def free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
-
-
 @pytest.fixture
 def broker(tmp_path: Path):
-    port = free_port()
-    with (tmp_path / "nats.log").open("w") as log:
-        process = subprocess.Popen([nats_server(), "-js", "-sd", str(tmp_path / "store"), "-a", "127.0.0.1",
-                                    "-p", str(port)], stdout=log, stderr=log)
-        try:
-            deadline = time.monotonic() + 5
-            while True:
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                        break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        pytest.fail("NATS did not start within five seconds")
-                    time.sleep(0.02)
-            yield f"nats://127.0.0.1:{port}"
-        finally:
-            process.terminate()
-            process.wait(timeout=5)
+    with own_nats_server(nats_server(), tmp_path) as url:
+        yield url
 
 
 def identity(runtime: str, key_id: str, epoch: int, sessions: dict[str, str] | None = None) -> HostIdentity:
