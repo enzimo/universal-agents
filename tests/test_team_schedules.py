@@ -45,6 +45,7 @@ from team_services.people import CommandPerson
 from team_services.schedules import ScheduleOperations
 from tests.people_directory_support import access_store_at
 from tests.team_services_support import checked_reply, stand_in_frame
+from tests.test_message_contract import body_schema_file, validator
 from tests.test_pinned_memory_stale_edits import BACKENDS
 from tests.test_pinned_memory_stale_edits import _storage as backend_storage
 
@@ -145,6 +146,32 @@ def test_a_person_lists_their_own_schedules_and_a_chat_only_its_own(team: Team) 
     # Another person's chat lists nothing of theirs for Ada.
     assert bos_chat == {"outcome": "ok", "schedules": [], "total": 0}
     assert (len(first_page["schedules"]), first_page["next_offset"]) == (1, 1)
+
+
+def test_listed_rows_name_their_action_and_every_reply_meets_the_contracts_schema(team: Team) -> None:
+    """Each schedules.list row says what a run does (``action``, required by the contract); every stored
+    schedule runs a task. The list and change replies pass the contract's JSON Schemas as well as its models."""
+
+    team.add("sched_a", "ada")
+    team.add("hb_sched_team", "ada", system=True)
+
+    listed = team.listed()
+    paused = team.ask("schedules.pause", {"schedule_id": "sched_a", "seen_version": team.version("sched_a"),
+                                          "paused_until": LATER}, request_id="cmd-2")
+    stale = team.ask("schedules.resume", {"schedule_id": "sched_a", "seen_version": "b" * 64}, request_id="cmd-3")
+    refused = team.ask("schedules.remove", {"schedule_id": "hb_sched_team", "seen_version": team.version("hb_sched_team")},
+                       request_id="cmd-4")
+    missing = team.ask("schedules.disable", {"schedule_id": "sched_none", "seen_version": "b" * 64}, request_id="cmd-5")
+
+    assert [(row["schedule_id"], row["action"]) for row in listed["schedules"]] == [
+        ("sched_a", {"type": "task"}), ("hb_sched_team", {"type": "task"})]
+    replies = {"schedules.list": [listed], "schedules.pause": [paused], "schedules.resume": [stale],
+               "schedules.remove": [refused], "schedules.disable": [missing]}
+    for kind, bodies in replies.items():
+        for body in bodies:
+            validator(body_schema_file(f"{kind}.reply")).validate(body)
+    assert [paused["outcome"], stale["outcome"], refused["outcome"], missing["outcome"]] == [
+        "ok", "changed_since_read", "not_allowed", "not_found"]
 
 
 def test_a_person_the_team_does_not_know_gets_nothing(team: Team) -> None:

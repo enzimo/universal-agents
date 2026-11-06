@@ -14,11 +14,12 @@
           "$ref": "../common.schema.json#/$defs/coordination_claim"
         },
         "notes": {
+          "description": "The notes on each claimed resource that has any.",
           "type": "array",
           "items": {
-            "$ref": "../common.schema.json#/$defs/coordination_seen_note"
+            "$ref": "../common.schema.json#/$defs/coordination_resource_notes"
           },
-          "maxItems": 32
+          "maxItems": 8
         }
       },
       "required": [
@@ -62,6 +63,21 @@
       "type": "object",
       "properties": {
         "outcome": {
+          "const": "sensitive_content"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
           "const": "claimed"
         },
         "conflicts": {
@@ -77,16 +93,21 @@
                 "items": {
                   "$ref": "../common.schema.json#/$defs/coordination_seen_claim"
                 },
-                "maxItems": 32
+                "maxItems": 8
               },
               "waiting_requests": {
-                "description": "How many other requests wait for it.",
+                "description": "How many other requests wait for it or for something on, above or under it, whoever's they are: a bare number, so a refusal always shows its cause.",
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "claims_total": {
+                "description": "How many conflicting claims there are in all; the list holds the newest of them.",
                 "$ref": "../common.schema.json#/$defs/count"
               }
             },
             "required": [
               "resource",
               "claims",
+              "claims_total",
               "waiting_requests"
             ],
             "additionalProperties": false

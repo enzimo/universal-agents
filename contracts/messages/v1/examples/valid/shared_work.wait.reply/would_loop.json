@@ -27,10 +27,11 @@
     "holding": [
       "record:knowledge_page:personal:travel-plans"
     ],
-    "message": "Waiting would never end: that request waits for the page Travel plans, which you hold."
+    "message": "Waiting would never end: that request waits for the page Travel plans, which you hold.",
+    "holding_total": 1
   },
   "causation_id": "01928f3a-7b2c-7c27-8000-000000000c27",
   "idempotency_key": "shared_work.wait.reply:zYh37_hOsi0mNOyjbU6Ycg-DS6O-gtA4zVOSAhZBwb8",
-  "body_digest": "qvXoGR6gSG7B_4rpQgFGcMGVT_OWmxy9kPE0VjjJTfA",
-  "signature": "lNZFrBIX7QgG6dt5ka2B1oXkx430Y9e9bb8yE8pVScgZJPced7s80k9d8QAUqKdOMVcUQAT4sA3hDdW3pW24Dg"
+  "body_digest": "YYL0tYKoPMwjM4D9G7xwm-d0mSlC0R0PihTz3CTXsrI",
+  "signature": "kFvOe6wMlYHu32DOg7RbQP1pq1FzQgcmz2MecwHh5LJ3tKUmB7ZMkyWoFKwOLHPyH7KqrsaqaGhbCIPv9-iUAA"
 }
