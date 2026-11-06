@@ -4238,7 +4238,13 @@ freshly signed revocations record. The authority:
   the launcher now lists, say), it gets a new one with the next membership epoch that
   replaces it. While
   the contract is a pre-release, a host running another contract digest gets
-  `protocol_mismatch`;
+  `protocol_mismatch`, naming the digest the authority runs. The digest is read before
+  the rest of a join or renewal (`verify_frame` marks such a frame `other_contract`), so
+  a host of another revision learns this even when that revision shapes the body
+  differently. The one exception is a renewal that only gives up the host's agents (its
+  profile without agent types or sessions, `HostProfile.giving_up`): it is answered on
+  any contract, when this revision can read it, with a certificate that grants no agents,
+  so a host on another contract can hand its agents over;
 - keeps every certificate it issued, so a restarted authority still recognises the
   hosts that renew.
 
@@ -4269,6 +4275,20 @@ carry is not asked for, and the caller is told. When a frame or
 record names a certificate or an agent session this host does not hold yet, it reads it
 from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
 checks the frame again, once.
+
+**A host on another contract.** While the contract's label is a pre-release, hosts of one
+installation refuse a peer whose contract digest differs (`kinds.CONTRACT_SHA256`, the one
+reading of it; joins, renewals and host records carry it). A host learns that it runs
+another contract than the installation from the team services' host record, which it reads
+when it starts and whenever it changes (`MessageHost.follow_contract`), or from a
+`protocol_mismatch` answer to its join or renewal. It logs both digests once
+(`protocol1_host_other_contract`) and tells its listeners, which drain its work; its record
+then says `draining` and, once it holds nothing, `drained`. From then on it renews only to
+give up its agents: a renewal for more is turned away, so it asks for none while it drains,
+and the renewal once drained gets a certificate that grants no agents. Readers cannot read
+the rest of such a host's record, only that it names another digest, and that it is
+authentic. Under one launcher every process starts from the same release, so this happens
+only when a process is restarted on its own after the code under it changed.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
 `team-services` with the `team_services` role (plan decision 44; scheduled runs are still
@@ -4312,6 +4332,10 @@ They serve the team's address (`svc.team`) and answer, so far:
   the placement unless the agent is handed over. A renewal is refused (`not_allowed`) for a
   session that has ended or whose placement is no longer the agent's current one, so a
   session closed earlier never comes back when its agent is placed on the same host again.
+  A host whose record names another contract digest gets no new placement (`sessions.open`
+  answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
+  its sessions are still renewed and closed, so it keeps receiving control messages for the
+  tasks it holds while it finishes or hands them back.
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one at a time.
