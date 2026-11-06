@@ -751,9 +751,6 @@
         },
         "tool_setup_result": {
           "$ref": "#/components/messages/tool_setup_result"
-        },
-        "wait_ended": {
-          "$ref": "#/components/messages/wait_ended"
         }
       },
       "parameters": {
@@ -806,6 +803,9 @@
         },
         "task_stop": {
           "$ref": "#/components/messages/task_stop"
+        },
+        "wait_ended": {
+          "$ref": "#/components/messages/wait_ended"
         }
       },
       "parameters": {
@@ -4496,7 +4496,7 @@
             }
           ]
         },
-        "summary": "Change a schedule's name, instruction, timing, controls or run notes."
+        "summary": "Change a schedule's name, instruction, action type, timing, controls or run notes."
       },
       "schedules_update_reply": {
         "name": "schedules.update.reply",
@@ -4840,7 +4840,7 @@
             }
           ]
         },
-        "summary": "The person's other running requests, with their claims and notes."
+        "summary": "The asking request's own claims and waits, and the person's other running requests."
       },
       "shared_work_list_reply": {
         "name": "shared_work.list.reply",
@@ -5965,7 +5965,7 @@
             }
           ]
         },
-        "summary": "A request's wait ended; it now holds the claim, the other request ended, or the wait reached its limit."
+        "summary": "A request's wait ended; it now holds a new claim, the other request ended, the record it waited for was removed, or the wait reached its limit."
       }
     }
   },
@@ -8743,11 +8743,11 @@
     "receive_wait_ended_agent": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/wait_ended"
+          "$ref": "#/channels/work_control/messages/wait_ended"
         }
       ]
     },
@@ -11519,11 +11519,11 @@
     "send_wait_ended_agent": {
       "action": "send",
       "channel": {
-        "$ref": "#/channels/work_agent"
+        "$ref": "#/channels/work_control"
       },
       "messages": [
         {
-          "$ref": "#/channels/work_agent/messages/wait_ended"
+          "$ref": "#/channels/work_control/messages/wait_ended"
         }
       ]
     }
