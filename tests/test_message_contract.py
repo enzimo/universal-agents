@@ -689,9 +689,29 @@ def test_outside_agents_cannot_publish_into_worker_pools() -> None:
 
 # README, "An agent's two queues": the inbox holds what needs a free slot, the control queue the rest.
 INBOX_KINDS = {"task.request", "task.result", "task.question", "task.answer", "question.closed", "credential.form.result",
-               "tool.setup.result", "wait.ended"}
+               "tool.setup.result"}
 CONTROL_KINDS = {"task.stop", "task.steer", "custody.moved", "custody.confirmed", "access.decision", "task.progress",
-                 "task.claimed", "task.handback", "task.account", "task.report", "delivery.refused", "ledger.fact"}
+                 "task.claimed", "task.handback", "task.account", "task.report", "delivery.refused", "ledger.fact",
+                 "wait.ended"}
+
+# README, "Waking the model": these end a wait the task paused on with a local Strands interrupt.
+LOCAL_WAIT_ENDS = {"access.decision", "tool.setup.result", "wait.ended"}
+
+
+def test_a_kind_that_ends_a_local_wait_wakes_the_model() -> None:
+    """Resuming the paused tool call continues the model's turn, so these kinds are ``always`` wherever they end it."""
+
+    for name in LOCAL_WAIT_ENDS:
+        entry = REGISTRY["kinds"][name]
+        assert entry["ledger"].endswith("_wait_closed"), name
+        wakes = entry["wakes_model"]
+        if isinstance(wakes, dict):
+            # Only an access decision's ``waiting`` state leaves the wait open, so only it stays quiet.
+            assert {state for state, value in wakes["values"].items() if value != "always"} == {"waiting"}, name
+        else:
+            assert wakes == "always", name
+    # A credential form's result ends no local wait: the lead goes on and sees it at its next turn.
+    assert REGISTRY["kinds"]["credential.form.result"]["wakes_model"] == "next_turn"
 
 
 def test_an_agents_control_queue_holds_every_kind_its_host_takes_at_once() -> None:
@@ -816,6 +836,8 @@ def test_a_copy_and_its_original_carry_different_keys_and_the_copy_has_no_receiv
      "is not a unique"),
     ({"idempotency": ["/body/summary"]}, "names no part every frame carries"),
     ({"senders": ["gateway"], "senders_by_address": {}}, "not a topology check"),
+    # A work ledger never closes a wait no kind opens.
+    ({"ledger": "orphan_wait_closed"}, "has no orphan_wait_open in any kind"),
 ])
 def test_the_generator_refuses_broken_key_parts_copies_and_idle_receivers(change: dict, problem: str) -> None:
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
@@ -1483,6 +1505,119 @@ def test_every_kind_and_reply_has_a_valid_example() -> None:
     assert expected <= examples, sorted(expected - examples)
 
 
+# README, "Coordination between a person's requests": for these messages every fixed value and every
+# true/false field appears in an example too, not only each oneOf alternative, so the other
+# implementations check the same corpus. task.result counts only its coordination events.
+COORDINATION_KINDS = sorted([
+    *(name for name in REGISTRY["kinds"] if name.startswith("shared_work.")),
+    *(f"{name}.reply" for name in REGISTRY["kinds"] if name.startswith("shared_work.")),
+    "wait.ended",
+    "task.result",
+])
+
+
+def fixed_values(file: str, node: dict, path: str, found: dict, depth: int = 0) -> None:
+    """Each enum and boolean in a body schema: its JSON path and every value it may hold."""
+
+    while "$ref" in node:
+        file, fragment = RESOLVER.resolve(file, node["$ref"])
+        node = RESOLVER.node(file, fragment)
+    if depth > 32:
+        raise AssertionError(f"{file}{path}: schema nesting exceeds the frame limit; example coverage cannot skip it")
+    if "enum" in node:
+        found.setdefault(path, set()).update(node["enum"])
+    if node.get("type") == "boolean":
+        found.setdefault(path, set()).update({True, False})
+    for variant in node.get("oneOf", []):
+        fixed_values(file, variant, path, found, depth + 1)
+    if node.get("type") == "array":
+        fixed_values(file, node["items"], path + "[]", found, depth + 1)
+    for name, child in node.get("properties", {}).items():
+        fixed_values(file, child, f"{path}.{name}", found, depth + 1)
+
+
+@pytest.mark.parametrize("kind", COORDINATION_KINDS)
+def test_every_value_of_a_coordination_message_has_a_valid_example(kind: str) -> None:
+    file = body_schema_file(kind)
+    wanted: dict = {}
+    fixed_values(file, json.loads((CONTRACT / "schemas" / file).read_text(encoding="utf-8")), "", wanted)
+    if kind == "task.result":
+        wanted = {place: values for place, values in wanted.items() if place.startswith(".coordination")}
+    seen: dict = {}
+    for path in (EXAMPLES / "valid" / kind).glob("*.json"):
+        example_values(json.loads(path.read_text(encoding="utf-8"))["body"], "", wanted, seen)
+    missing = {place: sorted(map(str, values - seen.get(place, set()))) for place, values in wanted.items()
+               if values - seen.get(place, set())}
+    assert not missing, missing
+
+
+# README, "Schedules": where a schedule's action type travels besides schedules.install.
+SCHEDULE_ACTION_PLACES = {
+    "schedules.list.reply": ".schedules[].action.type",
+    "schedules.get.reply": ".action.type",
+    "schedules.update": ".action.type",
+    "tasks.inventory.reply": ".schedules[].action.type",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(SCHEDULE_ACTION_PLACES))
+def test_schedule_action_types_match_install_and_each_has_a_valid_example(kind: str) -> None:
+    install: dict = {}
+    variant_values(body_schema_file("schedules.install"),
+                   json.loads((CONTRACT / "schemas" / body_schema_file("schedules.install")).read_text(encoding="utf-8")),
+                   "", install)
+    place = SCHEDULE_ACTION_PLACES[kind]
+    file = body_schema_file(kind)
+    wanted: dict = {}
+    fixed_values(file, json.loads((CONTRACT / "schemas" / file).read_text(encoding="utf-8")), "", wanted)
+    assert wanted[place] == install[".action.type"] == {"task", "fixed_message"}
+    seen: dict = {}
+    for path in (EXAMPLES / "valid" / kind).glob("*.json"):
+        example_values(json.loads(path.read_text(encoding="utf-8"))["body"], "", {place: wanted[place]}, seen)
+    assert seen.get(place) == wanted[place], seen
+
+
+def test_coordination_replies_at_their_limits_fit_in_one_frame() -> None:
+    """README, "Coordination between a person's requests" ("Reply size"): the caps were chosen to fit a frame.
+
+    With every list at its cap and every text at its longest in ASCII, a check, a refused claim,
+    one page of a list and a granted wait each fit in max_frame_bytes. Longer text in other
+    scripts is what the rule to leave out the oldest notes first is for.
+    """
+
+    keys = [f"file:team/{n}" + "k" * 1089 for n in range(8)]
+    assert all(len(key) == 1100 for key in keys)
+    rid, text, title, at = "r" * 128, "t" * 500, "T" * 200, "2026-10-22T04:30:00.000Z"
+    holder = {"whose": "same_person", "root_task_id": rid, "title": title, "reason": text}
+    note = {"whose": "same_person", "note_id": rid, "root_task_id": rid, "title": title, "text": text, "written_at": at}
+    seen_claim = {"claim_id": rid, "resource": keys[0], "relation": "below", "ends_at": at, "holder": holder}
+    own_claim = {"claim_id": rid, "resources": keys, "ends_at": at, "extensions_left": 2, "reason": text}
+    wait = {"wait_id": rid, "task_id": rid, "on": {"type": "request", "root_task_id": rid, "title": title}, "ends_by": at}
+    bodies = {
+        "shared_work.check.reply": {"outcome": "ok", "resources": [
+            {"resource": key, "can_wait": True, "claims": [seen_claim] * 8, "claims_total": 8, "notes": [note] * 8,
+             "notes_total": 8} for key in keys]},
+        "shared_work.claim.reply": {"outcome": "claimed", "message": text, "conflicts": [
+            {"resource": key, "claims": [seen_claim] * 8, "claims_total": 8, "waiting_requests": 3} for key in keys]},
+        "shared_work.list.reply": {
+            "outcome": "ok",
+            "this_request": {"claims": [own_claim] * 8, "claims_total": 8, "waits": [wait] * 8, "waits_total": 8},
+            "requests": [{"root_task_id": rid, "title": title, "kind": "chat", "state": "running", "last_activity": text,
+                          "last_activity_at": at, "claims": [own_claim] * 8, "claims_total": 8,
+                          "notes": [{"note_id": rid, "resource": keys[0], "text": text, "written_at": at}] * 8,
+                          "notes_total": 8}],
+            "total": 64, "next_offset": 1},
+        "wait.ended": {"wait_id": rid, "root_task_id": rid, "task_id": rid,
+                       "ended": {"why": "claim_granted", "claim": own_claim, "notes": [note] * 8, "notes_total": 8}},
+    }
+    for kind, body in bodies.items():
+        validator(body_schema_file(kind)).validate(body)
+        frame = json.loads(next((EXAMPLES / "valid" / kind).glob("*.json")).read_text(encoding="utf-8"))
+        frame["body"] = body
+        size = len(json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        assert size <= kinds.MAX_FRAME_BYTES, (kind, size)
+
+
 # -- state records, installation traffic and dead letters ---------------------------------------------
 
 STATE_EXAMPLES = EXAMPLES / "state"
@@ -1560,6 +1695,64 @@ def test_a_host_cannot_write_another_hosts_liveness() -> None:
     with pytest.raises(FrameRefused) as refused:
         fixtures.verify_state(signed_state(document))
     assert (refused.value.code, refused.value.at) == ("invalid_body", "/body/runtime")
+
+
+OTHER_CONTRACT = "5d1f8a0c6b7e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a"
+
+
+def host_record_of_another_contract() -> dict:
+    """A host record from a pre-release revision whose host record has other fields than this one's."""
+
+    document = state_example("host/lead-host.json")
+    document["body"]["contract_sha256"] = OTHER_CONTRACT
+    del document["body"]["health"]
+    document["body"]["queue_depths"] = {"inbox": 3}
+    return document
+
+
+def test_a_host_record_of_another_contract_is_accepted_without_its_body() -> None:
+    """README, "Versions": the digest is read before the body, so the reader can tell the host runs another contract.
+
+    The record stays authentic, so the team services keep counting the host's custody windows
+    from it and its tasks never get a second holder without a person's override.
+    """
+
+    record = fixtures.verify_state(signed_state(host_record_of_another_contract()))
+    assert record.other_contract and record.their_contract_sha256 == OTHER_CONTRACT
+    assert record.body is None and record.document.record == "host"
+    assert record.signer is not None and record.signer.runtime == "lead-host-1"
+
+
+def test_a_host_record_of_this_contract_is_still_read_strictly() -> None:
+    document = host_record_of_another_contract()
+    document["body"]["contract_sha256"] = fixtures.EXAMPLE_CONTRACT_SHA256
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert refused.value.code == "invalid_body"
+
+
+def test_a_host_record_of_another_contract_is_still_checked_for_its_signature() -> None:
+    document = host_record_of_another_contract()
+    data = json.loads(signed_state(document))
+    data["sequence"] += 1
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(json.dumps(data).encode())
+    assert refused.value.code == "bad_signature"
+
+
+def test_a_released_label_reads_every_host_record_strictly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A released label compares only the label and its minor, so the digest no longer decides how a record is read."""
+
+    monkeypatch.setattr(wire_trust, "PROTOCOL", "1.0")
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(host_record_of_another_contract()))
+    assert refused.value.code == "invalid_body"
+
+
+def test_the_generated_code_names_the_contract_digest() -> None:
+    record = json.loads((CONTRACT / "generated" / "compatibility.json").read_text(encoding="utf-8"))
+    assert kinds.CONTRACT_SHA256 == record["contract_sha256"]
+    assert wire_trust.TrustStore("install_example", []).contract_sha256 == kinds.CONTRACT_SHA256
 
 
 def test_a_certificate_names_its_connection_class_and_a_remote_hosts_tools() -> None:

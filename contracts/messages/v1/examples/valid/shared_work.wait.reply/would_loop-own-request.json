@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.wait.reply",
+  "message_id": "01928f3a-7b2c-7c38-8000-000000000c38",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7c27-8000-000000000c27",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "would_loop",
+    "reason": "own_request",
+    "holding": [],
+    "holding_total": 0,
+    "message": "A request never waits for itself."
+  },
+  "causation_id": "01928f3a-7b2c-7c27-8000-000000000c27",
+  "idempotency_key": "shared_work.wait.reply:zYh37_hOsi0mNOyjbU6Ycg-DS6O-gtA4zVOSAhZBwb8",
+  "body_digest": "tOv0pBd5max8Mfz1b9jOjWy5z5OCCI966zR8tpOz3xw",
+  "signature": "N4Qm9DmwY-FvtSbSWI4AM11mKmH-tjA8tL41riPD3P-dUvAWN1M5CbHsW10wF0f5u79VF71MNayeiXExeJ6EBQ"
+}

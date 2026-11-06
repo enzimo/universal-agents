@@ -36,6 +36,9 @@
                     "minLength": 1,
                     "maxLength": 500
                   },
+                  "action": {
+                    "$ref": "../common.schema.json#/$defs/schedule_action"
+                  },
                   "timing": {
                     "oneOf": [
                       {
@@ -244,6 +247,7 @@
                 "required": [
                   "schedule_id",
                   "management_class",
+                  "action",
                   "timing",
                   "enabled",
                   "timing_revision",
@@ -292,6 +296,9 @@
                     "minLength": 1,
                     "maxLength": 500
                   },
+                  "action": {
+                    "$ref": "../common.schema.json#/$defs/schedule_action"
+                  },
                   "timing": {
                     "oneOf": [
                       {
@@ -500,6 +507,7 @@
                 "required": [
                   "schedule_id",
                   "management_class",
+                  "action",
                   "timing",
                   "enabled",
                   "timing_revision",
