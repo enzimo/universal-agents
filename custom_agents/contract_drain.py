@@ -22,7 +22,8 @@ draining an agent means:
    started with a launch record) starts no task it has not started yet and, once its
    running turns ended, winds down as after a lost launch lease
    (``custom_agents.lease_loss_wind_down``), naming its own cause in its logs and texts and
-   counted as no interruption: the tasks it has not started go back to the
+   counted as no interruption, nor as a lost worker by a delegated task's requester
+   (``custom_agents.delegated_work_runtime``): the tasks it has not started go back to the
    team lead, which sends them out again on the type's queue; tasks that wait on a person
    or a subtask finish here until that wind-down's deadline, because their replies come to
    this agent; then the worker exits. Pool workers run in the team lead's process, so the

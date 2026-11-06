@@ -295,7 +295,10 @@ each. They run in parallel on as many workers as the team allows:
 - **Lost workers.** A task whose worker died is taken over by a replacement, or
   handed back to the queue after a lost lease; each move to another worker is
   counted from claims, and after `max_retries_after_worker_loss` (3) moves the
-  task fails as `worker_lost`.
+  task fails as `worker_lost`. A move after a worker whose process runs another
+  message contract handed the task back is recorded but not counted: nothing
+  failed, and the requester reads that hand-back's cause, which the lead saved in
+  the team's database before it sent the task out again.
 - **When the requester wakes.** Its model runs again when every delegated task
   ended, at once when one failed with a typed reason, or when a
   `check_back_after_minutes` set on the delegation passed
