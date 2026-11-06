@@ -13,8 +13,6 @@ import json
 import logging
 import os
 import signal
-import socket
-import subprocess
 import time
 from pathlib import Path
 
@@ -31,6 +29,7 @@ from env_secrets import PROCESS_INSTALLATION_AUTHORITY, PROCESS_TEAM_SERVICES, e
 from team_services.lock import LEASE, LOCKS_BUCKET, lock_key
 from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
 from team_services.serving import serving_process
+from tests.own_nats_server import own_nats_server
 from tests.test_live_message_contract import nats_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -38,32 +37,10 @@ TEAM = "team_one"
 REPO = Path(__file__).resolve().parents[1]
 
 
-def free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
-
-
 @pytest.fixture
 def broker(tmp_path: Path):
-    port = free_port()
-    with (tmp_path / "nats.log").open("w") as log:
-        process = subprocess.Popen([nats_server(), "-js", "-sd", str(tmp_path / "store"), "-a", "127.0.0.1", "-p", str(port)],
-                                   stdout=log, stderr=log)
-        try:
-            deadline = time.monotonic() + 5
-            while True:
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                        break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        pytest.fail("NATS did not start within five seconds")
-                    time.sleep(0.02)
-            yield f"nats://127.0.0.1:{port}"
-        finally:
-            process.terminate()
-            process.wait(timeout=5)
+    with own_nats_server(nats_server(), tmp_path) as url:
+        yield url
 
 
 @pytest.fixture

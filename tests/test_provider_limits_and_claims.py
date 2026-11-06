@@ -17,7 +17,7 @@ from custom_agents.provider_limits import (
     handle_delegated_provider_limit,
 )
 from custom_messages.contracts.delegated_work_v1 import DelegatedTaskClaimedV1, TaskFailureCategory
-from custom_messages.contracts.routing_v1 import MessageHeader
+from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import TurnActionOutboxRecord
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
 from custom_messages.enums import MessageMetaType, ProgressState
@@ -186,6 +186,49 @@ async def test_claims_record_the_holder_and_moves_until_the_retry_limit(tmp_path
     stop = agent.team_comms.send_message.await_args.kwargs
     assert stop["routing_key"] == "w3"
     assert stop["message"].msg_content.target_task_id == "sub_1"
+
+
+@pytest.mark.asyncio
+async def test_a_move_after_a_drain_hand_back_does_not_count_as_a_lost_worker(tmp_path, monkeypatch):
+    """A worker whose process runs another message contract hands its task back without any fault
+    (custom_agents.contract_drain). The lead saved that hand-back with its cause in the team's database
+    before it sent the task out again, so the requester reads why its task moved: such a move is
+    recorded, but does not count toward the retries after a lost worker, and the task's history says
+    why it moved."""
+
+    from custom_agents.delegated_work_runtime import delegated_tasks, handle_delegated_task_claimed
+    from custom_messages.contracts.worker_handback_v1 import (
+        WIND_DOWN_OTHER_CONTRACT,
+        HandedBackTaskV1,
+        WorkerLeaseLossEvidenceV1,
+        WorkerTaskHandbackV1,
+        handback_identity,
+    )
+    from storage.worker_handback_repository import WorkerHandbackRepository
+
+    agent = _requester(tmp_path, monkeypatch, retries=1)
+    history: list[str] = []
+    agent.task_manager.append_history_entry = lambda task_id, summary, **kwargs: history.append(summary)
+    await handle_delegated_task_claimed(agent, claim=_claim("w1"), msg_header=MessageHeader(from_agent_id="w1"), msg_meta=None)
+    WorkerHandbackRepository(agent.task_manager.storage_settings).record(WorkerTaskHandbackV1(
+        handback_id=handback_identity(worker_agent_id="w1", launch_id="launch_w1", task_id="sub_1"),
+        team_id="team_t", worker_agent_id="w1", worker_named_agent_type="WebResearchAgent",
+        evidence=WorkerLeaseLossEvidenceV1(launch_id="launch_w1", lease_lost_at_utc=datetime.now(timezone.utc),
+                                           reason="Its process runs another message contract.",
+                                           cause=WIND_DOWN_OTHER_CONTRACT),
+        handed_back=HandedBackTaskV1(
+            task_id="sub_1", disposition="not_started", prior_state="accepted",
+            task=Task(task_id="sub_1", parent_task_id="parent_1", task_type=MessageMetaType.REQUEST),
+            header=MessageHeader(from_agent_id="lead"), meta=MessageMeta())))
+    await handle_delegated_task_claimed(agent, claim=_claim("w2"), msg_header=MessageHeader(from_agent_id="w2"), msg_meta=None)
+    record = delegated_tasks(agent).get("team_t", "sub_1")
+    assert (record.holder_agent_id, record.holders, record.interruptions) == ("w2", ["w1", "w2"], 0)
+    assert "another message contract" in history[-1] and "was lost" not in history[-1]
+    # Its next worker is lost (no hand-back): that move counts, and one is still within one automatic retry.
+    await handle_delegated_task_claimed(agent, claim=_claim("w3"), msg_header=MessageHeader(from_agent_id="w3"), msg_meta=None)
+    assert delegated_tasks(agent).get("team_t", "sub_1").interruptions == 1
+    assert "was lost" in history[-1]
+    agent._fail_subtask_and_reconcile_parent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
