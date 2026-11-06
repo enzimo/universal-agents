@@ -93,7 +93,7 @@ async def test_a_host_gets_a_session_and_then_signs_for_its_agent(broker: str) -
     async with AsyncExitStack() as stack:
         services = await host(stack, broker, identity("team-services-1", "test-services-key-1", 2))
         worker = await host(stack, broker, identity("worker-host-1", "test-worker-key-1", 3))
-        records = StateRecords(None, services.identity, services.trust)
+        records = StateRecords(None, lambda: services.identity, services.trust)
 
         async def answer(verified: VerifiedFrame) -> dict[str, Any]:
             if verified.frame.kind != "sessions.open":
@@ -205,7 +205,7 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
         js = services.nc.jetstream()
         for bucket in ("UA1_AGENTS", "UA1_PLACEMENT"):
             await js.create_key_value(bucket=bucket)
-        placements = StateRecords(js, services.identity, services.trust)
+        placements = StateRecords(js, lambda: services.identity, services.trust)
         key = f"{TEAM}.researcher-2"
         body = {"team": TEAM, "agent": "researcher-2", "agent_type": "researcher", "host": "worker-host-1", "host_epoch": 3,
                 "definition_sha256": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws", "placed_at": format_timestamp(fixtures.NOW),
@@ -217,15 +217,15 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
         with pytest.raises(KeyWrongLastSequenceError):
             await placements.put("placement", key, placements.signed("placement", key, body, sequence=3,
                                                                      issued_at=fixtures.NOW), last_revision=first)
-        reader = StateRecords(worker.nc.jetstream(), worker.identity, worker.trust)
+        reader = StateRecords(worker.nc.jetstream(), lambda: worker.identity, worker.trust)
         stored = await reader.read_report("placement", key, now=fixtures.NOW)
         assert stored is not None and stored.record.document.sequence == 2
         # A host writes its own agent's state; a reader verifies who signed it.
-        agents = StateRecords(worker.nc.jetstream(), worker.identity, worker.trust)
+        agents = StateRecords(worker.nc.jetstream(), lambda: worker.identity, worker.trust)
         state = {"team": TEAM, "agent": "researcher-2", "agent_type": "researcher", "session": "s-researcher-2-1",
                  "state": "idle", "accepting_work": True, "since": format_timestamp(fixtures.NOW)}
         await agents.put("agent", key, agents.signed("agent", key, state, sequence=1, issued_at=fixtures.NOW))
-        read = await StateRecords(js, services.identity, services.trust).read_report("agent", key, now=fixtures.NOW)
+        read = await StateRecords(js, lambda: services.identity, services.trust).read_report("agent", key, now=fixtures.NOW)
         assert read is not None and read.record.signer.runtime == "worker-host-1"
         assert await reader.read_report("agent", f"{TEAM}.nobody", now=fixtures.NOW) is None
         changes: list[tuple[str, bool]] = []
