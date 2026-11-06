@@ -4233,8 +4233,10 @@ freshly signed revocations record. The authority:
 - answers `host.join` and `host.renew`. A join from a host the launcher listed, with
   that key, asking for no more than listed, gets a 30-day certificate; any other join
   is denied, so a local installation never takes in a host nobody approved. A host
-  asking again with its key gets its certificate back while over a third of its life
-  is left, otherwise a new one with the next membership epoch that replaces it. While
+  asking again with its key for the same grants gets its certificate back while over a
+  third of its life is left; otherwise, or when it asks for other grants (an agent type
+  the launcher now lists, say), it gets a new one with the next membership epoch that
+  replaces it. While
   the contract is a pre-release, a host running another contract digest gets
   `protocol_mismatch`;
 - keeps every certificate it issued, so a restarted authority still recognises the

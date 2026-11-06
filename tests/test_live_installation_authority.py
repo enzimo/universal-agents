@@ -279,6 +279,29 @@ async def test_a_join_never_gets_back_a_certificate_the_authority_did_not_sign(b
 
 
 @pytest.mark.asyncio
+async def test_a_join_asking_for_other_grants_gets_a_new_certificate(broker: str, tmp_path: Path) -> None:
+    """A host listed for another agent type asks for it and gets a certificate naming it, not its old one back."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        first = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        wider = HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, ("analyst", "researcher"), WORKER.session_limit)
+        write_expected_hosts(layout.trust_expected_hosts_path, {WORKER.runtime: ExpectedHost(
+            WORKER.runtime, worker_keys.key_id, worker_keys.public_key_text, frozenset(wider.roles),
+            frozenset(wider.teams), frozenset(wider.agent_types), wider.session_limit)})
+        second = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)
+        assert second.membership_epoch == first.membership_epoch + 1 and second.replaces == first.certificate_id
+        assert second.agent_types == frozenset({"analyst", "researcher"})
+        # Asking for the same again hands that certificate back; asking for less gets a narrower one.
+        assert (await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)).membership_epoch == 2
+        narrower = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        assert narrower.membership_epoch == 3 and narrower.agent_types == frozenset({"researcher"})
+
+
+@pytest.mark.asyncio
 async def test_the_launcher_starts_the_real_authority_and_a_listed_host_joins(broker: str, tmp_path: Path,
                                                                               monkeypatch) -> None:
     """docker.message_hosts with ``assistant_cli run-installation-authority`` as a real process."""

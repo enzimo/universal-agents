@@ -4,10 +4,10 @@ Rules from the message contract's README ("Installation traffic", "Trust over ti
 and the registry's write rules for ``certificate`` and ``revocations``:
 
 - **Certificates** last 30 days and name what the join asked for, never more. A host
-  that asks again with the key its certificate holds gets that certificate back while
-  more than a third of its life is left; otherwise, and on a renewal, it gets a new one
-  with the next membership epoch that ``replaces`` the old one. A host whose key is
-  revoked gets none.
+  that asks again with the key its certificate holds, for the same grants, gets that
+  certificate back while more than a third of its life is left; otherwise, when it asks
+  for other grants, and on a renewal, it gets a new one with the next membership epoch
+  that ``replaces`` the old one. A host whose key is revoked gets none.
 - **The revocations record** is signed again every 6 hours and lasts 24 hours, with a
   sequence above every one before it and at least its issue time in milliseconds, so an
   authority restored from a backup never writes a lower one.
@@ -443,7 +443,7 @@ class InstallationAuthority:
         now = self.clock()
         stored = await self._latest_certificate(runtime)
         if self._reusable(stored, key["key_id"], key["public_key"], now) and stored is not None \
-                and _grants_at_most(stored["body"], body):
+                and _grants_exactly(stored["body"], body):
             return {"outcome": "ok", "certificate": stored}
         request = CertificateRequest(runtime=runtime, teams=tuple(body["teams"]), roles=tuple(body["roles"]),
                                      agent_types=tuple(body["agent_types"]), session_limit=int(body["session_limit"]),
@@ -502,10 +502,14 @@ def _denial(expected: Any, body: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
-def _grants_at_most(certificate: Mapping[str, Any], asked: Mapping[str, Any]) -> bool:
-    """Whether a stored certificate grants no more than a join now asks for, so it may be handed back."""
+def _grants_exactly(certificate: Mapping[str, Any], asked: Mapping[str, Any]) -> bool:
+    """Whether a stored certificate grants just what a join now asks for, so it may be handed back.
 
-    return (set(certificate["teams"]) <= set(asked["teams"]) and set(certificate["roles"]) <= set(asked["roles"])
-            and set(certificate["agent_types"]) <= set(asked["agent_types"])
-            and int(certificate["session_limit"]) <= int(asked["session_limit"])
+    A join asking for more (a new specialist type for the team lead's host) or for less
+    gets a new certificate with the next membership epoch, which replaces the old one.
+    """
+
+    return (set(certificate["teams"]) == set(asked["teams"]) and set(certificate["roles"]) == set(asked["roles"])
+            and set(certificate["agent_types"]) == set(asked["agent_types"])
+            and int(certificate["session_limit"]) == int(asked["session_limit"])
             and certificate["connection_class"] == asked["connection_class"])
