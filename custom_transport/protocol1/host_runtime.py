@@ -34,10 +34,9 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 import rfc8785
 
 from custom_messages.wire.encoding import b64url, format_timestamp
-from custom_messages.wire.kinds import INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
 from custom_messages.wire.trust import HostCertificate
 from custom_transport.protocol1.bootstrap import read_bundle
-from custom_transport.protocol1.contract_files import contract_sha256
 from custom_transport.protocol1.host_keys import load_host_keys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import (
@@ -188,7 +187,7 @@ class MessageHost:
             "session_limit": certificate.session_limit,
             "sessions_active": min(self.sessions_active(), certificate.session_limit),
             "protocol": PROTOCOL,
-            "contract_sha256": contract_sha256(),
+            "contract_sha256": CONTRACT_SHA256,
             "state": state,
             "health": "healthy" if all(item["state"] == "healthy" for item in components) else "degraded",
             "components": components,
@@ -259,7 +258,7 @@ class MessageHost:
         reply = await self.live.request("host.renew", {
             "renew_id": self.renewal_id(certificate),
             "certificate_id": certificate.certificate_id, "membership_epoch": certificate.membership_epoch,
-            "profile_sha256": self.profile.digest(), "contract_sha256": contract_sha256()},
+            "profile_sha256": self.profile.digest(), "contract_sha256": CONTRACT_SHA256},
             {"installation": certificate.installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
              "id": AUTHORITY_SERVICE_ID}, team=INSTALLATION_SCOPE)
         body = reply.raw["body"]
@@ -331,7 +330,7 @@ class MessageHost:
         """
 
         renewing: list[str | int] = [certificate.runtime, certificate.certificate_id, certificate.membership_epoch,
-                                     self.profile.digest(), release_version(), contract_sha256()]
+                                     self.profile.digest(), release_version(), CONTRACT_SHA256]
         return f"renew-{certificate.membership_epoch}-{b64url(hashlib.sha256(rfc8785.dumps(renewing)).digest())}"
 
     async def keep_up(self, stop: asyncio.Event, *, drained: Callable[[], bool] = lambda: True) -> None:
