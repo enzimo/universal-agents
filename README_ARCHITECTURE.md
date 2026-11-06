@@ -4432,6 +4432,29 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
   kept only for retries of that one request, since a repeated id gets the first answer back
   (README "Stored outcomes"). A refused renewal opens a new session.
 
+**An agent process on another contract drains** (`custom_agents.agent_host`,
+`custom_agents.contract_drain`). When its host learns that the process runs another
+contract than the installation (from the team services' host record, which it follows from
+its join on, or from `protocol_mismatch`), it opens no session and asks for no refused one
+again; a join refused that way is not asked for again either. It drains every agent on the
+agent's own loop. Queued task work still runs on today's queues in this phase, so draining
+an agent means: it leaves the queues every agent of its type shares (its type's queue and,
+for the team lead, the team's), whose messages stay there for another agent of the type,
+which the lead's worker pools start when tasks wait, or for the next team lead; the lead's
+process starts no pool or scheduled worker; the turns in progress finish; a pool worker
+starts no task it has not started and, once its running turns ended, winds down as after a
+lost launch lease, returning those tasks to the team lead, which sends them out again on
+the type's queue, then exits. The team lead and startup agents have no way to hand a task
+back yet (that comes with `task.handback` and the queued work of protocol 1), so they
+finish what they already admitted. The host's record says `draining` meanwhile; its
+agents' sessions are still renewed, so requests about the tasks they hold still reach them.
+Once no agent holds an unfinished task or a waiting request, the host closes their sessions
+(`handed_over`), its record says `drained` and it renews only to give its agents up
+(`event=agent_host_drained`). A process that never joined drains its agents the same way,
+with no record to write. Under one launcher this happens only when a process, such as the
+team lead's after a restart of `manager`, starts on code that changed under the running
+installation.
+
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is
 retried. The store that makes the change checks for a stored reply under its write
