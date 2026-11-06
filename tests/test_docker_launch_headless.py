@@ -2051,7 +2051,7 @@ def test_the_installation_authority_starts_after_the_streams_and_is_watched_with
     # The team services are a host the authority approves without asking anyone.
     from installation_authority.expected_hosts import read_expected_hosts
 
-    assert read_expected_hosts(layout.trust_expected_hosts_path)["team-services"].roles == {"team_services", "scheduler"}
+    assert read_expected_hosts(layout.trust_expected_hosts_path)["team-services"].roles == {"team_services"}
     external = steps[3][1]["external_processes"]
     assert ("installation authority", authority) in external and ("team services", team_services) in external
     assert PROCESS_INSTALLATION_AUTHORITY == "installation_authority"

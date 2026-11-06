@@ -57,7 +57,7 @@ from typing import Any, Callable, Optional
 
 from nats.errors import ConnectionClosedError
 from nats.errors import Error as NatsError
-from nats.js.errors import InvalidKeyError, KeyNotFoundError, KeyWrongLastSequenceError
+from nats.js.errors import BadRequestError, InvalidKeyError, KeyNotFoundError, KeyWrongLastSequenceError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
@@ -73,6 +73,8 @@ _UNAVAILABLE = (NatsError, OSError, asyncio.TimeoutError)
 # Failures among those that trying again cannot cure: a closed client never reconnects, an invalid key stays invalid.
 _LASTING = (ConnectionClosedError, InvalidKeyError)
 _SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
+# JetStream's error code for a write that names another last revision of the key.
+_WRONG_LAST_SEQUENCE = 10071
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -269,10 +271,15 @@ class SingleInstanceLock:
             wait = RENEW_EVERY.total_seconds()
 
     async def release(self) -> None:
-        """Let a standby take over at once instead of after the lease."""
+        """Let a standby take over at once instead of after the lease; a lock another instance holds now stays."""
 
         bucket = await self.js.key_value(LOCKS_BUCKET)
         try:
             await bucket.delete(lock_key(self.team), last=self.revision)
-        except (KeyWrongLastSequenceError, KeyNotFoundError):
+        except KeyNotFoundError:
             pass
+        except BadRequestError as error:
+            # nats-py reports a delete under another revision as a bad request with JetStream's
+            # wrong-last-sequence code, not as the KeyWrongLastSequenceError it raises for updates.
+            if not isinstance(error, KeyWrongLastSequenceError) and error.err_code != _WRONG_LAST_SEQUENCE:
+                raise
