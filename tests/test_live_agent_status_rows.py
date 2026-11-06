@@ -14,7 +14,7 @@ import contextlib
 from unittest.mock import MagicMock, patch
 
 import pytest
-from live_nats_client import resolve_live_transport_settings
+from live_nats_client import delete_team_streams, resolve_live_transport_settings
 
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness
 from custom_agents.task_manager import TaskManager
@@ -92,3 +92,4 @@ async def test_live_manager_restart_keeps_startup_worker_rows(tmp_path):
             for label in list(running):
                 with contextlib.suppress(Exception):
                     await stop(label)
+            await delete_team_streams(team_id, transport=transport)
