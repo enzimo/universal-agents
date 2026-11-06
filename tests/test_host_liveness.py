@@ -104,8 +104,9 @@ class _RenewingLive:
         return SimpleNamespace(raw={"body": {"outcome": "denied"}})
 
 
-async def _renewal_id(certificate) -> str:
-    host = MessageHost(layout=None, profile=HostProfile(certificate.runtime, ("team_one",), ("worker_host",)), nc=None)
+async def _renewal_id(certificate, contract_sha256: str = host_runtime.CONTRACT_SHA256) -> str:
+    host = MessageHost(layout=None, profile=HostProfile(certificate.runtime, ("team_one",), ("worker_host",)), nc=None,
+                       contract_sha256=contract_sha256)
     host.live = _RenewingLive(certificate)  # type: ignore[assignment]
     await host.renew()
     return host.live.bodies[-1]["renew_id"]  # type: ignore[union-attr]
@@ -122,8 +123,7 @@ async def test_a_renewal_keeps_its_id_on_retries_and_takes_a_new_one_after_an_up
     assert await _renewal_id(certificate) == first  # a retry of the same renewal
     monkeypatch.setattr(host_runtime, "release_version", lambda: "99.0.0")
     upgraded = await _renewal_id(certificate)
-    monkeypatch.setattr(host_runtime, "contract_sha256", lambda: "0" * 64)
-    new_contract = await _renewal_id(certificate)
+    new_contract = await _renewal_id(certificate, "0" * 64)
     assert len({first, upgraded, new_contract}) == 3
     # The longest runtime id and epoch still fit the contract's record id, whole.
     longest = SimpleNamespace(installation="install_one", runtime="r" * 64, certificate_id="cert." + "r" * 64 + ".1",
@@ -181,3 +181,75 @@ async def test_a_host_writes_its_record_again_at_once_when_asked_and_never_after
     await host.publish_liveness("drained")
     await host.report_now()
     assert [document["state"] for document in records.written] == ["accepting", "accepting", "drained"]
+
+
+OTHER_CONTRACT = "0" * 64
+
+
+class _MismatchLive:
+    """Stands in for ``LiveHost``: answers the first renewal ``protocol_mismatch`` and every later one ``ok``."""
+
+    def __init__(self, certificate) -> None:
+        self.identity = SimpleNamespace(certificate=certificate, with_certificate=lambda renewed: SimpleNamespace(
+            certificate=renewed))
+        self.bodies: list[dict] = []
+        self.trust = SimpleNamespace(add=lambda data, now: True, store=SimpleNamespace(
+            host_certificate=lambda installation, runtime, epoch: SimpleNamespace(
+                **{**vars(certificate), "membership_epoch": epoch, "agent_types": frozenset(), "session_limit": 0})))
+
+    async def request(self, kind, body, audience, *, team):
+        self.bodies.append(body)
+        if len(self.bodies) == 1:
+            return SimpleNamespace(raw={"body": {"outcome": "protocol_mismatch", "accepted": "1.0-pre",
+                                                 "accepted_contract_sha256": OTHER_CONTRACT}})
+        return SimpleNamespace(raw={"body": {"outcome": "ok", "certificate": {"body": {"membership_epoch": 4}}}})
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_learns_it_runs_another_contract_drains_and_renews_only_to_give_up_its_agents(caplog) -> None:
+    """README "Versions": a host on another contract learns it from ``protocol_mismatch``, says ``draining`` and then
+    ``drained`` in its record, and renews only to give up its agents (``HostProfile.giving_up``)."""
+
+    now = [START]
+    profile = HostProfile("worker-host-1", ("team_one",), ("worker_host",), ("researcher",), 2)
+    certificate = SimpleNamespace(installation="install_one", runtime="worker-host-1", certificate_id="cert.worker-host-1.3",
+                                  membership_epoch=3, issued_at=START - timedelta(days=21),
+                                  expires_at=START + timedelta(days=9), agent_types=frozenset({"researcher"}),
+                                  session_limit=2)
+    host, records = _host(now)
+    host.profile = profile
+    host.renew_if_due = MessageHost.renew_if_due.__get__(host)  # type: ignore[method-assign]
+    live = _MismatchLive(certificate)
+    host.live = live  # type: ignore[assignment]
+    learned: list[str] = []
+    host.on_other_contract(learned.append)
+    await host.publish_liveness("accepting")
+
+    await host.renew_if_due()  # due: two thirds of its life are gone
+    assert learned == [OTHER_CONTRACT] and host.installation_contract == OTHER_CONTRACT
+    assert live.bodies[0]["profile_sha256"] == profile.digest()
+    assert caplog.text.count("event=protocol1_host_other_contract") == 1
+
+    # While it drains it asks for no renewal: only one that gives up every agent is answered.
+    await host.renew_if_due()
+    assert len(live.bodies) == 1
+    await host.drain()
+    assert records.written[-1]["state"] == "draining"
+    host.learned_other_contract(OTHER_CONTRACT, "team_services_record")
+    assert learned == [OTHER_CONTRACT]  # told once
+
+    await host.finish_drain()
+    assert records.written[-1]["state"] == "drained"
+    give_up = live.bodies[-1]
+    assert give_up["profile_sha256"] == profile.giving_up().digest() != profile.digest()
+    assert give_up["renew_id"] != live.bodies[0]["renew_id"]
+    assert host.identity.certificate.membership_epoch == 4 and host.identity.certificate.session_limit == 0
+    await host.report_now()
+    assert records.written[-1]["state"] == "drained"
+
+
+def test_a_host_record_names_the_contract_the_host_runs() -> None:
+    host = _reporting_host([])
+    assert host.liveness_body("accepting")["contract_sha256"] == host_runtime.CONTRACT_SHA256
+    host.contract_sha256 = OTHER_CONTRACT
+    assert host.liveness_body("draining")["contract_sha256"] == OTHER_CONTRACT

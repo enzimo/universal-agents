@@ -1749,6 +1749,91 @@ def test_a_released_label_reads_every_host_record_strictly(monkeypatch: pytest.M
     assert refused.value.code == "invalid_body"
 
 
+def join_or_renewal_of_another_contract(kind: str) -> dict:
+    """A join or renewal from a pre-release revision whose body has other fields than this one's."""
+
+    frame = fixtures.example_frame(kind, "full")
+    frame["body"]["contract_sha256"] = OTHER_CONTRACT
+    frame["body"]["queue_depths"] = {"inbox": 3}
+    # Fields this revision compares before the schema, moved elsewhere by the other one.
+    renamed = "runtime" if kind == "host.join" else "certificate_id"
+    frame["body"]["host"] = {renamed: frame["body"].pop(renamed)}
+    return frame
+
+
+@pytest.mark.parametrize("kind", ["host.join", "host.renew"])
+def test_a_join_or_renewal_of_another_contract_is_read_for_its_digest_before_its_body(kind: str) -> None:
+    """README, "Versions": the authority reads the digest first, so a host of another revision learns
+    ``protocol_mismatch`` rather than a refusal of a body shaped by another contract.
+    """
+
+    frame = join_or_renewal_of_another_contract(kind)
+    verified = fixtures.verify(fixtures.resign(frame), frame)
+    assert verified.other_contract and verified.their_contract_sha256 == OTHER_CONTRACT
+    assert verified.body is None and verified.frame.kind == kind
+    assert (verified.certificate is None) == (kind == "host.join")
+
+
+@pytest.mark.parametrize("kind", ["host.join", "host.renew"])
+def test_a_join_or_renewal_of_this_contract_is_still_read_strictly(kind: str) -> None:
+    frame = join_or_renewal_of_another_contract(kind)
+    frame["body"]["contract_sha256"] = fixtures.EXAMPLE_CONTRACT_SHA256
+    refused = refusal(fixtures.resign(frame), frame)
+    assert refused.code == "wrong_issuer" and refused.at.startswith("/body/")
+
+
+@pytest.mark.parametrize("kind", ["host.join", "host.renew"])
+def test_a_released_label_reads_every_join_and_renewal_strictly(kind: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(wire_trust, "PROTOCOL", "1.0")
+    frame = join_or_renewal_of_another_contract(kind)
+    assert refusal(fixtures.resign(frame), frame).code == "wrong_issuer"
+
+
+def join_and_renewal_cases() -> list[Path]:
+    """The invalid joins and renewals whose refusal survives giving them another digest and signing again."""
+
+    cases = []
+    for path in invalid_examples():
+        case, _ = invalid_case(path)
+        sent = json.loads(case["frame_text"])
+        if sent.get("kind") in {"host.join", "host.renew"} and case.get("signing", "after") == "after" \
+                and "pad_to_bytes" not in case and case["at"] != "/body/contract_sha256":
+            cases.append(path)
+    return cases
+
+
+@pytest.mark.parametrize("path", join_and_renewal_cases(), ids=lambda path: path.stem)
+def test_another_contracts_join_or_renewal_is_refused_only_for_what_precedes_its_body(path: Path) -> None:
+    """Everything a join or renewal of another contract is checked for comes before its body.
+
+    Its signature (and a join's presented key, which that needs), issuer, audience, subject,
+    times and replay are checked as for any frame; its body, and the idempotency key made
+    from it, are not read.
+    """
+
+    case, _ = invalid_case(path)
+    frame = json.loads(case["frame_text"])
+    frame["body"]["contract_sha256"] = OTHER_CONTRACT
+    data = fixtures.resign(frame)
+    if case["at"].startswith("/body/") and not case["at"].startswith("/body/application_key/") \
+            or case["at"] == "/idempotency_key":
+        verified = fixtures.verify(data, frame, case["context"])
+        assert verified.other_contract and verified.body is None
+    else:
+        refused = refusal(data, frame, case["context"])
+        assert (refused.code, refused.at) == (case["refusal"], case["at"]), refused
+
+
+def test_a_join_of_another_contract_is_still_checked_for_its_signature_time_and_replay() -> None:
+    frame = join_or_renewal_of_another_contract("host.join")
+    data = json.loads(fixtures.resign(frame))
+    data["body"]["queue_depths"]["inbox"] = 4
+    assert refusal(json.dumps(data).encode(), data).code == "bad_signature"
+    signed = fixtures.resign(frame)
+    assert refusal(signed, frame, {"now": "2026-10-22T04:31:00.000Z"}).code == "expired"
+    assert refusal(signed, frame, {"replay": {"digest": "another"}}).code == "replayed"
+
+
 def test_the_generated_code_names_the_contract_digest() -> None:
     record = json.loads((CONTRACT / "generated" / "compatibility.json").read_text(encoding="utf-8"))
     assert kinds.CONTRACT_SHA256 == record["contract_sha256"]

@@ -7,7 +7,17 @@ and the registry's write rules for ``certificate`` and ``revocations``:
   that asks again with the key its certificate holds, for the same grants, gets that
   certificate back while more than a third of its life is left; otherwise, when it asks
   for other grants, and on a renewal, it gets a new one with the next membership epoch
-  that ``replaces`` the old one. A host whose key is revoked gets none.
+  that ``replaces`` the old one. A host whose key is revoked gets none. A renewal whose
+  profile gives up every agent (``HostProfile.giving_up``) gets a certificate that grants
+  no agent types and no sessions.
+- **Another contract** (README "Versions"). While the label is a pre-release, a join or
+  renewal that names another contract digest is read for that digest before the rest of
+  its body (``verify_frame`` marks it ``other_contract``) and answered ``protocol_mismatch``,
+  naming the digest the authority runs, so the host learns why rather than a refusal of a
+  body another contract shaped. The one exception is a renewal that only gives up the
+  host's agents: the host then hands its agents over, so it is answered when this
+  revision can read it (its body fits this contract, names the certificate that signs it
+  and keeps its keys). There are no worker pools yet, so there is nothing else to give up.
 - **The revocations record** is signed again every 6 hours and lasts 24 hours, with a
   sequence above every one before it and at least its issue time in milliseconds, so an
   authority restored from a backup never writes a lower one.
@@ -37,13 +47,14 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
 from nats.js.errors import BucketNotFoundError, KeyNotFoundError, NoKeysError, NotFoundError
+from pydantic import ValidationError
 
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from custom_messages.wire.encoding import b64url, format_timestamp
-from custom_messages.wire.frame import Receiver, VerifiedFrame
+from custom_messages.wire.frame import Receiver, VerifiedFrame, body_model, expected_idempotency_key
 from custom_messages.wire.refusals import FrameRefused
-from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, KINDS, PROTOCOL
 from custom_messages.wire.trust import AuthorityKey, HostCertificate, TrustStore, sign_state
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
@@ -101,9 +112,13 @@ class InstallationAuthority:
     """One installation's authority: it signs with ``authority`` and speaks as the host ``host_keys``."""
 
     def __init__(self, layout: InstanceLayout, authority: AuthorityKeys, host_keys: HostKeys, *,
-                 clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER) -> None:
+                 clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER,
+                 contract_sha256: str = CONTRACT_SHA256) -> None:
+        """``contract_sha256`` is the contract this authority runs: its code's, unless a test gives another."""
+
         if host_keys.runtime != AUTHORITY_RUNTIME:
             raise ValueError(f"the authority speaks as host {AUTHORITY_RUNTIME!r}")
+        self.contract_sha256 = contract_sha256
         self.layout = layout
         self.authority = authority
         self.host_keys = host_keys
@@ -175,6 +190,7 @@ class InstallationAuthority:
         now = self.clock()
         trust = self._trust = PersistentTrustStore.open(read_bundle(self.layout.trust_bootstrap_path),
                                                         self.layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+        trust.store.contract_sha256 = self.contract_sha256
         revocations = await self._sign_revocations(now)
         own = await self._own_certificate(teams, revocations["body"]["revocation_epoch"], now)
         self._own = own
@@ -414,29 +430,59 @@ class InstallationAuthority:
     # -- answering ------------------------------------------------------------------------------
 
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
+        if verified.other_contract:
+            return await self.answer_other_contract(verified)
         if verified.frame.kind == "host.join":
             return await self.answer_join(verified)
         if verified.frame.kind == "host.renew":
             return await self.answer_renew(verified)
         raise Unsupported(verified.frame.kind)
 
-    def _protocol_mismatch(self, digest: str) -> Optional[dict[str, Any]]:
-        """The answer to a join or renewal from a host on another pre-release contract (README "Versions").
+    def _protocol_mismatch(self) -> dict[str, Any]:
+        """The answer to a host on another pre-release contract: the digest this authority runs, and what to install."""
 
-        It names the digest this authority runs, so the host learns why it was turned away.
+        return {"outcome": "protocol_mismatch", "accepted": PROTOCOL, "accepted_contract_sha256": self.contract_sha256,
+                "install": f"universal-agents {release_version()}",
+                "message": "This host runs another pre-release contract than the installation; install the same release."}
+
+    async def answer_other_contract(self, verified: VerifiedFrame) -> dict[str, Any]:
+        """A join or renewal from a host on another contract: ``protocol_mismatch``, unless it only gives up agents."""
+
+        runtime = verified.frame.issuer.runtime
+        if verified.frame.kind == "host.renew" and self._readable_give_up(verified):
+            self.logger.warning("A host on another contract gave up its agents; its renewal is answered. "
+                                "event=host_renewal_gave_up_agents runtime=%s their_contract_sha256=%s "
+                                "contract_sha256=%s", runtime, verified.their_contract_sha256, self.contract_sha256)
+            return await self._renew(verified, give_up=True)
+        self.logger.warning("A host on another contract was turned away. event=host_protocol_mismatch runtime=%s kind=%s "
+                            "their_contract_sha256=%s contract_sha256=%s", runtime, verified.frame.kind,
+                            verified.their_contract_sha256, self.contract_sha256)
+        return self._protocol_mismatch()
+
+    def _readable_give_up(self, verified: VerifiedFrame) -> bool:
+        """Whether a renewal of another contract is one this revision reads and that only gives up agents.
+
+        Its body was not read when it was verified, so it is read here: it fits this
+        contract's renewal (schema and retry key), names the certificate that signs it, keeps
+        the host's keys and asks for the profile that gives up every agent.
         """
 
-        if PROTOCOL.endswith("-pre") and digest != CONTRACT_SHA256:
-            return {"outcome": "protocol_mismatch", "accepted": PROTOCOL, "accepted_contract_sha256": CONTRACT_SHA256,
-                    "install": f"universal-agents {release_version()}",
-                    "message": "This host runs another pre-release contract than the installation; install the same release."}
-        return None
+        certificate = verified.certificate
+        assert certificate is not None  # a renewal is signed by the certificate it renews
+        body = verified.raw["body"]
+        try:
+            body_model("host.renew")[0].validate_python(body)
+        except ValidationError:
+            return False
+        return (verified.frame.idempotency_key == expected_idempotency_key(verified.raw, KINDS["host.renew"], False, None)
+                and body["certificate_id"] == certificate.certificate_id
+                and body["membership_epoch"] == certificate.membership_epoch
+                and "application_key_rotation" not in body
+                and body.get("new_nats_public_key", certificate.nats_public_key) == certificate.nats_public_key
+                and _gives_up(certificate, body))
 
     async def answer_join(self, verified: VerifiedFrame) -> dict[str, Any]:
         body = verified.raw["body"]
-        mismatch = self._protocol_mismatch(str(body["contract_sha256"]))
-        if mismatch is not None:
-            return mismatch
         runtime, key = str(body["runtime"]), body["application_key"]
         expected = read_expected_hosts(self.layout.trust_expected_hosts_path).get(runtime)
         denial = _denial(expected, body)
@@ -460,17 +506,23 @@ class InstallationAuthority:
         return {"outcome": "ok", "certificate": record}
 
     async def answer_renew(self, verified: VerifiedFrame) -> dict[str, Any]:
+        certificate = verified.certificate
+        assert certificate is not None  # a renewal is signed by the certificate it renews
+        return await self._renew(verified, give_up=_gives_up(certificate, verified.raw["body"]))
+
+    async def _renew(self, verified: VerifiedFrame, *, give_up: bool) -> dict[str, Any]:
+        """The renewed certificate: the grants of the one it replaces, or none of its agents when it gives them up."""
+
         body = verified.raw["body"]
-        mismatch = self._protocol_mismatch(str(body["contract_sha256"]))
-        if mismatch is not None:
-            return mismatch
         certificate = verified.certificate
         assert certificate is not None and self.live is not None  # a renewal is signed by the certificate it renews
         rotation = body.get("application_key_rotation")
         key = rotation["key"] if rotation else {"key_id": certificate.key_id, "public_key": _public_text(certificate)}
+        agent_types = () if give_up else tuple(sorted(certificate.agent_types))
         request = CertificateRequest(runtime=certificate.runtime, teams=tuple(sorted(certificate.teams)),
-                                     roles=tuple(sorted(certificate.roles)), agent_types=tuple(sorted(certificate.agent_types)),
-                                     session_limit=certificate.session_limit, connection_class=certificate.connection_class,
+                                     roles=tuple(sorted(certificate.roles)), agent_types=agent_types,
+                                     session_limit=0 if give_up else certificate.session_limit,
+                                     connection_class=certificate.connection_class,
                                      key_id=key["key_id"], public_key=key["public_key"],
                                      nats_public_key=str(body.get("new_nats_public_key") or certificate.nats_public_key),
                                      profile_sha256=str(body["profile_sha256"]))
@@ -485,6 +537,14 @@ def _encoded(record: Mapping[str, Any]) -> bytes:
 
 def _profile_of(teams: Iterable[str]) -> str:
     return HostProfile(AUTHORITY_RUNTIME, tuple(teams), ("installation_authority",)).digest()
+
+
+def _gives_up(certificate: HostCertificate, body: Mapping[str, Any]) -> bool:
+    """Whether a renewal asks for the certificate's profile without any agent (``HostProfile.giving_up``)."""
+
+    granted = HostProfile(certificate.runtime, tuple(certificate.teams), tuple(certificate.roles),
+                          tuple(certificate.agent_types), certificate.session_limit, certificate.connection_class)
+    return body.get("profile_sha256") == granted.giving_up().digest()
 
 
 def _public_text(certificate: HostCertificate) -> str:
