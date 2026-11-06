@@ -1,0 +1,13 @@
+{
+  "description": "Every schedule has an action, so every schedule row on the person's task page says whether it runs a model turn or sends a fixed message.",
+  "refusal": "invalid_body",
+  "at": "/body/schedules/0/action",
+  "base": "tasks.inventory.reply/fixed-message.json",
+  "changes": [
+    {
+      "remove": "/body/schedules/0/action"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"tasks.inventory.reply\", \"message_id\": \"01928f3a-7b2c-7c48-8000-000000000c48\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"host\", \"id\": \"gateway-1\", \"runtime\": \"gateway-1\"}, \"subject\": \"_INBOX.gateway-1.01928f3a-7b2c-7401-8000-000000000401\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"roots\": [], \"schedules\": [{\"schedule_id\": \"sched_user_once_inline\", \"name\": \"Dentist reminder\", \"next_fire_at\": \"2026-10-27T15:00:00.000Z\", \"enabled\": true}], \"total\": 1}, \"causation_id\": \"01928f3a-7b2c-7401-8000-000000000401\", \"idempotency_key\": \"tasks.inventory.reply:arWXh8WhCI6HwuQ0_q8l60h9gcCV_zNBjmpuEJmZ9wE\", \"body_digest\": \"fcC6kEQo7OADWvkPL7A8jDavYz154M42Enp8Z_-2y20\", \"signature\": \"1RY9TmMqF1n0-EiPToa1ODlPFwQL5mffF6UkKMkzUxtGM9BJJvIxj3xw0mtw-TA7s4TYMCCaHZIthk15tw_WBg\"}"
+}

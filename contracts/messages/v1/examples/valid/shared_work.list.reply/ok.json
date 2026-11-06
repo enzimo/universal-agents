@@ -23,6 +23,42 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "ok",
+    "this_request": {
+      "claims": [
+        {
+          "claim_id": "claim_10",
+          "resources": [
+            "file:users/person-7c1/notes/archive-plan.md"
+          ],
+          "ends_at": "2026-10-22T04:44:00.000Z",
+          "extensions_left": 1,
+          "reason": "Writing the archive plan."
+        }
+      ],
+      "claims_total": 1,
+      "waits": [
+        {
+          "wait_id": "wait_1",
+          "task_id": "task_sub_7f_1",
+          "on": {
+            "type": "resource",
+            "resource": "file:team/reports/q3.md"
+          },
+          "ends_by": "2026-10-22T05:05:00.000Z"
+        },
+        {
+          "wait_id": "wait_2",
+          "task_id": "task_sub_7f_2",
+          "on": {
+            "type": "request",
+            "root_task_id": "task_root_8a",
+            "title": "Quarterly report thread"
+          },
+          "ends_by": "2026-10-22T05:05:00.000Z"
+        }
+      ],
+      "waits_total": 2
+    },
     "requests": [
       {
         "root_task_id": "task_root_8a",
@@ -42,6 +78,7 @@
             "reason": "Moving the quarterly reports into archive/."
           }
         ],
+        "claims_total": 1,
         "notes": [
           {
             "note_id": "note_3",
@@ -49,7 +86,8 @@
             "text": "I moved Q1 and Q2 into archive/; Q3 and Q4 are still to do. Don't rename the folder.",
             "written_at": "2026-10-22T04:20:00.000Z"
           }
-        ]
+        ],
+        "notes_total": 1
       },
       {
         "root_task_id": "run_sched_1_0430",
@@ -58,12 +96,50 @@
         "state": "waiting_for_request",
         "last_activity_at": "2026-10-22T04:30:00.000Z",
         "claims": [],
-        "notes": []
+        "claims_total": 0,
+        "notes": [],
+        "notes_total": 0
+      },
+      {
+        "root_task_id": "task_root_9c",
+        "title": "Flight booking",
+        "kind": "chat",
+        "state": "waiting_for_person",
+        "last_activity": "Asked which of two flights to book",
+        "last_activity_at": "2026-10-22T04:12:00.000Z",
+        "claims": [],
+        "claims_total": 0,
+        "notes": [],
+        "notes_total": 0
+      },
+      {
+        "root_task_id": "task_root_9d",
+        "title": "Supplier comparison",
+        "kind": "objective_work",
+        "state": "waiting_for_workers",
+        "last_activity_at": "2026-10-22T04:26:00.000Z",
+        "claims": [],
+        "claims_total": 0,
+        "notes": [],
+        "notes_total": 0
+      },
+      {
+        "root_task_id": "task_root_9e",
+        "title": "Inbox clean-up",
+        "kind": "chat",
+        "state": "queued",
+        "last_activity_at": "2026-10-22T04:29:00.000Z",
+        "claims": [],
+        "claims_total": 0,
+        "notes": [],
+        "notes_total": 0
       }
-    ]
+    ],
+    "total": 6,
+    "next_offset": 5
   },
   "causation_id": "01928f3a-7b2c-7c05-8000-000000000c05",
   "idempotency_key": "shared_work.list.reply:vFAeYykvf3VDTX07ZuFoflUB78u3aYxDHRcmTobAGfc",
-  "body_digest": "pu3xorRbnYQ5kwrV5Fp2jJD73qmVSlVbEhgimVG8GDQ",
-  "signature": "EOWN0YnRVXKAn1HNojqMyHzoSz4BZSNNGLgVYoorSmjdd1mkU41MeqdOV9lKiNUd0M-FEH8-1JN_OZvDT20tAg"
+  "body_digest": "X874aKgUUGNiqkAhRDAzVIkMGxXsXtqGh4ZxLboay18",
+  "signature": "wUMCScYNx-sDVEeDX0a9BmZ6838Er2UhPtQGswl3zLLdH-dds6NrTW-Yz2wEuN0eWf8-kuBmpxMDnDG4jBgzBQ"
 }
