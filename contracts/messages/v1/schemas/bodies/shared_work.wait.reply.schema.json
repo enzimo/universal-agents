@@ -18,15 +18,14 @@
           "$ref": "../common.schema.json#/$defs/timestamp"
         },
         "holder_waiting_for_person": {
-          "description": "Whether what it waits for is itself waiting for the person.",
+          "description": "Present only when what it waits for is the asking person's own request or claim: whether that request is itself waiting for the person. Another person's request state is never shown.",
           "type": "boolean"
         }
       },
       "required": [
         "outcome",
         "wait_id",
-        "ends_by",
-        "holder_waiting_for_person"
+        "ends_by"
       ],
       "additionalProperties": false
     },
@@ -64,6 +63,21 @@
       "type": "object",
       "properties": {
         "outcome": {
+          "const": "sensitive_content"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
           "const": "not_found"
         },
         "message": {
@@ -72,6 +86,36 @@
       },
       "required": [
         "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "holds_claim"
+        },
+        "claims": {
+          "description": "This request's own live claims on, above or under the resource, newest first: the request uses, extends or releases them instead of waiting.",
+          "type": "array",
+          "items": {
+            "$ref": "../common.schema.json#/$defs/coordination_own_seen_claim"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "claims_total": {
+          "description": "How many such claims there are in all; the list holds the newest of them.",
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "claims",
+        "claims_total"
       ],
       "additionalProperties": false
     },
@@ -104,7 +148,7 @@
           ]
         },
         "holding": {
-          "description": "What this request holds that the other one waits for.",
+          "description": "What this request holds that the other request waits for, newest first.",
           "type": "array",
           "items": {
             "$ref": "../common.schema.json#/$defs/resource_key"
@@ -113,12 +157,17 @@
         },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
+        },
+        "holding_total": {
+          "description": "How many such resources there are in all.",
+          "$ref": "../common.schema.json#/$defs/count"
         }
       },
       "required": [
         "outcome",
         "reason",
-        "holding"
+        "holding",
+        "holding_total"
       ],
       "additionalProperties": false
     },

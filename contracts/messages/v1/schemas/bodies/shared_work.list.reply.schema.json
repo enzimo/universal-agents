@@ -2,13 +2,46 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.list.reply.schema.json",
   "title": "shared_work.list reply",
-  "description": "The person's other running requests, with their claims and notes.",
+  "description": "The asking request's own claims and waits, and the person's other running requests, a page at a time.",
   "oneOf": [
     {
       "type": "object",
       "properties": {
         "outcome": {
           "const": "ok"
+        },
+        "this_request": {
+          "description": "The asking request's own live claims and waits, whichever of its tasks took them.",
+          "type": "object",
+          "properties": {
+            "claims": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/coordination_claim"
+              },
+              "maxItems": 8
+            },
+            "claims_total": {
+              "$ref": "../common.schema.json#/$defs/count"
+            },
+            "waits": {
+              "type": "array",
+              "items": {
+                "$ref": "../common.schema.json#/$defs/coordination_own_wait"
+              },
+              "maxItems": 8
+            },
+            "waits_total": {
+              "$ref": "../common.schema.json#/$defs/count"
+            }
+          },
+          "required": [
+            "claims",
+            "claims_total",
+            "waits",
+            "waits_total"
+          ],
+          "additionalProperties": false
         },
         "requests": {
           "type": "array",
@@ -51,14 +84,22 @@
                 "items": {
                   "$ref": "../common.schema.json#/$defs/coordination_claim"
                 },
-                "maxItems": 32
+                "maxItems": 8
               },
               "notes": {
                 "type": "array",
                 "items": {
                   "$ref": "../common.schema.json#/$defs/coordination_note"
                 },
-                "maxItems": 32
+                "maxItems": 8
+              },
+              "claims_total": {
+                "description": "How many of its live claims there are in all; the list holds the newest of them.",
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "notes_total": {
+                "description": "How many notes it left there are in all; the list holds the newest of them.",
+                "$ref": "../common.schema.json#/$defs/count"
               }
             },
             "required": [
@@ -68,16 +109,28 @@
               "state",
               "last_activity_at",
               "claims",
-              "notes"
+              "claims_total",
+              "notes",
+              "notes_total"
             ],
             "additionalProperties": false
           },
           "maxItems": 64
+        },
+        "total": {
+          "description": "How many other running requests the person has.",
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "next_offset": {
+          "description": "Where the next page starts; present only when more requests remain.",
+          "$ref": "../common.schema.json#/$defs/count"
         }
       },
       "required": [
         "outcome",
-        "requests"
+        "this_request",
+        "requests",
+        "total"
       ],
       "additionalProperties": false
     },

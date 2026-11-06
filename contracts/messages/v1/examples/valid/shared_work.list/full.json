@@ -45,9 +45,11 @@
   },
   "algorithm": "ed25519",
   "body": {
-    "task_id": "task_root_7f"
+    "task_id": "task_root_7f",
+    "offset": 0,
+    "limit": 5
   },
   "idempotency_key": "shared_work.list:iRTEnp3VtnfUhSj4SIgSE_eBncEEGRPEs8OxTdq270Q",
-  "body_digest": "_Np7UcK0NsD2LDqWdmhjpil-2fW08pNSNIrT12EQOc0",
-  "signature": "iux1h0MAMAD5KQRUai1xKDguzBdK19IHWyhT9xg8CGguot_9dwvKwdDEOyO2rqkLiZ6sRXsmPtHlvKBnQtHiBw"
+  "body_digest": "6h4BlAt35a7H1jODnkOHQ7BEtRZ4Z6u59RmbbyLbjTY",
+  "signature": "PmEeQN7SGP5l-qaaKlpnNH7TbOaFdoDQsIPZCu-lKtjffcLNwLbjXJ7rrZSOq9OaGOnDYIWkmW--YKgkw14AAw"
 }

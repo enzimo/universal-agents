@@ -89,6 +89,10 @@
         "accepted": {
           "$ref": "../common.schema.json#/$defs/protocol_label"
         },
+        "accepted_contract_sha256": {
+          "description": "The contract digest the installation authority runs, so a host that runs the same label can see that its contract differs (README, \"Versions\").",
+          "$ref": "../common.schema.json#/$defs/contract_sha256"
+        },
         "install": {
           "type": "string",
           "minLength": 1,
@@ -101,6 +105,7 @@
       "required": [
         "outcome",
         "accepted",
+        "accepted_contract_sha256",
         "install"
       ],
       "additionalProperties": false
