@@ -17,6 +17,8 @@ Sources, each producing ``StatusFindingV1`` items:
   (``assistant_gateway.model_key_endpoints``);
 - the agents' own findings in their status heartbeat
   (``custom_agents.status_findings``), and whether TeamLead is reporting;
+- the hosts' records: agents that cannot run their work because the team services gave
+  them no session (``assistant_gateway.team_view.host_findings``);
 - people's model settings in the access store (``access_control.person_settings``):
   active people whose work may not use the team's model keys and who have no
   model of their own yet (a warning: their requests do not run), and the
@@ -133,6 +135,7 @@ class StatusPage:
         storage: StorageCapacity | None = None,
         jetstream_usage: Callable[[], Awaitable[Any]] = _no_message_storage,
         person_storage_totals: Callable[[], StatusFindingV1 | None] = lambda: None,
+        host_findings: Callable[[], Sequence[StatusFindingV1]] = lambda: (),
     ) -> None:
         self._config = config
         # People and their model settings; the gateway's own manager storage unless a test gives one.
@@ -149,6 +152,8 @@ class StatusPage:
         self._jetstream_usage = jetstream_usage
         # Out-of-date totals behind people's storage notices (storage_usage.StorageUsageNotices.stale_finding).
         self._person_storage_totals = person_storage_totals
+        # What the team's host records list as not healthy (team_view.GatewayTeamView.host_findings).
+        self._host_findings = host_findings
 
     async def report(self) -> StatusReportV1:
         # File and database reads run in worker threads: the gateway's loop
@@ -159,6 +164,7 @@ class StatusPage:
         findings.extend(_override_findings(overrides))
         findings.extend(await self._model_key_findings(overrides, unavailable))
         findings.extend(self._agent_findings())
+        findings.extend(self._host_findings())
         findings.extend(self._receiver_findings())
         findings.extend(await asyncio.to_thread(self._person_findings, unavailable))
         findings.extend(self._configuration_findings())

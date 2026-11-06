@@ -17,8 +17,17 @@ from types import SimpleNamespace
 import pytest
 
 from assistant_gateway.message_host import GATEWAY_RUNTIME, GatewayMessageHost, gateway_profile
-from custom_agents.agent_host import AgentProcessHost, definition_sha256, startup_agent_host_profile
+from custom_agents.agent_host import (
+    LEAD_HOST_RUNTIME,
+    AgentProcessHost,
+    definition_sha256,
+    lead_host_profile,
+    startup_agent_host_profile,
+)
+from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
+from docker import message_hosts
+from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 from team_services.relays import AGENT_UNAVAILABLE_TEXT, Relays
@@ -40,8 +49,8 @@ async def _until(condition, timeout: float = 20.0) -> None:
         await asyncio.sleep(0.05)
 
 
-def _agent(agent_id: str) -> SimpleNamespace:
-    return SimpleNamespace(id=agent_id, named_agent_type="Researcher", _runtime_loop=asyncio.get_running_loop())
+def _agent(agent_id: str, agent_type: str = "Researcher") -> SimpleNamespace:
+    return SimpleNamespace(id=agent_id, named_agent_type=agent_type, _runtime_loop=asyncio.get_running_loop())
 
 
 @pytest.mark.asyncio
@@ -61,8 +70,7 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
     async with AsyncExitStack() as stack:
         await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
-        relays = Relays(lambda: services_host.live, services_host.nc.jetstream(), TEAM, "TeamArchitect",
-                        logging.getLogger("test.relays"))
+        relays = Relays(services_host, TEAM, "TeamArchitect", logging.getLogger("test.relays"))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop, [relays.handlers()]))
         gateway = GatewayMessageHost(layout, TEAM)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
@@ -133,3 +141,124 @@ async def test_a_real_agent_opens_its_session_through_its_process_host(tmp_path:
                 assert host.agents[lead.id].subscription is not None
             finally:
                 await _stop_agents(running)
+
+
+async def _team_with_a_lead_host(stack: AsyncExitStack, broker: str, layout: InstanceLayout,  # noqa: F811
+                                 lead_profile, catalog: set[str], stop: asyncio.Event) -> tuple[MessageHost, asyncio.Task]:
+    """The launcher's set-up: the team lead's host listed to ask for the catalog's types, which the authority
+    reads at each join; and the team services serving."""
+
+    services_profile = team_services_profile(TEAM)
+    message_hosts.prepare_message_host_trust(layout, {
+        services_profile.runtime: message_hosts.expected_host(layout, services_profile),
+        lead_profile.runtime: message_hosts.expected_host(layout, lead_profile, agent_types_from_catalog=True)})
+    authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
+                                      catalog_agent_types=lambda: frozenset(catalog))
+    await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
+    services = MessageHost(layout, services_profile, await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+    return services, asyncio.create_task(serve_team(services, TEAM, stop))
+
+
+def _has_session(host: AgentProcessHost, agent_id: str) -> bool:
+    hosted = host.agents.get(agent_id)
+    return hosted is not None and hosted.session is not None and hosted.subscription is not None
+
+
+def _events(caplog, event: str, agent: str) -> list[str]:
+    return [record.getMessage() for record in caplog.records
+            if f"event={event} " in record.getMessage() and f"agent={agent} " in record.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_specialist_created_while_the_lead_runs_gets_its_session_after_its_host_joins_again(
+    broker: str, tmp_path: Path, caplog,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Plan 13B.5: every running agent holds a session, a specialist type the team created at runtime too."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    catalog = {"TeamArchitect", "Researcher"}
+    lead_profile = lead_host_profile(TEAM, sorted(catalog), 4)
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        _services, serving = await _team_with_a_lead_host(stack, broker, layout, lead_profile, catalog, stop)
+        lead = AgentProcessHost(layout, lead_profile, TEAM, catalog_types=lambda: set(catalog),
+                                refused_retry_seconds=(0.2, 1.0))
+        lead.attach(_agent("lead_1", "TeamArchitect"), agent_type="TeamArchitect", definition=DEFINITION,
+                    nc=await connect(stack, broker, LEAD_HOST_RUNTIME))
+        await _until(lambda: _has_session(lead, "lead_1"))
+        assert lead.host is not None and lead.host.identity.certificate.membership_epoch == 1
+
+        # The team creates a specialist; its first worker starts in the lead's process, no restart.
+        catalog.add("Analyst")
+        with caplog.at_level(logging.INFO, logger="custom_agents.agent_host"):
+            lead.attach(_agent("analyst_1", "Analyst"), agent_type="Analyst", definition=DEFINITION, nc=None)
+            await _until(lambda: _has_session(lead, "analyst_1"))
+        certificate = lead.host.identity.certificate
+        assert certificate.membership_epoch == 2 and "Analyst" in certificate.agent_types
+        # Refused once for the type, joined again, and opened at once: no finding, no refusal to log.
+        assert not _events(caplog, "agent_host_session_refused", "analyst_1")
+        assert "refusals_before=0" in _events(caplog, "agent_host_session_opened", "analyst_1")[0]
+        assert "event=protocol1_rejoined" in caplog.text
+        # The lead keeps its session through the new certificate: both sign with it now.
+        assert set(lead.host.identity.sessions) == {"lead_1", "analyst_1"}
+
+        await lead.stop()
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_session_is_asked_for_again_and_listed_in_the_host_record_until_it_opens(
+    broker: str, tmp_path: Path, caplog,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    catalog = {"TeamArchitect", "Researcher"}
+    lead_profile = lead_host_profile(TEAM, sorted(catalog), 2)  # the lead and one worker
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        services, serving = await _team_with_a_lead_host(stack, broker, layout, lead_profile, catalog, stop)
+        lead = AgentProcessHost(layout, lead_profile, TEAM, refused_retry_seconds=(0.3, 1.0))
+        with caplog.at_level(logging.INFO, logger="custom_agents.agent_host"):
+            lead.attach(_agent("lead_1", "TeamArchitect"), agent_type="TeamArchitect", definition=DEFINITION,
+                        nc=await connect(stack, broker, LEAD_HOST_RUNTIME))
+            await _until(lambda: _has_session(lead, "lead_1"))
+            lead.attach(_agent("worker_1"), agent_type="Researcher", definition=DEFINITION, nc=None)
+            await _until(lambda: _has_session(lead, "worker_1"))
+            lead.attach(_agent("worker_2"), agent_type="Researcher", definition=DEFINITION, nc=None)
+            await _until(lambda: "worker_2" in lead.agents and lead.agents["worker_2"].refusal is not None)
+
+            # Others read the refused agent in the lead host's record, as the gateway's Status page does.
+            async def components() -> tuple[str, list[tuple[str, str, str]]]:
+                assert services.records is not None
+                report = await services.records.read_report("host", LEAD_HOST_RUNTIME, now=services.clock())
+                assert report is not None
+                body = report.record.body
+                return body.health, [(item.component, item.state, item.code) for item in body.components]
+
+            for _ in range(100):
+                health, listed = await components()
+                if listed:
+                    break
+                await asyncio.sleep(0.05)
+            assert (health, listed) == ("degraded", [("Researcher-worker_2", "unhealthy", "session_limit_reached")])
+            await asyncio.sleep(2.5)  # asked again several times meanwhile
+            assert lead.agents["worker_2"].session is None
+
+            # The cause goes: a worker leaves, so there is room, and the next request opens the session.
+            await asyncio.wrap_future(lead.detach("worker_1"))
+            await _until(lambda: _has_session(lead, "worker_2"))
+            for _ in range(100):
+                health, listed = await components()
+                if not listed:
+                    break
+                await asyncio.sleep(0.05)
+            assert (health, listed) == ("healthy", [])
+
+        refused = _events(caplog, "agent_host_session_refused", "worker_2")
+        assert len(refused) == 1 and "code=session_limit_reached" in refused[0]  # once per change, not per request
+        opened = _events(caplog, "agent_host_session_opened", "worker_2")
+        assert len(opened) == 1 and "refusals_before=0" not in opened[0]
+
+        await lead.stop()
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)

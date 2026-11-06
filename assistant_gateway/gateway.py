@@ -1422,6 +1422,7 @@ class UserGateway:
                 storage=self.stored_data.capacity,
                 person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
+                host_findings=self._team_view.host_findings if self._team_view is not None else lambda: (),
             ),
             # People's Knowledge page; the team services answer it (team_services.knowledge).
             knowledge=GatewayKnowledgePages(
