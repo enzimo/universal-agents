@@ -699,6 +699,12 @@ RecordVersion = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$
 ProgressState = Literal['abandoned', 'accepted', 'cancelled', 'completed', 'finalizing_plan', 'failed', 'in_progress', 'not_started', 'partial', 'paused', 'preparing', 'retrying', 'undefined', 'waiting']
 
 
+class ScheduleAction(WireModel):
+    "What each run of a schedule does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn."
+
+    type: Literal['task', 'fixed_message']
+
+
 class TextContentInline(WireModel):
     type: Literal['inline']
     text: LongText
@@ -6270,12 +6276,6 @@ class SchedulesGetBody(WireModel):
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
 
 
-class SchedulesGetReplyOkAction(WireModel):
-    "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn. Every page carries it, outside the detail text."
-
-    type: Literal['task', 'fixed_message']
-
-
 class SchedulesGetReplyOkDetail(WireModel):
     text: Annotated[str, StringConstraints(min_length=0, max_length=4000)]
     offset: Annotated[int, Field(ge=0, le=9007199254740991)]
@@ -6288,7 +6288,7 @@ class SchedulesGetReplyOk(WireModel):
     outcome: Literal['ok']
     schedule_id: RecordId
     seen_version: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
-    action: SchedulesGetReplyOkAction
+    action: ScheduleAction
     detail: SchedulesGetReplyOkDetail
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
@@ -6696,12 +6696,6 @@ class SchedulesListBody(WireModel):
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
 
 
-class SchedulesListReplyOkSchedulesItemUserAction(WireModel):
-    "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn."
-
-    type: Literal['task', 'fixed_message']
-
-
 class SchedulesListReplyOkSchedulesItemUserTimingInterval(WireModel):
     kind: Literal['interval']
     interval_ms: Annotated[int, Field(ge=1, le=9007199254740991)]
@@ -6758,7 +6752,7 @@ class SchedulesListReplyOkSchedulesItemUser(WireModel):
     management_class: Literal['user']
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     instruction_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
-    action: SchedulesListReplyOkSchedulesItemUserAction
+    action: ScheduleAction
     timing: Annotated[Union[SchedulesListReplyOkSchedulesItemUserTimingInterval, SchedulesListReplyOkSchedulesItemUserTimingCron, SchedulesListReplyOkSchedulesItemUserTimingOnce], Field(discriminator='kind')]
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -6769,12 +6763,6 @@ class SchedulesListReplyOkSchedulesItemUser(WireModel):
     worker: SchedulesListReplyOkSchedulesItemUserWorker
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
     run_notes: Union[SchedulesListReplyOkSchedulesItemUserRunNotes, MISSING] = Field(default=MISSING)
-
-
-class SchedulesListReplyOkSchedulesItemSystemAction(WireModel):
-    "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn."
-
-    type: Literal['task', 'fixed_message']
 
 
 class SchedulesListReplyOkSchedulesItemSystemTimingInterval(WireModel):
@@ -6834,7 +6822,7 @@ class SchedulesListReplyOkSchedulesItemSystem(WireModel):
     system_schedule_kind: Union[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team'], MISSING] = Field(default=MISSING)
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     instruction_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
-    action: SchedulesListReplyOkSchedulesItemSystemAction
+    action: ScheduleAction
     timing: Annotated[Union[SchedulesListReplyOkSchedulesItemSystemTimingInterval, SchedulesListReplyOkSchedulesItemSystemTimingCron, SchedulesListReplyOkSchedulesItemSystemTimingOnce], Field(discriminator='kind')]
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -7212,12 +7200,6 @@ class SchedulesSetWorkerReplyScheduleWorkerPolicyRevisionConflict(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
-class SchedulesUpdateBodyAction(WireModel):
-    "Switch what each run does: task gives the schedule's text to a model turn, fixed_message sends it as it is, without a model turn. The stored text stays; instruction replaces it in either case."
-
-    type: Literal['task', 'fixed_message']
-
-
 class SchedulesUpdateBodyTimingInterval(WireModel):
     kind: Literal['interval']
     interval_ms: Annotated[int, Field(ge=1, le=9007199254740991)]
@@ -7264,7 +7246,7 @@ class SchedulesUpdateBody(WireModel):
     seen_version: RecordVersion
     name: Union[Annotated[str, StringConstraints(min_length=0, max_length=16384)], MISSING] = Field(default=MISSING)
     instruction: Union[TextContent, MISSING] = Field(default=MISSING)
-    action: Union[SchedulesUpdateBodyAction, MISSING] = Field(default=MISSING)
+    action: Union[ScheduleAction, MISSING] = Field(default=MISSING)
     timing: Union[Annotated[Union[SchedulesUpdateBodyTimingInterval, SchedulesUpdateBodyTimingCron, SchedulesUpdateBodyTimingOnce], Field(discriminator='kind')], MISSING] = Field(default=MISSING)
     expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
@@ -8381,6 +8363,7 @@ class TasksInventoryReplyOkRootsItem(WireModel):
 class TasksInventoryReplyOkSchedulesItem(WireModel):
     schedule_id: RecordId
     name: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    action: ScheduleAction
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     enabled: bool
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)

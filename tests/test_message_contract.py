@@ -1450,6 +1450,7 @@ SCHEDULE_ACTION_PLACES = {
     "schedules.list.reply": ".schedules[].action.type",
     "schedules.get.reply": ".action.type",
     "schedules.update": ".action.type",
+    "tasks.inventory.reply": ".schedules[].action.type",
 }
 
 

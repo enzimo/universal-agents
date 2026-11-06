@@ -18,21 +18,8 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "action": {
-          "description": "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn. Every page carries it, outside the detail text.",
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "enum": [
-                "task",
-                "fixed_message"
-              ]
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "additionalProperties": false
+          "description": "Every page carries the schedule's action type, outside the detail text.",
+          "$ref": "../common.schema.json#/$defs/schedule_action"
         },
         "detail": {
           "type": "object",

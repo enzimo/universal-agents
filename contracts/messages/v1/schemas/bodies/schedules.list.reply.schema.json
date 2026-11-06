@@ -37,21 +37,7 @@
                     "maxLength": 500
                   },
                   "action": {
-                    "description": "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn.",
-                    "type": "object",
-                    "properties": {
-                      "type": {
-                        "type": "string",
-                        "enum": [
-                          "task",
-                          "fixed_message"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "type"
-                    ],
-                    "additionalProperties": false
+                    "$ref": "../common.schema.json#/$defs/schedule_action"
                   },
                   "timing": {
                     "oneOf": [
@@ -311,21 +297,7 @@
                     "maxLength": 500
                   },
                   "action": {
-                    "description": "What each run does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn.",
-                    "type": "object",
-                    "properties": {
-                      "type": {
-                        "type": "string",
-                        "enum": [
-                          "task",
-                          "fixed_message"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "type"
-                    ],
-                    "additionalProperties": false
+                    "$ref": "../common.schema.json#/$defs/schedule_action"
                   },
                   "timing": {
                     "oneOf": [

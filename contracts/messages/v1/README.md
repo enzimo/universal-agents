@@ -1736,10 +1736,11 @@ The page then displays its id or an unspecified assignment, as today.
 
 A schedule's action says what each run does: `task` gives its instruction to a model turn, and
 `fixed_message` sends its text as it is, without a model turn, so a plain reminder needs no
-model. `schedules.install` sets it (`action`). `schedules.list` rows and the `schedules.get`
-reply carry its type (`action.type`, with the same values), so the person's schedule views can
-mark the schedules that run without a model, and `schedules.update` switches it. Today's
-runtime runs every schedule as a model turn, so its schedules read as `task`.
+model. `schedules.install` sets it (`action`). `schedules.list` rows, the `schedules.get`
+reply and the schedule rows of `tasks.inventory` (Settings → Tasks) carry its type
+(`action.type`, with the same values), so every view of a person's schedules can mark the
+schedules that run without a model, and `schedules.update` switches it. Today's runtime runs
+every schedule as a model turn, so its schedules read as `task`.
 
 `schedules.list` pages the schedules the caller may see. Each row returns the schedule's
 listing digest as `seen_version`, action type, timing, repeat limit, run notes and worker
@@ -1958,8 +1959,10 @@ also carries the request's live claims (`claims`, newest eight, with `claims_tot
 while one of its tasks waits, what for and until when (`waiting_for`: a resource, or another
 of the person's requests with its title), so Settings → Tasks can show "waiting for Archive
 cleanup until 10:45" ("Coordination between a person's requests").
-Schedule entries retain `objective_id` for scheduled-Objective counts and may omit
-their name, as today. `tasks.list` keeps blockers and latest activity;
+Schedule entries carry the schedule's action type (`action.type`, "Schedules"), so the page
+marks a reminder that sends a fixed message without a model turn. They retain
+`objective_id` for scheduled-Objective counts and may omit their name, as today.
+`tasks.list` keeps blockers and latest activity;
 `tasks.list_finished` keeps the owner's display name. Task ids in these lists are
 the root task ids. Both list replies return `next_offset` only when more remain.
 After a cancel or Objective control, the gateway reads the inventory again to show

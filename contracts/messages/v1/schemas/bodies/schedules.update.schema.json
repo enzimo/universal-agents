@@ -24,20 +24,7 @@
     },
     "action": {
       "description": "Switch what each run does: task gives the schedule's text to a model turn, fixed_message sends it as it is, without a model turn. The stored text stays; instruction replaces it in either case.",
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string",
-          "enum": [
-            "task",
-            "fixed_message"
-          ]
-        }
-      },
-      "required": [
-        "type"
-      ],
-      "additionalProperties": false
+      "$ref": "../common.schema.json#/$defs/schedule_action"
     },
     "timing": {
       "oneOf": [
