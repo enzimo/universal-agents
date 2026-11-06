@@ -11,8 +11,8 @@ installation or an outside agent can implement them without reading UA's Python 
 
 The protocol is labelled `1.0-pre` while the messages are being moved onto it. It becomes
 `1.0` when the last kind is live. Until then a fix may change these files under the same
-label. Hosts refuse peers whose label differs, and are to refuse peers whose contract digest
-differs once joins and host records carry it; no message carries it yet ("Versions").
+label. Hosts refuse peers whose label differs and, while the label is a pre-release, hosts of
+one installation also refuse peers whose contract digest differs ("Versions").
 
 ## Layout
 
@@ -763,15 +763,16 @@ pulls from an agent's inbox only while the agent can take more work, and stops w
 agent's local waiting list is full or the agent is paused. A message about work the agent
 already holds must not wait there behind tasks it cannot start yet: a stop or a hold for
 the task that holds the slot, the renewal of its custody window, a smaller access list, or
-the access decision one of its steps waits for. So each agent has two queues
-(`agent_queues` in `transport.yaml`), each with its own consumer in
+the access decision or the end of a coordination wait one of its tasks waits for. So each
+agent has two queues (`agent_queues` in `transport.yaml`), each with its own consumer in
 `UA1_AGENT_WORK_<team>`:
 - the **inbox**, `work.agent.<agent>`, holds the kinds that need an execution slot: new
-  tasks, results, questions, answers, closed questions, credential form and tool setup
-  results, and the ends of coordination waits;
+  tasks, results, questions, answers, closed questions, and credential form and tool setup
+  results;
 - the **control queue**, `work.control.<agent>`, holds every other kind sent to an agent:
   stops, steering, custody moves and confirmations, progress, claims, handbacks, hold
-  accounts, reports, access decisions, refusals and ledger facts.
+  accounts, reports, access decisions, the ends of coordination waits, refusals and ledger
+  facts.
 
 The host reads the control queue whenever it runs the agent, paused or not, and admits each
 message at once, since none needs a slot. Like all queued work, it waits only while the
@@ -794,6 +795,19 @@ a task stopped before it started never starts; it forgets the message once the m
 own lifetime ends. Worker pools need no second queue, since a pool receives only new tasks.
 An edge's reader, a gateway route or an outside agent's adapter, passes each message on and
 runs no task itself, so it reads its one queue whenever it runs.
+
+**Waking the model.** Each kind's `wakes_model` says what a message does to the model of the
+agent that receives it:
+- `always`: the host gives the task a model turn as soon as it can. A task paused on a local
+  wait (a Strands interrupt) resumes, and a task with no turn running gets one;
+- `next_turn`: the model sees the message at the task's next turn, together with other news.
+  It starts no turn;
+- `never`: the message only changes records, such as the work ledger or custody.
+
+A kind that ends a local wait is `always` wherever it ends it, since resuming the paused tool
+call continues the model's turn: an access decision (except `waiting`, which leaves the wait
+open), a tool setup's result and the end of a coordination wait. A credential form's result
+ends no local wait: the lead goes on, and sees the result at its next turn.
 
 **Credentials follow placement.** A host's NATS credential names the agents and pools it
 runs, so it changes when the host gains or loses one. NATS checks a user's permissions only
@@ -1002,7 +1016,8 @@ its session names when it is an agent; the time is
 replay record is empty; and a reply answers the valid example whose message id it names.
 Joins, renewals and host records carry the fixed example digest
 `c734d95cdcb5b0081997c039906cf13cf3eeef0e0ef105160fb1138c5f6a2f60`, not the digest of the
-contract they belong to, which would change with them.
+contract they belong to, which would change with them, and the examples' receivers run that
+digest. A `protocol_mismatch` answer names another one, the authority's in that example.
 
 Each file in `examples/invalid/` describes one refusal:
 - `refusal` and `at`: the code and the JSON pointer of the field the refusal is about
@@ -1301,19 +1316,40 @@ files go in order of their paths relative to that folder, with `/` between folde
 compared as UTF-8 bytes. For each file the digest takes its relative path in UTF-8, a zero
 byte, the file's size in bytes as decimal digits, a zero byte, and the file's bytes. While
 the label ends in `-pre`, a fix may change the contract without changing the label, so
-hosts refuse a peer whose digest differs from their own:
-- `host.join` and `host.renew` carry the host's `contract_sha256`. While the label ends in
-  `-pre`, the installation authority answers a join or renewal whose digest differs from its
-  own with `protocol_mismatch`, so a host upgraded in place gets no new certificate until it
-  runs the authority's contract;
-- each host liveness record carries it too. While the label ends in `-pre`, a reader sends no
-  work to a host whose record names another digest and places no agent on it, and logs the
-  host and both digests. The record itself is authentic, so `TrustStore.verify` still accepts
-  it; the comparison is the reader's decision, not a refusal of the record.
+hosts of one installation refuse a peer whose digest differs from their own. The generated
+code names its own digest (`custom_messages.wire.kinds.CONTRACT_SHA256`).
+- **Where it travels.** `host.join`, `host.renew` and each host liveness record carry the
+  host's `contract_sha256`. Another revision of the contract may shape these bodies
+  differently, so the digest is read before the rest of the body: the installation authority
+  reads a join's or renewal's `protocol` and `contract_sha256` first, and `TrustStore.verify`
+  reads a host record's digest after its signature, writer and times and before its body.
+  Otherwise a host of another revision would be refused as malformed and never learn why.
+- **The authority.** While the label ends in `-pre`, it answers a join or renewal whose digest
+  differs from its own with `protocol_mismatch`, naming the digest it runs
+  (`accepted_contract_sha256`) and what to install. It still answers a renewal that only gives
+  up agents or pools ("Credentials follow placement"), so a host on another contract can hand
+  its agents over. A host upgraded in place renews with a new `renew_id`, since a repeated one
+  gets its stored outcome back ("Stored outcomes").
+- **Readers of host records.** A host record that names another digest is authentic, so
+  `TrustStore.verify` accepts it without reading the rest of its body and marks it
+  (`other_contract`, with `their_contract_sha256`). A reader sends that host no new work,
+  places no agent on it and logs the host and both digests, but still sends it control
+  messages for the tasks it holds (stops, custody, access decisions, the ends of waits). The
+  team services keep counting its custody windows from its records, so its tasks never get a
+  second holder without a person's override ("Custody windows").
+- **The host on another contract.** A host learns that its digest differs from the team
+  services' host record, which it reads when it starts and whenever it changes, or from
+  `protocol_mismatch`. It then stops pulling from worker pool queues and from its agents'
+  inboxes, keeps reading their control queues, finishes the turns in progress and hands back
+  (`task.handback`) every task it has not finished, holding every action outside the team
+  meanwhile, and renews only to give up its agents and pools. Messages either side can no
+  longer read are set aside as dead letters, as usual.
 
-A released label (no `-pre`) compares only the label and its minor ("Versions" above), so the
-digest is then informational. `--check` regenerates the record, so a changed source with a
-stale digest fails it.
+The digest is compared only within one installation: frames from another installation
+(`x-<installation>`) carry none, and federation agreements gain it before two installations
+connect. A released label (no `-pre`) compares only the label and its minor ("Versions"
+above), so the digest is then informational. `--check` regenerates the record, so a changed
+source with a stale digest fails it.
 
 ## Operation inputs and outcomes
 
@@ -1791,8 +1827,17 @@ and `schedule_worker_inspection`. The team services check ownership through the 
 task context or command token. A schedule's name and assigned agent type may be absent.
 The page then displays its id or an unspecified assignment, as today.
 
+A schedule's action says what each run does: `task` gives its instruction to a model turn, and
+`fixed_message` sends its text as it is, without a model turn, so a plain reminder needs no
+model. `schedules.install` sets it (`action`). `schedules.list` rows, the `schedules.get`
+reply and the schedule rows of `tasks.inventory` (Settings → Tasks) carry its type
+(`action.type`, with the same values), so every view of a person's schedules can mark the
+schedules that run without a model, and `schedules.update` switches it. Today's runtime runs
+every schedule as a model turn, so its schedules read as `task`.
+
 `schedules.list` pages the schedules the caller may see. Each row returns the schedule's
-listing digest as `seen_version`, timing, repeat limit, run notes and worker assignment.
+listing digest as `seen_version`, action type, timing, repeat limit, run notes and worker
+assignment; `instruction_preview` shows the start of the instruction or of the fixed message.
 The assignment keeps `automatic_creation` as `not_configured`, `enabled`, `disabled` or
 `default_policy`, plus `review_agent_type`, `upgrade_required`, `desired_agent_type` and
 `reassignment_pending`. `not_running_since` and `not_running_explanation` explain a stuck
@@ -1812,7 +1857,8 @@ This read has no covered change, stores no outcome and uses `/message_id` as its
 The request's `offset` and `max_chars` map to `details_offset` and `details_max_chars`.
 The wire accepts 1..4,000 characters per page, the runtime's existing excerpt limit.
 The reply's `detail` keeps `text`, `offset`, `total_chars`, `sha256` and, only when more
-text remains, `next_offset`. An offset at the end returns an empty final page. Offsets
+text remains, `next_offset`. Every page also carries the schedule's `action.type`, outside
+the detail text. An offset at the end returns an empty final page. Offsets
 and lengths count Unicode characters, not UTF-8 bytes, and allow 0..2^53 - 1. The
 receiver serializes the complete safe projection with `ensure_ascii=False` and sorted
 keys before paging. `sha256` is the lowercase hexadecimal SHA-256 of that complete
@@ -1871,7 +1917,11 @@ Confidence is a string label in 0.9.8, for example `high` or `unknown`, so it st
 Omitted fields use the runtime defaults on install. The execution ledger remains
 runtime-owned; a policy edit must not replace state or ledger entries a run just wrote.
 
-`schedules.update` accepts a partial edit. `clear_name` clears the optional name;
+`schedules.update` accepts a partial edit. `action.type` switches what each run does and
+keeps the stored text: a fixed message's text becomes the model's instruction, or an
+instruction becomes the message sent as it is. `instruction` replaces that text for either
+type. The listing digest covers the action type, so a switch changes `seen_version` like any
+other edit. `clear_name` clears the optional name;
 `clear_expires_at` clears expiration. `time_zone` alone changes an existing cron
 schedule's zone, and `next_fire_at` explicitly moves its next run. `enabled`,
 `paused_until` and `clear_pause` keep the update tool's combined edits; the separate
@@ -1997,9 +2047,15 @@ task id, with `children_total` and `next_child_offset` to continue. Repeat the s
 root window with the next child offset to read a larger graph. Senders may shorten
 either window to fit the frame, but never silently discard members. The maximum
 window is 100 roots or schedules and 200 children per root. Blockers use
-`text_content` so the full waiting reason can be read from a blob when necessary.
-Schedule entries retain `objective_id` for scheduled-Objective counts and may omit
-their name, as today. `tasks.list` keeps blockers and latest activity;
+`text_content` so the full waiting reason can be read from a blob when necessary. A root
+also carries the request's live claims (`claims`, newest eight, with `claims_total`) and,
+while one of its tasks waits, what for and until when (`waiting_for`: a resource, or another
+of the person's requests with its title), so Settings → Tasks can show "waiting for Archive
+cleanup until 10:45" ("Coordination between a person's requests").
+Schedule entries carry the schedule's action type (`action.type`, "Schedules"), so the page
+marks a reminder that sends a fixed message without a model turn. They retain
+`objective_id` for scheduled-Objective counts and may omit their name, as today.
+`tasks.list` keeps blockers and latest activity;
 `tasks.list_finished` keeps the owner's display name. Task ids in these lists are
 the root task ids. Both list replies return `next_offset` only when more remain.
 After a cancel or Objective control, the gateway reads the inventory again to show
@@ -2037,73 +2093,196 @@ the token of the root task it works on (`authority_binding: {type: root_task}`).
 the agent's `task_id`; the team services check that the agent holds that task and that the
 token is bound to its root task (`bad_authority`). The request is the token's root task, and
 the person is the token's person. A request never waits on its own tasks, and a claim belongs
-to the request, so the lead and every worker of one request act under it. System work holds
-claims with no person.
+to the request, so the lead and every worker of one request act under it. Work for no person
+takes part as team maintenance (below).
 
-**Same person only.** Titles, states, reasons and note texts reach only the same person's
-requests. Another person's claim is `another_member`, its note shows only that one exists, and
-system work's claim is `team_maintenance`. Counts never include other people's requests.
+**What a request learns about others.** Awareness stays within one person, and team
+maintenance is the team's own work:
+- The person's own requests see each other in full: titles, states, reasons and note texts.
+- Another person's request is "another team member's request" (`another_member`). A request
+  learns only that it holds a claim on, above or under a resource the request named and until
+  when; that notes exist there, without their text; how many requests wait for it
+  (`waiting_requests`, a bare number that counts every request, so a refusal always shows its
+  cause); and, when a wait is refused, that it waits for something this request holds
+  (`would_loop`). Never its title, state, reason or note text, and never whether it waits for
+  its person (`holder_waiting_for_person` is sent only for the person's own requests).
+- Work for no person, a run of a schedule that works for nobody, is team maintenance
+  (`team_maintenance`). It runs as the team, not as an administrator: it then keeps no person's
+  access, reaches no person's private space, and does not move or stop when an administrator
+  leaves. It has no private side either, so its claims show their reason and its notes their
+  text to every request, after the same checks as everyone's. It may not name a resource in a
+  person's own space (`not_allowed`) and may wait for resources but not for requests;
+  `shared_work.count` answers zeros for it and `shared_work.list` shows only its own claims
+  and waits.
+- `shared_work.count` counts only the person's own other requests.
 
 **Resource keys.** `resource_key` is one string, built by the host's trusted code from what the
 agent named, never free text:
 - `file:<folder target>`, with the folder target grammar of access grants (`team/...`,
-  `agents/...`, `users/<folder>/...`, `data/<name>/...`, no empty, `.` or `..` part). A key
-  ending with `/` is a folder: it conflicts with every key under it, so a claim on
+  `agents/...`, `users/<folder>/...`, `data/<name>/...`): no empty, `.` or `..` part, no
+  backslash and no control character. A folder key always ends with `/`, a top folder's too
+  (`file:team/`, `file:users/<folder>/`), and a file key never does, so each file and folder
+  has one spelling. A folder conflicts with every key under it: a claim on
   `file:team/reports/` conflicts with one on `file:team/reports/q3.md` (`relation` `above`
   and `below`);
 - `record:knowledge_page:<space>:<page>`, `record:memory_fact:<bank>:<number>`,
   `record:schedule:<id>`, `record:objective:<id>` and `record:heartbeat_item:<id>`;
 - `account:<tool>:<owner>`, the team's account of a tool or the person's own.
 
-The team services refuse a key that is not in its normal form, for example a folder target
-that is not the way access grants write it, with `invalid_request`.
+The schema checks the spelling. The team services also refuse, with `invalid_request`, a key
+whose spelling is right but whose meaning is not: a folder named without its `/`, or a file
+named with one.
+
+A key in a person's own space (`record:knowledge_page:personal:<page>`,
+`record:memory_fact:usermem:<number>`, `account:<tool>:person`) names the token person's own
+record, since a person's space is never another person's to change. The team services keep and
+compare these keys together with that person, so the same key from two people never conflicts
+and never reveals that the other person works on something. Work for no person has no such
+space and gets `not_allowed` for these keys.
+
+Records are named the way people and agents name them, so a memory fact's number is given to
+the next new fact once the fact is gone. A record is removed when it is deleted, and when its
+store removes it after its end: a memory fact past its expiry time (`expires`), a schedule past
+its end date (`expires_at`) or after its last run. In the step that removes a record, the
+claims and notes on it end and every wait on it ends without a grant (`record_removed`, "Waits
+and grants"). A record that later takes the same number is another resource and starts with no
+claim, note or wait. Nothing is above or under a record key, so a removal ends nothing on
+another key. A file key names a path, not a record: a file deleted and written again at the
+same path is the same resource, and the claims, notes and waits on it go on.
 
 **The operations.**
 - `shared_work.count` gives the numbers for the line each turn of a person's work shows: the
   person's other running requests, how many of them are scheduled runs or hold claims, and how
   many of this request's tasks wait for another request.
-- `shared_work.list` lists the person's other running requests (at most 64), with their kind,
-  state, last activity, claims and notes.
+- `shared_work.list` gives the asking request's own live claims and waits (`this_request`),
+  whichever of its tasks took them, so a lead sees what its workers hold. It also gives the
+  person's other running requests, a page at a time (`offset`, a `limit` of at most 64,
+  `total`, and `next_offset` while more remain), with their kind, state, last activity, claims
+  and notes.
 - `shared_work.check` reports, for up to eight resources, the live claims on, above or under
   each one, its notes, and whether a wait on it would be accepted now (`can_wait`).
 - `shared_work.claim` claims up to eight resources, all or none, for 15 minutes. It answers
-  `claimed` with every conflict when another request holds a claim on, above or under one of
-  them, or when other requests wait for one after this request's own claim on it ran out. Its
-  answer carries the notes on the resources.
+  `claimed`, listing every conflict, when for one of them:
+  - another request holds a live claim on, above or under it;
+  - another request waits for something on, above or under it. A waiter keeps its place, so
+    claims on the files in a folder never pass over a request that waits for the folder;
+  - this request already holds a live claim on, above or under it, listed as `this_request`.
+    The request uses, extends or releases that claim instead, so it holds a resource for at
+    most 35 minutes at a time.
+
+  Its answer carries the notes on the resources, grouped by resource.
 - `shared_work.extend` adds 10 minutes, at most twice (`limit_reached` after that), so a claim
-  lasts at most 35 minutes. Activity never extends a claim.
-- `shared_work.release` ends a claim now. A claim also ends when its request ends, fails or is
-  stopped, without a message.
+  lasts at most 35 minutes. Activity never extends a claim. A claim that has ended answers
+  `not_found`, and a claim on a resource the task may no longer reach answers `not_allowed`.
+- `shared_work.release` ends a claim now. Giving a claim up is never refused: a claim of this
+  request that has already ended answers `ok` with the time it ended, and only a claim id that
+  is not this request's answers `not_found`. A claim also ends, without a message, when its
+  request ends, fails or is stopped, and when its record is removed ("Resource keys").
 - `shared_work.note` leaves up to 500 characters on one resource, at most three per resource
-  for each request (`limit_reached`). Notes are checked like knowledge pages for credentials and
-  identity numbers (`sensitive_content`), last while their request runs and one day more, and
-  are shown to models as quoted text from another request, never as instructions.
-- `shared_work.wait` waits for a claimed resource or for another of the person's requests. In
-  one serialized step it refuses a wait on the request itself or one that would close a loop
-  (`would_loop`, naming what this request holds that the other one waits for), and answers
-  `nothing_to_wait_for` when the resource has no claim and nobody waits for it. Otherwise it
-  records the wait, answers with the latest time it ends (`ends_by`), and the host ends the
-  turn with a local wait, freeing the agent's slot.
+  for each request (`limit_reached`). A note lasts while its request runs and one day more.
+- `shared_work.wait` waits for a claimed resource or for another of the person's requests. A
+  wait on a resource gives the `reason` its claim carries if the wait is granted. In one
+  serialized step, in this order, it:
+  - refuses a wait on a resource while this request holds a live claim on, above or under it
+    (`holds_claim`), listing those claims as `shared_work.claim` lists its own (`this_request`).
+    A grant would be a second claim over what the request already holds and would keep it held
+    for up to 35 minutes more, so the request uses, extends or releases its claim instead, and
+    waits only once it holds nothing there;
+  - refuses a wait on the request itself or one that would close a loop (`would_loop`, naming
+    what this request holds that the other one waits for);
+  - answers `nothing_to_wait_for` when nothing but this request's own waits is on, above or
+    under the resource.
+
+  Otherwise it records the wait, answers with the latest time it ends (`ends_by`), and the host
+  ends the turn with a local wait, freeing the agent's slot.
+
+Notes and the reasons of claims and of waits on a resource are text a model wrote that other
+models read. Both are checked like knowledge pages for credentials and identity numbers
+(`sensitive_content`, from `note`, `claim` and `wait`) and shown to models as quoted text from
+another request, never as instructions.
+
+**Reply size.** Each list inside a coordination reply holds at most eight items, newest first,
+next to a total that counts them all (`claims_total`, `notes_total`, `waits_total`,
+`holding_total`); `shared_work.list` pages its requests ("Reply size"). A reply that would still
+not fit in `max_frame_bytes` leaves out the oldest notes first, then the claims that end first,
+never a resource it was asked about, and its totals still count everything.
+
+**Waits and grants.** These rules keep every wait finite and free of loops:
+- Every wait lasts at most 35 minutes, on a resource or on a request, and `ends_by` is that
+  limit.
+- The loop check follows who waits for whom. A waiting request waits for every other request
+  that holds a live claim on, above or under what it waits for, for every other request whose
+  earlier wait is on, above or under what it waits for, since that one is granted first, and,
+  for a wait on a request, for that request. A wait that would make a request wait for itself
+  through these is refused. So a later grant never closes a loop either: the request that gets
+  a claim was already ahead of everyone it now blocks.
+- Whenever a claim ends (released, ran out or its request ended) or a wait ends without a
+  grant (its limit, or its task or request ended), the team services look at the waits on,
+  above or under that resource in the order they were recorded. A wait is
+  granted when no other request holds a live claim on, above or under its resource and no
+  other request's earlier wait is on, above or under it. The grant is a new claim of the
+  waiting request, with its own `claim_id`, on exactly the resource it waited for, with the
+  wait's `reason`, for 15 minutes from the grant. The request's other waits on that resource
+  or under it end with the same grant, each with its own `wait.ended`, so a request never
+  waits on its own claim.
+- When a record is removed ("Resource keys"), every wait on it ends without a grant, in the
+  same step as the claims on it, each with its own `wait.ended` (`record_removed`). A wait on a
+  removed record is never granted: the record it waited for is gone, and a record that later
+  takes the same number is another resource, which the waiting request never asked for.
+- A wait ends without a message when its task stops, fails or ends, moves to another holder
+  or is handed back, and when its request ends, fails or is stopped. A claim already granted
+  stays with the request, which sees it with `shared_work.list`.
 
 Writes (`claim`, `extend`, `release`, `note`, `wait`) carry the agent's `request_id` as their
 retry key ("Stored outcomes"); `count`, `list` and `check` are reads keyed by the message id.
 
-**The end of a wait.** `wait.ended` is durable work from the team services to the waiting
-task's current holder (`routing: holder`), so it survives restarts and custody moves. It goes to
-the holder's inbox, since it resumes the task and needs an execution slot. It says why the wait
-ended:
-- `claim_granted`: the claim was released or ran out, and the earliest waiter now holds a claim
-  on the resource, with the notes on it. Its 15 minutes start when it is granted;
+**The end of a wait.** `wait.ended` is durable work from the team services to the holder of
+the task that recorded the wait (`routing: holder`), so it survives restarts. It is sent once:
+a wait ends without a message when its task moves or is handed back, so no other holder ever
+needs it, and its key names the wait alone. It goes to the holder's control queue, which the
+host reads even while every slot is busy or the agent is paused, like an access decision: the
+host takes it at once and resumes the task ahead of new work as soon as a slot is free. It
+wakes the model ("Waking the model"). It says why the wait ended:
+- `claim_granted`: the wait was granted ("Waits and grants"): its new claim, with the notes on
+  the resource. Its 15 minutes start when it is granted;
 - `request_ended`: the request it waited for ended;
-- `limit_reached`: a wait on a request lasts at most 35 minutes; `still` says what the other
-  request is doing, and the model may carry on, wait again or ask the person.
+- `record_removed`: the record it waited for was deleted, or removed by its store after its end
+  ("Resource keys"). The host knows the record from its wait. The model reads again before it
+  changes anything there, since a record that later takes the same number is another record;
+- `limit_reached`: the wait reached its 35 minutes. `still` says what it waited for is doing:
+  `claimed` for a resource, `running` or `waiting_for_person` for a request. The model may
+  carry on, wait again or ask the person.
+
+A granted claim's `ends_at` is at most 15 minutes after the message (body rule `ends_within`).
+
+**What the host does with a wait.**
+- It repeats a `shared_work` write with the same `request_id` until it gets an outcome
+  ("Stored outcomes"), before the model is told anything, so no wait or claim is recorded that
+  the host does not know about. A repeated `wait` whose wait has already ended gets its stored
+  `ok`, and the host then finds the `wait.ended` it kept.
+- A `wait.ended` can arrive before the task's turn has ended with its wait, for example when
+  the reply was slow. The host keeps it under the task and applies it when the turn ends with
+  that wait, as it does for a stop that comes before its task.
+- When it resumes a task whose granted claim's `ends_at` has passed, it tells the model that
+  the claim has already ended.
+- If no `wait.ended` has come by `ends_by` plus the clock tolerance, the host resumes the task
+  as if the wait reached its limit, with what it waited for unknown, logs the task and the
+  wait id, and ignores a later `wait.ended` for it. A lost or set-aside message then delays a
+  task by the clock tolerance at most, never forever.
+- The holder's work ledger opens the wait when `shared_work.wait` answers `ok`
+  (`coordination_wait_open`) and closes it on `wait.ended` (`coordination_wait_closed`). For a
+  delegated task, the team services also tell its requester with `ledger.fact` (`type: wait`,
+  `kind` `claimed_resource` or `other_request`, `case_id` the wait id) when the wait opens and
+  when it is resolved, so the requester's stand-in shows the held-up work.
 
 **What the requester hears.** A worker's claims, extensions, releases and notes send nothing to
 its lead. When something happened that the lead may need to plan around, trusted code adds
-`coordination` events to the task's `task.result`: a wait and how it ended, a refused wait, a
-write refused because another request claimed the resource, a claim that ran out after its last
-extension while the work was unfinished, and a note left on a resource. A worker that cannot
-go on asks its lead with `task.question`, like any other blocker.
+`coordination` events to the task's `task.result`, at most one of each kind (body rule
+`unique`), each listing up to eight cases with how many there were in all, so a busy task never
+runs out of room for them: its waits and how they ended, its refused waits and what they were
+for, its writes refused because another request claimed the resource, its claims that ran out
+after their last extension while the work was unfinished, and the resources it left notes on.
+A worker that cannot go on asks its lead with `task.question`, like any other blocker.
 
 ## Covered changes
 
@@ -2177,7 +2356,14 @@ that can happen to it, each with its data:
 - `request_closed` may carry the request's state.
 - `needs_person_decision` may carry the `case_id` the person decides in a change review
   ("Change reviews").
-- `record_busy` carries `retry_at`, when to try again.
+- `record_busy` carries `retry_at`, when to try again. When another request's claim on the
+  record caused it ("Coordination between a person's requests"), it also carries `claim`: the
+  claim's id and resource, when it ends (which is `retry_at`), whose kind of request holds it
+  (the person's own, another team member's, or team maintenance) and how many notes are on
+  the resource. Before the model sees the refusal, the host's trusted code reads the holder's
+  description and the notes with `shared_work.check`, under the same privacy rules, so the
+  model can wait, carry on with other work or ask the person. The refusal itself stays small
+  in every covered operation.
 
 `change_conflict`, `needs_person_decision` and `record_busy` come only from the checks of
 covered records, so the generator refuses them on an operation without `covered_change`.

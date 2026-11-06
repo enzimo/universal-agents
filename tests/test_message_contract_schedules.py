@@ -156,9 +156,10 @@ def test_exact_detail_preserves_instruction_ledger_and_owner_scope(agent: Any, t
         page = text_page(text, offset=offset, max_chars=4000)
         if page["next_offset"] is None:
             del page["next_offset"]
+        # Today's runtime runs every schedule as a model turn (README, "Schedules"), so its action is task.
         body = check_body("schedules.get.reply", {
             "outcome": "ok", "schedule_id": created["schedule_id"], "seen_version": raw["record_digest"],
-            "detail": page, "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
+            "action": {"type": "task"}, "detail": page, "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
         })
         assert body["detail"]["sha256"] == hashlib.sha256(text.encode()).hexdigest()
         parts.append(body["detail"]["text"])
