@@ -395,6 +395,36 @@ async def test_a_session_signed_before_the_team_services_renewed_and_restarted_i
 
 
 @pytest.mark.asyncio
+async def test_a_closed_session_is_not_renewed_when_its_agent_is_placed_again(broker: str, tmp_path: Path) -> None:
+    """A renewal signs again only a session that has not ended and whose placement is the current one."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        assert worker.live is not None
+        first = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        closed = await worker.live.request("sessions.close", {"request_id": "close-1", "session": first,
+                                                              "reason": "exited"}, audience(worker), team=TEAM)
+        assert closed.raw["body"]["outcome"] == "ok"
+        # The agent is placed on the same host again: a new placement, and a new session naming it.
+        second = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        assert second != first
+        refused = await renew_session(worker, first)
+        assert refused["outcome"] == "not_allowed", refused
+        assert (await renew_session(worker, second))["outcome"] == "ok"
+        # Handed over: the placement stays until the new host opens, yet the ended session is not renewed.
+        handed = await worker.live.request("sessions.close", {"request_id": "close-2", "session": second,
+                                                              "reason": "handed_over"}, audience(worker), team=TEAM)
+        assert handed.raw["body"]["outcome"] == "ok"
+        assert (await renew_session(worker, second))["outcome"] == "not_allowed"
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
 async def test_a_host_joins_again_for_an_agent_type_added_while_it_runs(broker: str, tmp_path: Path, caplog) -> None:
     """MessageHost.rejoin: every running agent holds a session, a specialist created at runtime too."""
 

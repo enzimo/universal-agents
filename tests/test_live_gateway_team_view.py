@@ -115,3 +115,74 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         await gateway.close()
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_the_status_page_shows_an_agent_without_a_session_until_its_session_opens(
+    broker: str, tmp_path: Path,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Plan 13B.5: a refused agent has no address, so its host's record lists it, and the gateway shows it."""
+
+    from assistant_gateway.status_page import StatusPage
+    from tests.test_status_page import _config, _Notices
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    lead_profile = lead_host_profile(TEAM, ("TeamArchitect", "Researcher"), 2)  # the lead and one worker
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), lead_profile)
+        services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
+        gateway = GatewayMessageHost(layout, TEAM)
+        view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: None, on_lead=AsyncMock(),
+                               details_seconds=30)
+        gateway.observe_team(view)
+        gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        assert await view.wait_ready(20)
+
+        async def no_keys() -> dict:
+            return {"endpoints": []}
+
+        page = StatusPage(config=_config(tmp_path), model_key_status=no_keys, agent_statuses=lambda: [],
+                          send_notice_once=_Notices(), host_findings=view.host_findings)
+
+        async def without_session() -> list:
+            return [finding for finding in (await page.report()).findings
+                    if finding.finding_id.startswith("agent_without_session:")]
+
+        lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
+                                     refused_retry_seconds=(0.3, 1.0))
+        lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
+                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
+        lead_host.attach(stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False), agent_type="Researcher",
+                         definition=DEFINITION, nc=None, state=("idle", True))
+        await _until(lambda: view.live_ids() == {"lead_1", "worker_1"})
+        assert await without_session() == []  # starting is no finding
+
+        # A second worker: the lead's process has no room for it, so its session is refused.
+        lead_host.attach(stand_in("worker_2", "Researcher-2", "Researcher", is_lead=False), agent_type="Researcher",
+                         definition=DEFINITION, nc=None, state=("idle", True))
+        for _ in range(200):
+            found = await without_session()
+            if found:
+                break
+            await asyncio.sleep(0.05)
+        assert [finding.finding_id for finding in found] == ["agent_without_session:lead:session_limit_reached"]
+        assert found[0].title == "Agent Researcher-worker_2 cannot run its work"
+        assert "worker limit" in found[0].summary and "team-wide restart" in found[0].action
+        assert "worker_2" not in view.live_ids()
+
+        # The cause goes: a worker leaves, the refused one gets its session, and the finding goes with it.
+        await asyncio.wrap_future(lead_host.detach("worker_1"))
+        await _until(lambda: "worker_2" in view.live_ids())
+        for _ in range(200):
+            found = await without_session()
+            if not found:
+                break
+            await asyncio.sleep(0.05)
+        assert found == []
+
+        await lead_host.stop()
+        await gateway.close()
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)

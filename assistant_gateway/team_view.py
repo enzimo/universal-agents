@@ -19,6 +19,13 @@ what the gateway already acts on:
   ``agent.status`` from each live agent every 20 seconds, the old heartbeat's period, and
   merged in.
 - **Held guidance** is woken when the lead's record changes, as the lead's heartbeat did.
+- **Agents without a session.** Every running agent holds a session (plan 13B.5); one whose
+  session the team services refused has no record and no address, so it cannot report
+  findings itself. Its host lists it in the host record's ``components`` instead
+  (``custom_agents.agent_host``), and ``host_findings`` turns those into Status page
+  problems: which agents cannot run their work, why, and what to do. A finding goes once
+  the agent's session opens or the agent stops; the wait for the first answer at start is
+  not listed.
 
 Everything here runs on the gateway's own loop.
 """
@@ -30,17 +37,104 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
+from custom_agents.agent_host import (
+    LEAD_HOST_RUNTIME,
+    MORE_AGENTS_CODE,
+    REFUSAL_CODES,
+    TYPE_NOT_CERTIFIABLE_CODE,
+    TYPE_NOT_GRANTED_CODE,
+)
 from custom_messages.contracts.control_v1 import AgentStatus
-from custom_messages.contracts.status_v1 import StatusFindingV1
+from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
 from custom_messages.enums import MessageMetaType
 from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
-from custom_transport.protocol1.team_agents import TeamAgent, TeamAgents
+from custom_transport.protocol1.team_agents import HostComponent, TeamAgent, TeamAgents
 
 # The old heartbeat's period: how often the gateway asks each live agent for its details.
 DETAILS_POLL_SECONDS = 20.0
 DETAILS_TIMEOUT_SECONDS = 5.0
 SOURCE = "agent_records"
 _LOGGER = logging.getLogger(__name__)
+
+# Why agents have no session, by their component's code in the host record, and what an administrator
+# does about it (module docstring). ``{where}`` names the process they run in.
+_WITHOUT_SESSION: dict[str, tuple[str, str]] = {
+    REFUSAL_CODES["limit_reached"]: (
+        "{where} already runs as many agents as the team's worker limit allows.",
+        "Raise the worker limit (agent.worker_pools.max_total_workers_per_team) and make a team-wide restart, or "
+        "wait: when another worker finishes, the agent gets its session without a restart."),
+    REFUSAL_CODES["not_allowed"]: (
+        "The agent type is not among the types {where} may run, and the team's agent catalog no longer has it.",
+        "Make a team-wide restart, so the process starts with the current agent catalog."),
+    TYPE_NOT_GRANTED_CODE: (
+        "The agent type is in the team's agent catalog, but the installation authority did not add it to the "
+        "types {where} may run.",
+        "Make a team-wide restart. If this comes back, send the logs with event=protocol1_rejoin_refused."),
+    TYPE_NOT_CERTIFIABLE_CODE: (
+        "The agent type's name is longer than 24 characters or has characters other than letters, digits, '-' "
+        "and '_', so no process can be allowed to run it.",
+        "Rename the agent type to at most 24 letters, digits, '-' or '_', and start its agents again."),
+    REFUSAL_CODES["already_placed"]: (
+        "The team services have each placed on another process.",
+        "Make a team-wide restart. If this comes back, send the logs with event=agent_host_session_refused."),
+    MORE_AGENTS_CODE: (
+        "{where} runs more agents without a session than its record can list; its log names them all.",
+        "Look for event=agent_host_session_refused in that process's log for why, and act on it."),
+}
+_WITHOUT_SESSION_OTHERWISE = (
+    "The team services could not give a session.",
+    "Sessions are asked for again every few minutes. If this lasts, make a team-wide restart and send the logs "
+    "with event=agent_host_session_refused.")
+# What an agent without a session cannot do, whatever the reason.
+_WITHOUT_SESSION_MEANS = (
+    "An agent without a session answers no requests, other agents and the Team page do not see it, and its exit "
+    "goes unseen; if it is TeamLead, chats are answered as unavailable. It still works through tasks already "
+    "queued for it.")
+_AGENTS_NAMED = 10
+
+
+def host_findings(components: list[HostComponent]) -> list[StatusFindingV1]:
+    """Status page problems from the hosts' unhealthy components: one per host and reason (module docstring).
+
+    Each agent is named by its component, ``<agent type>-<agent id>``. A component of
+    another kind (none yet) is shown by its name and code.
+    """
+
+    grouped: dict[tuple[str, str, str], list[str]] = {}
+    for item in components:
+        grouped.setdefault((item.host, item.code or "", item.state), []).append(item.component)
+    findings = []
+    for (host, code, state), names in sorted(grouped.items()):
+        where = "the team lead's process" if host == LEAD_HOST_RUNTIME else f"process {host}"
+        place = _capitalized(where)
+        details = f"host: {host}; code: {code or 'none'}; components: {', '.join(names)}"[:2000]
+        if not (code in _WITHOUT_SESSION or code.startswith("session_") or code == TYPE_NOT_CERTIFIABLE_CODE):
+            findings.append(StatusFindingV1(
+                finding_id=f"host_component:{host}:{','.join(sorted(names))}"[:200],
+                severity=StatusSeverity.PROBLEM if state == "unhealthy" else StatusSeverity.WARNING,
+                title=f"Part of {where} is {state}"[:200],
+                summary=f"{place} reports {', '.join(names)} as {state}{f' ({code})' if code else ''}."[:2000],
+                action="Check that process's log, or make a team-wide restart.", source=host, details=details))
+            continue
+        why, action = _WITHOUT_SESSION.get(code, _WITHOUT_SESSION_OTHERWISE)
+        if code == MORE_AGENTS_CODE:
+            title, named = f"More agents in {where} cannot run their work", ""
+        else:
+            shown = ", ".join(names[:_AGENTS_NAMED]) + (f" and {len(names) - _AGENTS_NAMED} more"
+                                                         if len(names) > _AGENTS_NAMED else "")
+            title = (f"Agent {names[0]} cannot run its work" if len(names) == 1
+                     else f"{len(names)} agents in {where} cannot run their work")
+            named = f"{shown} in {where} got no session from the team services. "
+        findings.append(StatusFindingV1(
+            finding_id=f"agent_without_session:{host}:{code}"[:200], severity=StatusSeverity.PROBLEM,
+            title=title[:200], summary=f"{named}{_capitalized(why.format(where=where))} {_WITHOUT_SESSION_MEANS}"[:2000],
+            action=action[:1000], source=place[:120], details=details))
+    return findings
+
+
+def _capitalized(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
 
 StatusObserver = Callable[[AgentStatus, Optional[datetime], str], None]
 LeadObserver = Callable[[AgentStatus], Awaitable[None]]
@@ -120,6 +214,13 @@ class GatewayTeamView:
 
     def live_ids(self) -> frozenset[str]:
         return frozenset(self._agents.live()) if self._agents is not None else frozenset()
+
+    def host_findings(self) -> list[StatusFindingV1]:
+        """The Status page's findings from the team's host records, as of now (``host_findings``)."""
+
+        if self._agents is None or not self.ready.is_set():
+            return []
+        return host_findings(self._agents.host_components())
 
     # -- following the records ------------------------------------------------------------
 

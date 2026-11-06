@@ -26,7 +26,6 @@ from custom_messages.wire.frame import Receiver
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
-from custom_transport.protocol1.live import LiveHost
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
@@ -138,11 +137,6 @@ def _delivery_refs(config: GatewayInstanceConfig) -> DeliveryRefs | None:
         return None
 
 
-def _started(host: MessageHost) -> LiveHost:
-    assert host.live is not None, "the team services serve only after joining"
-    return host.live
-
-
 async def run_team_services(config: GatewayInstanceConfig) -> None:
     team = config.manager.team_id
     adapter = NatsTransportAdapter(config=transport_config(config), mapper=NatsSubjectMapper(team_id=team), logger=_LOGGER)
@@ -153,7 +147,7 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     await adapter.connect()
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
-        relays = Relays(lambda: _started(host), host.nc.jetstream(), team, config.manager.named_agent_type, _LOGGER)
+        relays = Relays(host, team, config.manager.named_agent_type, _LOGGER)
         await serve_team(host, team, stop, [*team_operations(config, host.clock), relays.handlers()])
     finally:
         with contextlib.suppress(Exception):

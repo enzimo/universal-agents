@@ -1196,7 +1196,9 @@ disappears once it is fixed:
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
   is not answering, the secure tool broker does not answer, TeamLead
-  stopped reporting, or a disk the instance uses is nearly full (95% by
+  stopped reporting, an agent cannot run its work because the team gave it
+  no session (the finding says why, for example the worker limit is reached,
+  and what to do), or a disk the instance uses is nearly full (95% by
   default).
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved

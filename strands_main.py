@@ -601,7 +601,9 @@ def build_parser() -> argparse.ArgumentParser:
         '--host-runtime',
         type=str,
         default=None,
-        help="This process's protocol 1 host id (the launcher sets it; without it the process runs no host)",
+        help=("This process's protocol 1 host id (the launcher sets it). Without it the process runs no host, so "
+              "its agents hold no session: other agents and the gateway do not see them, and a run with several "
+              "agents needs the launcher"),
     )
     parser.add_argument(
         '--model-provider',
