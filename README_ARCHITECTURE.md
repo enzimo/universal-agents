@@ -4591,7 +4591,12 @@ problem per process and reason, naming the agents (`<agent type>-<agent id>`), s
 in plain words (the worker limit reached, a type the process may not run, a type name no
 certificate can carry, ...) and what to do, such as raising the worker limit and making a
 team-wide restart. It goes once the session opens or the agent stops; starting up, before
-the first answer, is no finding. At start the gateway waits up
+the first answer, is no finding. A host whose record names another contract digest than
+the gateway's keeps its agents on the Team page, not accepting work, so people's commands
+about the tasks they hold still reach them; a team lead on such a host counts as
+unavailable, since a chat is new work, and the Status page shows one problem per such host
+naming both digests and saying to install one release everywhere and restart the whole
+team. At start the gateway waits up
 to 15 seconds to read the records, and marks a saved route unavailable when no live lead
 is in them. Before this the gateway asked for the lead on the operational subject at start
 ("discovery"), followed presence, and polled the lead's consumer and heartbeat every 5

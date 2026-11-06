@@ -26,6 +26,11 @@ what the gateway already acts on:
   problems: which agents cannot run their work, why, and what to do. A finding goes once
   the agent's session opens or the agent stops; the wait for the first answer at start is
   not listed.
+- **A host on another contract** (contract README "Versions"). Its agents stay listed, so
+  people's commands about the tasks they hold still reach them, but they take no new work:
+  the Team page shows them as not accepting work, and a team lead whose host runs another
+  contract counts as unavailable, so chats are not sent to it. ``host_findings`` adds a
+  Status page problem for each such host, naming both digests and what to do.
 
 Everything here runs on the gateway's own loop.
 """
@@ -47,6 +52,7 @@ from custom_agents.agent_host import (
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
 from custom_messages.enums import MessageMetaType
+from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
 from custom_transport.protocol1.team_agents import HostComponent, TeamAgent, TeamAgents
 
@@ -93,17 +99,20 @@ _WITHOUT_SESSION_MEANS = (
 _AGENTS_NAMED = 10
 
 
-def host_findings(components: list[HostComponent]) -> list[StatusFindingV1]:
-    """Status page problems from the hosts' unhealthy components: one per host and reason (module docstring).
+def host_findings(components: list[HostComponent], other_contracts: Optional[Mapping[str, str]] = None,
+                  contract_sha256: str = CONTRACT_SHA256) -> list[StatusFindingV1]:
+    """Status page problems from the hosts' unhealthy components, one per host and reason, and from each host
+    that runs another contract than ``contract_sha256``, the gateway's (module docstring).
 
     Each agent is named by its component, ``<agent type>-<agent id>``. A component of
     another kind (none yet) is shown by its name and code.
     """
 
+    findings = [_other_contract_finding(host, theirs, contract_sha256)
+                for host, theirs in sorted((other_contracts or {}).items())]
     grouped: dict[tuple[str, str, str], list[str]] = {}
     for item in components:
         grouped.setdefault((item.host, item.code or "", item.state), []).append(item.component)
-    findings = []
     for (host, code, state), names in sorted(grouped.items()):
         where = "the team lead's process" if host == LEAD_HOST_RUNTIME else f"process {host}"
         place = _capitalized(where)
@@ -132,6 +141,21 @@ def host_findings(components: list[HostComponent]) -> list[StatusFindingV1]:
     return findings
 
 
+def _other_contract_finding(host: str, theirs: str, ours: str) -> StatusFindingV1:
+    where = "the team lead's process" if host == LEAD_HOST_RUNTIME else f"process {host}"
+    return StatusFindingV1(
+        finding_id=f"host_other_contract:{host}"[:200], severity=StatusSeverity.PROBLEM,
+        title=f"{_capitalized(where)} runs another release's message contract"[:200],
+        summary=(f"{_capitalized(where)} runs another message contract than the rest of the team, so it takes no "
+                 "new work and no agent is placed on it; requests about the tasks it holds still reach it while it "
+                 "finishes or hands them back, and it then gives its agents up. If it is the team lead's, chats are "
+                 "answered as unavailable.")[:2000],
+        action=("Install the same release for every process of the instance and restart the whole team, so they "
+                "all run one message contract.")[:1000],
+        source=_capitalized(where)[:120],
+        details=f"host: {host}; its contract: {theirs}; this gateway's contract: {ours}"[:2000])
+
+
 def _capitalized(text: str) -> str:
     return text[:1].upper() + text[1:]
 
@@ -156,7 +180,7 @@ def record_status(item: TeamAgent, team_id: str, *, details: Optional[Mapping[st
         self_id=item.agent, team_id=team_id, name=item.display_name or f"Agent_{item.agent}",
         named_agent_type=item.agent_type, agent_role="team_lead" if item.is_lead else "worker",
         is_team_lead=item.is_lead, is_paused=item.state == "paused", is_executing=item.state == "busy",
-        is_busy=item.state == "busy", accepting_work=item.accepting_work and not exiting,
+        is_busy=item.state == "busy", accepting_work=item.takes_work and not exiting,
         has_execution_capacity=found.get("has_capacity"), is_exiting=exiting,
         available_skills=list(found.get("skills", [])), status_findings=findings,
         last_seen_at=datetime.now(timezone.utc).isoformat(), status_type=MessageMetaType.RESPONSE,
@@ -210,7 +234,10 @@ class GatewayTeamView:
         return True
 
     def lead(self) -> Optional[TeamAgent]:
-        return self._agents.lead() if self._agents is not None and self.ready.is_set() else None
+        """The live team lead whose host runs this gateway's contract; one on another contract takes no chats."""
+
+        lead = self._agents.lead() if self._agents is not None and self.ready.is_set() else None
+        return lead if lead is not None and lead.other_contract is None else None
 
     def live_ids(self) -> frozenset[str]:
         return frozenset(self._agents.live()) if self._agents is not None else frozenset()
@@ -220,7 +247,8 @@ class GatewayTeamView:
 
         if self._agents is None or not self.ready.is_set():
             return []
-        return host_findings(self._agents.host_components())
+        return host_findings(self._agents.host_components(), self._agents.other_contract_hosts(),
+                             self._host.live.trust.store.contract_sha256)
 
     # -- following the records ------------------------------------------------------------
 
@@ -238,7 +266,11 @@ class GatewayTeamView:
             else:
                 continue
             self._on_status(status, None, SOURCE)
-            if (now is not None and now.is_lead) or (now is None and earlier is not None and earlier.is_lead):
+            if now is not None and now.is_lead and now.other_contract is not None:
+                # It takes no chats: for the manager client it is leaving (module docstring).
+                self._leads.put_nowait(record_status(now, self.team_id, details=self._details.get(agent_id),
+                                                     exiting=True))
+            elif (now is not None and now.is_lead) or (now is None and earlier is not None and earlier.is_lead):
                 self._leads.put_nowait(status)
 
     async def _apply_leads(self, stop: asyncio.Event) -> None:
