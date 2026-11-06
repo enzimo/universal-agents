@@ -4530,7 +4530,9 @@ which the lead's worker pools start when tasks wait, or for the next team lead; 
 process starts no pool or scheduled worker; the turns in progress finish; a pool worker
 starts no task it has not started and, once its running turns ended, winds down as after a
 lost launch lease, returning those tasks to the team lead, which sends them out again on
-the type's queue, then exits. The team lead and startup agents have no way to hand a task
+the type's queue, then exits; pool workers run in the team lead's process, so the lead
+drains with them, and what they return waits in the lead's queue for a team lead on the
+installation's contract. The team lead and startup agents have no way to hand a task
 back yet (that comes with `task.handback` and the queued work of protocol 1), so they
 finish what they already admitted. The host's record says `draining` meanwhile; its
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
