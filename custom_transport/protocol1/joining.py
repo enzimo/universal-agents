@@ -7,6 +7,11 @@ bundle (``verify_frame`` does, with the reply's request) and keeps in its trust 
 A local host is approved at once when the launcher listed it; ``pending`` makes it wait
 and ask again with the same join id, as the contract says. Renewals use ``renew`` with
 the certificate that signs them.
+
+A join names the contract the host runs (``contract_sha256``): its trust store's, which is
+the one its code was generated from (``custom_messages.wire.kinds.CONTRACT_SHA256``)
+unless a test gives another. While the label is a pre-release, an authority on another
+contract answers ``protocol_mismatch`` and names its own (README "Versions").
 """
 
 from __future__ import annotations
@@ -16,19 +21,18 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
 
 from custom_messages.wire.encoding import b64url
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
-from custom_messages.wire.kinds import INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
 from custom_messages.wire.models import Frame
 from custom_messages.wire.trust import HostCertificate
-from custom_transport.protocol1.contract_files import contract_sha256
 from custom_transport.protocol1.host_keys import HostKeys
 from custom_transport.protocol1.ids import new_message_id
 from custom_transport.protocol1.live import (
@@ -83,16 +87,31 @@ class HostProfile:
                    "connection_class": self.connection_class}
         return b64url(hashlib.sha256(rfc8785.dumps(profile)).digest())
 
+    def giving_up(self) -> "HostProfile":
+        """The profile a host renews with to give up all its agents: the same, with no agent types or sessions.
+
+        A host on another contract renews only this way (README "Versions"); the authority
+        answers it on any contract and grants no agents (``installation_authority``).
+        """
+
+        return replace(self, agent_types=(), session_limit=0)
+
 
 class JoinRefused(RuntimeError):
-    """The authority answered the join with ``denied``, ``protocol_mismatch`` or ``not_allowed``."""
+    """The authority answered the join with ``denied``, ``protocol_mismatch`` or ``not_allowed``.
 
-    def __init__(self, outcome: str, message: str) -> None:
+    ``accepted_contract_sha256`` is the authority's contract digest when it answered
+    ``protocol_mismatch``.
+    """
+
+    def __init__(self, outcome: str, message: str, accepted_contract_sha256: Optional[str] = None) -> None:
         super().__init__(f"join {outcome}: {message}")
         self.outcome, self.message = outcome, message
+        self.accepted_contract_sha256 = accepted_contract_sha256
 
 
-def join_body(keys: HostKeys, installation: str, profile: HostProfile, join_id: str) -> dict[str, Any]:
+def join_body(keys: HostKeys, installation: str, profile: HostProfile, join_id: str,
+              contract_sha256: str = CONTRACT_SHA256) -> dict[str, Any]:
     body: dict[str, Any] = {
         "join_id": join_id,
         "installation": installation,
@@ -105,7 +124,7 @@ def join_body(keys: HostKeys, installation: str, profile: HostProfile, join_id: 
         "session_limit": profile.session_limit,
         "connection_class": profile.connection_class,
         "protocol": PROTOCOL,
-        "contract_sha256": contract_sha256(),
+        "contract_sha256": contract_sha256,
         "deployment": profile.deployment,
         "profile_sha256": profile.digest(),
     }
@@ -114,14 +133,16 @@ def join_body(keys: HostKeys, installation: str, profile: HostProfile, join_id: 
     return body
 
 
-def sign_join(keys: HostKeys, installation: str, profile: HostProfile, *, join_id: str, issued: datetime) -> dict[str, Any]:
+def sign_join(keys: HostKeys, installation: str, profile: HostProfile, *, join_id: str, issued: datetime,
+              contract_sha256: str = CONTRACT_SHA256) -> dict[str, Any]:
     """A join frame, signed with the key it presents: the issuer names epoch zero and no certificate."""
 
     issuer = {"installation": installation, "team": INSTALLATION_SCOPE, "runtime": profile.runtime,
               "membership_epoch": 0, "revocation_epoch": 0, "key_id": keys.key_id}
     audience = {"installation": installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
                 "id": AUTHORITY_SERVICE_ID}
-    frame = build_frame("host.join", join_body(keys, installation, profile, join_id), audience, issuer=issuer,
+    frame = build_frame("host.join", join_body(keys, installation, profile, join_id, contract_sha256), audience,
+                        issuer=issuer,
                         issued=issued, subject=request_subject("host.join", audience, profile.runtime))
     return sign_frame(frame, keys.application_key)
 
@@ -131,9 +152,10 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
                logger: logging.Logger = _LOGGER, sleep: Callable[[float], Any] = asyncio.sleep) -> HostCertificate:
     """Join the installation and return this host's certificate, kept in ``trust``.
 
-    Waits for an authority that is still starting ("no responders") and for a
-    ``pending`` approval, up to ``deadline_seconds``; raises ``JoinRefused`` when the
-    authority refuses the join and ``ServiceUnavailable`` when the deadline passes.
+    The join names the contract ``trust`` runs. Waits for an authority that is still
+    starting ("no responders") and for a ``pending`` approval, up to ``deadline_seconds``;
+    raises ``JoinRefused`` when the authority refuses the join and ``ServiceUnavailable``
+    when the deadline passes.
     """
 
     installation = trust.store.installation
@@ -143,7 +165,8 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
     give_up = loop.time() + deadline_seconds
     pause = 0.5
     while True:
-        frame = sign_join(keys, installation, profile, join_id=join_id, issued=clock())
+        frame = sign_join(keys, installation, profile, join_id=join_id, issued=clock(),
+                          contract_sha256=trust.store.contract_sha256)
         data, headers = encode(frame)
         try:
             message = await nc.request(frame["subject"], data, timeout=30, headers=headers)
@@ -182,4 +205,4 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
                            profile.runtime, body.get("review_code"))
             await sleep(wait)
             continue
-        raise JoinRefused(outcome, str(body.get("message", "")))
+        raise JoinRefused(outcome, str(body.get("message", "")), body.get("accepted_contract_sha256"))
