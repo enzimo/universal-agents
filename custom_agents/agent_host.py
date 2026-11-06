@@ -911,8 +911,13 @@ def attach_agent(agent: Any, adapter: Any) -> None:
 
 
 def agent_record_state(agent: Any) -> tuple[str, bool]:
-    """The agent's state for its record: paused, busy or idle, and whether it accepts work."""
+    """The agent's state for its record: paused, busy or idle, and whether it accepts work.
 
+    A worker winding down after a lost launch lease takes no work, nor does an agent whose
+    process runs another message contract (``custom_agents.contract_drain``).
+    """
+
+    from custom_agents.contract_drain import is_contract_draining
     from custom_agents.lease_loss_wind_down import is_winding_down
 
     if getattr(agent, "paused", False):
@@ -921,7 +926,7 @@ def agent_record_state(agent: Any) -> tuple[str, bool]:
         state = "busy"
     else:
         state = "idle"
-    return state, not is_winding_down(agent)
+    return state, not is_winding_down(agent) and not is_contract_draining(agent)
 
 
 def report_agent_state(agent: Any) -> None:

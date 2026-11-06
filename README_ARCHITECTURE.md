@@ -4478,6 +4478,13 @@ seconds after its last liveness write. Whether an agent is the team lead comes f
 session's `agent_role`, which the team services signed. The view is replaced as a whole on
 each change, so agents on other threads read it without locks. The team lead's process and
 the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+A host record that names another contract digest is authentic but its body is not read, so
+the host's certificate epoch comes from the record's signer. Its agents stay in the view,
+so control messages about the tasks they hold still reach them, marked with that digest
+(`TeamAgent.other_contract`): they take no new work (`TeamAgent.takes_work`), the host is
+logged once with both digests (`event=team_agents_host_other_contract`), and
+`other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
+says it takes no work too.
 
 **An agent process on another contract drains** (`custom_agents.agent_host`,
 `custom_agents.contract_drain`). When its host learns that the process runs another

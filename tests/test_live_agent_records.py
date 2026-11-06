@@ -165,3 +165,58 @@ async def test_the_team_leads_record_names_it_the_lead(
         await gateway.close()
         stop.set()
         await asyncio.wait_for(asyncio.gather(serving, reading), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_readers_keep_an_agent_whose_host_runs_another_contract_and_send_it_no_new_work(
+    broker: str, tmp_path: Path, caplog,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Contract README "Versions": a host record that names another contract digest is authentic but its body is
+    not read. Reading its certificate from the body stopped the whole view; now its agent stays, marked, and the
+    host is logged once, not at every record it writes."""
+
+    from tests.test_live_team_services import OTHER_CONTRACT, run_on_another_contract
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    profile = startup_agent_host_profile(TEAM, RUNTIME, "Researcher")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), profile)
+        services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
+        gateway = GatewayMessageHost(layout, TEAM)
+        gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        await gateway.ready(timeout=20)
+        reader = TeamAgents(gateway.host, TEAM, recheck_seconds=0.2, logger=logging.getLogger("test.team_agents"))
+        reading = asyncio.create_task(reader.run(stop))
+
+        async def keeps(agent, reason):  # the agent's own drain is tests/test_contract_drain.py's
+            return None
+
+        async def holds(agent):
+            return True
+
+        agent_host = AgentProcessHost(layout, profile, TEAM, drain_agent=keeps, holds_work=holds)
+        agent_host.attach(_agent("researcher_1", "Researcher-1"), agent_type="Researcher", definition=DEFINITION,
+                          nc=await connect(stack, broker, RUNTIME), state=("idle", True))
+        await _until(lambda: reader.agent("researcher_1") is not None)
+        assert reader.agent("researcher_1").takes_work
+
+        with caplog.at_level(logging.WARNING, logger="test.team_agents"):
+            run_on_another_contract(agent_host.host)
+            for _ in range(3):
+                await agent_host.host.report_now()
+            await _until(lambda: reader.agent("researcher_1") is not None
+                         and reader.agent("researcher_1").other_contract == OTHER_CONTRACT)
+            await asyncio.sleep(0.5)  # several checks of the view
+        seen = reader.agent("researcher_1")
+        assert seen.accepting_work is True and not seen.takes_work and not reading.done()
+        assert reader.other_contract_hosts() == {RUNTIME: OTHER_CONTRACT}
+        logged = [record.getMessage() for record in caplog.records
+                  if "event=team_agents_host_other_contract" in record.getMessage()]
+        assert len(logged) == 1 and f"host={RUNTIME}" in logged[0] and OTHER_CONTRACT in logged[0]
+
+        await agent_host.stop()
+        await gateway.close()
+        stop.set()
+        await asyncio.wait_for(asyncio.gather(serving, reading), timeout=10)
