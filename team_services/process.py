@@ -1,8 +1,8 @@
 """The team services as a process the launcher supervises (``assistant_cli run-team-services``).
 
 It runs as host ``team-services``: it joins the installation, waits for the team's
-single-instance lock, serves the team's address, and keeps its host upkeep (liveness,
-trust, renewal) and the lock's lease until it is stopped. Losing the lock (another
+single-instance lock, serves the team's address, then writes its host record, and keeps
+its host upkeep (liveness, trust, renewal) and the lock's lease until it is stopped. Losing the lock (another
 instance holds it, or its lease ran out without a successful renewal) stops the process
 with an error, so the launcher stops the team rather than letting two instances serve. A
 renewal that only failed, such as NATS not answering for a few seconds, is tried again
@@ -18,7 +18,7 @@ import contextlib
 import logging
 import signal
 from datetime import datetime
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 from access_control.people_directory import PeopleDirectory
 from assistant_gateway.config import GatewayInstanceConfig
@@ -30,14 +30,14 @@ from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
 from storage.pinned_memory_repository import create_pinned_memory_repository
-from team_services.lock import SingleInstanceLock
+from team_services.lock import LockLost, SingleInstanceLock
 from team_services.memory import MemoryOperations
 from team_services.service import Handler, TeamServices
+from team_services.serving import mark_serving
 from team_services.sessions import SessionService
 
 TEAM_SERVICES_RUNTIME = "team-services"
-# Plan decision 58: the scheduler role (signing scheduled runs) runs in this process.
-TEAM_SERVICES_ROLES = ("team_services", "scheduler")
+TEAM_SERVICES_ROLES = ("team_services",)
 _LOGGER = logging.getLogger("team_services")
 
 
@@ -62,7 +62,10 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
     ``families`` are the handlers of people's commands (``team_operations``).
     """
 
-    live = await host.start()
+    # Every instance writes the same host record, so it is written only by the one that holds the
+    # lock and serves (plan 13B.4): a standby never looks like the serving instance, and the
+    # record appearing means the team services answer.
+    live = await host.start(report=False)
     lock = SingleInstanceLock(host.nc.jetstream(), team, TEAM_SERVICES_RUNTIME, host.clock, host.logger)
     if not await lock.acquire(stop):
         return
@@ -73,15 +76,24 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
     subscription = await live.serve("svc.team", Receiver(live.identity.installation, team, "team_services", team,
                                                          TEAM_SERVICES_RUNTIME), services.handle)
     await host.nc.flush()
-    host.logger.info("The team services are serving. event=team_services_ready team=%s operations=%s", team,
-                     ",".join(sorted(services.served)))
-    upkeep = asyncio.create_task(host.keep_up(stop))
+    lost = False
+    upkeep: Optional[asyncio.Task[None]] = None
     try:
+        await host.publish_liveness("accepting")
+        host.logger.info("The team services are serving. event=team_services_ready team=%s operations=%s", team,
+                         ",".join(sorted(services.served)))
+        # The launcher waits for this (team_services.serving): it comes with the host record, once they serve.
+        mark_serving(host.layout, lock.instance, host.clock())
+        upkeep = asyncio.create_task(host.keep_up(stop, drained=lambda: not lost))
         await lock.keep(stop)
+    except LockLost:
+        lost = True  # another instance may serve now and write the record; this one writes no more
+        raise
     finally:
         await subscription.unsubscribe()
         stop.set()
-        await upkeep
+        if upkeep is not None:
+            await upkeep
         await lock.release()
 
 

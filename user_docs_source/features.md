@@ -952,7 +952,10 @@ The supervisor acts only on restart requests that record their approval: your
 approved request, your agreement with authorization off, or the authenticated
 gateway configuration editor. Other JSON is discarded. `manager`, `gateway`,
 and `all` restart supervised child process scopes; none reboots the host or
-container.
+container. An `all` restart, which the configuration editor asks for, also
+restarts the installation authority and the team services, before the other
+processes, so settings they read at start take effect; the team answers again
+once the team services serve.
 
 Tools are not attached to agent types any more, and getting a new tool never
 needs a restart: with authorization on, an agent's tools follow the access it
