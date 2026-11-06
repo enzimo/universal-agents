@@ -95,6 +95,24 @@ def _environment(source: ExportSource) -> dict[str, str]:
     return parse_env_file(env_path) if env_path.is_file() else {}
 
 
+def _instance_config(source: ExportSource, environment: Mapping[str, str]) -> Any:
+    """The instance's settings: the saved file with ``environment`` (``_environment``) applied.
+
+    Which NATS credentials are generated is decided from these, as onboarding
+    and the import decide it. ``source.config`` has this command's own
+    environment applied instead, and an operator's shell may name a NATS
+    server the instance does not use: an external server's user and password
+    would be left behind as generated, or a local server's generated ones
+    carried.
+    """
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    return GatewayInstanceConfig.load_for_process(
+        source.layout.instance_config_path, env=environment
+    )
+
+
 def _operator_values(
     environment: Mapping[str, str], config: Any = None
 ) -> dict[str, str]:
@@ -146,6 +164,7 @@ class OperatorSecretsSection:
         from team_transfer.sections import encrypt_section
         from team_transfer.settings import _relative_to_root
 
+        environment = _environment(source)
         secrets = [
             OperatorSecretV1(
                 kind=SecretKind.ENVIRONMENT,
@@ -157,7 +176,7 @@ class OperatorSecretsSection:
                 ),
             )
             for name, value in sorted(
-                _operator_values(_environment(source), source.config).items()
+                _operator_values(environment, _instance_config(source, environment)).items()
             )
         ]
         for path in _auth_files(source.layout):
