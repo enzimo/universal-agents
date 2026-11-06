@@ -138,3 +138,15 @@ async def test_a_draining_team_lead_starts_no_worker(monkeypatch) -> None:
     await worker_pool_controller.reconcile_worker_pools(lead)
     await schedule_worker_controller.reconcile_schedule_workers(lead)
     assert started == ["reconciled", "reconciled"]
+
+
+@pytest.mark.asyncio
+async def test_a_draining_agent_says_in_its_status_that_it_takes_no_work(tmp_path) -> None:
+    from custom_messages.enums import ControlType
+    from tests.test_runtime_repair_anomalies import _make_agent
+
+    agent = _make_agent(tmp_path)
+    assert agent.get_self_status(info_type=ControlType.STATUS_REQUEST_FULL).accepting_work is True
+    agent._ensure_nats_transport_adapter = lambda: _Adapter()
+    await drain_agent(agent, REASON)
+    assert agent.get_self_status(info_type=ControlType.STATUS_REQUEST_FULL).accepting_work is False

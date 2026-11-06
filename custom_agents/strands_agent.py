@@ -8,6 +8,7 @@ This module provides the UniversalAgent class, which:
 - Supports the hub-and-spoke multi-agent architecture
 """
 
+from custom_agents.contract_drain import is_contract_draining
 from custom_agents.lease_loss_wind_down import divert_request_during_wind_down, is_winding_down
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
@@ -5399,7 +5400,8 @@ class UniversalAgent(BaseModel):
             has_execution_capacity=status_metrics["has_execution_capacity"],
             is_busy=self.is_executing,
             is_exiting=is_exiting,
-            accepting_work=not is_winding_down(self),
+            # A worker winding down, or an agent whose process runs another message contract, takes no new work.
+            accepting_work=not is_winding_down(self) and not is_contract_draining(self),
             is_team_lead=self.is_team_lead,
             top_level_queue_depth=status_metrics["top_level_queue_depth"],
             waiting_top_level_task_count=status_metrics["waiting_top_level_task_count"],
