@@ -126,6 +126,8 @@ ENVIRONMENT_OVERRIDES_FILENAME = "environment_overrides.json"
 # Locked by the supervisor and every agent process of one runtime run
 # (runtime_hosting.process_run).
 PROCESS_RUN_LOCK_FILENAME = "process_run.lock"
+# Written by the team services once they serve; the launcher waits for it (team_services.serving).
+TEAM_SERVICES_SERVING_FILENAME = "team-services-serving.json"
 INSTALLED_SKILLS_DIRNAME = "installed"
 # Team import (``team_transfer``): reports, and a marker that stays while an
 # import is unfinished so a half-imported team never starts.
@@ -418,6 +420,16 @@ class InstanceLayout:
         """
 
         return self.runtime_dir / PROCESS_RUN_LOCK_FILENAME
+
+    @property
+    def team_services_serving_path(self) -> Path:
+        """Names the team services process that last started serving (``team_services.serving``).
+
+        The launcher removes it before it starts the team services and waits until it names
+        the process it started.
+        """
+
+        return self.runtime_dir / TEAM_SERVICES_SERVING_FILENAME
 
     # Team import
     @property

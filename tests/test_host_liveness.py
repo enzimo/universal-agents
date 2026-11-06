@@ -8,6 +8,7 @@ upkeep loop runs here on a fake clock: its waits return at once and move the clo
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ import pytest
 
 from custom_transport.protocol1 import host_runtime
 from custom_transport.protocol1.host_runtime import LIVENESS_INTERVAL, LIVENESS_LIFETIME, MessageHost
+from custom_transport.protocol1.joining import HostProfile
 
 START = datetime(2026, 11, 5, 9, 0, tzinfo=timezone.utc)
 
@@ -88,3 +90,42 @@ async def test_a_host_that_stops_writing_shows_as_gone_30_seconds_after_its_last
     # Crashed right after writing: the record holds for 30 seconds, then readers drop it.
     assert last["expires_at"] == START + LIVENESS_LIFETIME == START + timedelta(seconds=30)
     assert LIVENESS_LIFETIME == 3 * LIVENESS_INTERVAL
+
+
+class _RenewingLive:
+    """Stands in for ``LiveHost``: keeps each renewal body and answers it with a refusal."""
+
+    def __init__(self, certificate) -> None:
+        self.identity = SimpleNamespace(certificate=certificate)
+        self.bodies: list[dict] = []
+
+    async def request(self, kind, body, audience, *, team):
+        self.bodies.append(body)
+        return SimpleNamespace(raw={"body": {"outcome": "denied"}})
+
+
+async def _renewal_id(certificate) -> str:
+    host = MessageHost(layout=None, profile=HostProfile(certificate.runtime, ("team_one",), ("worker_host",)), nc=None)
+    host.live = _RenewingLive(certificate)  # type: ignore[assignment]
+    await host.renew()
+    return host.live.bodies[-1]["renew_id"]  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_keeps_its_id_on_retries_and_takes_a_new_one_after_an_upgrade_in_place(monkeypatch) -> None:
+    """README "Contract digest": a host upgraded in place renews with a new renew_id, since a repeated one gets
+    its stored outcome back ("Stored outcomes")."""
+
+    certificate = SimpleNamespace(installation="install_one", runtime="worker-host-1", certificate_id="cert.worker-host-1.3",
+                                  membership_epoch=3)
+    first = await _renewal_id(certificate)
+    assert await _renewal_id(certificate) == first  # a retry of the same renewal
+    monkeypatch.setattr(host_runtime, "release_version", lambda: "99.0.0")
+    upgraded = await _renewal_id(certificate)
+    monkeypatch.setattr(host_runtime, "contract_sha256", lambda: "0" * 64)
+    new_contract = await _renewal_id(certificate)
+    assert len({first, upgraded, new_contract}) == 3
+    # The longest runtime id and epoch still fit the contract's record id, whole.
+    longest = SimpleNamespace(installation="install_one", runtime="r" * 64, certificate_id="cert." + "r" * 64 + ".1",
+                              membership_epoch=2 ** 53 - 1)
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}", await _renewal_id(longest))
