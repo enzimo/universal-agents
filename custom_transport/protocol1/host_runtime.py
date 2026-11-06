@@ -8,6 +8,10 @@ over time", "State records"):
   ``UA1_CERTS`` at start and every half hour (the authority signs one every six hours
   and each lasts a day), so the host never refuses other hosts' frames for lack of one;
 - **renew** its certificate when two thirds of its life are gone;
+- **take the newest certificate** when another process runs as the same host
+  (``take_newest_certificate``): every team services instance is host ``team-services``,
+  and a standby that waited for the lock may hold a certificate the serving instance has
+  since renewed;
 - **join again** for agent types its certificate does not name yet (``rejoin``), such as a
   specialist type the team created while the host runs, so every running agent can hold
   a session;
@@ -287,6 +291,53 @@ class MessageHost:
                                   self.profile.runtime)
                 return
             await self._renew()
+
+    async def take_newest_certificate(self) -> None:
+        """Sign with this host's newest certificate, which another process of the same host may hold; renew it if due.
+
+        Every team services instance runs as host ``team-services`` with the same keys. A
+        standby joined when it started and may wait for the lock for weeks, while the serving
+        instance renews their certificate (day 20 of 30). A replaced certificate signs
+        nothing new from ``certificate_overlap_seconds`` after its replacement was issued
+        (README "Trust over time"): readers then refuse what it signs as ``unknown_key``, and
+        the authority refuses its renewal the same way, so the first upkeep could not repair
+        it. The authority stores each certificate in ``UA1_CERTS`` before it answers, under
+        ``host.<installation>.<runtime>.<membership epoch>`` at the epoch above every stored
+        one, so this reads the epochs above its own until one is missing and signs with the
+        newest that verifies. A newest certificate for another key is not this process's to
+        sign with (``IdentityError``). A renewal that is due but fails now is logged and left
+        to the upkeep: the newest certificate still signs.
+        """
+
+        assert self.live is not None and self.records is not None, "start() first"
+        async with self._certificate_change:
+            current = self.identity.certificate
+            newest, epoch = current, current.membership_epoch
+            while True:
+                epoch += 1
+                key = f"host.{current.installation}.{current.runtime}.{epoch}"
+                try:
+                    await self.records.take_trust_record("certificate", key, now=self.clock())
+                except FrameRefused as refused:
+                    # Any process with the shared NATS login can write there; the authority stored the next above it.
+                    self.logger.warning("A stored certificate of this host does not verify and is skipped. "
+                                        "event=protocol1_stored_certificate_refused runtime=%s key=%s code=%s",
+                                        current.runtime, key, refused.code)
+                    continue
+                found = self.live.trust.store.host_certificate(current.installation, current.runtime, epoch)
+                if found is None:  # no certificate under this epoch: the one below is the newest
+                    break
+                newest = found
+            if newest.membership_epoch != current.membership_epoch:
+                self.live.identity = self.live.identity.with_certificate(newest)
+                self.logger.warning("Another process of this host renewed its certificate; signing with the newest. "
+                                    "event=protocol1_certificate_caught_up runtime=%s membership_epoch=%s previous=%s",
+                                    current.runtime, newest.membership_epoch, current.membership_epoch)
+        try:
+            await self.renew_if_due()
+        except Exception:
+            self.logger.warning("The certificate is due for renewal but could not be renewed now; the upkeep asks "
+                                "again. event=protocol1_renew_failed runtime=%s", self.profile.runtime, exc_info=True)
 
     async def renew(self) -> None:
         """Renew the certificate now; keep the old one until the new one is held."""
