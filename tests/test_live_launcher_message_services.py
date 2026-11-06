@@ -26,10 +26,10 @@ from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
 from custom_messages.wire.values import parse_timestamp
 from docker import message_hosts
-from docker.launch_headless import message_hosts_to_approve, terminate_process
+from docker.launch_headless import terminate_process
 from env_secrets import PROCESS_INSTALLATION_AUTHORITY, PROCESS_TEAM_SERVICES, environment_for
 from team_services.lock import LEASE, LOCKS_BUCKET, lock_key
-from team_services.process import TEAM_SERVICES_RUNTIME
+from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
 from team_services.serving import serving_process
 from tests.test_live_message_contract import nats_server
 
@@ -68,7 +68,7 @@ def broker(tmp_path: Path):
 
 @pytest.fixture
 def services(broker: str, tmp_path: Path):
-    """What the launcher's main builds, for an instance whose NATS is ``broker``."""
+    """What the launcher's main builds, for an instance whose NATS is ``broker``, listing the one host it starts."""
 
     config = GatewayInstanceConfig.create(instance_name="services-test", instance_root=str(tmp_path / "instance"),
                                           team_id=TEAM, timezone="UTC")
@@ -77,7 +77,7 @@ def services(broker: str, tmp_path: Path):
     env["NATS_URL"] = broker
     started = message_hosts.MessageServices(
         config.layout,
-        lambda: message_hosts_to_approve(GatewayInstanceConfig.load_for_process(config.config_path)),
+        lambda: {TEAM_SERVICES_RUNTIME: message_hosts.expected_host(config.layout, team_services_profile(TEAM))},
         message_hosts.build_installation_authority_command(config.config_path, repo_root=REPO),
         environment_for(PROCESS_INSTALLATION_AUTHORITY, env),
         message_hosts.build_team_services_command(config.config_path, repo_root=REPO),
