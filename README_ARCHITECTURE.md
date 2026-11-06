@@ -4222,11 +4222,21 @@ freshly signed revocations record. The authority:
   the contract's topology owner; queued work streams come with queued work);
 - signs its own certificate, and the revocations record every six hours (it lasts a
   day, with an ever higher sequence, so a restored authority never writes a lower one);
+- uses a record it reads from `UA1_CERTS` (the revocations record it signs again, a
+  certificate it hands back) only when it verifies against the authority's own key:
+  every process shares one NATS login and can write there. It signs the next
+  revocations record from the newest one it verified, in the bucket, the bundle or its
+  memory, and writes over a record that does not verify. When the bucket holds a record
+  that does not verify and it has verified none, it does not start, since an empty list
+  would accept every revoked host again; its log says to restore the trust folder from
+  a backup, or to delete that record to start an empty list;
 - answers `host.join` and `host.renew`. A join from a host the launcher listed, with
   that key, asking for no more than listed, gets a 30-day certificate; any other join
   is denied, so a local installation never takes in a host nobody approved. A host
-  asking again with its key gets its certificate back while over a third of its life
-  is left, otherwise a new one with the next membership epoch that replaces it. While
+  asking again with its key for the same grants gets its certificate back while over a
+  third of its life is left; otherwise, or when it asks for other grants (an agent type
+  the launcher now lists, say), it gets a new one with the next membership epoch that
+  replaces it. While
   the contract is a pre-release, a host running another contract digest gets
   `protocol_mismatch`;
 - keeps every certificate it issued, so a restarted authority still recognises the

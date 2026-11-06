@@ -17,11 +17,14 @@ from pathlib import Path
 
 import nats
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from assistant_gateway.config import GatewayInstanceConfig
+from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, reply_audience, verify_frame
 from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_messages.wire.models import Frame
+from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1 import host_keys, joining
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.identity import HostIdentity
@@ -32,7 +35,14 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from docker import message_hosts
 from env_secrets import PROCESS_INSTALLATION_AUTHORITY, environment_for
 from installation_authority.expected_hosts import ExpectedHost, write_expected_hosts
-from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
+from installation_authority.service import (
+    AUTHORITY_RUNTIME,
+    CERTIFICATES_BUCKET,
+    InstallationAuthority,
+    RevocationsUnverified,
+    certificate_key,
+    revocations_key,
+)
 from runtime_settings.instance_layout import InstanceLayout
 from tests.test_live_message_contract import nats_server
 from tests.test_message_contract import body_schema_file, validator
@@ -98,6 +108,28 @@ async def start_authority(stack: AsyncExitStack, url: str, layout: InstanceLayou
 
 def host_trust(layout: InstanceLayout, runtime: str) -> PersistentTrustStore:
     return PersistentTrustStore.open(read_bundle(layout.trust_bootstrap_path), layout.host_trust_dir(runtime), utc_now())
+
+
+def forged(document: dict) -> dict:
+    """``document`` signed by a key that is not the authority's: what any process with the shared NATS login can write."""
+
+    return sign_state(document, Ed25519PrivateKey.generate())
+
+
+async def put_record(nc, key: str, document: dict) -> None:
+    bucket = await nc.jetstream().key_value(CERTIFICATES_BUCKET)
+    await bucket.put(key, json.dumps(document).encode())
+
+
+async def stored_record(nc, key: str) -> dict:
+    bucket = await nc.jetstream().key_value(CERTIFICATES_BUCKET)
+    return json.loads((await bucket.get(key)).value)
+
+
+def revocation_entry(certificate) -> dict:
+    return {"certificate_id": certificate.certificate_id, "runtime": certificate.runtime, "key_id": certificate.key_id,
+            "key_expires_at": format_timestamp(certificate.expires_at), "membership_epoch": certificate.membership_epoch,
+            "revoked_at": format_timestamp(utc_now()), "reason": "compromised"}
 
 
 @pytest.mark.asyncio
@@ -209,6 +241,119 @@ async def test_a_host_on_another_contract_learns_the_authoritys_digest_when_it_j
                              arrived_on=message.subject, now=utc_now(), replay=LiveReplayRecord().lookup,
                              headers=answer_headers(message), answering=request)
         assert_mismatch("host.join", reply.raw["body"])
+
+
+@pytest.mark.asyncio
+async def test_the_authority_signs_again_only_the_revocations_record_it_signed(broker: str, tmp_path: Path) -> None:
+    """A revocations record another process wrote to the bucket can neither lift a revocation nor revoke every host."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout)
+        nc = await connect(stack, broker, "writer")
+        key = revocations_key(INSTALLATION)
+        certificate = await join(await connect(stack, broker, WORKER.runtime), worker_keys, host_trust(layout, WORKER.runtime),
+                                 WORKER)
+        # A revocation the authority signed: it lists the worker's certificate.
+        revoked = authority.revocations_record(sequence=authority._revocations["sequence"] + 1, revocation_epoch=2,
+                                               entries=[revocation_entry(certificate)], issued=utc_now())
+        await put_record(nc, key, revoked)
+        signed = await authority._sign_revocations(utc_now())
+        assert signed["body"]["entries"] == revoked["body"]["entries"] and signed["body"]["revocation_epoch"] == 2
+
+        # Another process writes a record that lifts it, with a higher sequence; then one that revokes the authority.
+        lifted = forged({**signed, "sequence": signed["sequence"] + 10, "body": {**signed["body"], "entries": []}})
+        await put_record(nc, key, lifted)
+        resigned = await authority._sign_revocations(utc_now())
+        assert resigned["body"]["entries"] == revoked["body"]["entries"]
+        assert resigned["sequence"] > signed["sequence"]
+        # The forged record is replaced in the bucket by the authority's own.
+        assert await stored_record(nc, key) == resigned
+
+        everyone = forged({**resigned, "sequence": resigned["sequence"] + 10,
+                           "body": {**resigned["body"], "entries": [revocation_entry(authority.live.identity.certificate)]}})
+        await put_record(nc, key, everyone)
+        # A restarted authority keeps the record it verified (the bundle's), not the bucket's.
+        restarted = await start_authority(stack, broker, layout)
+        assert restarted._revocations["body"]["entries"] == revoked["body"]["entries"]
+        assert await stored_record(nc, key) == restarted._revocations
+        held = [record for record in read_bundle(layout.trust_bootstrap_path).records if record["record"] == "revocations"]
+        assert held == [restarted._revocations]
+
+
+@pytest.mark.asyncio
+async def test_an_authority_that_verified_no_revocations_record_does_not_start(broker: str, tmp_path: Path) -> None:
+    """With a record in the bucket that does not verify and none of its own, it fails closed rather than sign an empty list."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    prepare(layout)
+    async with AsyncExitStack() as stack:
+        nc = await connect(stack, broker, "writer")
+        await nc.jetstream().create_key_value(bucket=CERTIFICATES_BUCKET, history=1)
+        authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
+                                          host_keys.load_host_keys(layout, AUTHORITY_RUNTIME))
+        now = utc_now()
+        record = forged(authority.revocations_record(sequence=int(now.timestamp() * 1000), revocation_epoch=1, entries=[],
+                                                     issued=now))
+        await put_record(nc, revocations_key(INSTALLATION), record)
+        with pytest.raises(RevocationsUnverified) as refused:
+            await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
+        assert "bad_signature" in str(refused.value) and "trust folder" in str(refused.value)
+        # Nothing was signed: the bucket still holds the other process's record and the bundle no revocations record.
+        assert await stored_record(nc, revocations_key(INSTALLATION)) == record
+        assert not read_bundle(layout.trust_bootstrap_path).records
+
+
+@pytest.mark.asyncio
+async def test_a_join_never_gets_back_a_certificate_the_authority_did_not_sign(broker: str, tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout)
+        nc = await connect(stack, broker, "writer")
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        first = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        key = certificate_key(INSTALLATION, WORKER.runtime, first.membership_epoch)
+        stored = await stored_record(nc, key)
+        # The same grants under another signature: the authority would hand it back if it took it as its own.
+        await put_record(nc, key, forged(stored))
+        # The host still joins: the authority issues a certificate instead of handing back the other process's, at
+        # the next epoch, since hosts may already hold the certificate first named.
+        again = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        assert again.roles == frozenset({"worker_host"}) and again.membership_epoch == first.membership_epoch + 1
+        own_key = certificate_key(INSTALLATION, AUTHORITY_RUNTIME, authority._own["body"]["membership_epoch"])
+        forged_own = forged(await stored_record(nc, own_key))
+        await put_record(nc, own_key, forged_own)
+        # A restarted authority does not take a forged certificate of its own either.
+        restarted = await start_authority(stack, broker, layout)
+        assert restarted._own != forged_own
+        assert restarted._own["body"]["membership_epoch"] == authority._own["body"]["membership_epoch"] + 1
+        assert await stored_record(nc, certificate_key(INSTALLATION, AUTHORITY_RUNTIME,
+                                                       restarted._own["body"]["membership_epoch"])) == restarted._own
+
+
+@pytest.mark.asyncio
+async def test_a_join_asking_for_other_grants_gets_a_new_certificate(broker: str, tmp_path: Path) -> None:
+    """A host listed for another agent type asks for it and gets a certificate naming it, not its old one back."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        first = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        wider = HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, ("analyst", "researcher"), WORKER.session_limit)
+        write_expected_hosts(layout.trust_expected_hosts_path, {WORKER.runtime: ExpectedHost(
+            WORKER.runtime, worker_keys.key_id, worker_keys.public_key_text, frozenset(wider.roles),
+            frozenset(wider.teams), frozenset(wider.agent_types), wider.session_limit)})
+        second = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)
+        assert second.membership_epoch == first.membership_epoch + 1 and second.replaces == first.certificate_id
+        assert second.agent_types == frozenset({"analyst", "researcher"})
+        # Asking for the same again hands that certificate back; asking for less gets a narrower one.
+        assert (await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)).membership_epoch == 2
+        narrower = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        assert narrower.membership_epoch == 3 and narrower.agent_types == frozenset({"researcher"})
 
 
 @pytest.mark.asyncio
