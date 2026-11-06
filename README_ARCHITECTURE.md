@@ -4452,7 +4452,11 @@ agent's own loop. Queued task work still runs on today's queues in this phase, s
 an agent means: it leaves the queues every agent of its type shares (its type's queue and,
 for the team lead, the team's), whose messages stay there for another agent of the type,
 which the lead's worker pools start when tasks wait, or for the next team lead; the lead's
-process starts no pool or scheduled worker; the turns in progress finish; a pool worker
+process starts no pool or scheduled worker; no draining agent claims a due schedule, whose
+run would be a task of its own, so the schedule stays due and the next team lead, on the
+installation's contract, fires it once at its first scheduler pass (a run missed meanwhile
+is not made up, and a final run late beyond `missed_one_time_after_seconds` is turned off
+with a notice, as for any missed run); the turns in progress finish; a pool worker
 starts no task it has not started and, once its running turns ended, winds down as after a
 lost launch lease, returning those tasks to the team lead, which sends them out again on
 the type's queue, then exits; pool workers run in the team lead's process, so the lead

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -150,3 +151,56 @@ async def test_a_draining_agent_says_in_its_status_that_it_takes_no_work(tmp_pat
     agent._ensure_nats_transport_adapter = lambda: _Adapter()
     await drain_agent(agent, REASON)
     assert agent.get_self_status(info_type=ControlType.STATUS_REQUEST_FULL).accepting_work is False
+
+
+def test_a_draining_lead_fires_no_schedule_and_the_next_lead_fires_it_once(tmp_path) -> None:
+    """The lead's scheduler admits a due schedule's run as a task of its own, which a draining lead must not take on.
+
+    The schedule stays due and unclaimed, so the next team lead, on the installation's contract, fires it at its
+    first pass: once, moving it on from now (a run missed meanwhile is not made up), and not again at the next pass.
+    """
+
+    from datetime import timedelta
+
+    from custom_agents.contract_drain import ContractDrain
+    from custom_agents.schedule_store import ScheduleStore
+    from custom_agents.scheduled_runtime import _scheduler_pass
+    from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType
+    from storage.config import resolve_storage_settings
+    from tests.test_schedule_tools import _LoopAgent
+
+    store = ScheduleStore(storage_settings=resolve_storage_settings(
+        {"backend": "sqlite", "sqlite": {"path": str(tmp_path / "runtime.db")}}), default_cron_timezone="UTC")
+    due = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    schedule = ScheduledMessage(
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check the feed"),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="person_a")),
+        interval_ms=3_600_000, repeat_count=None, next_fire_at=due, claim_team_id="team_1")
+    store.add(schedule)
+
+    async def sleep(_seconds: float) -> None:
+        return None
+
+    def lead(*, draining: bool) -> _LoopAgent:
+        agent = _LoopAgent(can_start=True)
+        agent._schedule_store = store
+        if draining:
+            agent._contract_drain = ContractDrain(reason=REASON, started_at=datetime.now(timezone.utc))
+        return agent
+
+    draining = lead(draining=True)
+    asyncio.run(_scheduler_pass(draining, {}, sleep))
+    assert draining.enqueued == []
+    row = store.get_row(schedule.schedule_id)
+    assert row["next_fire_at"] == due and not row.get("claimed_by_agent_id")
+
+    successor = lead(draining=False)
+    asyncio.run(_scheduler_pass(successor, {}, sleep))
+    assert successor.enqueued == [(schedule.schedule_id, schedule.schedule_id)]
+    moved_on = store.get_row(schedule.schedule_id)["next_fire_at"]
+    assert datetime.fromisoformat(moved_on) > datetime.now(timezone.utc)
+    asyncio.run(_scheduler_pass(successor, {}, sleep))
+    assert successor.enqueued == [(schedule.schedule_id, schedule.schedule_id)]
