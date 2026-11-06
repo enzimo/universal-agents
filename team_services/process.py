@@ -24,7 +24,7 @@ from access_control.people_directory import PeopleDirectory
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.frame import Receiver
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
-from custom_transport.protocol1.host_runtime import MessageHost
+from custom_transport.protocol1.host_runtime import TEAM_SERVICES_RUNTIME, MessageHost
 from custom_transport.protocol1.joining import HostProfile
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
@@ -42,7 +42,6 @@ from team_services.service import Handler, TeamServices
 from team_services.serving import mark_serving
 from team_services.sessions import SessionService
 
-TEAM_SERVICES_RUNTIME = "team-services"
 TEAM_SERVICES_ROLES = ("team_services",)
 _LOGGER = logging.getLogger("team_services")
 
