@@ -107,6 +107,32 @@ class LiveNatsQueue:
             self._messages.get_nowait()
 
 
+async def delete_team_streams(team_id: str, *, transport: TransportSettings | None = None) -> None:
+    """Delete the streams named for a live test's own team (its work and dead letters) when it ends.
+
+    Each such test runs a team id of its own with a random part, so the streams whose names
+    start with that team's stream prefix are its own, also on a shared server, and another
+    run's are never touched. With a configured subject prefix every team shares one set of
+    streams, so nothing is deleted. Call it also when the test failed: a long-lived server
+    ran out of storage after about 1,500 streams that tests had left behind.
+    """
+
+    import nats
+
+    config = nats_transport_config_from_env(transport=transport)
+    if config.subject_prefix:
+        return
+    own = NatsSubjectMapper(team_id=team_id).work_stream_name().removesuffix("WORK")
+    connection = await nats.connect(servers=list(config.servers), user=config.user, password=config.password)
+    try:
+        jetstream = connection.jetstream()
+        for stream in await jetstream.streams_info():
+            if stream.config.name and stream.config.name.startswith(own):
+                await jetstream.delete_stream(stream.config.name)
+    finally:
+        await connection.close()
+
+
 class LiveNatsClient:
     def __init__(
         self,

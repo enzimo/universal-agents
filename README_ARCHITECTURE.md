@@ -4354,8 +4354,14 @@ it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, hol
 30-second lease renewed every 10 seconds. The lock names the process instance, not only
 the runtime, so a second copy of the same host, or a restart while the old process still
 runs, waits as a standby, logs which instance serves, and takes over when the lease runs
-out or the first releases it on a clean stop. An instance that finds another holding the
-lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
+out or the first releases it on a clean stop. A stop releases the lock even when
+unsubscribing or writing the last host record failed, after that record, so the next
+instance does not wait out the lease. Every instance runs as one host with one
+certificate, so an instance that takes the lock first signs with the host's newest
+certificate in `UA1_CERTS`, which the serving instance may have renewed while this one
+waited (a replaced certificate signs nothing new five minutes after its replacement, and
+readers and the authority then refuse it), and renews it at once when it is due. An
+instance that finds another holding the lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
 short outage) is tried again every 2 seconds while the lease lasts, each failure logged
 (`team_services_lock_renew_failed`), and the instance keeps serving: its lease still keeps
 others out, and stopping would stop the whole team, because the launcher stops every
@@ -4476,7 +4482,12 @@ record, so a malformed or forged one, or one removed meanwhile, is skipped with 
 lead's host may run any agent type in the instance's catalog, including specialists created
 while it runs: the launcher lists it with `agent_types_from_catalog`, the authority reads the
 catalog at each join, and a join asking for different grants gets a new certificate (a join
-asking for exactly the same gets its certificate back). A host that meets a relayed frame
+asking for exactly the same gets its certificate back). A join with the key of the host's
+current certificate keeps the types that certificate grants, as a renewal does: removing a
+specialist from the catalog leaves its running worker running, and the lead's host asks for
+every type it holds again whenever it joins for a new one, so a removed type no longer gets
+every later join for a new specialist refused. The type leaves the certificate when the
+process restarts and asks for the catalog's types afresh. A host that meets a relayed frame
 whose token another host signed reads that host's certificate from `UA1_CERTS` too.
 
 Every running agent holds a session (plan 13B.5, decided 2026-11-06). Without one an agent
@@ -4547,10 +4558,17 @@ agent's own loop. Queued task work still runs on today's queues in this phase, s
 an agent means: it leaves the queues every agent of its type shares (its type's queue and,
 for the team lead, the team's), whose messages stay there for another agent of the type,
 which the lead's worker pools start when tasks wait, or for the next team lead; the lead's
-process starts no pool or scheduled worker; the turns in progress finish; a pool worker
+process starts no pool or scheduled worker; no draining agent claims a due schedule, whose
+run would be a task of its own, so the schedule stays due and the next team lead, on the
+installation's contract, fires it once at its first scheduler pass (a run missed meanwhile
+is not made up, and a final run late beyond `missed_one_time_after_seconds` is turned off
+with a notice, as for any missed run); the turns in progress finish; a pool worker
 starts no task it has not started and, once its running turns ended, winds down as after a
 lost launch lease, returning those tasks to the team lead, which sends them out again on
-the type's queue, then exits; pool workers run in the team lead's process, so the lead
+the type's queue, then exits (its handbacks carry the cause `other_message_contract`, so its
+log lines and the failure a requester is told name the other contract rather than a lost
+lease, and the lead counts none of them toward the interruption limit, since nothing
+failed); pool workers run in the team lead's process, so the lead
 drains with them, and what they return waits in the lead's queue for a team lead on the
 installation's contract. The team lead and startup agents have no way to hand a task
 back yet (that comes with `task.handback` and the queued work of protocol 1), so they

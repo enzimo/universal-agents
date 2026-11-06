@@ -2,7 +2,10 @@
 
 Each lost launch lease interrupts the run on that worker and the lead sends the
 work out again (worker_handback_runtime). If the same work is interrupted
-``max_consecutive_interruptions`` times in a row, retrying is not helping:
+``max_consecutive_interruptions`` times in a row, retrying is not helping. Only
+lost leases count: a worker whose process runs another message contract hands
+its work back without any fault (``custom_agents.contract_drain``), so its
+handbacks are left out of the streak.
 
 - ordinary work is counted per task id; the task is cancelled with the usual
   reply to its requester (a subtask the lead delegated itself fails instead, so
@@ -34,7 +37,7 @@ from custom_messages.contracts.routing_v1 import (
     MessageMeta,
 )
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
+from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_LEASE_LOST, WorkerTaskHandbackV1
 from custom_messages.enums import MessageMetaType, RequesterType
 from storage.worker_handback_repository import WorkerHandbackRepository
 
@@ -70,7 +73,7 @@ def interruption_streak(
     records = getattr(getattr(agent, "_schedule_store", None), "worker_records", None)
     occurrence = records.for_task(task_id, agent.team_id) if records is not None else None
     if records is None or occurrence is None:
-        handbacks = repository.interrupted_for_tasks(agent.team_id, frozenset({task_id}))
+        handbacks = _lost_leases(repository.interrupted_for_tasks(agent.team_id, frozenset({task_id})))
         return InterruptionStreak("task", task_id, len(handbacks), limit, handbacks)
     runs = records.occurrences_for_schedule(occurrence.schedule_id, agent.team_id)
     # Any run that finished (even with an error) ends the streak; superseded or
@@ -84,10 +87,16 @@ def interruption_streak(
     streak_task_ids = frozenset(
         run.task_id for run in runs if reset_at is None or _due(run.due_at) > reset_at
     )
-    handbacks = repository.interrupted_for_tasks(agent.team_id, streak_task_ids)
+    handbacks = _lost_leases(repository.interrupted_for_tasks(agent.team_id, streak_task_ids))
     return InterruptionStreak(
         "schedule", occurrence.schedule_id, len(handbacks), limit, handbacks, occurrence
     )
+
+
+def _lost_leases(handbacks: tuple[WorkerTaskHandbackV1, ...]) -> tuple[WorkerTaskHandbackV1, ...]:
+    """The interruptions that count (module docstring): those of workers that lost their launch lease."""
+
+    return tuple(item for item in handbacks if item.evidence.cause == WIND_DOWN_LEASE_LOST)
 
 
 async def escalate_interruptions(

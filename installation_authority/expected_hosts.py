@@ -8,8 +8,9 @@ presents exactly that key for that runtime, asking for no more, is approved at o
 The team lead's process runs workers of any type the team defines, including specialists
 created while it runs, so its entry may say ``agent_types_from_catalog``: the authority
 then also allows every agent type in the instance's agent catalog as it reads it at the
-join (``InstallationAuthority.catalog_agent_types``). The authority runs no model, so no
-process that does can widen its own grant.
+join (``InstallationAuthority.catalog_agent_types``), besides the types the host's current
+certificate already grants. The authority runs no model, so no process that does can widen
+its own grant.
 """
 
 from __future__ import annotations
