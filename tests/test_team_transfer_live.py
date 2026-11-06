@@ -14,6 +14,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,24 +46,41 @@ def broker_env(config) -> dict[str, str]:
     return env
 
 
-def start_broker(config_path: Path, config, port: int) -> subprocess.Popen:
-    log = open(BASE / f"broker-{port}.log", "w")
-    proc = subprocess.Popen(
-        [PY, "-m", "assistant_cli", "run-secure-tool-broker", "--config", str(config_path),
-         "--env", str(config.layout.team_env_path), "--host", "127.0.0.1", "--port", str(port)],
-        cwd=REPO, env=broker_env(config), stdout=log, stderr=subprocess.STDOUT,
-    )
-    import httpx
-    for _ in range(120):
-        try:
-            if httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code == 200:
-                return proc
-        except httpx.HTTPError:
-            pass
-        if proc.poll() is not None:
-            raise SystemExit(f"broker exited; see {log.name}")
-        time.sleep(0.5)
-    raise SystemExit("broker did not start")
+def start_broker(config_path: Path, config) -> tuple[subprocess.Popen, int]:
+    """Start a broker and return it with its port, once its own log says it listens there.
+
+    The broker needs a fixed port, so the test picks a free one and closes it before the
+    broker binds it. Another test's server can take the port in between: the broker then
+    stops with "address already in use" while the other server answers on the port. The
+    broker counts as started only when its own log says it listens while it still runs;
+    when it could not bind, it starts again on another port.
+    """
+
+    for _attempt in range(3):
+        port = free_port()
+        log_path = BASE / f"broker-{port}.log"
+        with log_path.open("w") as log:
+            proc = subprocess.Popen(
+                [PY, "-m", "assistant_cli", "run-secure-tool-broker", "--config", str(config_path),
+                 "--env", str(config.layout.team_env_path), "--host", "127.0.0.1", "--port", str(port)],
+                cwd=REPO, env=broker_env(config), stdout=log, stderr=subprocess.STDOUT,
+            )
+        listening = f"Secure tool broker listening on http://127.0.0.1:{port} "
+        deadline = time.monotonic() + 60
+        while True:
+            text = log_path.read_text()
+            if proc.poll() is not None:
+                if "address already in use" in text:
+                    break
+                raise SystemExit(f"broker exited; see {log_path}")
+            if listening in text:
+                return proc, port
+            if time.monotonic() >= deadline:
+                proc.terminate()
+                proc.wait(10)
+                raise SystemExit(f"broker did not start; see {log_path}")
+            time.sleep(0.2)
+    raise SystemExit("every port the test picked was taken before the broker could listen on it")
 
 
 def cli(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -127,8 +145,7 @@ def run(base: Path) -> None:
     passfile = BASE / "passphrase"
     passfile.write_text(PASSPHRASE + "\n")
     out = BASE / "team.uatransfer"
-    port = free_port()
-    old_broker = start_broker(config_path, config, port)
+    old_broker, port = start_broker(config_path, config)
     cli_env = dict(os.environ, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port}")
     try:
         exported = cli("team", "export", "--config", str(config_path), "--owner", "usr_ana", "--out", str(out),
@@ -156,8 +173,7 @@ def run(base: Path) -> None:
     assert (new_root / "instance_config.yaml").is_file()
 
     new_config = GatewayInstanceConfig.load(new_root / "instance_config.yaml")
-    port2 = free_port()
-    new_broker = start_broker(new_root / "instance_config.yaml", new_config, port2)
+    new_broker, port2 = start_broker(new_root / "instance_config.yaml", new_config)
     try:
         creds = cli("team", "import-credentials", "--in", str(out), "--config", str(new_root / "instance_config.yaml"),
                     "--review", str(review_dir), "--passphrase-file", str(passfile), env=dict(clean_env, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port2}"))
@@ -195,3 +211,48 @@ def run(base: Path) -> None:
 @pytest.mark.live
 def test_team_transfer_end_to_end_with_real_broker_processes(tmp_path: Path) -> None:
     run(tmp_path / "work")
+
+
+@pytest.mark.live
+def test_the_broker_start_skips_a_port_another_server_took_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import http.server
+    import threading
+
+    from assistant_gateway.bootstrap import bootstrap_instance
+    from assistant_gateway.config import GatewayInstanceConfig
+    from assistant_gateway.instance_secrets import ensure_internal_credential_env_file
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    # Another test's server takes the first port this start picks.
+    other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    threading.Thread(target=other.serve_forever, daemon=True).start()
+    taken = other.server_address[1]
+    ports = iter([taken])
+    picked = free_port
+    monkeypatch.setattr(sys.modules[__name__], "free_port", lambda: next(ports, None) or picked())
+    monkeypatch.setattr(sys.modules[__name__], "BASE", tmp_path)
+    config = GatewayInstanceConfig.create(instance_name="alpha", instance_root=str(tmp_path / "old"), team_id="team_e2e", timezone="UTC")
+    config.security_layer.credential_state_backend.mode = "files"
+    config.security_layer.sealbox.enabled = False
+    config_path = config.save(tmp_path / "old" / "instance_config.yaml")
+    bootstrap_instance(config)
+    ensure_internal_credential_env_file(config)
+    try:
+        broker, port = start_broker(config_path, config)
+        try:
+            assert port != taken and broker.poll() is None
+            assert "address already in use" in (tmp_path / f"broker-{taken}.log").read_text()
+        finally:
+            broker.terminate()
+            broker.wait(10)
+    finally:
+        other.shutdown()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import hashlib
 import logging
@@ -83,18 +84,50 @@ def _free_port() -> int:
     return port
 
 
-def _wait_for_tcp(port: int, process: subprocess.Popen[str]) -> None:
+def _start_own_sealbox(
+    server: Path, server_env: dict[str, str], port: int, token_file: Path
+) -> subprocess.Popen[str] | None:
+    """Start sealbox-server on ``port``; None when another program already listens there.
+
+    The port is picked free and closed before the server binds it, so another test's
+    server can take it in between. sealbox-server logs its address before it binds, so
+    neither that line nor a connection to the port shows that this server listens. A
+    request only this test's root token is allowed to make does: another server refuses
+    the token or does not know the path, while this one stops with "Failed to bind".
+    """
+
+    import httpx
+
+    process = subprocess.Popen(
+        [str(server)],
+        env={**server_env, "LISTEN_ADDR": f"127.0.0.1:{port}"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    headers = {"Authorization": f"Bearer {token_file.read_text().strip()}"}
     deadline = time.time() + 8
     while time.time() < deadline:
         if process.poll() is not None:
+            output = "".join(process.communicate())
+            if "Failed to bind address" in output:
+                return None
             raise RuntimeError(
                 f"sealbox-server exited early with code {process.returncode}"
             )
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                return
-        except OSError:
+            answer = httpx.get(
+                f"http://127.0.0.1:{port}/v2/admin/tenants", headers=headers, timeout=0.5
+            )
+        except httpx.HTTPError:
             time.sleep(0.1)
+            continue
+        if answer.status_code == 200:
+            return process
+        # Another server answers: this one stops once it fails to bind.
+        time.sleep(0.1)
+    process.kill()
+    process.wait(timeout=3)
     raise RuntimeError("sealbox-server did not become reachable")
 
 
@@ -146,13 +179,12 @@ def live_sealbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     token_file = tmp_path / "root_token"
     store_path = tmp_path / "sealbox.db"
-    port = _free_port()
     runtime = SealboxRuntimeConfig(
         enabled=True,
         manage_service=True,
         auto_initialize=True,
         bind_host="127.0.0.1",
-        bind_port=port,
+        bind_port=_free_port(),
         service_url=None,
         store_path=store_path,
         root_token_file=token_file,
@@ -167,18 +199,19 @@ def live_sealbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         {
             "STORE_PATH": str(store_path),
             "AUTH_TOKEN_FILE": str(token_file),
-            "LISTEN_ADDR": f"127.0.0.1:{port}",
         }
     )
-    process = subprocess.Popen(
-        [str(server)],
-        env=server_env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    started: subprocess.Popen[str] | None = None
+    for _attempt in range(3):
+        started = _start_own_sealbox(server, server_env, runtime.bind_port, token_file)
+        if started is not None:
+            break
+        runtime = dataclasses.replace(runtime, bind_port=_free_port())
+    if started is None:
+        raise RuntimeError("every port the test picked was taken before sealbox-server could listen on it")
+    process = started
+    port = runtime.bind_port
     try:
-        _wait_for_tcp(port, process)
         root_env = os.environ.copy()
         root_env.update(
             {
@@ -215,14 +248,10 @@ def live_sealbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             nonlocal process
             process.terminate()
             process.wait(timeout=3)
-            process = subprocess.Popen(
-                [str(server)],
-                env=server_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            _wait_for_tcp(port, process)
+            restarted = _start_own_sealbox(server, server_env, port, token_file)
+            if restarted is None:
+                pytest.fail(f"another program took port {port} while sealbox-server restarted")
+            process = restarted
 
         yield {
             "cli": cli,
@@ -1166,3 +1195,30 @@ def test_live_team_transfer_reuses_secrets_after_catalog_storage_failure(
     assert resolved.source_ref["item_id"] == written_items[0]
     assert "event=credentials_transfer_catalog_import_failed" in caplog.text
     assert secret_value not in caplog.text
+
+
+def test_a_sealbox_start_does_not_take_another_tests_server_on_its_port_for_its_own(tmp_path: Path) -> None:
+    server = _find_binary("SEALBOX_SERVER_PATH", ("sealbox-server",))
+    if server is None:
+        pytest.skip("sealbox-server is required for live Sealbox tests")
+    servers: list[subprocess.Popen[str]] = []
+    try:
+        for name in ("other", "own"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "root_token").write_text(f"{name}-root-token-{os.getpid()}\n")
+        other_env = {**os.environ, "STORE_PATH": str(tmp_path / "other" / "sealbox.db"),
+                     "AUTH_TOKEN_FILE": str(tmp_path / "other" / "root_token")}
+        port = _free_port()
+        other = _start_own_sealbox(server, other_env, port, tmp_path / "other" / "root_token")
+        assert other is not None
+        servers.append(other)
+        own_env = {**os.environ, "STORE_PATH": str(tmp_path / "own" / "sealbox.db"),
+                   "AUTH_TOKEN_FILE": str(tmp_path / "own" / "root_token")}
+
+        # The other test's server answers on the port but refuses this test's token.
+        assert _start_own_sealbox(server, own_env, port, tmp_path / "own" / "root_token") is None
+        assert other.poll() is None
+    finally:
+        for process in servers:
+            process.terminate()
+            process.wait(timeout=3)
