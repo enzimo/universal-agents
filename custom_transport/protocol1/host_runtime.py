@@ -113,6 +113,10 @@ class MessageHost:
     # The installation's contract digest, once this host learned that it runs another one (module docstring).
     installation_contract: Optional[str] = None
     _contract_listeners: list[Callable[[str], None]] = field(default_factory=list)
+    # Whether the renewal that gives up its agents got an answer; until then the upkeep asks again.
+    _give_up_answered: bool = False
+    # Why the team services' record did not verify last time, so each new reason is logged once.
+    _contract_record_refused: Optional[str] = None
     _started_at: Optional[datetime] = None
     _liveness_sequence: int = 0
     # The state the last host record said, None before the first; records are written one at a time.
@@ -270,6 +274,9 @@ class MessageHost:
         """Renew the certificate once two thirds of its life are gone; on another contract, only once drained."""
 
         async with self._certificate_change:
+            if self.state == "drained" and not self._give_up_answered:
+                await self._renew()  # the renewal that gives up its agents, until it is answered
+                return
             certificate = self.identity.certificate
             life = certificate.expires_at - certificate.issued_at
             if self.clock() < certificate.issued_at + life * 2 / 3:
@@ -302,6 +309,8 @@ class MessageHost:
             {"installation": certificate.installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
              "id": AUTHORITY_SERVICE_ID}, team=INSTALLATION_SCOPE)
         body = reply.raw["body"]
+        if self.state == "drained":
+            self._give_up_answered = True
         if body["outcome"] == "protocol_mismatch":
             self.learned_other_contract(body.get("accepted_contract_sha256"), "renewal")
             return
@@ -416,17 +425,20 @@ class MessageHost:
             if raw is None:
                 continue
             try:
-                record = self.live.trust.store.verify(raw, record="host", now=self.clock())
-            except FrameRefused as refused:
-                if refused.code != "unknown_key" or not await self.fetch_trust(raw):
-                    self.logger.info("A host record did not verify; it says nothing about the installation's contract. "
-                                     "event=protocol1_contract_record_refused runtime=%s key=%s code=%s",
-                                     self.profile.runtime, key, refused.code)
-                    continue
                 try:
                     record = self.live.trust.store.verify(raw, record="host", now=self.clock())
-                except FrameRefused:
-                    continue
+                except FrameRefused as refused:
+                    if refused.code != "unknown_key" or not await self.fetch_trust(raw):
+                        raise
+                    record = self.live.trust.store.verify(raw, record="host", now=self.clock())
+            except FrameRefused as refused:
+                if refused.code != self._contract_record_refused:  # each new reason once, not at every write
+                    self._contract_record_refused = refused.code
+                    self.logger.info("A host record did not verify; it says nothing about the installation's "
+                                     "contract. event=protocol1_contract_record_refused runtime=%s key=%s code=%s",
+                                     self.profile.runtime, key, refused.code)
+                continue
+            self._contract_record_refused = None
             if record.other_contract:
                 self.learned_other_contract(record.their_contract_sha256, "team_services_record")
 
@@ -447,8 +459,13 @@ class MessageHost:
         if self.records is not None and self._reported_state is not None:
             await self.publish_liveness("drained")
         if self.live is not None:
-            async with self._certificate_change:
-                await self._renew()
+            try:
+                async with self._certificate_change:
+                    await self._renew()
+            except Exception:
+                self.logger.warning("The renewal that gives up this host's agents got no answer; the upkeep asks "
+                                    "again. event=protocol1_give_up_renewal_failed runtime=%s", self.profile.runtime,
+                                    exc_info=True)
 
     async def keep_up(self, stop: asyncio.Event, *, drained: Callable[[], bool] = lambda: True) -> None:
         """Liveness every 10 seconds, trust every half hour and renewal when due, until ``stop`` is set.
