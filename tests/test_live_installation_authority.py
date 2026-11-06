@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.encoding import format_timestamp
-from custom_messages.wire.frame import Receiver, reply_audience, verify_frame
+from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
 from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_messages.wire.models import Frame
 from custom_messages.wire.trust import sign_state
@@ -174,9 +174,7 @@ async def test_a_renewal_raises_the_epoch_and_the_authority_keeps_its_records_ac
         worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
         reply = await worker.request("host.renew", {
             "renew_id": "renew-1", "certificate_id": certificate.certificate_id, "membership_epoch": 1,
-            "profile_sha256": WORKER.digest(), "contract_sha256": json.loads(
-                (Path(__file__).resolve().parents[1] / "contracts/messages/v1/generated/compatibility.json").read_text())[
-                "contract_sha256"]},
+            "profile_sha256": WORKER.digest(), "contract_sha256": CONTRACT_SHA256},
             {"installation": INSTALLATION, "team": "_install", "target": "installation_service", "id": "authority"},
             team="_install")
         renewed = reply.raw["body"]["certificate"]["body"]
@@ -194,28 +192,49 @@ async def test_a_renewal_raises_the_epoch_and_the_authority_keeps_its_records_ac
         assert dead_letters.config.filter_subject == f"ua.v1.{TEAM}.*.dlq.notice.*"
 
 
+AUTHORITY_AUDIENCE = {"installation": INSTALLATION, "team": "_install", "target": "installation_service",
+                      "id": "authority"}
+OTHER_CONTRACT = "0" * 64
+
+
+def assert_mismatch(kind: str, body: dict) -> None:
+    """A ``protocol_mismatch`` reply that meets the contract's reply schema and names the authority's digest."""
+
+    validator(body_schema_file(f"{kind}.reply")).validate(body)
+    assert body["outcome"] == "protocol_mismatch"
+    assert body["accepted_contract_sha256"] == CONTRACT_SHA256
+
+
+async def send_join(nc, frame: dict, trust: PersistentTrustStore) -> dict:
+    """Send a join frame as it is and return the body of the verified reply."""
+
+    data, headers = encode(frame)
+    message = await nc.request(frame["subject"], data, timeout=30, headers=headers)
+    raise_if_refused("host.join", frame["subject"], message, logging.getLogger(__name__))
+    request = Frame.model_validate(frame)
+    named = reply_audience(request)
+    reply = verify_frame(message.data, trust=trust.store,
+                         receiver=Receiver(named["installation"], named["team"], named["target"], named["id"],
+                                           named["runtime"]),
+                         arrived_on=message.subject, now=utc_now(), replay=LiveReplayRecord().lookup,
+                         headers=answer_headers(message), answering=request)
+    return reply.raw["body"]
+
+
 @pytest.mark.asyncio
 async def test_a_host_on_another_contract_learns_the_authoritys_digest_when_it_joins_or_renews(
-        broker: str, tmp_path: Path, monkeypatch) -> None:
+        broker: str, tmp_path: Path) -> None:
     """README "Versions": a join or renewal naming another contract digest gets ``protocol_mismatch``.
 
     The reply names the digest the authority runs (``accepted_contract_sha256``), so the
     host learns why instead of getting ``handler_failed``. The host verifies the reply as
-    it would any other, and its body is checked against the contract's reply schema.
+    it would any other, and its body is checked against the contract's reply schema. A
+    host whose own trust store runs the other contract learns it from ``join``.
     """
 
-    other = "0" * 64
-    assert other != CONTRACT_SHA256
+    assert OTHER_CONTRACT != CONTRACT_SHA256
     layout = InstanceLayout.at(tmp_path / "instance")
     worker_keys = prepare(layout)
-    authority_audience = {"installation": INSTALLATION, "team": "_install", "target": "installation_service",
-                          "id": "authority"}
-
-    def assert_mismatch(kind: str, body: dict) -> None:
-        validator(body_schema_file(f"{kind}.reply")).validate(body)
-        assert body["outcome"] == "protocol_mismatch"
-        assert body["accepted_contract_sha256"] == CONTRACT_SHA256
-
     async with AsyncExitStack() as stack:
         await start_authority(stack, broker, layout)
         worker_nc = await connect(stack, broker, WORKER.runtime)
@@ -224,23 +243,93 @@ async def test_a_host_on_another_contract_learns_the_authoritys_digest_when_it_j
         worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
         renewal = await worker.request("host.renew", {
             "renew_id": "renew-other-contract", "certificate_id": certificate.certificate_id, "membership_epoch": 1,
-            "profile_sha256": WORKER.digest(), "contract_sha256": other}, authority_audience, team="_install")
+            "profile_sha256": WORKER.digest(), "contract_sha256": OTHER_CONTRACT}, AUTHORITY_AUDIENCE, team="_install")
         assert_mismatch("host.renew", renewal.raw["body"])
 
-        monkeypatch.setattr(joining, "contract_sha256", lambda: other)
-        frame = joining.sign_join(worker_keys, INSTALLATION, WORKER, join_id="join-other-contract", issued=utc_now())
-        assert frame["body"]["contract_sha256"] == other
-        data, headers = encode(frame)
-        message = await worker_nc.request(frame["subject"], data, timeout=30, headers=headers)
-        raise_if_refused("host.join", frame["subject"], message, logging.getLogger(__name__))
-        request = Frame.model_validate(frame)
-        named = reply_audience(request)
-        reply = verify_frame(message.data, trust=trust.store,
-                             receiver=Receiver(named["installation"], named["team"], named["target"], named["id"],
-                                               named["runtime"]),
-                             arrived_on=message.subject, now=utc_now(), replay=LiveReplayRecord().lookup,
-                             headers=answer_headers(message), answering=request)
-        assert_mismatch("host.join", reply.raw["body"])
+        frame = joining.sign_join(worker_keys, INSTALLATION, WORKER, join_id="join-other-contract", issued=utc_now(),
+                                  contract_sha256=OTHER_CONTRACT)
+        assert_mismatch("host.join", await send_join(worker_nc, frame, trust))
+
+        other = host_trust(layout, WORKER.runtime)
+        other.store.contract_sha256 = OTHER_CONTRACT
+        with pytest.raises(JoinRefused) as refused:
+            await join(worker_nc, worker_keys, other, WORKER)
+        assert refused.value.outcome == "protocol_mismatch"
+        assert refused.value.accepted_contract_sha256 == CONTRACT_SHA256
+
+
+@pytest.mark.asyncio
+async def test_a_join_of_another_contract_learns_protocol_mismatch_whatever_shape_its_body_has(
+        broker: str, tmp_path: Path) -> None:
+    """README "Versions": the authority reads a join's digest before the rest of its body.
+
+    Another revision may shape the body differently: here its runtime moved, a field this
+    one requires is gone and one it does not know is there. Read strictly, the join was
+    refused (``wrong_issuer`` at ``/body/runtime``) and the host never learned why.
+    """
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        frame = joining.sign_join(worker_keys, INSTALLATION, WORKER, join_id="join-reshaped", issued=utc_now(),
+                                  contract_sha256=OTHER_CONTRACT)
+        body = frame["body"]
+        body["host"] = {"runtime": body.pop("runtime"), "deployment": body.pop("deployment")}
+        body["queue_depths"] = {"inbox": 0}
+        reshaped = sign_frame(frame, worker_keys.application_key)
+        assert_mismatch("host.join", await send_join(worker_nc, reshaped, host_trust(layout, WORKER.runtime)))
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_that_gives_up_every_agent_is_answered_on_any_contract(broker: str, tmp_path: Path) -> None:
+    """README "Versions": the authority still answers a renewal that only gives up agents, so a host on another
+    contract can hand its agents over; the certificate it gets grants no agent types and no sessions.
+
+    A renewal that asks for the certificate's profile without any agent (``HostProfile.giving_up``)
+    gets that on this contract too. A host on another contract that renews for anything more
+    is turned away.
+    """
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    giving_up = WORKER.giving_up().digest()
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        certificate = await join(worker_nc, worker_keys, trust, WORKER)
+        assert certificate.agent_types == frozenset({"researcher"}) and certificate.session_limit == 4
+        worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
+
+        async def renew(renew_id: str, profile: str, contract: str) -> dict:
+            current = worker.identity.certificate
+            reply = await worker.request("host.renew", {
+                "renew_id": renew_id, "certificate_id": current.certificate_id,
+                "membership_epoch": current.membership_epoch, "profile_sha256": profile, "contract_sha256": contract},
+                AUTHORITY_AUDIENCE, team="_install")
+            body = reply.raw["body"]
+            if body["outcome"] == "ok":
+                trust.add(json.dumps(body["certificate"]).encode(), now=utc_now())
+                renewed = trust.store.host_certificate(INSTALLATION, WORKER.runtime,
+                                                       body["certificate"]["body"]["membership_epoch"])
+                assert renewed is not None and renewed.certificate_id == body["certificate"]["body"]["certificate_id"]
+                worker.identity = worker.identity.with_certificate(renewed)
+            return body
+
+        other = await renew("renew-gives-up-1", giving_up, OTHER_CONTRACT)
+        assert other["outcome"] == "ok", other
+        granted = other["certificate"]["body"]
+        assert (granted["agent_types"], granted["session_limit"], granted["membership_epoch"]) == ([], 0, 2)
+        assert granted["replaces"] == certificate.certificate_id and granted["profile_sha256"] == giving_up
+        assert (granted["teams"], granted["roles"]) == ([TEAM], ["worker_host"])
+        # Asking for more than giving up, on another contract, is turned away.
+        assert_mismatch("host.renew", await renew("renew-other-contract", WORKER.digest(), OTHER_CONTRACT))
+        # On this contract the same profile renews as usual.
+        same = await renew("renew-gives-up-2", giving_up, CONTRACT_SHA256)
+        assert same["outcome"] == "ok" and same["certificate"]["body"]["agent_types"] == []
+        assert same["certificate"]["body"]["membership_epoch"] == 3
 
 
 @pytest.mark.asyncio
