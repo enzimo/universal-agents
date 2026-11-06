@@ -836,6 +836,7 @@ Verify:
 
 - Missing instance: run `docker run ... onboard` first.
 - The team lead or an agent stops with "Stream ... is missing; start the topology owner first": the container sets up the streams before any service starts, so they were removed from NATS while the runtime ran, for example by a restart of an external NATS server with `transport.storage: memory`. Restart the container to set them up again.
+- The start stops with "The local NATS server cannot start: 127.0.0.1:4222 is already in use": another nats-server still holds the port, for example one left over from an earlier start that ended abruptly, or the running team's own server when a maintenance command starts a local server (`--start-local-nats`). Stop that nats-server (`ps -ef | grep nats-server` shows it), or stop the team first, then start again.
 - Multiple instances under `/data`: set `TEAM_INSTANCE_ROOT` or `TEAM_INSTANCE_CONFIG`.
 - Generated site links unreachable: publish the website port and set `network.public_origin` plus `interactive_apps.plugins.builtin.internal_website.settings.public_port` to browser-reachable values.
 - Auth links unreachable: publish the broker port and set `network.public_origin` plus `security_layer.broker_public_port` to browser-reachable values.

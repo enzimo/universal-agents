@@ -21,9 +21,9 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
-import socket
 import subprocess
 import time
 from typing import Mapping, MutableMapping
@@ -92,28 +92,62 @@ def nats_log_tail(service_root: Path, *, max_files: int = 3, max_lines_per_file:
     return "\n".join(sections)
 
 
+_LISTENING = "Listening for client connections on"
+_READY = "Server is ready"
+_PORT_TAKEN = re.compile(r"listen tcp (\S+): bind: address already in use")
+
+
+def _startup_output(startup_log_path: Path, offset: int) -> str:
+    """What the server of this start wrote: the startup log is appended to on every start."""
+
+    with startup_log_path.open("rb") as log:
+        log.seek(offset)
+        return log.read().decode("utf-8", errors="replace")
+
+
 def _wait_for_nats_ready(
     process: subprocess.Popen[bytes],
     *,
     logger: logging.Logger,
     service_root: Path,
+    startup_log_path: Path,
+    offset: int,
     timeout_seconds: float = 30.0,
 ) -> None:
+    """Return once the server this start launched says it listens and is ready, while it still runs.
+
+    Another server answering on the port is not readiness. The server runs in its own
+    session, so one left over from an earlier start (a launcher that crashed, or a team
+    still running) can keep the port; this start's server then stops with "address
+    already in use", and the start must say so instead of going on with the old one.
+    """
+
     deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+    while True:
         code = process.poll()
+        output = _startup_output(startup_log_path, offset)
         if code is not None:
+            taken = _PORT_TAKEN.search(output)
+            if taken is not None:
+                raise RuntimeError(
+                    f"The local NATS server cannot start: {taken.group(1)} is already in use, most "
+                    "likely by a nats-server that is still running from an earlier start or from a team "
+                    "that is still running. Stop that nats-server (`ps -ef | grep nats-server` shows "
+                    "it), then start again."
+                )
             raise RuntimeError(
-                f"NATS process exited before becoming ready with code {code}.\n"
-                f"{nats_log_tail(service_root)}"
+                f"NATS process exited before becoming ready with code {code}.\n{nats_log_tail(service_root)}"
             )
-        try:
-            with socket.create_connection((INTERNAL_NATS_HOST, INTERNAL_NATS_PORT), timeout=1.0):
-                return
-        except OSError:
-            time.sleep(0.25)
-    logger.warning("NATS did not become ready before timeout; diagnostics follow.\n%s", nats_log_tail(service_root))
-    raise RuntimeError("Timed out waiting for NATS to become ready.")
+        if _LISTENING in output and _READY in output and process.poll() is None:
+            return
+        if time.time() >= deadline:
+            logger.warning(
+                "NATS did not become ready before timeout; diagnostics follow.\n%s", nats_log_tail(service_root)
+            )
+            raise RuntimeError(
+                f"The local NATS server did not say it was ready within {timeout_seconds:g} seconds."
+            )
+        time.sleep(0.25)
 
 
 def _write_private_file(path: Path, content: str) -> None:
@@ -267,6 +301,7 @@ def start_local_nats(
     startup_log_path = log_dir / "nats-server-startup.log"
     logger.info("Starting local NATS/JetStream: %s", " ".join(log_command))
     logger.info("Writing local NATS startup output to %s", startup_log_path)
+    offset = startup_log_path.stat().st_size if startup_log_path.exists() else 0
     startup_log = startup_log_path.open("ab")
     try:
         process = subprocess.Popen(
@@ -279,5 +314,7 @@ def start_local_nats(
         )
     finally:
         startup_log.close()
-    _wait_for_nats_ready(process, logger=logger, service_root=root)
+    _wait_for_nats_ready(
+        process, logger=logger, service_root=root, startup_log_path=startup_log_path, offset=offset
+    )
     return process
