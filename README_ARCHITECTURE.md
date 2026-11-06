@@ -4528,7 +4528,14 @@ check), about the 30 seconds after which the presence heartbeat counted it gone.
 member's state
 goes to the Team page's records as it changes; skills, Status page findings and whether a
 busy agent could start more, which records do not carry, are asked with `agent.status`
-(basic) from each live agent every 20 seconds and merged in. At start the gateway waits up
+(basic) from each live agent every 20 seconds and merged in. An agent whose session was
+refused has no record and no address, so it cannot report findings; the Status page shows
+what the team's live host records list instead (`GatewayTeamView.host_findings`): one
+problem per process and reason, naming the agents (`<agent type>-<agent id>`), saying why
+in plain words (the worker limit reached, a type the process may not run, a type name no
+certificate can carry, ...) and what to do, such as raising the worker limit and making a
+team-wide restart. It goes once the session opens or the agent stops; starting up, before
+the first answer, is no finding. At start the gateway waits up
 to 15 seconds to read the records, and marks a saved route unavailable when no live lead
 is in them. Before this the gateway asked for the lead on the operational subject at start
 ("discovery"), followed presence, and polled the lead's consumer and heartbeat every 5
