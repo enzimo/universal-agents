@@ -26,6 +26,7 @@ from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
 from custom_transport.protocol1.live import utc_now
 from docker import message_hosts
+from installation_authority.expected_hosts import write_expected_hosts
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.lock import lock_key
@@ -371,3 +372,54 @@ async def test_a_session_signed_before_the_team_services_renewed_and_restarted_i
         assert restarted.identity.certificate.membership_epoch == 2
         second_stop.set()
         await asyncio.wait_for(second, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_host_joins_again_for_an_agent_type_added_while_it_runs(broker: str, tmp_path: Path, caplog) -> None:
+    """MessageHost.rejoin: every running agent holds a session, a specialist created at runtime too."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        other = await host(stack, broker, layout, OTHER)
+        assert other.records is not None
+        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        assert (await open_session(worker, "analyst-1", agent_type="analyst"))["outcome"] == "not_allowed"
+
+        # Not listed for this host yet: the authority refuses, and the host keeps its certificate.
+        refused = await worker.rejoin(["analyst"])
+        assert (refused.granted, refused.refused, refused.not_certifiable) == (frozenset(), frozenset({"analyst"}),
+                                                                             frozenset())
+        assert refused.refusal is not None and refused.refusal.startswith("denied")
+        assert refused.certificate == worker.identity.certificate and worker.identity.certificate.membership_epoch == 1
+
+        # Listed now (the team's catalog gained it): joining again grants it at the next epoch. A name no
+        # certificate can carry is never asked for, and the caller is told.
+        wider = HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, ("analyst", "researcher"), WORKER.session_limit)
+        write_expected_hosts(layout.trust_expected_hosts_path, {
+            profile.runtime: message_hosts.expected_host(layout, profile)
+            for profile in (team_services_profile(TEAM), wider, OTHER)})
+        too_long = "a-specialist-type-name-too-long"
+        with caplog.at_level(logging.WARNING):
+            rejoined = await worker.rejoin(["analyst", too_long])
+        assert (rejoined.granted, rejoined.refused, rejoined.not_certifiable) == (frozenset({"analyst"}), frozenset(),
+                                                                                frozenset({too_long}))
+        assert rejoined.refusal is None and f"agent_type={too_long}" in caplog.text
+        assert worker.identity.certificate == rejoined.certificate
+        assert rejoined.certificate.membership_epoch == 2
+        assert rejoined.certificate.agent_types == frozenset({"analyst", "researcher"})
+        assert worker.profile.agent_types == ("analyst", "researcher")
+
+        # The host signs everything with the new certificate: a session for the new type, its host record.
+        assert (await open_session(worker, "analyst-1", agent_type="analyst"))["outcome"] == "ok"
+        await worker.publish_liveness("accepting")
+        report = await other.records.read_report("host", WORKER.runtime, now=other.clock())
+        assert report is not None and report.record.signer is not None
+        assert report.record.signer.membership_epoch == report.record.body.certificate.membership_epoch == 2
+        # A type already granted needs no join.
+        assert (await worker.rejoin(["researcher"])).certificate.membership_epoch == 2
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
