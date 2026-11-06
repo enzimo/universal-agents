@@ -21,7 +21,9 @@ draining an agent means:
    (``custom_agents.lease_loss_wind_down``): the tasks it has not started go back to the
    team lead, which sends them out again on the type's queue; tasks that wait on a person
    or a subtask finish here until that wind-down's deadline, because their replies come to
-   this agent; then the worker exits. The team lead and startup agents have no way to hand
+   this agent; then the worker exits. Pool workers run in the team lead's process, so the
+   lead drains with them: what they return waits in the lead's queue for a team lead on the
+   installation's contract. The team lead and startup agents have no way to hand
    a task back in this phase (``task.handback`` comes with the queued work of protocol 1):
    they finish here what they already admitted and take nothing new.
 
