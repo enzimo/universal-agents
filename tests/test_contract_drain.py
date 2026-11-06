@@ -83,11 +83,11 @@ async def test_an_agent_leaves_the_queues_its_type_shares_and_keeps_what_it_hold
 @pytest.mark.asyncio
 async def test_a_pool_worker_starts_nothing_new_and_winds_down_once_its_running_turns_end(monkeypatch) -> None:
     running = {"t-running"}
-    wound_down: list[str] = []
+    wound_down: list[tuple[str, str]] = []
     monkeypatch.setattr(contract_drain, "TURN_POLL_SECONDS", 0.01)
     monkeypatch.setattr(turn_registry, "executing_task_ids", lambda agent: set(running))
     monkeypatch.setattr(lease_loss_wind_down, "start_lease_loss_wind_down",
-                        lambda agent, *, reason: wound_down.append(reason))
+                        lambda agent, *, reason, cause: wound_down.append((reason, cause)))
     started = _info("t-waiting", ProgressState.WAITING, (ProgressState.IN_PROGRESS, ProgressState.WAITING))
     agent = _agent(worker=True, infos=(_info("t-new", ProgressState.ACCEPTED), started), queue=("t-new",))
 
@@ -102,7 +102,8 @@ async def test_a_pool_worker_starts_nothing_new_and_winds_down_once_its_running_
     assert wound_down == []
     running.clear()
     await asyncio.wait_for(agent._contract_drain.task, timeout=5)
-    assert wound_down == [REASON]
+    # It winds down for its own cause, which no log line, text or interruption count takes for a lost lease.
+    assert wound_down == [(REASON, "other_message_contract")]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,10 @@
 """TeamLead handling of tasks returned by workers that lost their launch lease.
 
+A worker whose process runs another message contract than its installation returns
+its tasks the same way (``custom_agents.contract_drain``); its handbacks say so in
+their evidence's ``cause``, the lead's log names that cause, and they are sent out
+again without counting toward the interruption limit, since nothing failed.
+
 The lead accepts a handback only from the worker that owns the stated launch:
 the envelope sender must be the handback's worker, and the stored launch
 record must name that worker for this team. Accepted handbacks are saved
@@ -34,7 +39,11 @@ from custom_messages.contracts.redispatch_v1 import (
     render_redispatch_directive,
 )
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
+from custom_messages.contracts.worker_handback_v1 import (
+    WIND_DOWN_LEASE_LOST,
+    WIND_DOWN_OTHER_CONTRACT,
+    WorkerTaskHandbackV1,
+)
 from custom_messages.enums import ProgressState
 from id_generation import new_id
 from storage.agent_launch_repository import AgentLaunchRepository
@@ -52,6 +61,11 @@ from storage.worker_handback_repository import (
 # Pending handbacks retried by the scheduler pass wait this long between
 # attempts, so one handback that keeps failing cannot flood the log.
 HANDBACK_RETRY_INTERVAL_SECONDS = 30.0
+# Why a worker returned a task, by its evidence's cause (module docstring).
+_WHY_RETURNED: dict[str, str] = {
+    WIND_DOWN_LEASE_LOST: "after losing its launch lease",
+    WIND_DOWN_OTHER_CONTRACT: "because its process runs another message contract than its installation",
+}
 
 
 async def handle_worker_task_handback(
@@ -91,10 +105,11 @@ async def handle_worker_task_handback(
         repository.record, handback
     )
     agent._logger.warning(
-        "Worker returned a task after losing its launch lease. "
+        "Worker returned a task %s. "
         "event=worker_task_handback_received agent_id=%s handback_id=%s "
         "worker_agent_id=%s launch_id=%s task_id=%s disposition=%s schedule_id=%s "
-        "duplicate=%s",
+        "cause=%s duplicate=%s",
+        _WHY_RETURNED[handback.evidence.cause],
         agent.id,
         handback.handback_id,
         handback.worker_agent_id,
@@ -102,6 +117,7 @@ async def handle_worker_task_handback(
         handback.handed_back.task_id,
         handback.handed_back.disposition,
         handback.handed_back.schedule_id,
+        handback.evidence.cause,
         not saved,
     )
     status = await agent.task_manager.operations_runtime.run(
@@ -167,6 +183,9 @@ async def _process_handback(
     if (
         skip_status is None
         and handback.handed_back.disposition == "interrupted"
+        # Only a lost lease is a fault; a process on another contract hands its
+        # work back without one (module docstring).
+        and handback.evidence.cause == WIND_DOWN_LEASE_LOST
         # A delegated task's moves between workers are counted by its requester
         # from claim reports (delegated_work_runtime), which also sees moves
         # after a worker crash; counting here too would stop it twice.

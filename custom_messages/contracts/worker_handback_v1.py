@@ -1,9 +1,13 @@
-"""Task handback from a worker runtime that lost its launch lease.
+"""Task handback from a worker runtime that lost its launch lease, or whose process drains.
 
 A spawned worker renews a fenced launch lease from its scheduler loop. Once the
 lease is lost, another owner may hold that launch, so the worker winds down: it
 returns work it has not started and the task it was executing to the TeamLead,
-keeps tasks that wait on a person or subtask until a deadline, then exits.
+keeps tasks that wait on a person or subtask until a deadline, then exits. A
+worker whose process runs another message contract than its installation winds
+down the same way (``custom_agents.contract_drain``), without any fault; the
+evidence's ``cause`` tells the two apart, and only a lost lease counts toward the
+interruption limit (``custom_agents.worker_interruption_escalation``).
 
 Each message carries exactly one task so it stays small and so its identity is
 deterministic per worker launch and task: a resend is a duplicate, not new
@@ -25,6 +29,10 @@ from custom_messages.contracts.task_v1 import Task
 
 HANDBACK_NOT_STARTED = "not_started"
 HANDBACK_INTERRUPTED = "interrupted"
+# Why a worker winds down and hands work back (``WorkerLeaseLossEvidenceV1.cause``).
+WIND_DOWN_LEASE_LOST = "launch_lease_lost"
+WIND_DOWN_OTHER_CONTRACT = "other_message_contract"
+WindDownCause = Literal["launch_lease_lost", "other_message_contract"]
 MAX_HANDBACK_ERROR_ENTRIES = 10
 MAX_HANDBACK_ACTION_NOTES = 50
 MAX_HANDBACK_TEXT = 500
@@ -32,6 +40,9 @@ MAX_HANDBACK_TEXT = 500
 __all__ = [
     "DispatchedActionNoteV1",
     "HandedBackTaskV1",
+    "WIND_DOWN_LEASE_LOST",
+    "WIND_DOWN_OTHER_CONTRACT",
+    "WindDownCause",
     "WorkerLeaseLossEvidenceV1",
     "WorkerTaskHandbackV1",
     "handback_identity",
@@ -52,6 +63,9 @@ class WorkerLeaseLossEvidenceV1(HandbackContract):
     recent_scheduler_errors: tuple[str, ...] = Field(
         default=(), max_length=MAX_HANDBACK_ERROR_ENTRIES
     )
+    # Why it winds down (module docstring). Handbacks saved before the cause was
+    # recorded all came from a lost lease, the only cause there was.
+    cause: WindDownCause = WIND_DOWN_LEASE_LOST
 
 
 class HandedBackTaskV1(HandbackContract):

@@ -7759,6 +7759,15 @@
       "additionalProperties": false,
       "description": "Why the worker stopped: its launch identity and recent scheduler errors.",
       "properties": {
+        "cause": {
+          "default": "launch_lease_lost",
+          "enum": [
+            "launch_lease_lost",
+            "other_message_contract"
+          ],
+          "title": "Cause",
+          "type": "string"
+        },
         "launch_id": {
           "anyOf": [
             {

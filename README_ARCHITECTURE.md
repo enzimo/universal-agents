@@ -4459,7 +4459,10 @@ is not made up, and a final run late beyond `missed_one_time_after_seconds` is t
 with a notice, as for any missed run); the turns in progress finish; a pool worker
 starts no task it has not started and, once its running turns ended, winds down as after a
 lost launch lease, returning those tasks to the team lead, which sends them out again on
-the type's queue, then exits; pool workers run in the team lead's process, so the lead
+the type's queue, then exits (its handbacks carry the cause `other_message_contract`, so its
+log lines and the failure a requester is told name the other contract rather than a lost
+lease, and the lead counts none of them toward the interruption limit, since nothing
+failed); pool workers run in the team lead's process, so the lead
 drains with them, and what they return waits in the lead's queue for a team lead on the
 installation's contract. The team lead and startup agents have no way to hand a task
 back yet (that comes with `task.handback` and the queued work of protocol 1), so they
