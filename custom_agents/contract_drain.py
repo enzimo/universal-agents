@@ -12,13 +12,17 @@ draining an agent means:
    agent, for another agent of the type (the team lead's worker pools start one when tasks
    wait) or for the next team lead; the team lead's process starts no pool or scheduled
    worker while it drains (``custom_agents.worker_pool_controller``,
-   ``custom_agents.schedule_worker_controller``). Its own route, which carries the replies
-   to what it holds, and its controls are still read.
+   ``custom_agents.schedule_worker_controller``), and no draining agent claims a due
+   schedule, whose run it would admit as a task of its own
+   (``scheduled_runtime._schedule_claim_scope``): the schedule stays due for the next team
+   lead on the installation's contract, which fires it once. Its own route, which carries
+   the replies to what it holds, and its controls are still read.
 2. **The turns in progress finish.** A running turn is not stopped.
 3. **What it has not finished goes back where this release has a way.** A pool worker (one
    started with a launch record) starts no task it has not started yet and, once its
    running turns ended, winds down as after a lost launch lease
-   (``custom_agents.lease_loss_wind_down``): the tasks it has not started go back to the
+   (``custom_agents.lease_loss_wind_down``), naming its own cause in its logs and texts and
+   counted as no interruption: the tasks it has not started go back to the
    team lead, which sends them out again on the type's queue; tasks that wait on a person
    or a subtask finish here until that wind-down's deadline, because their replies come to
    this agent; then the worker exits. Pool workers run in the team lead's process, so the
@@ -108,11 +112,12 @@ async def _wind_down_after_running_turns(agent: Any, state: ContractDrain) -> No
 
     from custom_agents.lease_loss_wind_down import start_lease_loss_wind_down
     from custom_agents.turn_registry import executing_task_ids
+    from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_OTHER_CONTRACT
 
     while executing_task_ids(agent) and not agent._should_exit.is_set():
         await asyncio.sleep(TURN_POLL_SECONDS)
     if not agent._should_exit.is_set():
-        start_lease_loss_wind_down(agent, reason=state.reason)
+        start_lease_loss_wind_down(agent, reason=state.reason, cause=WIND_DOWN_OTHER_CONTRACT)
 
 
 async def holds_work(agent: Any) -> bool:
