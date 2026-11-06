@@ -26,7 +26,6 @@
     "conflicts": [
       {
         "resource": "file:team/reports/",
-        "waiting_requests": 1,
         "claims": [
           {
             "claim_id": "claim_5",
@@ -41,21 +40,22 @@
             }
           },
           {
-            "claim_id": "claim_6",
-            "resource": "file:team/",
-            "relation": "above",
-            "ends_at": "2026-10-22T04:40:00.000Z",
-            "holder": {
-              "whose": "team_maintenance"
-            }
-          },
-          {
             "claim_id": "claim_7",
             "resource": "file:team/reports/q1.md",
             "relation": "below",
             "ends_at": "2026-10-22T04:38:00.000Z",
             "holder": {
               "whose": "another_member"
+            }
+          },
+          {
+            "claim_id": "claim_6",
+            "resource": "file:team/reports/archive/",
+            "relation": "below",
+            "ends_at": "2026-10-22T04:40:00.000Z",
+            "holder": {
+              "whose": "team_maintenance",
+              "reason": "Compressing last year's reports."
             }
           },
           {
@@ -69,13 +69,51 @@
               "reason": "Checking the Q2 totals."
             }
           }
-        ]
+        ],
+        "claims_total": 4,
+        "waiting_requests": 1
+      },
+      {
+        "resource": "file:users/person-7c1/notes/archive-plan.md",
+        "claims": [
+          {
+            "claim_id": "claim_12",
+            "resource": "file:users/person-7c1/notes/archive-plan.md",
+            "relation": "exact",
+            "ends_at": "2026-10-22T04:41:00.000Z",
+            "holder": {
+              "whose": "same_person",
+              "root_task_id": "task_root_8a",
+              "title": "Quarterly report thread",
+              "reason": "Adding the Q3 figures to the archive plan."
+            }
+          }
+        ],
+        "claims_total": 1,
+        "waiting_requests": 0
+      },
+      {
+        "resource": "file:team/archive/2025.md",
+        "claims": [
+          {
+            "claim_id": "claim_13",
+            "resource": "file:team/archive/",
+            "relation": "above",
+            "ends_at": "2026-10-22T04:38:00.000Z",
+            "holder": {
+              "whose": "team_maintenance",
+              "reason": "Rebuilding the archive index."
+            }
+          }
+        ],
+        "claims_total": 1,
+        "waiting_requests": 0
       }
     ],
-    "message": "Another of your requests is working under team/reports/ until 04:50."
+    "message": "Another of your requests is working under team/reports/ until 04:50, and this request already holds team/reports/q2.md."
   },
   "causation_id": "01928f3a-7b2c-7c0e-8000-000000000c0e",
   "idempotency_key": "shared_work.claim.reply:CFh0YwbkYagK9pXklM5e_lEOaIxFJn0J6Sbq6QdWsqU",
-  "body_digest": "2JptKkdXhTXuvMZPbmXJCN0nPANoWWeuSQipoYQIuMo",
-  "signature": "6aYIz2M-4yWRAjuPOcxyz6kWR1C5e8ad0oHpEcdO8th4gKQPFM90fEIHPvli0LwuuIL-yHwnmrGxoDJhYqFSDQ"
+  "body_digest": "pf0B8KaQ926L0zIzlcUn3MEHlT6Jvsrc05rYWGz3pRM",
+  "signature": "CaShIjzY_xRbmG0I3qPUgMclg0O7oXzaDP3YFa-k2A_6ZyWUOeMMi3iqotSDz5Eir26Qa6xIdpLBBgx2OganBg"
 }

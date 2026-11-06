@@ -1,0 +1,14 @@
+{
+  "description": "A list asks for at most 64 requests at a time and pages through the rest.",
+  "refusal": "invalid_body",
+  "at": "/body/limit",
+  "base": "shared_work.list/full.json",
+  "changes": [
+    {
+      "set": "/body/limit",
+      "to": 65
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"shared_work.list\", \"message_id\": \"01928f3a-7b2c-7c05-8000-000000000c05\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"lead-host-1\", \"agent\": \"lead\", \"session\": \"s-lead-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-lead-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.lead-host-1.svc.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"authority\": {\"token_id\": \"01928f3a-7b2c-7c05-9000-000000000c05\", \"issuer\": {\"installation\": \"install_example\", \"runtime\": \"gateway-1\", \"membership_epoch\": 1, \"key_id\": \"test-gateway-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\"}, \"person\": \"person_7c1\", \"bound_to\": {\"type\": \"root_task\", \"id\": \"task_root_7f\"}, \"issued_at\": \"2026-10-22T04:29:00.000Z\", \"expires_at\": \"2026-10-23T04:29:00.000Z\", \"algorithm\": \"ed25519\", \"signature\": \"slykm4be-_u7FqNg9HH9q9tPe0vdT05DEnGW3AOw6bamqICcLN-Ouq4ZLVVucknYDdGEHEL21HPWIb9xXPjFAQ\"}, \"algorithm\": \"ed25519\", \"body\": {\"task_id\": \"task_root_7f\", \"offset\": 0, \"limit\": 65}, \"idempotency_key\": \"shared_work.list:iRTEnp3VtnfUhSj4SIgSE_eBncEEGRPEs8OxTdq270Q\", \"body_digest\": \"3PYPBr5TlaSN0nbVjNWMMCm8MCIvYR9qIuQrhmCrhf8\", \"signature\": \"EQwJRjmzOG6YPYauwuhqFCCAEiDNEqxDWSXdizYvw4bMVqEoeI6dAD1Q4-jijf01QqZ9SXnTGZuof70WdzzaDA\"}"
+}

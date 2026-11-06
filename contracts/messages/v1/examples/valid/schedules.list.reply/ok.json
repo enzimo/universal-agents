@@ -30,6 +30,9 @@
         "management_class": "user",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "interval",
           "interval_ms": 86400000
@@ -75,6 +78,9 @@
         "management_class": "user",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "interval",
           "interval_ms": 86400000
@@ -125,6 +131,9 @@
         "management_class": "user",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "cron",
           "expression": "0 9 * * 1#2",
@@ -171,6 +180,9 @@
         "management_class": "user",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "cron",
           "expression": "0 9 * * 1#2",
@@ -221,7 +233,10 @@
         "schedule_id": "sched_user_once_inline",
         "management_class": "user",
         "objective_id": "objective_id_1",
-        "instruction_preview": "Review documentation and report material changes.",
+        "instruction_preview": "Call the dentist to confirm Tuesday's appointment.",
+        "action": {
+          "type": "fixed_message"
+        },
         "timing": {
           "kind": "once",
           "at": "2026-10-23T09:00:00.000Z"
@@ -266,7 +281,10 @@
         "schedule_id": "sched_user_once_blob",
         "management_class": "user",
         "objective_id": "objective_id_1",
-        "instruction_preview": "Review documentation and report material changes.",
+        "instruction_preview": "Call the dentist to confirm Tuesday's appointment.",
+        "action": {
+          "type": "fixed_message"
+        },
         "timing": {
           "kind": "once",
           "at": "2026-10-23T09:00:00.000Z"
@@ -318,6 +336,9 @@
         "management_class": "system",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "interval",
           "interval_ms": 86400000
@@ -366,6 +387,9 @@
         "management_class": "system",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "interval",
           "interval_ms": 86400000
@@ -419,6 +443,9 @@
         "management_class": "system",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "cron",
           "expression": "0 9 * * 1#2",
@@ -468,6 +495,9 @@
         "management_class": "system",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "cron",
           "expression": "0 9 * * 1#2",
@@ -522,6 +552,9 @@
         "management_class": "system",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "once",
           "at": "2026-10-23T09:00:00.000Z"
@@ -570,6 +603,9 @@
         "management_class": "system",
         "objective_id": "objective_id_1",
         "instruction_preview": "Review documentation and report material changes.",
+        "action": {
+          "type": "task"
+        },
         "timing": {
           "kind": "once",
           "at": "2026-10-23T09:00:00.000Z"
@@ -621,6 +657,6 @@
     "total": 12
   },
   "causation_id": "01928f3a-7b2c-742e-8000-00000000042e",
-  "body_digest": "VOGr53jt-XKXZJ_SFuybf6XctvYUAjP-oteeejb44h0",
-  "signature": "hEGdC4nqHclwCFuxGFtjuFo6n5ZJphsV7-9PDdN8dw_9-NxAwsk-uW2lMUkg47jmIoupQPwaD63zOQ13_XBgBA"
+  "body_digest": "BlaYMjSQMogRphY7kEZRd-C20kPGpSfTjM97M38efh8",
+  "signature": "bUNh_G2uEfw88PaBNvbgbq19wP4REAy_xyAmJSVtr2WRK_f0xuJ_u5-8kHLjQoj2FgSPXNN6i9dfjX6MD6PiAw"
 }
