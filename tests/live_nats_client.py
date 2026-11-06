@@ -108,7 +108,7 @@ class LiveNatsQueue:
 
 
 async def delete_team_streams(team_id: str, *, transport: TransportSettings | None = None) -> None:
-    """Delete the streams named for a live test's own team (work, dead letters, presence) when it ends.
+    """Delete the streams named for a live test's own team (its work and dead letters) when it ends.
 
     Each such test runs a team id of its own with a random part, so the streams whose names
     start with that team's stream prefix are its own, also on a shared server, and another
