@@ -4294,6 +4294,10 @@ starts during a short outage, the attempt is tried again every 2 seconds until i
 or the process is stopped, logged the first time and whenever the error changes
 (`team_services_lock_acquire_failed`). The instance serves only after its own write of the
 lock succeeded, and a malformed lock record or a closed NATS connection still stops it.
+Every instance writes the same host record (`team-services` in `UA1_HOSTS`), so only the
+one that holds the lock writes it, once it serves: a standby never looks like the serving
+instance, the record appearing means the team services answer, and an instance that lost
+the lock writes it no more.
 They serve the team's address (`svc.team`) and answer, so far:
 
 - `sessions.open`: the host's certificate must allow the agent's type and have room under

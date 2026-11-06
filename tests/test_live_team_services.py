@@ -20,6 +20,7 @@ import nats
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1.host_keys import ensure_host_keys, load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
@@ -104,9 +105,9 @@ def audience(started: MessageHost) -> dict[str, str]:
     return {"installation": started.identity.installation, **TO_SERVICES}
 
 
-async def open_session(started: MessageHost, agent: str, agent_type: str = "researcher") -> dict:
+async def open_session(started: MessageHost, agent: str, agent_type: str = "researcher", *, attempts: int = 50) -> dict:
     assert started.live is not None
-    for _ in range(50):  # the team services may still be taking the lock
+    for _ in range(attempts):  # the team services may still be taking the lock
         try:
             reply = await started.live.request("sessions.open", {"request_id": f"open-{agent}", "agent": agent,
                                                                  "agent_type": agent_type, "definition_sha256": DEFINITION},
@@ -193,12 +194,17 @@ async def test_a_second_team_services_instance_waits_and_takes_over(broker: str,
         worker = await host(stack, broker, layout, WORKER)
         assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
         with caplog.at_level(logging.WARNING):
-            second = await team_services(stack, broker, layout, second_stop)
+            standby, second = await team_services_host(stack, broker, layout, second_stop)
             for _ in range(50):
                 if "event=team_services_standby" in caplog.text:
                     break
                 await asyncio.sleep(0.1)
         assert "event=team_services_standby" in caplog.text
+        # The standby has not written the team services' host record: it is the serving instance's.
+        hosts = await worker.nc.jetstream().key_value("UA1_HOSTS")
+        assert standby._started_at is not None
+        serving_record = json.loads((await hosts.get(TEAM_SERVICES_RUNTIME)).value)
+        assert serving_record["body"]["started_at"] != format_timestamp(standby._started_at)
         # The first stops and releases the lock; the standby takes over at once and serves.
         with caplog.at_level(logging.INFO):
             first_stop.set()
@@ -210,6 +216,14 @@ async def test_a_second_team_services_instance_waits_and_takes_over(broker: str,
         assert "event=team_services_lock_held" in caplog.text
         entry = await (await worker.nc.jetstream().key_value("UA1_LOCKS")).get(lock_key(TEAM))
         assert json.loads(entry.value)["runtime"] == TEAM_SERVICES_RUNTIME
+        # Serving now, it writes the record.
+        for _ in range(50):
+            taken_over = json.loads((await hosts.get(TEAM_SERVICES_RUNTIME)).value)
+            if taken_over["body"]["started_at"] == format_timestamp(standby._started_at):
+                break
+            await asyncio.sleep(0.1)
+        assert taken_over["body"]["started_at"] == format_timestamp(standby._started_at)
+        assert taken_over["body"]["state"] == "accepting"
         assert (await open_session(worker, "researcher-2"))["outcome"] == "ok"
         second_stop.set()
         await asyncio.wait_for(second, timeout=10)
@@ -429,3 +443,61 @@ async def test_a_host_joins_again_for_an_agent_type_added_while_it_runs(broker: 
         assert (await worker.rejoin(["researcher"])).certificate.membership_epoch == 2
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_host_record_appears_only_once_they_serve(broker: str, tmp_path: Path) -> None:
+    """Plan 13B.4: they take the lock before they publish their host record or serve; the record means they answer."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        worker = await host(stack, broker, layout, WORKER)
+        services = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        published = services.publish_liveness
+        answered_then: list[str] = []
+
+        async def publish_liveness(state: str = "accepting") -> None:
+            if not answered_then:  # the first record: does svc.team answer already?
+                try:
+                    answered_then.append((await open_session(worker, "researcher-1", attempts=1))["outcome"])
+                except AssertionError:
+                    answered_then.append("no responders")
+            await published(state)
+
+        services.publish_liveness = publish_liveness  # type: ignore[method-assign]
+        serving = asyncio.create_task(serve_team(services, TEAM, stop))
+        hosts = await worker.nc.jetstream().key_value("UA1_HOSTS")
+        for _ in range(100):
+            try:
+                await hosts.get(TEAM_SERVICES_RUNTIME)
+                break
+            except Exception:
+                await asyncio.sleep(0.05)
+        assert answered_then == ["ok"]
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_an_instance_that_lost_the_lock_leaves_the_host_record_to_the_one_serving(broker: str, tmp_path: Path,
+                                                                                        monkeypatch) -> None:
+    from team_services import lock as lock_module
+
+    monkeypatch.setattr(lock_module, "RENEW_EVERY", timedelta(seconds=0.2))
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        worker = await host(stack, broker, layout, WORKER)
+        serving = await team_services(stack, broker, layout, stop)
+        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        # Another instance takes the lock (as after this one's lease ran out) and serves.
+        later = format_timestamp(utc_now() + timedelta(seconds=30))
+        await put_raw(worker.nc, "UA1_LOCKS", lock_key(TEAM),
+                      json.dumps({"runtime": TEAM_SERVICES_RUNTIME, "instance": "another", "lease_ends_at": later}).encode())
+        with pytest.raises(lock_module.LockLost):
+            await asyncio.wait_for(serving, timeout=10)
+        record = json.loads((await (await worker.nc.jetstream().key_value("UA1_HOSTS")).get(TEAM_SERVICES_RUNTIME)).value)
+        assert record["body"]["state"] == "accepting"

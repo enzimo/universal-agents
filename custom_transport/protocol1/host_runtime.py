@@ -97,8 +97,12 @@ class MessageHost:
         assert self.live is not None, "start() first"
         return self.live.identity
 
-    async def start(self) -> LiveHost:
-        """Join, read the current trust records and report this host as accepting work."""
+    async def start(self, *, report: bool = True) -> LiveHost:
+        """Join, read the current trust records and report this host as accepting work.
+
+        ``report=False`` leaves the first host record to the caller: the team services
+        write theirs only once they hold their lock and serve.
+        """
 
         now = self.clock()
         keys = load_host_keys(self.layout, self.profile.runtime)
@@ -112,7 +116,8 @@ class MessageHost:
         self.records = StateRecords(self.nc.jetstream(), lambda: self.identity, trust, fetch_trust=self.fetch_trust)
         self._started_at = now
         await self.refresh_trust()
-        await self.publish_liveness("accepting")
+        if report:
+            await self.publish_liveness("accepting")
         return self.live
 
     async def fetch_trust(self, data: bytes) -> bool:
@@ -290,8 +295,12 @@ class MessageHost:
                                      self.profile.digest(), release_version(), contract_sha256()]
         return f"renew-{certificate.membership_epoch}-{b64url(hashlib.sha256(rfc8785.dumps(renewing)).digest())}"
 
-    async def keep_up(self, stop: asyncio.Event) -> None:
-        """Liveness every 10 seconds, trust every half hour and renewal when due, until ``stop`` is set."""
+    async def keep_up(self, stop: asyncio.Event, *, drained: Callable[[], bool] = lambda: True) -> None:
+        """Liveness every 10 seconds, trust every half hour and renewal when due, until ``stop`` is set.
+
+        The last record says the host drained, unless ``drained()`` says otherwise: a team
+        services instance that lost its lock leaves the record to the one serving now.
+        """
 
         while not stop.is_set():
             try:
@@ -308,4 +317,5 @@ class MessageHost:
             except Exception:
                 self.logger.exception("A host upkeep step failed; trying again. event=protocol1_host_upkeep_failed "
                                       "runtime=%s", self.profile.runtime)
-        await self.publish_liveness("drained")
+        if drained():
+            await self.publish_liveness("drained")
