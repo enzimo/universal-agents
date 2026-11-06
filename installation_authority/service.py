@@ -7,7 +7,11 @@ and the registry's write rules for ``certificate`` and ``revocations``:
   that asks again with the key its certificate holds, for the same grants, gets that
   certificate back while more than a third of its life is left; otherwise, when it asks
   for other grants, and on a renewal, it gets a new one with the next membership epoch
-  that ``replaces`` the old one. A host whose key is revoked gets none. A renewal whose
+  that ``replaces`` the old one. A join with the key of the host's current certificate may
+  ask again for the agent types that certificate grants, as a renewal keeps them; any other
+  type must be one the launcher listed for it or, for the team lead's host, one the agent
+  catalog has now. Removing a type from the catalog leaves its running agents running, so
+  the lead's host still asks for it when it joins again for a new type. A host whose key is revoked gets none. A renewal whose
   profile gives up every agent (``HostProfile.giving_up``) gets a certificate that grants
   no agent types and no sessions.
 - **Another contract** (README "Versions"). While the label is a pre-release, a join or
@@ -488,15 +492,16 @@ class InstallationAuthority:
         body = verified.raw["body"]
         runtime, key = str(body["runtime"]), body["application_key"]
         expected = read_expected_hosts(self.layout.trust_expected_hosts_path).get(runtime)
-        denial = _denial(expected, body, self._allowed_agent_types(expected))
+        # verify_frame already refused a join presenting a revoked key (README "Joining").
+        now = self.clock()
+        stored = await self._latest_certificate(runtime)
+        allowed = self._allowed_agent_types(expected) | _held_agent_types(stored, key, now)
+        denial = _denial(expected, body, allowed)
         if denial is not None:
             self.logger.warning("A join was refused. event=host_join_denied runtime=%s reason=%s key_id=%s",
                                 runtime, denial, key["key_id"])
             return {"outcome": "denied", "reason": denial,
                     "message": "This installation takes only the hosts its launcher starts."}
-        # verify_frame already refused a join presenting a revoked key (README "Joining").
-        now = self.clock()
-        stored = await self._latest_certificate(runtime)
         if self._reusable(stored, key["key_id"], key["public_key"], now) and stored is not None \
                 and _grants_exactly(stored["body"], body):
             return {"outcome": "ok", "certificate": stored}
@@ -568,10 +573,30 @@ def _public_text(certificate: HostCertificate) -> str:
     return b64url(certificate.public_key.public_bytes(Encoding.Raw, PublicFormat.Raw))
 
 
+def _held_agent_types(stored: Optional[Mapping[str, Any]], key: Mapping[str, Any], now: datetime) -> frozenset[str]:
+    """The agent types the host's current certificate grants, when the join presents that certificate's key.
+
+    A join from the host that holds them keeps them, as a renewal does (module docstring): a
+    type removed from the catalog leaves its running agents running, and the host asks for its
+    certificate's types again with every new one, so a removed type would otherwise make every
+    later join of that host refused.
+    """
+
+    if stored is None:
+        return frozenset()
+    body = stored["body"]
+    if (body["application_key"]["key_id"], body["application_key"]["public_key"]) != (key["key_id"], key["public_key"]):
+        return frozenset()
+    if parse_timestamp(body["expires_at"]) <= now:
+        return frozenset()
+    return frozenset(body["agent_types"])
+
+
 def _denial(expected: Any, body: Mapping[str, Any], agent_types: frozenset[str]) -> Optional[str]:
     """Why a join is refused, as the reply's reason, or ``None`` when the launcher listed exactly this host.
 
-    ``agent_types`` are the types the host may ask for (``_allowed_agent_types``).
+    ``agent_types`` are the types the host may ask for: those it is listed for or the catalog has
+    (``_allowed_agent_types``), and those its current certificate grants (``_held_agent_types``).
     """
 
     if expected is None:
