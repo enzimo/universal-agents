@@ -4248,7 +4248,9 @@ keys. The hosts still share one NATS login, so a join returns no NATS credential
 
 **Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
 reads the authority's newest revocations record at start and every half hour, renews its
-certificate when two thirds of its life are gone, and writes its own liveness record
+certificate when two thirds of its life are gone (each renewal's id names the certificate,
+the release and the contract digest, so retries keep it and a host upgraded in place never
+gets an earlier renewal's stored answer back), and writes its own liveness record
 (`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
 within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
 writes do not make a running host look gone; nothing moves because of it. It signs its

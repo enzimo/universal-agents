@@ -17,14 +17,18 @@ over time", "State records"):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
-from custom_messages.wire.encoding import format_timestamp
+import rfc8785
+
+from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.kinds import INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.trust import HostCertificate
 from custom_transport.protocol1.bootstrap import read_bundle
 from custom_transport.protocol1.contract_files import contract_sha256
 from custom_transport.protocol1.host_keys import load_host_keys
@@ -178,7 +182,7 @@ class MessageHost:
         certificate = self.identity.certificate
         assert self.live is not None
         reply = await self.live.request("host.renew", {
-            "renew_id": f"renew-{certificate.runtime}-{certificate.membership_epoch}",
+            "renew_id": self.renewal_id(certificate),
             "certificate_id": certificate.certificate_id, "membership_epoch": certificate.membership_epoch,
             "profile_sha256": self.profile.digest(), "contract_sha256": contract_sha256()},
             {"installation": certificate.installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
@@ -195,6 +199,20 @@ class MessageHost:
         self.live.identity = self.live.identity.with_certificate(renewed)
         self.logger.info("Renewed the host certificate. event=protocol1_renewed runtime=%s membership_epoch=%s",
                          certificate.runtime, renewed.membership_epoch)
+
+    def renewal_id(self, certificate: HostCertificate) -> str:
+        """The id of this host's renewal of ``certificate``: kept on every retry, new after an upgrade in place.
+
+        A repeated renewal id gets its stored outcome back (README "Contract digest",
+        "Stored outcomes"), so the id names what renews as well as what is renewed: the
+        certificate, the profile asked for, the software release and the contract digest.
+        A digest of them keeps every id whole within the contract's 128 characters, where
+        cutting a long one could repeat another's.
+        """
+
+        renewing: list[str | int] = [certificate.runtime, certificate.certificate_id, certificate.membership_epoch,
+                                     self.profile.digest(), release_version(), contract_sha256()]
+        return f"renew-{certificate.membership_epoch}-{b64url(hashlib.sha256(rfc8785.dumps(renewing)).digest())}"
 
     async def keep_up(self, stop: asyncio.Event) -> None:
         """Liveness every 10 seconds, trust every half hour and renewal when due, until ``stop`` is set."""
