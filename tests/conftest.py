@@ -117,6 +117,24 @@ def restore_process_environment_between_tests():
             os.environ.update(saved)
 
 
+@pytest.fixture(autouse=True)
+def delete_streams_a_live_nats_test_created(
+    request: pytest.FixtureRequest,
+) -> Generator[None, None, None]:
+    """Remove the streams a test marked ``nats`` created on the shared server, passed or failed.
+
+    See ``tests.live_nats_support.deleting_created_streams``.
+    """
+
+    if request.node.get_closest_marker("nats") is None:
+        yield
+        return
+    from tests.live_nats_support import deleting_created_streams
+
+    with deleting_created_streams():
+        yield
+
+
 @pytest.fixture
 def commands_without_agent():
     """Let the shell and Python tools run commands with no agent behind them.
