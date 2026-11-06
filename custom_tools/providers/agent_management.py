@@ -64,6 +64,16 @@ def _instantiate_agent_request(
     return agent.handle_agent_creation_request(request, header, meta)
 
 
+def _refused_for_another_contract(result: AgentCreationResultV1) -> Optional[str]:
+    """The model's answer when the process runs another message contract and starts no agents; else None."""
+
+    from custom_agents.agent_instantiation_service import LAUNCH_REFUSED_OTHER_CONTRACT, NO_NEW_WORK_MESSAGE
+
+    if result.results and all(item.reason == LAUNCH_REFUSED_OTHER_CONTRACT for item in result.results):
+        return json.dumps({"error": NO_NEW_WORK_MESSAGE, "reason_code": LAUNCH_REFUSED_OTHER_CONTRACT})
+    return None
+
+
 @tool
 def get_known_agents() -> str:
     """
@@ -281,15 +291,16 @@ def instantiate_agent(
         )
 
     try:
-        return _instantiate_agent_request(
+        result = _instantiate_agent_request(
             agent,
             agent_type,
             team_id,
             mcp_profile_names,
             idle_ttl_seconds,
-        ).model_dump_json()
+        )
     except Exception as e:
         return f"Error instantiating agent: {e}"
+    return _refused_for_another_contract(result) or result.model_dump_json()
 
 
 @tool
@@ -408,6 +419,9 @@ def instantiate_team_template(
                 result = _instantiate_agent_request(
                     agent, member_agent_type, target_team_id, mcp_profile_names
                 )
+                refused = _refused_for_another_contract(result)
+                if refused is not None:
+                    return refused  # nothing else would start either
                 if not result.accepted:
                     errors.append(f"{member_agent_type}: {result}")
                     continue

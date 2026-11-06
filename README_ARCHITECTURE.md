@@ -287,7 +287,10 @@ each. They run in parallel on as many workers as the team allows:
 - **Lost workers.** A task whose worker died is taken over by a replacement, or
   handed back to the queue after a lost lease; each move to another worker is
   counted from claims, and after `max_retries_after_worker_loss` (3) moves the
-  task fails as `worker_lost`.
+  task fails as `worker_lost`. A move after a worker whose process runs another
+  message contract handed the task back is recorded but not counted: nothing
+  failed, and the requester reads that hand-back's cause, which the lead saved in
+  the team's database before it sent the task out again.
 - **When the requester wakes.** Its model runs again when every delegated task
   ended, at once when one failed with a typed reason, or when a
   `check_back_after_minutes` set on the delegation passed
@@ -4537,8 +4540,12 @@ again; a join refused that way is not asked for again either. It drains every ag
 agent's own loop. Queued task work still runs on today's queues in this phase, so draining
 an agent means: it leaves the queues every agent of its type shares (its type's queue and,
 for the team lead, the team's), whose messages stay there for another agent of the type,
-which the lead's worker pools start when tasks wait, or for the next team lead; the lead's
-process starts no pool or scheduled worker; no draining agent claims a due schedule, whose
+which the lead's worker pools start when tasks wait, or for the next team lead; no agent
+starts in the process: every start goes through `AgentInstantiationService.launch`, which
+refuses while the process drains (`process_runs_another_message_contract`, logged once per
+request; the model's `instantiate_agent` is told plainly that the process takes no new work),
+and the controllers and the lead's takeover of dead agents' work do not ask while it drains;
+no draining agent claims a due schedule, whose
 run would be a task of its own, so the schedule stays due and the next team lead, on the
 installation's contract, fires it once at its first scheduler pass (a run missed meanwhile
 is not made up, and a final run late beyond `missed_one_time_after_seconds` is turned off

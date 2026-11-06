@@ -22,7 +22,8 @@ draining an agent means:
    started with a launch record) starts no task it has not started yet and, once its
    running turns ended, winds down as after a lost launch lease
    (``custom_agents.lease_loss_wind_down``), naming its own cause in its logs and texts and
-   counted as no interruption: the tasks it has not started go back to the
+   counted as no interruption, nor as a lost worker by a delegated task's requester
+   (``custom_agents.delegated_work_runtime``): the tasks it has not started go back to the
    team lead, which sends them out again on the type's queue; tasks that wait on a person
    or a subtask finish here until that wind-down's deadline, because their replies come to
    this agent; then the worker exits. Pool workers run in the team lead's process, so the
@@ -33,6 +34,14 @@ draining an agent means:
 
 ``holds_work`` tells the host whether an agent still holds an unfinished task or a request
 waiting to be admitted, so the host gives an agent up only once it holds nothing.
+
+**No agent starts in a draining process.** Every start goes through
+``AgentInstantiationService.launch``, which refuses while the agent that asks drains (reason
+``LAUNCH_REFUSED_OTHER_CONTRACT``, one log line): a new agent would take new work here, and a
+replacement for a dead agent would adopt that agent's saved work. Only the team lead's process
+starts agents, and the lead drains with its process. The periodic callers that would otherwise
+be refused at every pass, the worker pool and scheduled-worker controllers and the lead's
+takeover of dead agents' work, ask first and do nothing while it drains.
 """
 
 from __future__ import annotations
