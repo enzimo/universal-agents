@@ -4,13 +4,21 @@ Rules from the message contract's README ("Installation traffic", "Trust over ti
 and the registry's write rules for ``certificate`` and ``revocations``:
 
 - **Certificates** last 30 days and name what the join asked for, never more. A host
-  that asks again with the key its certificate holds gets that certificate back while
-  more than a third of its life is left; otherwise, and on a renewal, it gets a new one
-  with the next membership epoch that ``replaces`` the old one. A host whose key is
-  revoked gets none.
+  that asks again with the key its certificate holds, for the same grants, gets that
+  certificate back while more than a third of its life is left; otherwise, when it asks
+  for other grants, and on a renewal, it gets a new one with the next membership epoch
+  that ``replaces`` the old one. A host whose key is revoked gets none.
 - **The revocations record** is signed again every 6 hours and lasts 24 hours, with a
   sequence above every one before it and at least its issue time in milliseconds, so an
   authority restored from a backup never writes a lower one.
+- **Only its own records count.** Every process shares one NATS login in this phase, so
+  any of them can write ``UA1_CERTS``. The authority uses a record it reads there (the
+  revocations record to sign again, a certificate to hand back) only when it verifies
+  against the authority's own key; it never signs again what does not verify. It signs
+  the next revocations record from the newest one it verified: the bucket's, the
+  bootstrap bundle's or the one it signed last. When the bucket holds a record that
+  does not verify and it has verified none, it does not start (``RevocationsUnverified``):
+  an empty list would accept every revoked host again.
 - **The bootstrap bundle** carries the authority keys, the authority's own
   certificate and the newest revocations record, so a host can check a join reply
   before it has a certificate.
@@ -36,7 +44,7 @@ from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
-from custom_messages.wire.trust import HostCertificate, sign_state
+from custom_messages.wire.trust import AuthorityKey, HostCertificate, TrustStore, sign_state
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.contract_files import transport
@@ -66,6 +74,10 @@ def certificate_key(installation: str, runtime: str, epoch: int) -> str:
 
 def revocations_key(installation: str) -> str:
     return f"revocations.{installation}"
+
+
+class RevocationsUnverified(RuntimeError):
+    """The stored revocations record does not verify and the authority has verified none, so it cannot sign the next one."""
 
 
 @dataclass(frozen=True)
@@ -102,6 +114,9 @@ class InstallationAuthority:
         self._own: dict[str, Any] = {}
         self._revocations: dict[str, Any] = {}
         self._lock = asyncio.Lock()
+        # The authority host's trust store, opened first at start: it keeps the newest
+        # revocations record across restarts and serves the live host afterwards.
+        self._trust: Optional[PersistentTrustStore] = None
 
     @property
     def installation(self) -> str:
@@ -158,14 +173,16 @@ class InstallationAuthority:
         teams = sorted(set(teams))
         await self.ensure_topology(teams)
         now = self.clock()
+        trust = self._trust = PersistentTrustStore.open(read_bundle(self.layout.trust_bootstrap_path),
+                                                        self.layout.host_trust_dir(AUTHORITY_RUNTIME), now)
         revocations = await self._sign_revocations(now)
         own = await self._own_certificate(teams, revocations["body"]["revocation_epoch"], now)
         self._own = own
-        bundle = self._publish_bundle()
-        trust = PersistentTrustStore.open(bundle, self.layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+        trust.add(_encoded(own), now=now)
+        self._publish_bundle()
         certificate = trust.store.host_certificate(self.installation, AUTHORITY_RUNTIME,
                                                    int(own["body"]["membership_epoch"]))
-        assert certificate is not None  # just signed with the bundle's authority key
+        assert certificate is not None  # it verified against the authority's own key
         self.live = LiveHost(nc, HostIdentity(self.host_keys, certificate), trust, clock=self.clock, logger=self.logger)
         await self._take_issued_certificates(now)
         await self.live.serve(_INSTALLATION_ADDRESS, Receiver(self.installation, INSTALLATION_SCOPE, "installation_service",
@@ -206,26 +223,95 @@ class InstallationAuthority:
     async def _records(self) -> Any:
         return await self._js.key_value(CERTIFICATES_BUCKET)
 
-    async def _stored(self, key: str) -> Optional[dict[str, Any]]:
+    async def _stored_data(self, key: str) -> Optional[bytes]:
         try:
             entry = await (await self._records()).get(key)
         except KeyNotFoundError:
             return None
-        return json.loads(entry.value) if entry.value else None
+        return entry.value or None
+
+    def _own_record(self, data: bytes, record: str, key: str, now: datetime) -> dict[str, Any]:
+        """``data`` as a ``record`` under ``key`` that this authority signed; raises ``FrameRefused`` otherwise.
+
+        It is checked as every receiver checks a trust record (``TrustStore.add``), by a
+        store that trusts the authority's own key alone, so nothing another process wrote
+        to the bucket is used or signed again.
+        """
+
+        own_key = AuthorityKey(self.installation, self.authority.key_id, self.authority.private_key.public_key())
+        TrustStore(self.installation, [own_key]).add(data, now=now)
+        document: dict[str, Any] = json.loads(data)
+        if document["record"] != record or document["key"] != key:
+            raise FrameRefused("invalid_body", f"a {document['record']} record of {document['key']} is stored under {key}",
+                               at="/key")
+        return document
+
+    async def _stored(self, record: str, key: str, now: datetime) -> Optional[dict[str, Any]]:
+        """The ``record`` this authority wrote under ``key``; ``None`` when absent or when it does not verify (logged)."""
+
+        data = await self._stored_data(key)
+        if data is None:
+            return None
+        try:
+            return self._own_record(data, record, key, now)
+        except FrameRefused as refused:
+            self.logger.error("A stored record does not verify against the authority's key and is not used. "
+                              "event=stored_record_refused key=%s code=%s at=%s", key, refused.code, refused.at)
+            return None
+
+    def _newest_revocations(self, stored: Optional[bytes], now: datetime) -> Optional[dict[str, Any]]:
+        """The newest revocations record this authority signed, of the one it holds, the bundle's and the bucket's.
+
+        ``stored`` is the bucket's value. Returns ``None`` only when there is no record
+        at all, on the first start; raises ``RevocationsUnverified`` when the bucket holds
+        one that does not verify and none verified: signing an empty list would accept
+        every revoked host again.
+        """
+
+        key = revocations_key(self.installation)
+        candidates: list[Mapping[str, Any]] = [self._revocations] if self._revocations else []
+        candidates += [record for record in read_bundle(self.layout.trust_bootstrap_path).records
+                       if record.get("record") == "revocations"]
+        verified: list[dict[str, Any]] = []
+        for candidate in candidates:
+            try:
+                verified.append(self._own_record(_encoded(candidate), "revocations", key, now))
+            except FrameRefused as refused:
+                self.logger.warning("A held revocations record does not verify and is not used. "
+                                    "event=held_revocations_refused key=%s code=%s at=%s", key, refused.code, refused.at)
+        refused_stored: Optional[FrameRefused] = None
+        if stored is not None:
+            try:
+                verified.append(self._own_record(stored, "revocations", key, now))
+            except FrameRefused as refused:
+                refused_stored = refused
+                self.logger.error("The stored revocations record does not verify against the authority's key; it is "
+                                  "replaced, never signed again. event=stored_revocations_refused key=%s code=%s at=%s "
+                                  "held=%s", key, refused.code, refused.at, bool(verified))
+        if verified:
+            return max(verified, key=lambda record: int(record["sequence"]))
+        if refused_stored is not None:
+            raise RevocationsUnverified(
+                f"The stored revocations record {key} does not verify ({refused_stored.code}) and the authority holds no "
+                "verified one, so it cannot tell which hosts are revoked and does not start. Restore the instance's "
+                f"trust folder from a backup, or delete {key} from the {CERTIFICATES_BUCKET} bucket to start an empty "
+                "list, which forgets every revocation.")
+        return None
 
     async def _sign_revocations(self, now: datetime) -> dict[str, Any]:
-        """The next revocations record: the stored one's entries, a higher sequence, and a day's life."""
+        """The next revocations record: the newest verified one's entries, a higher sequence, and a day's life."""
 
         async with self._lock:
-            stored = await self._stored(revocations_key(self.installation)) or self._revocations or None
-            entries = stored["body"]["entries"] if stored else []
-            epoch = int(stored["body"]["revocation_epoch"]) if stored else 1
-            sequence = max(int(stored["sequence"]) + 1 if stored else 1, int(now.timestamp() * 1000))
+            held = self._newest_revocations(await self._stored_data(revocations_key(self.installation)), now)
+            entries = held["body"]["entries"] if held else []
+            epoch = int(held["body"]["revocation_epoch"]) if held else 1
+            sequence = max(int(held["sequence"]) + 1 if held else 1, int(now.timestamp() * 1000))
             record = self.revocations_record(sequence=sequence, revocation_epoch=epoch, entries=entries, issued=now)
-            await (await self._records()).put(revocations_key(self.installation), json.dumps(record).encode())
+            await (await self._records()).put(revocations_key(self.installation), _encoded(record))
             self._revocations = record
-            if self.live is not None:
-                self.live.trust.add(json.dumps(record).encode(), now=now)
+            if self._trust is not None:
+                self._trust.add(_encoded(record), now=now)
+            if self._own:
                 self._publish_bundle()
             return record
 
@@ -257,27 +343,32 @@ class InstallationAuthority:
         except (NoKeysError, NotFoundError):  # no key in the bucket yet
             return
         for key in keys:
-            stored = await self._stored(key)
+            stored = await self._stored("certificate", key, now)
             if stored is None:
                 continue
             try:
-                self.live.trust.add(json.dumps(stored).encode(), now=now)
+                self.live.trust.add(_encoded(stored), now=now)
             except FrameRefused as refused:
                 # An ended or revoked certificate no longer counts; renewals with it are refused.
                 self.logger.info("A stored certificate is not taken. event=stored_certificate_skipped key=%s code=%s",
                                  key, refused.code)
 
-    async def _latest_certificate(self, runtime: str) -> Optional[dict[str, Any]]:
-        """The stored certificate of ``runtime`` with the highest membership epoch."""
+    async def _stored_epochs(self, runtime: str) -> list[int]:
+        """The membership epochs of the keys stored for ``runtime``'s certificates, highest first."""
 
         prefix = f"host.{self.installation}.{runtime}."
         try:
             keys = [key for key in await (await self._records()).keys() if key.startswith(prefix)]
         except (NoKeysError, NotFoundError):  # the bucket holds no keys yet
             keys = []
-        epochs = sorted((int(key.rsplit(".", 1)[1]) for key in keys if key.rsplit(".", 1)[1].isdigit()), reverse=True)
-        for epoch in epochs:
-            stored = await self._stored(certificate_key(self.installation, runtime, epoch))
+        return sorted((int(key.rsplit(".", 1)[1]) for key in keys if key.rsplit(".", 1)[1].isdigit()), reverse=True)
+
+    async def _latest_certificate(self, runtime: str) -> Optional[dict[str, Any]]:
+        """The stored certificate of ``runtime`` with the highest membership epoch that this authority signed."""
+
+        now = self.clock()
+        for epoch in await self._stored_epochs(runtime):
+            stored = await self._stored("certificate", certificate_key(self.installation, runtime, epoch), now)
             if stored is not None:
                 return stored
         return None
@@ -305,14 +396,17 @@ class InstallationAuthority:
 
     async def _issue(self, request: CertificateRequest, previous: Optional[Mapping[str, Any]], revocation_epoch: int,
                      now: datetime) -> dict[str, Any]:
-        epoch = int(previous["body"]["membership_epoch"]) + 1 if previous else 1
+        # Above every stored key, also one whose record did not verify: hosts may hold the
+        # certificate it held before, and an epoch names one certificate only.
+        epoch = max([int(previous["body"]["membership_epoch"]) if previous else 0,
+                     *await self._stored_epochs(request.runtime)]) + 1
         replaces = previous["body"]["certificate_id"] if previous and parse_timestamp(previous["body"]["expires_at"]) > now \
             else None
         record = self.certificate_record(request, epoch=epoch, revocation_epoch=revocation_epoch, issued=now,
                                          replaces=replaces)
-        await (await self._records()).put(certificate_key(self.installation, request.runtime, epoch), json.dumps(record).encode())
-        if self.live is not None:
-            self.live.trust.add(json.dumps(record).encode(), now=now)
+        await (await self._records()).put(certificate_key(self.installation, request.runtime, epoch), _encoded(record))
+        if self._trust is not None:
+            self._trust.add(_encoded(record), now=now)
         self.logger.info("Issued a host certificate. event=host_certificate_issued runtime=%s membership_epoch=%s "
                          "key_id=%s replaces=%s", request.runtime, epoch, request.key_id, replaces)
         return record
@@ -355,7 +449,7 @@ class InstallationAuthority:
         now = self.clock()
         stored = await self._latest_certificate(runtime)
         if self._reusable(stored, key["key_id"], key["public_key"], now) and stored is not None \
-                and _grants_at_most(stored["body"], body):
+                and _grants_exactly(stored["body"], body):
             return {"outcome": "ok", "certificate": stored}
         request = CertificateRequest(runtime=runtime, teams=tuple(body["teams"]), roles=tuple(body["roles"]),
                                      agent_types=tuple(body["agent_types"]), session_limit=int(body["session_limit"]),
@@ -385,6 +479,10 @@ class InstallationAuthority:
         return {"outcome": "ok", "certificate": record}
 
 
+def _encoded(record: Mapping[str, Any]) -> bytes:
+    return json.dumps(record).encode()
+
+
 def _profile_of(teams: Iterable[str]) -> str:
     return HostProfile(AUTHORITY_RUNTIME, tuple(teams), ("installation_authority",)).digest()
 
@@ -410,10 +508,14 @@ def _denial(expected: Any, body: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
-def _grants_at_most(certificate: Mapping[str, Any], asked: Mapping[str, Any]) -> bool:
-    """Whether a stored certificate grants no more than a join now asks for, so it may be handed back."""
+def _grants_exactly(certificate: Mapping[str, Any], asked: Mapping[str, Any]) -> bool:
+    """Whether a stored certificate grants just what a join now asks for, so it may be handed back.
 
-    return (set(certificate["teams"]) <= set(asked["teams"]) and set(certificate["roles"]) <= set(asked["roles"])
-            and set(certificate["agent_types"]) <= set(asked["agent_types"])
-            and int(certificate["session_limit"]) <= int(asked["session_limit"])
+    A join asking for more (a new specialist type for the team lead's host) or for less
+    gets a new certificate with the next membership epoch, which replaces the old one.
+    """
+
+    return (set(certificate["teams"]) == set(asked["teams"]) and set(certificate["roles"]) == set(asked["roles"])
+            and set(certificate["agent_types"]) == set(asked["agent_types"])
+            and int(certificate["session_limit"]) == int(asked["session_limit"])
             and certificate["connection_class"] == asked["connection_class"])
