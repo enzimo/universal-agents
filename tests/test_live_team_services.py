@@ -18,7 +18,9 @@ from pathlib import Path
 
 import nats
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1.host_keys import ensure_host_keys, load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
@@ -267,3 +269,105 @@ async def test_a_host_that_renews_its_certificate_keeps_writing_records_readers_
         assert other.live.trust.store.verify(json.dumps(host_record).encode(), record="host", now=later).signer is not None
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+def forged(document: dict, **body: object) -> dict:
+    """``document`` with ``body`` changes, signed by a key that is not the team services': what any process with the
+    shared NATS login can write to the buckets."""
+
+    return sign_state({**document, "body": {**document["body"], **body}}, Ed25519PrivateKey.generate())
+
+
+async def put_raw(nc, bucket: str, key: str, value: bytes) -> None:
+    await (await nc.jetstream().key_value(bucket)).put(key, value)
+
+
+async def renew_session(started: MessageHost, session: str) -> dict:
+    assert started.live is not None
+    reply = await started.live.request("sessions.renew", {"request_id": f"renew-{session}-{time.monotonic_ns()}",
+                                                          "session": session}, audience(started), team=TEAM)
+    return reply.raw["body"]
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_use_only_the_placements_and_sessions_they_signed(broker: str, tmp_path: Path,
+                                                                                  caplog) -> None:
+    """Every process shares one NATS login, so any of them can write UA1_PLACEMENT and UA1_CERTS."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        writer = await connect(stack, broker, "writer")
+        opened = await open_session(worker, "researcher-1")
+        session = opened["session"]
+        name, installation_id = session["body"]["session"], session["body"]["installation"]
+        placement = json.loads((await (await writer.jetstream().key_value("UA1_PLACEMENT")).get(f"{TEAM}.researcher-1")).value)
+
+        with caplog.at_level(logging.WARNING):
+            # A session written for a lead the team services never placed, with its placement: renewing it must not
+            # get it signed.
+            lead = forged(session, session="s-lead-1-1", agent="lead-1", agent_type="TeamArchitect", agent_role="lead")
+            lead["key"] = f"session.{installation_id}.{TEAM}.s-lead-1-1"
+            lead = forged(lead)
+            await put_raw(writer, "UA1_CERTS", lead["key"], json.dumps(lead).encode())
+            lead_placement = forged({**placement, "key": f"{TEAM}.lead-1"}, agent="lead-1", agent_type="TeamArchitect")
+            await put_raw(writer, "UA1_PLACEMENT", f"{TEAM}.lead-1", json.dumps(lead_placement).encode())
+            assert (await renew_session(worker, "s-lead-1-1"))["outcome"] == "not_found"
+
+            # A genuine session written over with a lead role: the renewal re-signs what the team services signed.
+            await put_raw(writer, "UA1_CERTS", session["key"], json.dumps(forged(session, agent_role="lead")).encode())
+            renewed = await renew_session(worker, name)
+            assert renewed["outcome"] == "ok" and renewed["session"]["body"]["agent_role"] == "worker"
+            assert renewed["session"]["sequence"] == session["sequence"] + 1
+
+            # A placement written for an agent on another host does not keep it off this one, and an unreadable
+            # placement does not stop the host's sessions.
+            elsewhere = forged({**placement, "key": f"{TEAM}.researcher-9"}, agent="researcher-9", host=OTHER.runtime)
+            await put_raw(writer, "UA1_PLACEMENT", f"{TEAM}.researcher-9", json.dumps(elsewhere).encode())
+            await put_raw(writer, "UA1_PLACEMENT", f"{TEAM}.researcher-8", b"not a record")
+            placed = await open_session(worker, "researcher-9")
+            assert placed["outcome"] == "ok" and placed["session"]["body"]["runtime"] == WORKER.runtime
+            # A genuine placement copied under another agent's key is not that agent's either.
+            await put_raw(writer, "UA1_PLACEMENT", f"{TEAM}.researcher-7", json.dumps(placement).encode())
+            assert (await open_session(worker, "researcher-7"))["outcome"] == "limit_reached"
+        refusals = [record.getMessage() for record in caplog.records if "event=team_services_record_refused" in
+                    record.getMessage()]
+        assert any(f"key=session.{installation_id}.{TEAM}.s-lead-1-1" in line and "code=bad_signature" in line
+                   for line in refusals)
+        assert any(f"key={TEAM}.researcher-8" in line and "code=malformed" in line for line in refusals)
+        assert any(f"key={TEAM}.researcher-7" in line for line in refusals)
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_session_signed_before_the_team_services_renewed_and_restarted_is_still_renewed(broker: str,
+                                                                                                tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    first_stop, second_stop = asyncio.Event(), asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        services, first = await team_services_host(stack, broker, layout, first_stop)
+        worker = await host(stack, broker, layout, WORKER)
+        session = (await open_session(worker, "researcher-1"))["session"]
+        await services.renew()
+        first_stop.set()
+        await asyncio.wait_for(first, timeout=10)
+        # A new process, whose trust store has only the renewed certificate: the session's signer is read from
+        # UA1_CERTS.
+        restarted, second = await team_services_host(stack, broker, layout, second_stop)
+        for _ in range(50):
+            try:
+                renewed = await renew_session(worker, session["body"]["session"])
+                break
+            except Exception as error:  # no responders while the new instance starts
+                if "no responders" not in str(error):
+                    raise
+                await asyncio.sleep(0.1)
+        assert renewed["outcome"] == "ok" and renewed["session"]["writer"]["membership_epoch"] == 2
+        assert restarted.identity.certificate.membership_epoch == 2
+        second_stop.set()
+        await asyncio.wait_for(second, timeout=10)

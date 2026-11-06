@@ -4264,7 +4264,12 @@ checks the frame again, once.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
 `team-services` with the `team_services` and `scheduler` roles (plan decisions 44 and 58),
-started by the launcher right after the authority. One instance serves a team at a time:
+started by the launcher right after the authority. They use a placement or session they
+read from `UA1_PLACEMENT` or `UA1_CERTS` only when it verifies (signed by a team services
+host and stored under its own key), since every process shares one NATS login and can
+write there: one that does not counts as absent and is logged with its key and the
+refusal (`team_services_record_refused`), and a renewal or close signs again only the
+session they hold. One instance serves a team at a time:
 it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, holding a
 30-second lease renewed every 10 seconds. The lock names the process instance, not only
 the runtime, so a second copy of the same host, or a restart while the old process still

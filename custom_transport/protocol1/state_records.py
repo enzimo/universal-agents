@@ -91,7 +91,11 @@ class StateRecords:
 
     async def read_report(self, record: str, key: str, *, now: datetime,
                           held: Optional[tuple[int, str]] = None) -> Optional[StoredRecord]:
-        """Read and verify one state report (host, agent, placement, team view, block list); ``None`` when absent."""
+        """Read and verify one state report (host, agent, placement, team view, block list); ``None`` when absent.
+
+        A record stored under another key than its own is refused (``invalid_body`` at
+        ``/key``): a copy of another agent's record is not this one's.
+        """
 
         entry = await self._get(record, key)
         if entry is None:
@@ -102,18 +106,27 @@ class StateRecords:
             if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
                 raise
             verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        if verified.document.key != key:
+            raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
         return StoredRecord(int(entry.revision), verified)
 
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
         """Read one trust record (certificate, revocations, session, agreement) into the trust store.
 
-        Returns whether the store took it as new; a missing key takes nothing.
+        Returns whether the store took it as new; a missing key takes nothing. A record
+        whose signer's certificate this host does not hold yet, such as a session the team
+        services signed before they renewed, is taken after reading that certificate.
         """
 
         entry = await self._get(record, key)
         if entry is None:
             return False
-        return self._trust.add(entry.value, now=now)
+        try:
+            return self._trust.add(entry.value, now=now)
+        except FrameRefused as refused:
+            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
+                raise
+            return self._trust.add(entry.value, now=now)
 
     async def _get(self, record: str, key: str) -> Any:
         bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
