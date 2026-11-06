@@ -131,6 +131,12 @@ async def test_a_host_gets_renews_and_closes_its_agents_sessions(broker: str, tm
         assert opened["outcome"] == "ok"
         session = opened["session"]
         assert (session["body"]["agent_role"], session["body"]["runtime"]) == ("worker", WORKER.runtime)
+        # The team services' certificate names their role only: they sign no authority tokens and run no schedules.
+        assert worker.live is not None
+        services_certificate = worker.live.trust.store.issued_certificate(json.loads(
+            (await (await worker.nc.jetstream().key_value("UA1_CERTS")).get(
+                f"host.{session['body']['installation']}.{TEAM_SERVICES_RUNTIME}.1")).value))
+        assert services_certificate.roles == frozenset({"team_services"})
         # The host keeps the session and may now sign for the agent.
         assert worker.live is not None
         worker.live.trust.add(json.dumps(session).encode(), now=worker.clock())

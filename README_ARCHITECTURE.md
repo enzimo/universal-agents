@@ -4268,8 +4268,9 @@ from `UA1_CERTS`, where the authority and the team services publish them, verifi
 checks the frame again, once.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
-`team-services` with the `team_services` and `scheduler` roles (plan decisions 44 and 58),
-started by the launcher right after the authority. They use a placement or session they
+`team-services` with the `team_services` role (plan decision 44; scheduled runs are still
+signed in the team lead's process, so no `scheduler` role), started by the launcher right
+after the authority. They use a placement or session they
 read from `UA1_PLACEMENT` or `UA1_CERTS` only when it verifies (signed by a team services
 host and stored under its own key), since every process shares one NATS login and can
 write there: one that does not counts as absent and is logged with its key and the

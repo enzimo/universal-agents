@@ -30,8 +30,7 @@ from team_services.service import TeamServices
 from team_services.sessions import SessionService
 
 TEAM_SERVICES_RUNTIME = "team-services"
-# Plan decision 58: the scheduler role (signing scheduled runs) runs in this process.
-TEAM_SERVICES_ROLES = ("team_services", "scheduler")
+TEAM_SERVICES_ROLES = ("team_services",)
 _LOGGER = logging.getLogger("team_services")
 
 
