@@ -277,6 +277,10 @@
         "retry_at": {
           "$ref": "../common.schema.json#/$defs/timestamp"
         },
+        "claim": {
+          "description": "When another request's claim made it wait: that claim.",
+          "$ref": "../common.schema.json#/$defs/busy_claim"
+        },
         "message": {
           "$ref": "../common.schema.json#/$defs/short_text"
         }

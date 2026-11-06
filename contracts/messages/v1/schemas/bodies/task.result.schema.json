@@ -36,13 +36,13 @@
       "$ref": "../common.schema.json#/$defs/short_text"
     },
     "coordination": {
-      "description": "What happened to this task's coordination that its requester may need to plan around, added by trusted code; absent when nothing did.",
+      "description": "What happened to this task's coordination that its requester may need to plan around, added by trusted code: at most one event of each kind; absent when nothing did.",
       "type": "array",
       "items": {
         "$ref": "../common.schema.json#/$defs/coordination_event"
       },
       "minItems": 1,
-      "maxItems": 8
+      "maxItems": 6
     },
     "outcome": {
       "oneOf": [

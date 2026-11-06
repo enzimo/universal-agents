@@ -32,6 +32,9 @@ NOW = datetime(2026, 10, 22, 4, 30, 1, tzinfo=timezone.utc)
 RECORD_ORDER = ("agreement", "certificate", "revocations", "agent_session")
 # The receiving host when a frame's audience names none.
 RECEIVING_HOST = "receiving-host"
+# The fixed digest the examples' joins, renewals and host records carry (README, "Examples"):
+# the examples' receivers run it, since the real digest covers the examples themselves.
+EXAMPLE_CONTRACT_SHA256 = "c734d95cdcb5b0081997c039906cf13cf3eeef0e0ef105160fb1138c5f6a2f60"
 # Edge routes the examples' edge adapter serves for outside agents (others are gateway routes).
 OUTSIDE_EDGES = {"a2a_partner"}
 _UNSET: Any = object()
@@ -59,7 +62,7 @@ def trust_store(add: Iterable[str] = (), remove: Iterable[str] = (), extra_docum
     names = [name for name in default_records() if name not in set(remove)] + list(add)
     documents = [(TRUST / name).read_bytes() for name in names] + list(extra_documents)
     documents.sort(key=lambda data: RECORD_ORDER.index(json.loads(data)["record"]))
-    store = TrustStore(anchors()[0].installation, anchors())
+    store = TrustStore(anchors()[0].installation, anchors(), contract_sha256=EXAMPLE_CONTRACT_SHA256)
     for data in documents:
         store.add(data, now=now)
     return store
