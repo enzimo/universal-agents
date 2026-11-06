@@ -152,12 +152,6 @@ class StateRecords:
         except NoKeysError:
             return []
 
-    async def raw(self, record: str, key: str) -> Optional[bytes]:
-        """One record as stored, unverified (to find which host wrote it before removing it)."""
-
-        entry = await self._get(record, key)
-        return None if entry is None else bytes(entry.value)
-
     async def watch(self, record: str, keys: str = ">", *,
                     caught_up: Optional[asyncio.Event] = None) -> AsyncIterator[tuple[str, Optional[bytes]]]:
         """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or purged.
