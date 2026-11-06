@@ -39,8 +39,9 @@ Why it is shaped this way:
   (README "Stored outcomes").
 - **Only verified records.** The placements read at start, to close the sessions an
   earlier run left, are verified like every record (signed by the team services and
-  stored under their own key); one that does not verify counts as absent and is logged,
-  and one bad key never keeps the agents from their sessions.
+  stored under their own key), and so are the agent records it removes (signed by this
+  host); one that does not verify counts as absent and is logged, and one bad key never
+  keeps the agents from their sessions.
 - **The agent's own loop does the work.** A request for a thread worker arrives on the
   host's loop and runs on the worker's loop (``run_coroutine_threadsafe``), where its task
   manager lives.
@@ -678,15 +679,29 @@ class AgentProcessHost:
             agent_id = key.removeprefix(f"{self.team}.")
             if agent_id == key or agent_id in self.agents:
                 continue
-            raw = await self.host.records.raw("agent", key)
             try:
-                writer = json.loads(raw or b"{}").get("writer", {}).get("runtime")
-            except ValueError:
-                continue
-            if writer == self.profile.runtime:
-                await self._remove_record(key, agent_id)
-                self.logger.info("Removed an agent record an earlier run of this host left behind. "
-                                 "event=agent_record_stale_removed runtime=%s agent=%s", self.profile.runtime, agent_id)
+                await self._remove_earlier_record(key, agent_id)
+            except Exception:
+                # One record that cannot be read or removed never keeps the agents from their sessions.
+                self.logger.exception("An earlier agent record could not be removed. "
+                                      "event=agent_record_stale_remove_failed runtime=%s key=%s", self.profile.runtime, key)
+
+    async def _remove_earlier_record(self, key: str, agent_id: str) -> None:
+        """Remove the record when it verifies as one this host wrote; one that does not verify is left and logged."""
+
+        assert self.host is not None and self.host.records is not None
+        try:
+            stored = await self.host.records.read_report("agent", key, now=self.host.clock())
+        except FrameRefused as refused:
+            self.logger.warning("A stored record does not verify and counts as absent. event=agent_host_record_refused "
+                                "runtime=%s record=agent key=%s code=%s at=%s", self.profile.runtime, key, refused.code,
+                                refused.at)
+            return
+        if stored is None or stored.record.signer is None or stored.record.signer.runtime != self.profile.runtime:
+            return
+        await self._remove_record(key, agent_id)
+        self.logger.info("Removed an agent record an earlier run of this host left behind. "
+                         "event=agent_record_stale_removed runtime=%s agent=%s", self.profile.runtime, agent_id)
 
     async def _renew_sessions(self) -> None:
         while True:

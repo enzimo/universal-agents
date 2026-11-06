@@ -80,12 +80,30 @@ class _Live:
         return _Subscription()
 
 
+class _Records:
+    """Stands in for ``StateRecords``: keeps the agent records written and removed."""
+
+    def __init__(self) -> None:
+        self.written: list[dict[str, Any]] = []
+        self.removed: list[str] = []
+
+    def signed(self, record: str, key: str, body: dict[str, Any], *, sequence: int, issued_at: datetime) -> dict:
+        return {"record": record, "key": key, "body": body}
+
+    async def put(self, record: str, key: str, document: dict[str, Any]) -> int:
+        self.written.append(document)
+        return 1
+
+    async def delete(self, record: str, key: str) -> None:
+        self.removed.append(key)
+
+
 class _Host:
     """Stands in for ``MessageHost``: joined, with a certificate naming ``agent_types``."""
 
     def __init__(self, agent_types: Iterable[str], *, grant: bool = True) -> None:
         self.live = _Live(agent_types)
-        self.records: Any = SimpleNamespace()
+        self.records: Any = _Records()
         self.rejoined: list[list[str]] = []
         self.grant = grant
         self.reports = 0
@@ -428,3 +446,35 @@ async def test_a_start_closes_earlier_sessions_only_from_placements_that_verify(
     refused = _events(caplog, "agent_host_record_refused")
     assert len(refused) == 1 and f"key={TEAM}.forged" in refused[0] and "code=wrong_issuer" in refused[0]
     assert _events(caplog, "agent_host_stale_session_close_failed")
+
+
+@pytest.mark.asyncio
+async def test_a_start_removes_only_the_earlier_agent_records_that_verify_as_its_own(caplog) -> None:
+    process, _ = _process()
+    mine = SimpleNamespace(signer=SimpleNamespace(runtime="lead"))
+    theirs = SimpleNamespace(signer=SimpleNamespace(runtime="agent-Researcher"))
+    stored: dict[str, Any] = {
+        f"{TEAM}.forged": FrameRefused("bad_signature", at="/signature"),
+        f"{TEAM}.removed": None,
+        f"{TEAM}.broken": RuntimeError("nats: timeout"),
+        f"{TEAM}.old_1": StoredRecord(4, mine),  # type: ignore[arg-type]
+        f"{TEAM}.other_host": StoredRecord(2, theirs),  # type: ignore[arg-type]
+    }
+    records = process.host.records  # type: ignore[union-attr]
+
+    async def keys(record: str) -> list[str]:
+        return [*stored, "other_team.z"]
+
+    async def read_report(record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+        assert record == "agent"
+        found = stored[key]
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+    records.keys, records.read_report = keys, read_report
+    with caplog.at_level(logging.WARNING, logger=agent_host.__name__):
+        await process._remove_earlier_records()
+    assert records.removed == [f"{TEAM}.old_1"]
+    assert "event=agent_host_record_refused" in caplog.text and f"key={TEAM}.forged" in caplog.text
+    assert "event=agent_record_stale_remove_failed" in caplog.text
