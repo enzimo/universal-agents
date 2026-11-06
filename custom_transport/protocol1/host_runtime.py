@@ -18,7 +18,18 @@ over time", "State records"):
   healthy (``components``, each with a code saying why), such as an agent whose session
   the team services refused; the gateway shows them as Status page findings (plan 13B.5).
   The host is then ``degraded``: it still serves everything else. When they change, the
-  host writes its record again at once (``report_now``) rather than at the next interval.
+  host writes its record again at once (``report_now``) rather than at the next interval;
+- **notice another contract** (README "Versions"). While the label is a pre-release, hosts
+  of one installation refuse a peer whose contract digest differs. A host learns that it
+  runs another contract than the installation from the team services' host record, which
+  it reads when it starts and whenever it changes (``follow_contract``), or from a
+  ``protocol_mismatch`` answer to its join or renewal. It logs both digests once and tells
+  its listeners (``on_other_contract``), which drain its work; its record then says
+  ``draining`` (``drain``) and, once it holds nothing, ``drained`` (``finish_drain``). From
+  then on it renews only to give up its agents (``HostProfile.giving_up``): a renewal for
+  more is turned away, so it asks for none while it drains. The host's own digest is its
+  code's (``kinds.CONTRACT_SHA256``); a test may run a host on another one
+  (``contract_sha256``).
 """
 
 from __future__ import annotations
@@ -34,10 +45,10 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 import rfc8785
 
 from custom_messages.wire.encoding import b64url, format_timestamp
-from custom_messages.wire.kinds import INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import HostCertificate
 from custom_transport.protocol1.bootstrap import read_bundle
-from custom_transport.protocol1.contract_files import contract_sha256
 from custom_transport.protocol1.host_keys import load_host_keys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import (
@@ -93,6 +104,13 @@ class MessageHost:
     # The parts of the host that are not healthy, as the host record lists them (module docstring):
     # each ``{"component": <token id>, "state": "degraded" or "unhealthy", "code": <why>}``.
     components: Callable[[], Sequence[Mapping[str, str]]] = field(default=lambda: ())
+    # The contract this host runs (module docstring): its code's, unless a test runs it on another.
+    contract_sha256: str = CONTRACT_SHA256
+    # What its record says: accepting, then draining and drained once it runs another contract than the installation.
+    state: str = "accepting"
+    # The installation's contract digest, once this host learned that it runs another one (module docstring).
+    installation_contract: Optional[str] = None
+    _contract_listeners: list[Callable[[str], None]] = field(default_factory=list)
     _started_at: Optional[datetime] = None
     _liveness_sequence: int = 0
     # The state the last host record said, None before the first; records are written one at a time.
@@ -120,7 +138,14 @@ class MessageHost:
         keys = load_host_keys(self.layout, self.profile.runtime)
         trust = PersistentTrustStore.open(read_bundle(self.layout.trust_bootstrap_path),
                                           self.layout.host_trust_dir(self.profile.runtime), now)
-        certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger)
+        # The contract the host's join names, and against which it reads other hosts' records.
+        trust.store.contract_sha256 = self.contract_sha256
+        try:
+            certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger)
+        except JoinRefused as refused:
+            if refused.outcome == "protocol_mismatch":
+                self.learned_other_contract(refused.accepted_contract_sha256, "join")
+            raise
         self.live = LiveHost(self.nc, HostIdentity(keys, certificate), trust, clock=self.clock, logger=self.logger,
                              fetch_trust=self.fetch_trust)
         # One identity: records are signed with what the live host signs frames with, so a
@@ -202,7 +227,7 @@ class MessageHost:
             "session_limit": certificate.session_limit,
             "sessions_active": min(self.sessions_active(), certificate.session_limit),
             "protocol": PROTOCOL,
-            "contract_sha256": contract_sha256(),
+            "contract_sha256": self.contract_sha256,
             "state": state,
             "health": "healthy" if all(item["state"] == "healthy" for item in components) else "degraded",
             "components": components,
@@ -235,11 +260,12 @@ class MessageHost:
             await self._publish(state)
 
     async def report_now(self) -> None:
-        """Write the host record again now, as its components changed; nothing before the first or after "drained"."""
+        """Write the host record again now, as its components or its state changed; nothing before the first or after
+        "drained"."""
 
         async with self._reporting:
             if self._reported_state is not None and self._reported_state != "drained":
-                await self._publish(self._reported_state)
+                await self._publish(self.state)
 
     async def _publish(self, state: str) -> None:
         assert self.records is not None
@@ -253,13 +279,19 @@ class MessageHost:
         self._reported_state = state
 
     async def renew_if_due(self) -> None:
-        """Renew the certificate once two thirds of its life are gone."""
+        """Renew the certificate once two thirds of its life are gone; on another contract, only once drained."""
 
         async with self._certificate_change:
             certificate = self.identity.certificate
             life = certificate.expires_at - certificate.issued_at
-            if self.clock() >= certificate.issued_at + life * 2 / 3:
-                await self._renew()
+            if self.clock() < certificate.issued_at + life * 2 / 3:
+                return
+            if self.installation_contract is not None and self.state != "drained":
+                # Only a renewal that gives up every agent is answered (module docstring).
+                self.logger.debug("A host on another contract renews only once it drained. runtime=%s",
+                                  self.profile.runtime)
+                return
+            await self._renew()
 
     async def renew(self) -> None:
         """Renew the certificate now; keep the old one until the new one is held."""
@@ -267,16 +299,24 @@ class MessageHost:
         async with self._certificate_change:
             await self._renew()
 
+    def renewal_profile(self) -> HostProfile:
+        """The profile a renewal asks for: the host's own, or none of its agents once it drained (module docstring)."""
+
+        return self.profile.giving_up() if self.state == "drained" else self.profile
+
     async def _renew(self) -> None:
         certificate = self.identity.certificate
         assert self.live is not None
         reply = await self.live.request("host.renew", {
             "renew_id": self.renewal_id(certificate),
             "certificate_id": certificate.certificate_id, "membership_epoch": certificate.membership_epoch,
-            "profile_sha256": self.profile.digest(), "contract_sha256": contract_sha256()},
+            "profile_sha256": self.renewal_profile().digest(), "contract_sha256": self.contract_sha256},
             {"installation": certificate.installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
              "id": AUTHORITY_SERVICE_ID}, team=INSTALLATION_SCOPE)
         body = reply.raw["body"]
+        if body["outcome"] == "protocol_mismatch":
+            self.learned_other_contract(body.get("accepted_contract_sha256"), "renewal")
+            return
         if body["outcome"] != "ok":
             self.logger.error("The certificate could not be renewed. event=protocol1_renew_refused runtime=%s outcome=%s",
                               certificate.runtime, body["outcome"])
@@ -286,8 +326,9 @@ class MessageHost:
                                                          int(body["certificate"]["body"]["membership_epoch"]))
         assert renewed is not None
         self.live.identity = self.live.identity.with_certificate(renewed)
-        self.logger.info("Renewed the host certificate. event=protocol1_renewed runtime=%s membership_epoch=%s",
-                         certificate.runtime, renewed.membership_epoch)
+        self.logger.info("Renewed the host certificate. event=protocol1_renewed runtime=%s membership_epoch=%s "
+                         "agent_types=%s session_limit=%s", certificate.runtime, renewed.membership_epoch,
+                         ",".join(sorted(renewed.agent_types)), renewed.session_limit)
 
     async def rejoin(self, agent_types: Iterable[str]) -> Rejoined:
         """Join again asking for ``agent_types`` as well, and sign everything with the certificate it gives.
@@ -345,8 +386,81 @@ class MessageHost:
         """
 
         renewing: list[str | int] = [certificate.runtime, certificate.certificate_id, certificate.membership_epoch,
-                                     self.profile.digest(), release_version(), contract_sha256()]
+                                     self.renewal_profile().digest(), release_version(), self.contract_sha256]
         return f"renew-{certificate.membership_epoch}-{b64url(hashlib.sha256(rfc8785.dumps(renewing)).digest())}"
+
+    # -- another contract (module docstring) ------------------------------------------------------
+
+    def on_other_contract(self, listener: Callable[[str], None]) -> None:
+        """Call ``listener`` with the installation's digest once this host learns that it runs another contract."""
+
+        self._contract_listeners.append(listener)
+
+    def learned_other_contract(self, theirs: Optional[str], learned_from: str) -> None:
+        """This host runs another contract than the installation's ``theirs``: log it once and tell the listeners."""
+
+        if self.installation_contract is not None or not theirs or theirs == self.contract_sha256:
+            return
+        self.installation_contract = theirs
+        self.logger.error("This host runs another message contract than its installation, so it takes no new work, "
+                          "finishes or hands back what it holds and then gives up its agents. Install the "
+                          "installation's release here and start this process again. "
+                          "event=protocol1_host_other_contract runtime=%s contract_sha256=%s "
+                          "installation_contract_sha256=%s learned_from=%s", self.profile.runtime,
+                          self.contract_sha256, theirs, learned_from)
+        for listener in list(self._contract_listeners):
+            try:
+                listener(theirs)
+            except Exception:
+                self.logger.exception("A listener for another contract failed. event=protocol1_contract_listener_failed "
+                                      "runtime=%s", self.profile.runtime)
+
+    async def follow_contract(self, runtime: str) -> None:
+        """Read ``runtime``'s host record (the team services') when it starts and whenever it changes; runs until cancelled.
+
+        A record that names another digest than this host's means the installation runs
+        another contract (``learned_other_contract``). A record that does not verify says
+        nothing about it and is logged.
+        """
+
+        assert self.records is not None and self.live is not None, "start() first"
+        async for key, raw in self.records.watch("host", runtime):
+            if raw is None:
+                continue
+            try:
+                record = self.live.trust.store.verify(raw, record="host", now=self.clock())
+            except FrameRefused as refused:
+                if refused.code != "unknown_key" or not await self.fetch_trust(raw):
+                    self.logger.info("A host record did not verify; it says nothing about the installation's contract. "
+                                     "event=protocol1_contract_record_refused runtime=%s key=%s code=%s",
+                                     self.profile.runtime, key, refused.code)
+                    continue
+                try:
+                    record = self.live.trust.store.verify(raw, record="host", now=self.clock())
+                except FrameRefused:
+                    continue
+            if record.other_contract:
+                self.learned_other_contract(record.their_contract_sha256, "team_services_record")
+
+    async def drain(self) -> None:
+        """Say ``draining`` in the host record now: the host takes no new work and finishes or hands back what it holds."""
+
+        if self.state != "accepting":
+            return
+        self.state = "draining"
+        await self.report_now()
+
+    async def finish_drain(self) -> None:
+        """Say ``drained`` once the host holds nothing, and renew to give up its agents (module docstring)."""
+
+        if self.state == "drained":
+            return
+        self.state = "drained"
+        if self.records is not None and self._reported_state is not None:
+            await self.publish_liveness("drained")
+        if self.live is not None:
+            async with self._certificate_change:
+                await self._renew()
 
     async def keep_up(self, stop: asyncio.Event, *, drained: Callable[[], bool] = lambda: True) -> None:
         """Liveness every 10 seconds, trust every half hour and renewal when due, until ``stop`` is set.
@@ -366,7 +480,7 @@ class MessageHost:
                 if self._last_trust_refresh is None or self.clock() - self._last_trust_refresh >= TRUST_REFRESH_INTERVAL:
                     await self.refresh_trust()
                 await self.renew_if_due()
-                await self.publish_liveness("accepting")
+                await self.publish_liveness(self.state)
             except Exception:
                 self.logger.exception("A host upkeep step failed; trying again. event=protocol1_host_upkeep_failed "
                                       "runtime=%s", self.profile.runtime)

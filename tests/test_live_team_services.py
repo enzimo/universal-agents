@@ -424,6 +424,103 @@ async def test_a_closed_session_is_not_renewed_when_its_agent_is_placed_again(br
         await asyncio.wait_for(serving, timeout=10)
 
 
+OTHER_CONTRACT = "0" * 64
+
+
+def run_on_another_contract(started: MessageHost, digest: str = OTHER_CONTRACT) -> None:
+    """A host that joined on this contract runs ``digest`` from now on: its records and renewals name it, and it
+    reads others' records against it.
+
+    That is how a host that kept running while the rest of its installation moved to
+    another pre-release contract looks from every side; a host started on another contract
+    could not join at all (``protocol_mismatch``).
+    """
+
+    assert started.live is not None
+    started.contract_sha256 = digest
+    started.live.trust.store.contract_sha256 = digest
+
+
+@pytest.mark.asyncio
+async def test_a_host_on_another_contract_gets_no_new_placement_but_keeps_its_sessions(broker: str, tmp_path: Path,
+                                                                                       caplog) -> None:
+    """README "Versions": readers place no agent on a host whose record names another contract, but it still
+    holds the agents it runs, so their sessions are renewed and closed as usual."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        assert worker.live is not None
+        session = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        run_on_another_contract(worker)
+        await worker.publish_liveness("draining")
+        refused = await open_session(worker, "researcher-2")
+        assert refused["outcome"] == "not_allowed" and "another message contract" in refused["message"], refused
+        assert "event=agent_session_refused_other_contract" in caplog.text and OTHER_CONTRACT in caplog.text
+        assert (await renew_session(worker, session))["outcome"] == "ok"
+        closed = await worker.live.request("sessions.close", {"request_id": "close-1", "session": session,
+                                                              "reason": "handed_over"}, audience(worker), team=TEAM)
+        assert closed.raw["body"]["outcome"] == "ok"
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_host_on_another_contract_learns_it_drains_and_renews_only_to_give_up_its_agents(
+        broker: str, tmp_path: Path) -> None:
+    """README "Versions": the host learns from the team services' host record, which it reads when it starts and
+    whenever it changes; a renewal for its agents is turned away, its record says ``draining`` and then
+    ``drained``, and its renewal that gives up every agent gets a certificate that grants none."""
+
+    from custom_messages.wire.kinds import CONTRACT_SHA256
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        services, serving = await team_services_host(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        assert worker.live is not None and worker.records is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 20
+        while services.records is None or await worker.records.read_report("host", TEAM_SERVICES_RUNTIME,
+                                                                             now=utc_now()) is None:
+            assert loop.time() < deadline, "the team services wrote no host record"
+            await asyncio.sleep(0.1)
+        learned: list[str] = []
+        worker.on_other_contract(learned.append)
+        run_on_another_contract(worker)
+        following = asyncio.create_task(worker.follow_contract(TEAM_SERVICES_RUNTIME))
+        while not learned:
+            assert loop.time() < deadline, "the host never read the team services' record"
+            await asyncio.sleep(0.05)
+        assert learned == [CONTRACT_SHA256] and worker.installation_contract == CONTRACT_SHA256
+
+        epoch = worker.identity.certificate.membership_epoch
+        await worker.renew()  # for its agents: turned away, and nothing changes
+        assert worker.identity.certificate.membership_epoch == epoch
+
+        async def own_record_state() -> str:
+            # Readers of the installation's contract cannot read its body; a reader of its own contract can.
+            stored = await worker.records.read_report("host", WORKER.runtime, now=utc_now())  # type: ignore[union-attr]
+            assert stored is not None and not stored.record.other_contract
+            return str(stored.record.body.state)
+
+        await worker.drain()
+        assert await own_record_state() == "draining"
+        await worker.finish_drain()
+        assert await own_record_state() == "drained"
+        given_up = worker.identity.certificate
+        assert given_up.membership_epoch == epoch + 1
+        assert (given_up.agent_types, given_up.session_limit) == (frozenset(), 0)
+        following.cancel()
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
 @pytest.mark.asyncio
 async def test_a_host_joins_again_for_an_agent_type_added_while_it_runs(broker: str, tmp_path: Path, caplog) -> None:
     """MessageHost.rejoin: every running agent holds a session, a specialist created at runtime too."""
