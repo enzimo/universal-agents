@@ -4536,6 +4536,13 @@ through its control mailbox (`agent.<id>.control`, durable, read while it works;
 decision 59), and a subtask no worker has taken yet gets none. The skill hint is no longer
 a message type.
 
+Agents now find each other only through the records, which only an agent holding a session
+has, so a run with several agents needs the launcher (`docker/launch_headless.py`, which
+the container and the desktop app use). Tests and `scripts/launch_agent_type.py` start an
+agent without `--host-runtime`, so without a host and a session: it still works through its
+queues, but other agents, the gateway (its Team and Status pages) and restart approvals do
+not see it, and it can neither ask nor be asked anything.
+
 **The gateway follows its team** (step 7c, `assistant_gateway.team_view`): the gateway's
 host reads the team's live agents once it has joined, and hands the team lead's arrival,
 changes and leaving, in order, to the manager client's `apply_manager_status`, so the
