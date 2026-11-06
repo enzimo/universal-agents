@@ -14,7 +14,11 @@ over time", "State records"):
 - **report liveness**: write its own host record every 10 seconds, each lasting 30, so a
   host that stops shows as gone within 30 seconds of its last write, as the presence
   heartbeat did, and one or two lost writes do not make a running host look gone.
-  Nothing moves because of that.
+  Nothing moves because of that. The record lists the parts of the host that are not
+  healthy (``components``, each with a code saying why), such as an agent whose session
+  the team services refused; the gateway shows them as Status page findings (plan 13B.5).
+  The host is then ``degraded``: it still serves everything else. When they change, the
+  host writes its record again at once (``report_now``) rather than at the next interval.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ import json
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 import rfc8785
 
@@ -53,6 +57,8 @@ from runtime_settings.instance_layout import InstanceLayout
 LIVENESS_INTERVAL = timedelta(seconds=10)
 LIVENESS_LIFETIME = timedelta(seconds=30)
 TRUST_REFRESH_INTERVAL = timedelta(minutes=30)
+# The most components a host record lists (the contract's host record, ``components``).
+HOST_COMPONENTS_MAX = 16
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -84,8 +90,14 @@ class MessageHost:
     live: Optional[LiveHost] = None
     records: Optional[StateRecords] = None
     sessions_active: Callable[[], int] = field(default=lambda: 0)
+    # The parts of the host that are not healthy, as the host record lists them (module docstring):
+    # each ``{"component": <token id>, "state": "degraded" or "unhealthy", "code": <why>}``.
+    components: Callable[[], Sequence[Mapping[str, str]]] = field(default=lambda: ())
     _started_at: Optional[datetime] = None
     _liveness_sequence: int = 0
+    # The state the last host record said, None before the first; records are written one at a time.
+    _reported_state: Optional[str] = None
+    _reporting: asyncio.Lock = field(default_factory=asyncio.Lock)
     _last_trust_refresh: Optional[datetime] = None
     # Held while the certificate changes (a renewal, a new join), so one never overwrites the other's.
     _certificate_change: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -168,6 +180,7 @@ class MessageHost:
             "certificate", f"host.{certificate.installation}.{certificate.runtime}.{certificate.membership_epoch}")
         assert held is not None  # the join kept it
         now = self.clock()
+        components = self._components()
         return {
             "runtime": certificate.runtime,
             "certificate": {"certificate_id": certificate.certificate_id, "membership_epoch": certificate.membership_epoch,
@@ -177,8 +190,8 @@ class MessageHost:
             "protocol": PROTOCOL,
             "contract_sha256": contract_sha256(),
             "state": state,
-            "health": "healthy",
-            "components": [],
+            "health": "healthy" if all(item["state"] == "healthy" for item in components) else "degraded",
+            "components": components,
             "placement_labels": [],
             "outbox_depth": 0,
             "revocation_epoch_seen": certificate.revocation_epoch,
@@ -187,9 +200,34 @@ class MessageHost:
             "software": {"name": "universal-agents", "version": release_version()},
         }
 
+    def _components(self) -> list[dict[str, str]]:
+        """The components to list, at most ``HOST_COMPONENTS_MAX``; none, logged, when they cannot be read.
+
+        The caller decides which fit (an agent host sums up those beyond the limit); a
+        failure here must never stop the host reporting its liveness.
+        """
+
+        try:
+            return [dict(item) for item in self.components()][:HOST_COMPONENTS_MAX]
+        except Exception:
+            self.logger.exception("The host's components could not be read; its record lists none. "
+                                  "event=protocol1_host_components_failed runtime=%s", self.profile.runtime)
+            return []
+
     async def publish_liveness(self, state: str = "accepting") -> None:
         """Write this host's own record, which expires after ``LIVENESS_LIFETIME`` unless written again."""
 
+        async with self._reporting:
+            await self._publish(state)
+
+    async def report_now(self) -> None:
+        """Write the host record again now, as its components changed; nothing before the first or after "drained"."""
+
+        async with self._reporting:
+            if self._reported_state is not None and self._reported_state != "drained":
+                await self._publish(self._reported_state)
+
+    async def _publish(self, state: str) -> None:
         assert self.records is not None
         now = self.clock()
         # A sequence above every earlier one, also across restarts: at least the time in milliseconds.
@@ -198,6 +236,7 @@ class MessageHost:
         document = self.records.signed("host", runtime, self.liveness_body(state), sequence=self._liveness_sequence,
                                        issued_at=now, expires_at=now + LIVENESS_LIFETIME)
         await self.records.put("host", runtime, document)
+        self._reported_state = state
 
     async def renew_if_due(self) -> None:
         """Renew the certificate once two thirds of its life are gone."""
