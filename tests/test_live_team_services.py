@@ -686,3 +686,62 @@ async def test_a_stop_whose_last_steps_fail_still_releases_the_lock(broker: str,
         with pytest.raises(KeyNotFoundError):
             await locks.get(lock_key(TEAM))
 
+
+@pytest.mark.asyncio
+async def test_a_standby_that_takes_over_signs_with_the_certificate_the_serving_instance_renewed(
+        broker: str, tmp_path: Path, caplog) -> None:
+    """Every instance runs as host team-services: a standby that joined before the serving instance renewed
+    their certificate must sign with the newest one once it serves, before it writes anything.
+
+    Its old certificate signs nothing new from five minutes after its replacement (README "Trust over time"), so
+    readers would refuse its host record, sessions and placements, and even its own renewal.
+    """
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    first_stop, second_stop = asyncio.Event(), asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        serving, first = await team_services_host(stack, broker, layout, first_stop)
+        worker = await host(stack, broker, layout, WORKER)
+        other = await host(stack, broker, layout, OTHER)
+        assert other.records is not None and other.live is not None
+        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        with caplog.at_level(logging.WARNING):
+            standby, second = await team_services_host(stack, broker, layout, second_stop)
+            for _ in range(50):
+                if "event=team_services_standby" in caplog.text:
+                    break
+                await asyncio.sleep(0.1)
+        assert "event=team_services_standby" in caplog.text
+        assert standby.identity.certificate.membership_epoch == 1
+        # While the standby waits, the serving instance renews (day 20 of 30), then stops.
+        await serving.renew()
+        assert serving.identity.certificate.membership_epoch == 2
+        first_stop.set()
+        await asyncio.wait_for(first, timeout=10)
+        hosts = await worker.nc.jetstream().key_value("UA1_HOSTS")
+        for _ in range(150):
+            record = json.loads((await hosts.get(TEAM_SERVICES_RUNTIME)).value)
+            if record["body"]["started_at"] == format_timestamp(standby._started_at):
+                break
+            await asyncio.sleep(0.1)
+        assert record["body"]["started_at"] == format_timestamp(standby._started_at)
+
+        # Its first host record is signed with the renewed certificate, and readers accept it.
+        report = await other.records.read_report("host", TEAM_SERVICES_RUNTIME, now=other.clock())
+        assert report is not None and report.record.signer is not None
+        assert report.record.signer.membership_epoch == report.record.body.certificate.membership_epoch == 2
+        # So is a session it opens.
+        opened = await open_session(worker, "researcher-2")
+        assert opened["outcome"] == "ok" and opened["session"]["writer"]["membership_epoch"] == 2
+        assert other.live.trust.add(json.dumps(opened["session"]).encode(), now=other.clock()) is True
+        # And once the replaced certificate signs nothing more, what it writes is still accepted.
+        later = utc_now() + timedelta(minutes=6)
+        assert standby.records is not None
+        host_record = standby.records.signed("host", TEAM_SERVICES_RUNTIME, standby.liveness_body("accepting"),
+                                             sequence=report.record.document.sequence + 1, issued_at=later,
+                                             expires_at=later + timedelta(seconds=30))
+        accepted = other.live.trust.store.verify(json.dumps(host_record).encode(), record="host", now=later)
+        assert accepted.signer is not None and accepted.signer.membership_epoch == 2
+        second_stop.set()
+        await asyncio.wait_for(second, timeout=10)

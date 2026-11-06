@@ -1,9 +1,11 @@
 """The team services as a process the launcher supervises (``assistant_cli run-team-services``).
 
 It runs as host ``team-services``: it joins the installation, waits for the team's
-single-instance lock, serves the team's address, then writes its host record, and keeps
-its host upkeep (liveness, trust, renewal) and the lock's lease until it is stopped.
-Stopping releases the lock even when unsubscribing or writing the last host record
+single-instance lock, signs with the host's newest certificate (every instance runs as this
+one host, and the serving instance may have renewed their certificate while this one waited,
+``MessageHost.take_newest_certificate``), serves the team's address, then writes its host
+record, and keeps its host upkeep (liveness, trust, renewal) and the lock's lease until it is
+stopped. Stopping releases the lock even when unsubscribing or writing the last host record
 failed, so the next instance does not wait out the lease. Losing the lock (another
 instance holds it, or its lease ran out without a successful renewal) stops the process
 with an error, so the launcher stops the team rather than letting two instances serve. A
@@ -72,6 +74,9 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event) -> None:
 
 async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock, team: str,
                               stop: asyncio.Event) -> None:
+    # All instances share one host certificate, and a standby may have waited long enough for the serving
+    # instance to renew it: sign with the newest before serving or writing anything.
+    await host.take_newest_certificate()
     assert host.records is not None  # start() made them
     sessions = SessionService(host.nc.jetstream(), host.records, live.trust, live.identity.installation, host.clock,
                               host.logger)
