@@ -72,7 +72,7 @@ def relayed_frame(team: str, kind: str, body: dict[str, Any], *, person_ref: str
     services, carrying the gateway's command token (custom_agents.relayed_task_controls)."""
 
     frame = stand_in_frame(team, kind, {"request_id": request_id, **body}, person_ref=person_ref,
-                           request_id=request_id, sender_roles=frozenset({"team_services", "scheduler"}))
+                           request_id=request_id, sender_roles=frozenset({"team_services"}))
     frame.authority.certificate = SimpleNamespace(roles=frozenset({"gateway"}))
     return frame
 
