@@ -21,9 +21,7 @@ import os
 import re
 import secrets
 import shutil
-import socket
 import subprocess
-import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Iterable
@@ -38,6 +36,7 @@ from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
 from tests import message_contract_support as fixtures
 from tests.live_nats_support import flush_fully
+from tests.own_nats_server import own_nats_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 CONTRACT = Path(__file__).resolve().parents[1] / "contracts/messages/v1"
@@ -162,49 +161,18 @@ def nats_server() -> str:
     return executable
 
 
-def free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
-
-
 @pytest.fixture
 def isolated_broker(tmp_path: Path):
-    executable = nats_server()
-    port = free_port()
     passwords = {name: secrets.token_urlsafe(24) for name in ("admin", *HOSTS)}
     users = [{"user": "admin", "password": passwords["admin"]}]
     users += [{"user": name, "password": passwords[name], "permissions": permissions(name)} for name in HOSTS]
-    settings = {
-        "host": "127.0.0.1", "port": port,
-        "jetstream": {"store_dir": str(tmp_path / "store"), **TRANSPORT["server"]["jetstream"]},
-        "authorization": {"users": users},
-    }
+    # own_nats_server sets the address, a port the server picks itself and the store folder.
+    settings = {"jetstream": dict(TRANSPORT["server"]["jetstream"]), "authorization": {"users": users}}
     config = tmp_path / "nats.json"
     config.write_text(json.dumps(settings))
     config.chmod(0o600)
-    with (tmp_path / "nats.log").open("w") as log:
-        process = subprocess.Popen([executable, "-c", str(config)], stdout=log, stderr=log)
-        try:
-            deadline = time.monotonic() + 5
-            while True:
-                if process.poll() is not None:
-                    pytest.fail(f"isolated NATS exited during startup: {(tmp_path / 'nats.log').read_text()}")
-                try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                        break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        pytest.fail("isolated NATS did not start within five seconds")
-                    time.sleep(0.02)
-            yield f"nats://127.0.0.1:{port}", passwords
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+    with own_nats_server(nats_server(), tmp_path, "-c", str(config)) as url:
+        yield url, passwords
 
 
 class Client:
