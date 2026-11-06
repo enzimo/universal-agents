@@ -35,11 +35,11 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.frame import Receiver, VerifiedFrame
 from custom_messages.wire.refusals import FrameRefused
-from custom_messages.wire.kinds import INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
 from custom_messages.wire.trust import HostCertificate, sign_state
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
-from custom_transport.protocol1.contract_files import contract_sha256, transport
+from custom_transport.protocol1.contract_files import transport
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import AUTHORITY_SERVICE_ID, HostProfile
@@ -327,8 +327,14 @@ class InstallationAuthority:
         raise Unsupported(verified.frame.kind)
 
     def _protocol_mismatch(self, digest: str) -> Optional[dict[str, Any]]:
-        if PROTOCOL.endswith("-pre") and digest != contract_sha256():
-            return {"outcome": "protocol_mismatch", "accepted": PROTOCOL, "install": f"universal-agents {release_version()}",
+        """The answer to a join or renewal from a host on another pre-release contract (README "Versions").
+
+        It names the digest this authority runs, so the host learns why it was turned away.
+        """
+
+        if PROTOCOL.endswith("-pre") and digest != CONTRACT_SHA256:
+            return {"outcome": "protocol_mismatch", "accepted": PROTOCOL, "accepted_contract_sha256": CONTRACT_SHA256,
+                    "install": f"universal-agents {release_version()}",
                     "message": "This host runs another pre-release contract than the installation; install the same release."}
         return None
 

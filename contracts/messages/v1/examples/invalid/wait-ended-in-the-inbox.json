@@ -1,0 +1,14 @@
+{
+  "description": "A wait's end is a message about a task the agent already holds, so it goes to the holder's control queue, which the host reads even while every slot is busy (README, \"An agent's two queues\").",
+  "refusal": "subject_mismatch",
+  "at": "/subject",
+  "base": "wait.ended/claim-granted.json",
+  "changes": [
+    {
+      "set": "/subject",
+      "to": "ua.v1.team_example.team-services-1.work.agent.researcher-2"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"wait.ended\", \"message_id\": \"01928f3a-7b2c-7c31-8000-000000000c31\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.agent.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"wait_id\": \"wait_1\", \"root_task_id\": \"task_root_7f\", \"task_id\": \"task_sub_7f_1\", \"ended\": {\"why\": \"claim_granted\", \"claim\": {\"claim_id\": \"claim_9\", \"resources\": [\"file:team/reports/q3.md\"], \"ends_at\": \"2026-10-22T04:45:00.000Z\", \"extensions_left\": 2, \"reason\": \"Updating the Q3 figures.\"}, \"notes\": [{\"whose\": \"same_person\", \"note_id\": \"note_3\", \"root_task_id\": \"task_root_8a\", \"title\": \"Quarterly report thread\", \"text\": \"I moved Q1 and Q2 into archive/; Q3 and Q4 are still to do. Don't rename the folder.\", \"written_at\": \"2026-10-22T04:20:00.000Z\"}, {\"whose\": \"this_request\", \"note_id\": \"note_4\", \"text\": \"Draft headings are final; only the summary changes.\", \"written_at\": \"2026-10-22T04:25:00.000Z\"}, {\"whose\": \"another_member\"}, {\"whose\": \"team_maintenance\", \"note_id\": \"note_7\", \"text\": \"The nightly archive index runs at 02:00; files moved before then are indexed tonight.\", \"written_at\": \"2026-10-22T04:10:00.000Z\"}], \"notes_total\": 4}}, \"idempotency_key\": \"wait.ended:uKQfQIjLgFAUQNw-cFCTAHATKkc-2Z_AJN43-wZO3Jo\", \"body_digest\": \"0gFTMvlYLTZYJZ3-Kjc52PI_NGYDZFUBKCOznA6L7UE\", \"signature\": \"TTzUEX2zWNMbvBOk8_xYztEcKUrF1WMc7pKBXb3o59Q5sMRMfZc5S98XpBGDDwprdvRx8S1foMnvvxYOQll_Bw\"}"
+}
