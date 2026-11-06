@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -65,6 +66,7 @@ from custom_messages.wire.kinds import (
     BETWEEN_INSTALLATIONS,
     CERTIFICATE_OVERLAP_SECONDS,
     CLOCK_SKEW_SECONDS,
+    CONTRACT_SHA256,
     INSTALLATION_SCOPE,
     KINDS,
     MAX_FRAME_BYTES,
@@ -81,6 +83,9 @@ from custom_messages.wire.spec import StateSpec, newer_minor, prune
 from custom_messages.wire.values import parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+# The form of a contract digest (common.schema.json, contract_sha256).
+_CONTRACT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
 OVERLAP = timedelta(seconds=CERTIFICATE_OVERLAP_SECONDS)
@@ -242,12 +247,19 @@ class Agreement:
 
 @dataclass(frozen=True)
 class VerifiedRecord:
-    """A state record whose signature, signer and record rules were checked."""
+    """A state record whose signature, signer and record rules were checked.
+
+    ``other_contract`` marks a host record whose host runs another pre-release contract
+    (README, "Versions"): its signature, writer and times were checked, but its body was
+    not read, so ``body`` is None and ``their_contract_sha256`` names that contract.
+    """
 
     document: State
     body: Any
     signer: Optional[HostCertificate]  # None when an authority key signed it
     digest: str
+    other_contract: bool = False
+    their_contract_sha256: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -296,8 +308,12 @@ class _Held(NamedTuple):
 class TrustStore:
     """One receiver's view of who may sign what. Not shared between installations."""
 
-    def __init__(self, installation: str, authority_keys: Iterable[AuthorityKey]) -> None:
+    def __init__(self, installation: str, authority_keys: Iterable[AuthorityKey], *,
+                 contract_sha256: str = CONTRACT_SHA256) -> None:
+        """``contract_sha256`` is the contract this receiver runs; by default the one its code was generated from."""
+
         self.installation = installation
+        self.contract_sha256 = contract_sha256
         self._anchors: dict[str, Ed25519PublicKey] = {}
         for key in authority_keys:
             if key.installation != installation:
@@ -517,6 +533,13 @@ class TrustStore:
         elif now is not None and issued_at - now > SKEW:
             # The longest lifetime counts from when a record was written, so that time has come.
             raise FrameRefused("not_yet_valid", "a trust record is not dated ahead of the receiver's clock", at="/issued_at")
+        if report and document.record == HOST:
+            theirs = self._other_contract(raw)
+            if theirs is not None:
+                # Authentic, but shaped by another contract: the reader decides what it means.
+                assert signer is not None
+                return VerifiedRecord(document=document, body=None, signer=signer, digest=digest,
+                                      other_contract=True, their_contract_sha256=theirs)
         try:
             body = spec.body_model.validate_python(prune(raw["body"], spec.body_shape) if newer else raw["body"])
         except ValidationError as error:
@@ -526,6 +549,24 @@ class TrustStore:
             assert signer is not None
             self._check_state_report(document, body, signer)
         return VerifiedRecord(document=document, body=body, signer=signer, digest=digest)
+
+    def _other_contract(self, raw: Mapping[str, Any]) -> Optional[str]:
+        """The contract digest a host record names, read before its body, when it is not this receiver's own.
+
+        While the label is a pre-release, two contracts can share it and shape a host record
+        differently, so a reader reads the digest on its own before the rest of the body
+        (README, "Versions"). It sends that host no new work, places no agent on it and logs
+        both digests; it still counts the host's custody windows from these records. A record
+        without a well-formed digest is read strictly, and refused there.
+        """
+
+        if not PROTOCOL.endswith("-pre"):
+            return None
+        body = raw.get("body")
+        theirs = body.get("contract_sha256") if isinstance(body, Mapping) else None
+        if isinstance(theirs, str) and _CONTRACT_DIGEST.fullmatch(theirs) and theirs != self.contract_sha256:
+            return theirs
+        return None
 
     def _check_report_writer(self, signer: HostCertificate, now: datetime) -> None:
         """A state report is used as soon as it is read, so its writer's certificate is not revoked and meets the minimum epochs.

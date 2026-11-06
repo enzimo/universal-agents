@@ -23,11 +23,16 @@
             },
             "resource": {
               "$ref": "../common.schema.json#/$defs/resource_key"
+            },
+            "reason": {
+              "description": "Why the request needs it: the reason of the claim it gets when the wait is granted.",
+              "$ref": "../common.schema.json#/$defs/short_text"
             }
           },
           "required": [
             "type",
-            "resource"
+            "resource",
+            "reason"
           ],
           "additionalProperties": false
         },
