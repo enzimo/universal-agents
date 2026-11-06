@@ -129,3 +129,55 @@ async def test_a_renewal_keeps_its_id_on_retries_and_takes_a_new_one_after_an_up
     longest = SimpleNamespace(installation="install_one", runtime="r" * 64, certificate_id="cert." + "r" * 64 + ".1",
                               membership_epoch=2 ** 53 - 1)
     assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}", await _renewal_id(longest))
+
+
+def _reporting_host(components) -> MessageHost:
+    """A host whose record body is built for real, from a stand-in certificate and trust store."""
+
+    certificate = SimpleNamespace(installation="install_one", runtime="lead", certificate_id="cert.lead.1",
+                                  membership_epoch=1, session_limit=4, revocation_epoch=1)
+    host = MessageHost(layout=None, profile=HostProfile("lead", ("team_one",), ("lead_host",)), nc=None,
+                       clock=lambda: START, components=lambda: components)
+    host.live = SimpleNamespace(identity=SimpleNamespace(certificate=certificate),  # type: ignore[assignment]
+                                trust=SimpleNamespace(store=SimpleNamespace(held_record=lambda record, key: (1, "A" * 43))))
+    return host
+
+
+def test_a_host_lists_the_components_that_are_not_healthy_in_its_record() -> None:
+    """Plan 13B.5: the Status page's findings come from the hosts' records; the contract allows 16 components."""
+
+    from custom_messages.wire.kinds import STATE_RECORDS
+
+    healthy = _reporting_host([]).liveness_body("accepting")
+    assert (healthy["components"], healthy["health"]) == ([], "healthy")
+
+    refused = [{"component": f"Researcher-agent_{n}", "state": "unhealthy", "code": "session_limit_reached"}
+               for n in range(20)]
+    body = _reporting_host(refused).liveness_body("accepting")
+    assert body["components"] == refused[:host_runtime.HOST_COMPONENTS_MAX] and len(body["components"]) == 16
+    assert body["health"] == "degraded"  # the host itself still serves its other agents
+    STATE_RECORDS["host"].body_model.validate_python(body)
+
+
+def test_a_host_whose_components_cannot_be_read_still_reports_its_liveness(caplog) -> None:
+    def broken():
+        raise RuntimeError("no components")
+
+    body = _reporting_host(broken).liveness_body("accepting")  # type: ignore[arg-type]
+    assert (body["components"], body["state"]) == ([], "accepting")
+    assert "event=protocol1_host_components_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_host_writes_its_record_again_at_once_when_asked_and_never_after_it_drained() -> None:
+    now = [START]
+    host, records = _host(now)
+    await host.report_now()
+    assert records.written == []  # not reported yet: the first record is the host's own
+    await host.publish_liveness("accepting")
+    await host.report_now()
+    assert [document["state"] for document in records.written] == ["accepting", "accepting"]
+    assert records.written[1]["sequence"] > records.written[0]["sequence"]
+    await host.publish_liveness("drained")
+    await host.report_now()
+    assert [document["state"] for document in records.written] == ["accepting", "accepting", "drained"]

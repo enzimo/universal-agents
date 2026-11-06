@@ -101,7 +101,7 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         await asyncio.wrap_future(agent_host.detach("researcher_1"))
         await _until(lambda: reader.agent("researcher_1") is None)
         assert written[-1] == "exiting"
-        assert await records.raw("agent", f"{TEAM}.researcher_1") is None
+        assert await records.read_report("agent", f"{TEAM}.researcher_1", now=agent_host.host.clock()) is None
         # It said it was leaving, so readers know it exited rather than went quiet.
         assert any("researcher_1" in exited for _, exited in changes)
 
@@ -114,7 +114,8 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         restarted.attach(_agent("researcher_3", "Researcher-3"), agent_type="Researcher", definition=DEFINITION,
                          nc=await connect(stack, broker, RUNTIME), state=("idle", True))
         await _until(lambda: reader.agent("researcher_3") is not None)
-        assert await restarted.host.records.raw("agent", f"{TEAM}.researcher_2") is None
+        assert await restarted.host.records.read_report("agent", f"{TEAM}.researcher_2",
+                                                        now=restarted.host.clock()) is None
         assert set(reader.live()) == {"researcher_3"}
 
         # A host that stops writing its liveness: its agents drop out once its record has expired,
