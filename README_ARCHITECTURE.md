@@ -4356,7 +4356,9 @@ run in the team lead's process and move here one family at a time.
   itself answers these, so the team services find its host in its placement and pass the
   same body to its address (`ctl.agent.<agent>`) with the gateway's command token unchanged,
   then answer with the agent's reply. `debug.dump` without an agent goes to the team lead.
-  An agent that runs nowhere is answered with a plain refusal.
+  An agent that runs nowhere is answered with a plain refusal. They use a placement only when
+  it verifies, as for sessions, so a forged or stale one never sends a command to another
+  agent, and one unreadable placement never hides the lead's.
 
 **Agent processes as hosts** (`custom_agents.agent_host`): the launcher starts the team
 lead's process as host `lead` (roles `lead_host` and `worker_host`) and each startup agent's
@@ -4370,12 +4372,41 @@ queues does not depend on them. A request to an agent runs on that agent's own l
 answered signed as the agent (`custom_agents.relayed_task_controls`: the task controls run for
 the person the gateway's token names, read back from the people copy). Agent ids are new at
 every start, so a host first closes the sessions its earlier run left behind
-(`event=agent_host_stale_session_closed`). The team lead's host may run any agent type in the
-instance's catalog, including specialists created while it runs: the launcher lists it with
-`agent_types_from_catalog`, the authority reads the catalog at each join, and a join asking
-for different grants gets a new certificate (a join asking for exactly the same gets its
-certificate back). A host that meets a relayed frame whose token another host signed reads
-that host's certificate from `UA1_CERTS` too.
+(`event=agent_host_stale_session_closed`); it reads those placements verified, like every
+record, so a malformed or forged one, or one removed meanwhile, is skipped with a log line
+(`event=agent_host_record_refused`) and never keeps the agents from their sessions. The team
+lead's host may run any agent type in the instance's catalog, including specialists created
+while it runs: the launcher lists it with `agent_types_from_catalog`, the authority reads the
+catalog at each join, and a join asking for different grants gets a new certificate (a join
+asking for exactly the same gets its certificate back). A host that meets a relayed frame
+whose token another host signed reads that host's certificate from `UA1_CERTS` too.
+
+Every running agent holds a session (plan 13B.5, decided 2026-11-06). Without one an agent
+has no address, so nothing can ask it anything and its exit goes unseen. So:
+
+- A refused session is asked for again, 5 seconds after the refusal and twice as long after
+  each further one, up to every 5 minutes, for as long as the agent runs, one opening at a
+  time: `limit_reached` (a worker leaving makes room; raising the worker limit takes a
+  restart of "all", which lists the lead's new limit), `already_placed` and `runtime_error`
+  alike. Each change of refusal is logged once (`event=agent_host_session_refused`), and so
+  is the opening that finally succeeds (`event=agent_host_session_opened`, with how many
+  refusals came before). Waiting for the first answer at start is not a refusal.
+- `not_allowed` for a type the host's certificate lacks, such as a specialist the team
+  created while the process runs: the host reads the team's agent catalog again, and when
+  the type is there it joins again for it (`MessageHost.rejoin`) and opens the session at
+  once. A type whose name no certificate can carry (over 24 characters, or characters other
+  than letters, digits, `-` and `_`) is never asked for.
+- While an agent has no session, its host's record lists it as an unhealthy component named
+  `<agent type>-<agent id>` (the type cut to 24 characters, other characters as `_`), with
+  why as its code: `session_limit_reached`, `session_not_allowed`, `session_type_not_granted`
+  (the authority did not add the type), `agent_type_not_certifiable`,
+  `session_already_placed`, `session_runtime_error`. A record holds 16 components, so with
+  more such agents the last is `more-agents` (`sessions_refused`). The host writes its record
+  again at once when the list changes.
+- Each opening that got an answer is followed by one with a new request id, and each daily
+  renewal has its own (the session and the sequence of the record it renews, as a digest),
+  kept only for retries of that one request, since a repeated id gets the first answer back
+  (README "Stored outcomes"). A refused renewal opens a new session.
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is
