@@ -1,8 +1,12 @@
 """The team services as a process the launcher supervises (``assistant_cli run-team-services``).
 
 It runs as host ``team-services``: it joins the installation, waits for the team's
-single-instance lock, serves the team's address, then writes its host record, and keeps
-its host upkeep (liveness, trust, renewal) and the lock's lease until it is stopped. Losing the lock (another
+single-instance lock, signs with the host's newest certificate (every instance runs as this
+one host, and the serving instance may have renewed their certificate while this one waited,
+``MessageHost.take_newest_certificate``), serves the team's address, then writes its host
+record, and keeps its host upkeep (liveness, trust, renewal) and the lock's lease until it is
+stopped. Stopping releases the lock even when unsubscribing or writing the last host record
+failed, so the next instance does not wait out the lease. Losing the lock (another
 instance holds it, or its lease ran out without a successful renewal) stops the process
 with an error, so the launcher stops the team rather than letting two instances serve. A
 renewal that only failed, such as NATS not answering for a few seconds, is tried again
@@ -26,6 +30,7 @@ from custom_messages.wire.frame import Receiver
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.protocol1.host_runtime import TEAM_SERVICES_RUNTIME, MessageHost
 from custom_transport.protocol1.joining import HostProfile
+from custom_transport.protocol1.live import LiveHost
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
@@ -68,6 +73,19 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
     lock = SingleInstanceLock(host.nc.jetstream(), team, TEAM_SERVICES_RUNTIME, host.clock, host.logger)
     if not await lock.acquire(stop):
         return
+    try:
+        await _serve_holding_lock(host, live, lock, team, stop, families)
+    finally:
+        # Released whatever happened while serving or stopping, so the next instance (a restart of every
+        # service) takes over at once instead of waiting out the lease; an error raised there is still raised.
+        await lock.release()
+
+
+async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock, team: str,
+                              stop: asyncio.Event, families: Sequence[Mapping[str, Handler]]) -> None:
+    # All instances share one host certificate, and a standby may have waited long enough for the serving
+    # instance to renew it: sign with the newest before serving or writing anything.
+    await host.take_newest_certificate()
     assert host.records is not None  # start() made them
     sessions = SessionService(host.nc.jetstream(), host.records, live.trust, live.identity.installation, host.clock,
                               host.logger)
@@ -89,11 +107,14 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
         lost = True  # another instance may serve now and write the record; this one writes no more
         raise
     finally:
-        await subscription.unsubscribe()
-        stop.set()
-        if upkeep is not None:
-            await upkeep
-        await lock.release()
+        try:
+            await subscription.unsubscribe()
+        finally:
+            # The upkeep ends and writes its last record (drained) even when unsubscribing failed, and before
+            # the caller releases the lock, so it never overwrites the record of the instance that takes over.
+            stop.set()
+            if upkeep is not None:
+                await upkeep
 
 
 def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]) -> list[Mapping[str, Handler]]:
