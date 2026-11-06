@@ -4547,7 +4547,9 @@ agent's own loop. An entry says only what the records say: id, type, name, lead 
 paused, busy, and whether it accepts work. When an agent's record said it was exiting, the
 team lead fails the subtasks it asked that agent for by name, as presence's exit did; an
 agent whose host only stopped reporting leaves the directory but is not given up for (the
-subtask watchdog handles work that never comes back). Agents ask each other on
+subtask watchdog handles work that never comes back). An agent whose host runs another
+contract stays in the directory, so the requests below about the tasks it holds still reach
+it, but its entry says it accepts no work and delegation passes it over. Agents ask each other on
 `ctl.agent.<agent>`, signed with the asking agent's session, through
 `custom_agents.agent_requests` (`ask_agent`, `announce`, `team_view`, which hold this
 process's host apart from the host's own module so the import graph stays free of loops):
