@@ -7,6 +7,7 @@ contract's README "Installation traffic" and "Trust over time".
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -18,11 +19,15 @@ import nats
 import pytest
 
 from assistant_gateway.config import GatewayInstanceConfig
-from custom_transport.protocol1 import host_keys
+from custom_messages.wire.frame import Receiver, reply_audience, verify_frame
+from custom_messages.wire.kinds import CONTRACT_SHA256
+from custom_messages.wire.models import Frame
+from custom_transport.protocol1 import host_keys, joining
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import HostProfile, JoinRefused, join
-from custom_transport.protocol1.live import LiveHost, utc_now
+from custom_transport.protocol1.live import LiveHost, answer_headers, encode, raise_if_refused, utc_now
+from custom_transport.protocol1.replay import LiveReplayRecord
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from docker import message_hosts
 from env_secrets import PROCESS_INSTALLATION_AUTHORITY, environment_for
@@ -30,6 +35,7 @@ from installation_authority.expected_hosts import ExpectedHost, write_expected_h
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
 from tests.test_live_message_contract import nats_server
+from tests.test_message_contract import body_schema_file, validator
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 INSTALLATION, TEAM = "install_one", "team_one"
@@ -154,6 +160,55 @@ async def test_a_renewal_raises_the_epoch_and_the_authority_keeps_its_records_ac
         assert hosts.config.max_age == 60
         dead_letters = await js.consumer_info(f"UA1_DLQ_{TEAM}", f"dlq~{TEAM}")
         assert dead_letters.config.filter_subject == f"ua.v1.{TEAM}.*.dlq.notice.*"
+
+
+@pytest.mark.asyncio
+async def test_a_host_on_another_contract_learns_the_authoritys_digest_when_it_joins_or_renews(
+        broker: str, tmp_path: Path, monkeypatch) -> None:
+    """README "Versions": a join or renewal naming another contract digest gets ``protocol_mismatch``.
+
+    The reply names the digest the authority runs (``accepted_contract_sha256``), so the
+    host learns why instead of getting ``handler_failed``. The host verifies the reply as
+    it would any other, and its body is checked against the contract's reply schema.
+    """
+
+    other = "0" * 64
+    assert other != CONTRACT_SHA256
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    authority_audience = {"installation": INSTALLATION, "team": "_install", "target": "installation_service",
+                          "id": "authority"}
+
+    def assert_mismatch(kind: str, body: dict) -> None:
+        validator(body_schema_file(f"{kind}.reply")).validate(body)
+        assert body["outcome"] == "protocol_mismatch"
+        assert body["accepted_contract_sha256"] == CONTRACT_SHA256
+
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        certificate = await join(worker_nc, worker_keys, trust, WORKER)
+        worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
+        renewal = await worker.request("host.renew", {
+            "renew_id": "renew-other-contract", "certificate_id": certificate.certificate_id, "membership_epoch": 1,
+            "profile_sha256": WORKER.digest(), "contract_sha256": other}, authority_audience, team="_install")
+        assert_mismatch("host.renew", renewal.raw["body"])
+
+        monkeypatch.setattr(joining, "contract_sha256", lambda: other)
+        frame = joining.sign_join(worker_keys, INSTALLATION, WORKER, join_id="join-other-contract", issued=utc_now())
+        assert frame["body"]["contract_sha256"] == other
+        data, headers = encode(frame)
+        message = await worker_nc.request(frame["subject"], data, timeout=30, headers=headers)
+        raise_if_refused("host.join", frame["subject"], message, logging.getLogger(__name__))
+        request = Frame.model_validate(frame)
+        named = reply_audience(request)
+        reply = verify_frame(message.data, trust=trust.store,
+                             receiver=Receiver(named["installation"], named["team"], named["target"], named["id"],
+                                               named["runtime"]),
+                             arrived_on=message.subject, now=utc_now(), replay=LiveReplayRecord().lookup,
+                             headers=answer_headers(message), answering=request)
+        assert_mismatch("host.join", reply.raw["body"])
 
 
 @pytest.mark.asyncio

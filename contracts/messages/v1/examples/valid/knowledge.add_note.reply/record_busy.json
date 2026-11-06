@@ -24,10 +24,17 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "record_busy",
-    "message": "Another request is changing this record. Retry after the stated time.",
-    "retry_at": "2026-10-22T04:30:10.000Z"
+    "retry_at": "2026-10-22T04:30:10.000Z",
+    "claim": {
+      "claim_id": "claim_11",
+      "resource": "record:knowledge_page:team:deployment-guide",
+      "ends_at": "2026-10-22T04:30:10.000Z",
+      "whose": "another_member",
+      "notes_total": 1
+    },
+    "message": "Another request is changing this record. Retry after the stated time."
   },
   "causation_id": "01928f3a-7b2c-7470-8000-000000000470",
-  "body_digest": "Tv7hFgBaPAZFIRqOlTz_ACYktrzn9nfJVIMIj2e8vE4",
-  "signature": "aDWjWkqiSoLc0rRa9mmJfNkuvv97SBNh6h7nDD45zSXPHIjYJFBQpeYnNIVxhwSl0FoWIs2Q9AcfcRjp9MSrBA"
+  "body_digest": "pziT8w40TDCKujvhbCDv5LEZ0BgL_IDu5khlzA7YYoM",
+  "signature": "-GpIxYn2nWMFYQyWZiZEc2Q4rixGjxFNZVU6bKGJZ0rKBQ_Bb-W_V9qLi_-ofMRQEsL957JgKikOLNp_FZWLAQ"
 }

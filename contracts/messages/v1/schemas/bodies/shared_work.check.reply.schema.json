@@ -23,24 +23,34 @@
                 "items": {
                   "$ref": "../common.schema.json#/$defs/coordination_seen_claim"
                 },
-                "maxItems": 32
+                "maxItems": 8
               },
               "notes": {
                 "type": "array",
                 "items": {
                   "$ref": "../common.schema.json#/$defs/coordination_seen_note"
                 },
-                "maxItems": 32
+                "maxItems": 8
               },
               "can_wait": {
                 "description": "Whether a wait on it would be accepted now.",
                 "type": "boolean"
+              },
+              "claims_total": {
+                "description": "How many live claims on, above or under it there are in all; the list holds the newest of them.",
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "notes_total": {
+                "description": "How many notes on it there are in all; the list holds the newest of them.",
+                "$ref": "../common.schema.json#/$defs/count"
               }
             },
             "required": [
               "resource",
               "claims",
+              "claims_total",
               "notes",
+              "notes_total",
               "can_wait"
             ],
             "additionalProperties": false

@@ -25,6 +25,9 @@
     "outcome": "ok",
     "schedule_id": "schedule_id_1",
     "seen_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "action": {
+      "type": "task"
+    },
     "detail": {
       "text": "{\"assigned_agent_type\": \"WebResearchAgent\", \"cron_expression\": null, \"cron_timezone\": null, \"enabled\": true, \"expires_at_utc\": null, \"interval_ms\": 86400000, \"management_class\": \"user\", \"next_fire_at\": \"2026-10-23T04:30:00+00:00\", \"objective_id\": null, \"owner_canonical_user_id\": \"person_7c1\", \"paused_until\": null, \"problem_statement\": \"Review the build and its saved result.\", \"record_digest\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"repeat_count\": 0, \"schedule_id\": \"schedule_id_1\", \"schedule_memory\": {\"ledger\": {\"recent_runs\": [{\"result\": \"Build R2 is saved.\", \"task_id\": \"run_r2\"}], \"total_runs\": 9}, \"policy\": {\"notify\": \"on_change\"}, \"schedule_kind\": \"build_review\", \"state\": {\"summary\": \"Build R2 is saved.\"}}, \"schedule_name\": \"Build review\", \"system_schedule_kind\": null}",
       "offset": 0,
@@ -36,6 +39,6 @@
   },
   "causation_id": "01928f3a-7b2c-7e60-8000-000000000002",
   "idempotency_key": "schedules.get.reply:JVlk4waxSryhA1XuuUf3DNd37weMckR3GkrT5yQqxKc",
-  "body_digest": "jyPh_7QxK6brtXm5pxQg7OTwI4DbiiLCXX-zwmJnG-Y",
-  "signature": "_BT6MZXh8n1KMGG907KgvNjaVRkUsbwgm0g0j6mo4SLB6FkDyCXWeo0Ix7a9bove3wZu_MH7MMVtlHxEoH4ADQ"
+  "body_digest": "mtWn33lFYRw-ahgJevAonT8JNxnQD1Ibr3t3NAVCOgk",
+  "signature": "VfTNM-5YQNCf29i7Dl10DeQ8pVFV7PZOhK2-lO-Pmt5hn9BxL2MRTTzN8jy7Qe4onVkIHrARUWL-C11ivFTUDQ"
 }

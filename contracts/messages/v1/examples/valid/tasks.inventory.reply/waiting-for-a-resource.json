@@ -1,0 +1,49 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.inventory.reply",
+  "message_id": "01928f3a-7b2c-7c3b-8000-000000000c3b",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "host",
+    "id": "gateway-1",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7401-8000-000000000401",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "roots": [
+      {
+        "root_task_id": "root_task_id_3",
+        "state": "waiting",
+        "latest_activity_at": "2026-10-22T04:30:00.000Z",
+        "waiting_for": {
+          "on": {
+            "type": "resource",
+            "resource": "file:team/reports/q3.md"
+          },
+          "ends_by": "2026-10-22T05:05:00.000Z"
+        },
+        "children": [],
+        "children_total": 0
+      }
+    ],
+    "schedules": [],
+    "total": 1
+  },
+  "causation_id": "01928f3a-7b2c-7401-8000-000000000401",
+  "idempotency_key": "tasks.inventory.reply:arWXh8WhCI6HwuQ0_q8l60h9gcCV_zNBjmpuEJmZ9wE",
+  "body_digest": "oLJFq-kZ9wcpYYtq4DD-2Ys6CgpvQKV5t6bTe984QPE",
+  "signature": "BzwkRKCCYuunjXjB5HTMrLkQ7IVNBaIHM7rUoHz-qbnm_m-aGT9nvmYnbT14lVX_O3maSrz09AOuV1l01rdvAg"
+}
