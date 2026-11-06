@@ -238,6 +238,9 @@ class MCPHostingAdministration:
                 headers={"Authorization": f"Bearer {broker_token}"},
                 json=payload.model_dump(mode="json", by_alias=True, exclude_none=True),
             )
+        if response.status_code == 409:
+            # The broker could not start the server's sidecar; its answer says why.
+            raise RuntimeError(response.text.strip())
         response.raise_for_status()
         definition = self.store.update_lifecycle(
             definition.hosted_server_id,

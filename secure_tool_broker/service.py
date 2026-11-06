@@ -93,6 +93,7 @@ from secure_tool_broker.google_workspace import (
 from access_control.people import is_administrator
 from runtime_settings.security import reject_removed_tool_credential_env_vars
 from secure_tool_broker.mcp_config import BrokerMCPConfig
+from secure_tool_broker.mcp_hosting_runtime import HostedMCPStartError
 from secure_tool_broker.tool_setup_recheck import run_rechecks
 from secure_tool_broker.tool_setup_status import TOOL_SETUP_PROVIDER, tool_setup_status
 from secure_tool_broker.tool_setup_tracking import note_broker_result
@@ -1084,6 +1085,8 @@ class SecureToolBrokerService:
                 str(exc),
             )
             return _mcp_refusal_response(exc)
+        except HostedMCPStartError as exc:
+            return self._hosted_start_refusal(connection_id, exc)
         except Exception as exc:
             self._logger.exception(
                 "Brokered MCP discovery failed. event=mcp_broker_discovery_failed"
@@ -1110,6 +1113,8 @@ class SecureToolBrokerService:
                 str(exc),
             )
             return _mcp_refusal_response(exc)
+        except HostedMCPStartError as exc:
+            return self._hosted_start_refusal(connection_id, exc)
         except Exception as exc:
             self._logger.exception(
                 "Brokered MCP invocation failed. event=mcp_broker_invocation_failed"
@@ -1119,6 +1124,17 @@ class SecureToolBrokerService:
         return web.json_response(
             response.model_dump(mode="json", by_alias=True, exclude_none=True)
         )
+
+    def _hosted_start_refusal(self, connection_id: str, exc: HostedMCPStartError) -> web.Response:
+        """A hosted server whose sidecar could not start: the agent's model reads why."""
+
+        self._logger.warning(
+            "Hosted MCP server did not start for a call. event=mcp_host_sidecar_start_failed "
+            "connection_id=%s reason=%s",
+            connection_id,
+            str(exc),
+        )
+        return _mcp_refusal_response(exc)
 
     async def _handle_mcp_host_lifecycle(
         self,
@@ -1135,6 +1151,14 @@ class SecureToolBrokerService:
             )
         except (PermissionError, FileNotFoundError, ValueError) as exc:
             raise web.HTTPForbidden(text=str(exc)) from exc
+        except HostedMCPStartError as exc:
+            self._logger.warning(
+                "Hosted MCP server did not start. event=mcp_host_sidecar_start_failed "
+                "hosted_server_id=%s reason=%s",
+                request.match_info.get("hosted_server_id"),
+                str(exc),
+            )
+            raise web.HTTPConflict(text=str(exc)) from exc
         except Exception as exc:
             self._logger.exception(
                 "Hosted MCP lifecycle failed. event=mcp_host_lifecycle_failed "

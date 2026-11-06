@@ -24,7 +24,7 @@ import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import pytest
@@ -70,7 +70,7 @@ from mcp_control.registry import (
 from secure_tool_broker.access_gate import REASON_IDENTITY_REJECTED
 from secure_tool_broker.mcp_client import BrokerMCPClient
 from secure_tool_broker.mcp_config import BrokerMCPConfig
-from secure_tool_broker.mcp_hosting_runtime import MCPHostedProcessSupervisor
+from secure_tool_broker.mcp_hosting_runtime import HostedMCPPortInUse, MCPHostedProcessSupervisor
 from secure_tool_broker.mcp_runtime import BrokerMCPRuntime
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import caller_token, open_gate, signed_task_context
@@ -109,17 +109,30 @@ def _free_port() -> int:
         return int(candidate.getsockname()[1])
 
 
-def _supervisor_config(tmp_path: Path, port: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        instance_root_path=tmp_path,
-        mcp=SimpleNamespace(
-            hosting=SimpleNamespace(
-                bind_host="127.0.0.1",
-                port_range_start=port,
-                port_range_end=port,
-            )
-        ),
-    )
+def _supervisor_config(tmp_path: Path) -> SimpleNamespace:
+    """What the sidecar supervisor reads from the instance settings: where the instance lives."""
+
+    return SimpleNamespace(instance_root_path=tmp_path)
+
+
+async def _start_on_a_free_port(
+    supervisor: MCPHostedProcessSupervisor, save: Callable[[int], MCPHostedServerDefinitionV1]
+) -> MCPHostedServerDefinitionV1:
+    """Save a definition for a free port and start its sidecar; use another port when that one was taken.
+
+    A sidecar listens on the port its definition names, so the test picks a free port and
+    closes it before the sidecar binds it. Another test's server can take it in between; the
+    start then says so (``HostedMCPPortInUse``) instead of reporting that server as running.
+    """
+
+    for _attempt in range(3):
+        definition = save(_free_port())
+        try:
+            await supervisor.start(definition.hosted_server_id)
+        except HostedMCPPortInUse:
+            continue
+        return definition
+    raise AssertionError("Every port the test picked was taken before the sidecar could listen on it.")
 
 
 def _hosting_config(tmp_path: Path) -> tuple[GatewayInstanceConfig, Path]:
@@ -164,8 +177,9 @@ def _hosted_connection(config: GatewayInstanceConfig, hosted_server_id: str):
 class _Broker:
     """The secure broker's hosted-server route, reached over HTTP by the runtime."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, status_code: int = 200) -> None:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, status_code: int = 200, text: str = "") -> None:
         self.status_code = status_code
+        self.text = text
         self.requests: list[dict[str, Any]] = []
         monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", "http://broker.test")
         monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", caller_token(CALLER_MANAGER))
@@ -181,7 +195,9 @@ class _Broker:
             )
             operation = request.url.path.rsplit("/", 1)[-1]
             status = "running" if operation == "start" else "stopped"
-            return httpx.Response(self.status_code, json={"status": status} if self.status_code == 200 else None)
+            if self.status_code != 200:
+                return httpx.Response(self.status_code, text=self.text)
+            return httpx.Response(self.status_code, json={"status": status})
 
         monkeypatch.setattr(
             httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs)
@@ -299,6 +315,29 @@ def test_a_refused_broker_call_leaves_the_hosted_server_as_it_was(tmp_path: Path
     result = _call_tool(agent, hosted_mcp_servers, action="start", hosted_server_id=definition.hosted_server_id)
 
     assert "403" in result["error"]
+    assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
+        HostedMCPLifecycle.STOPPED
+    )
+
+
+PORT_TAKEN = (
+    "The hosted MCP server echo cannot start: 127.0.0.1:41000 is already in use, most likely by its "
+    "sidecar left over from an earlier broker run."
+)
+
+
+def test_a_start_the_broker_could_not_finish_tells_the_agent_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, path = _hosting_config(tmp_path)
+    agent = change_agent(config, path, authorization_enabled=False)
+    definition = _propose(agent, config)
+    MCPHostingAdministration(config).install(
+        definition.hosted_server_id, approval=MCPConnectionAdministration.person_approval("admin-1")
+    )
+    _Broker(monkeypatch, status_code=409, text=PORT_TAKEN)
+
+    result = _call_tool(agent, hosted_mcp_servers, action="start", hosted_server_id=definition.hosted_server_id)
+
+    assert result["error"] == PORT_TAKEN
     assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
         HostedMCPLifecycle.STOPPED
     )
@@ -487,26 +526,14 @@ async def test_broker_starts_or_stops_only_the_exact_installed_definition(tmp_pa
 async def test_declarative_host_sidecar_requires_broker_token_and_serves_tools(
     tmp_path: Path,
 ) -> None:
-    port = _free_port()
-    config = _supervisor_config(tmp_path, port)
-    definition = MCPHostedServerDefinitionV1.build(
-        server_name="echo",
-        purpose="Return an attested copy of reviewed arguments.",
-        owner_canonical_user_id="usr_owner",
-        team_id=TEAM,
-        target_agent_types=("TeamArchitect",),
-        tools=(ECHO_TOOL,),
-        bind_host="127.0.0.1",
-        port=port,
-        lifecycle=HostedMCPLifecycle.STOPPED,
-    )
-    store = MCPHostedServerStore(resolve_mcp_hosting_paths(config))
-    store.save(definition)
+    config = _supervisor_config(tmp_path)
     supervisor = MCPHostedProcessSupervisor(config)
     provider = None
     try:
+        definition = await _start_on_a_free_port(supervisor, lambda port: _saved(config, _echo_definition(port)))
+        port = definition.port
         result = await supervisor.start(definition.hosted_server_id)
-        assert result["status"] == "running"
+        assert result["status"] == "running" and result["already_running"] is True
         async with httpx.AsyncClient(timeout=5.0) as client:
             denied = await client.post(f"http://127.0.0.1:{port}/mcp")
         assert denied.status_code == 403
@@ -547,25 +574,27 @@ async def test_broker_discovers_authenticated_static_server_from_env_reference(
     monkeypatch,
 ) -> None:
     config, _path = _hosting_config(tmp_path)
-    port = config.mcp.hosting.port_range_start
     config.mcp.network_policy.allow_loopback = True
     config.mcp.static_reconciliation.upgrade_mode = "grandfather_current"
-    definition = MCPHostedServerDefinitionV1.build(
-        server_name="authenticated-echo",
-        purpose="Verify broker-owned static environment materialization.",
-        owner_canonical_user_id=config.user.canonical_user_id,
-        team_id=config.manager.team_id,
-        target_agent_types=("TeamArchitect",),
-        tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
-        bind_host="127.0.0.1",
-        port=port,
-        lifecycle=HostedMCPLifecycle.STOPPED,
-    )
-    MCPHostedServerStore(resolve_mcp_hosting_paths(config)).save(definition)
+
+    def definition_for(port: int) -> MCPHostedServerDefinitionV1:
+        return MCPHostedServerDefinitionV1.build(
+            server_name="authenticated-echo",
+            purpose="Verify broker-owned static environment materialization.",
+            owner_canonical_user_id=config.user.canonical_user_id,
+            team_id=config.manager.team_id,
+            target_agent_types=("TeamArchitect",),
+            tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
+            bind_host="127.0.0.1",
+            port=port,
+            lifecycle=HostedMCPLifecycle.STOPPED,
+        )
+
     supervisor = MCPHostedProcessSupervisor(config)
     runtime = None
     try:
-        await supervisor.start(definition.hosted_server_id)
+        definition = await _start_on_a_free_port(supervisor, lambda port: _saved(config, definition_for(port)))
+        port = definition.port
         token = (
             (supervisor.paths.tokens / f"{definition.hosted_server_id}.token")
             .read_text(encoding="utf-8")
@@ -608,19 +637,30 @@ async def test_broker_dispatches_exact_hosted_operation_through_final_mcp_pep(
     tmp_path: Path,
 ) -> None:
     config, _path = _hosting_config(tmp_path)
-    port = config.mcp.hosting.port_range_start
-    definition = MCPHostedServerDefinitionV1.build(
-        server_name="broker-echo",
-        purpose="Exercise the final broker authorization boundary.",
-        owner_canonical_user_id=config.user.canonical_user_id,
-        team_id=config.manager.team_id,
-        target_agent_types=("TeamArchitect",),
-        tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
-        bind_host="127.0.0.1",
-        port=port,
-        lifecycle=HostedMCPLifecycle.RUNNING,
-    )
-    MCPHostedServerStore(resolve_mcp_hosting_paths(config)).save(definition)
+
+    def definition_for(port: int) -> MCPHostedServerDefinitionV1:
+        return MCPHostedServerDefinitionV1.build(
+            server_name="broker-echo",
+            purpose="Exercise the final broker authorization boundary.",
+            owner_canonical_user_id=config.user.canonical_user_id,
+            team_id=config.manager.team_id,
+            target_agent_types=("TeamArchitect",),
+            tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
+            bind_host="127.0.0.1",
+            port=port,
+            lifecycle=HostedMCPLifecycle.RUNNING,
+        )
+
+    # Every invocation passes the access gate (verified identity, then the tool catalog).
+    gate = open_gate(team_id=config.manager.team_id, instance_root=config.instance_root_path)
+    runtime = _broker_runtime(config, gate)
+    try:
+        # Started here so a taken port can be swapped; the discovery below finds it running.
+        definition = await _start_on_a_free_port(runtime.hosting, lambda port: _saved(config, definition_for(port)))
+    except BaseException:
+        await runtime.close()
+        raise
+    port = definition.port
     descriptor = descriptor_from_server_config(
         {
             "name": definition.server_name,
@@ -654,8 +694,6 @@ async def test_broker_dispatches_exact_hosted_operation_through_final_mcp_pep(
         named_agent_type="TeamArchitect",
     )
 
-    # Every invocation passes the access gate (verified identity, then the tool catalog).
-    gate = open_gate(team_id=config.manager.team_id, instance_root=config.instance_root_path)
     gate_checks = []
     check = gate.check
 
@@ -667,7 +705,6 @@ async def test_broker_dispatches_exact_hosted_operation_through_final_mcp_pep(
     gate.check = recording_check
     task_context = signed_task_context(config.user.canonical_user_id, team_id=config.manager.team_id)
     manager = BrokerCaller(CALLER_MANAGER)
-    runtime = _broker_runtime(config, gate)
     try:
         discovered = await runtime.discover_tools(
             record.connection_id,
@@ -741,3 +778,125 @@ def test_static_response_is_schema_validated_before_install() -> None:
             port=18700,
             lifecycle=HostedMCPLifecycle.PENDING,
         )
+
+
+# -- a sidecar is running only when the sidecar this start launched says so ----------------
+
+
+def _saved(config: Any, definition: MCPHostedServerDefinitionV1) -> MCPHostedServerDefinitionV1:
+    MCPHostedServerStore(resolve_mcp_hosting_paths(config)).save(definition)
+    return definition
+
+
+def _echo_definition(port: int, *, lifecycle: HostedMCPLifecycle = HostedMCPLifecycle.STOPPED) -> MCPHostedServerDefinitionV1:
+    return MCPHostedServerDefinitionV1.build(
+        server_name="echo",
+        purpose="Return an attested copy of reviewed arguments.",
+        owner_canonical_user_id="usr_owner",
+        team_id=TEAM,
+        target_agent_types=("TeamArchitect",),
+        tools=(ECHO_TOOL,),
+        bind_host="127.0.0.1",
+        port=port,
+        lifecycle=lifecycle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_left_over_from_an_earlier_broker_stops_the_start_and_says_what_to_do(
+    tmp_path: Path,
+) -> None:
+    config = _supervisor_config(tmp_path)
+    earlier_broker = MCPHostedProcessSupervisor(config)
+    restarted_broker = MCPHostedProcessSupervisor(config)
+    try:
+        definition = await _start_on_a_free_port(earlier_broker, lambda port: _saved(config, _echo_definition(port)))
+        port = definition.port
+        # The earlier broker stopped without stopping its sidecar, which runs in its own session.
+
+        with pytest.raises(HostedMCPPortInUse) as refused:
+            await restarted_broker.start(definition.hosted_server_id)
+
+        message = str(refused.value)
+        assert f"127.0.0.1:{port} is already in use" in message, message
+        assert "Stop that process" in message, message
+        assert earlier_broker._processes[definition.hosted_server_id].returncode is None
+        assert definition.hosted_server_id not in restarted_broker._processes
+    finally:
+        await restarted_broker.close()
+        await earlier_broker.close()
+
+
+class _Running:
+    returncode = None
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_starts_ready_line_in_the_sidecar_log_does_not_count(tmp_path: Path) -> None:
+    supervisor = MCPHostedProcessSupervisor(_supervisor_config(tmp_path))
+    log_path = tmp_path / "sidecar.log"
+    log_path.write_text("INFO:     Uvicorn running on http://127.0.0.1:41000 (Press CTRL+C to quit)\n")
+
+    with pytest.raises(TimeoutError):
+        await supervisor._wait_ready(
+            _echo_definition(41000),
+            _Running(),  # type: ignore[arg-type]
+            log_path=log_path,
+            offset=log_path.stat().st_size,
+            timeout_seconds=0.5,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_broker_answers_a_start_it_could_not_finish_with_the_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from secure_tool_broker.service import SecureToolBrokerService
+    from tests.broker_access_support import BROKER_ROOT, caller_headers
+
+    class Runtime:
+        async def change_host_lifecycle(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            raise HostedMCPPortInUse(PORT_TAKEN)
+
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
+    monkeypatch.setattr(service, "_get_mcp_runtime", lambda: Runtime())
+    async with TestClient(TestServer(service.build_app())) as client:
+        answer = await client.post(
+            "/v1/mcp/hosted/h1/start", headers=caller_headers(), json={"definition_digest": "0" * 64}
+        )
+        text = await answer.text()
+
+    assert (answer.status, text) == (409, PORT_TAKEN)
+
+
+@pytest.mark.asyncio
+async def test_the_mcp_chat_command_shows_why_a_start_failed() -> None:
+    from assistant_gateway.application.manager_control_command_service import GatewayManagerControlCommandService
+    from assistant_gateway.application.commands.manager_control import ManagerControlCommandRequest
+    from assistant_gateway.application.commands.context import GatewayActorContext
+
+    hosted = SimpleNamespace(
+        hosted_server_id="h1", server_name="echo", lifecycle="stopped", available_actions=("start",),
+        definition_digest="d" * 64,
+    )
+
+    class Controls:
+        def list_web_chat_mcp_connections(self, _request: object) -> SimpleNamespace:
+            return SimpleNamespace(connections=[])
+
+        def list_web_chat_hosted_mcp_servers(self, _request: object) -> SimpleNamespace:
+            return SimpleNamespace(servers=[hosted])
+
+        async def control_web_chat_mcp_lifecycle(self, _request: object) -> SimpleNamespace:
+            raise RuntimeError(PORT_TAKEN)
+
+    service = GatewayManagerControlCommandService(SimpleNamespace(), mcp_controls=Controls())  # type: ignore[arg-type]
+    result = await service.execute(
+        ManagerControlCommandRequest(
+            command="/mcp hosted start h1",
+            current_session_key="web:session",
+            actor=GatewayActorContext(channel_name="website", user_id="u1", chat_id="c1", canonical_user_id="usr_owner"),
+        )
+    )
+
+    assert PORT_TAKEN in result.text

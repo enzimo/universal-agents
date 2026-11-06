@@ -1031,7 +1031,11 @@ approved changes (`hosted_mcp_servers` with `plan_install` or `plan_remove`, or 
 installing also lets the agent types it names use its tools. Starting and
 stopping it are ordinary tool calls. The broker owns the bearer-protected
 sidecar and its private logs. Publishing it outside the instance is not
-available.
+available. A server counts as running only when its own sidecar says it is
+listening. If another program already uses the server's port, most likely its
+sidecar left over from a broker that stopped abruptly, the start fails and says
+so; stop that process (`ps -ef | grep mcp_control.managed_server` shows it) and
+start the server again.
 
 Open **Settings → Runtime** to review MCP connections and hosted
 servers alongside Objectives and schedules. Only administrators see the
