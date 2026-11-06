@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
 
+from custom_agents.contract_drain import LAUNCH_REFUSED_OTHER_CONTRACT, process_drains
 from custom_agents.schedule_repair_guidance import (
     AGENT_DEFINITION_CHANGED,
     SCHEDULE_LAUNCH_INTENT_CHANGED,
@@ -143,6 +144,8 @@ class AgentInstantiationService:
         occurrence_id: str | None = None,
         join_pending: bool | None = None,
     ) -> AgentLaunchResultV1:
+        if process_drains(self.agent):
+            return self._refused_while_draining(agent_type, source, request_id)
         try:
             if mcp_profile_names:
                 # An agent cannot add MCP servers to a new agent; MCP
@@ -262,6 +265,16 @@ class AgentInstantiationService:
         except (ValueError, PermissionError, LaunchConflict) as exc:
             return AgentLaunchResultV1(status="denied", reason=str(exc))
 
+    def _refused_while_draining(self, agent_type: str, source: str, request_id: str) -> AgentLaunchResultV1:
+        """No agent starts in a process that runs another message contract (``custom_agents.contract_drain``)."""
+
+        self.agent._logger.warning(
+            "An agent start was refused: this process runs another message contract than its installation and "
+            "takes no new work. event=agent_launch_refused_other_contract agent_type=%s source=%s request_id=%s",
+            agent_type, source, request_id,
+        )
+        return AgentLaunchResultV1(status="denied", reason=LAUNCH_REFUSED_OTHER_CONTRACT)
+
     def validate_schedule_start(
         self, binding: ScheduleWorkerBindingV1 | None, occurrence_id: str | None
     ) -> None:
@@ -339,6 +352,11 @@ class AgentInstantiationService:
                     AgentLaunchResultV1(status="denied", reason="same_team_required"),
                 ),
             )
+        if process_drains(self.agent):
+            # One refusal and one log line for the whole request (custom_agents.contract_drain).
+            refused = self._refused_while_draining(request.named_agent_type, source, request.request_id)
+            return AgentCreationResultV1(request_id=request.request_id,
+                                         results=(refused,) * max(request.agent_quantity, 1))
         owner_id = verified_person_id(self.agent) or ""  # the signed context's person
         ttl = request.idle_ttl_seconds
         if ttl is None:

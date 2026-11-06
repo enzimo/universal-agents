@@ -230,6 +230,12 @@ class AgentProcessHost:
     _stop: Optional[asyncio.Event] = None
     _task: Optional[asyncio.Task[None]] = None
 
+    @property
+    def draining(self) -> bool:
+        """Whether this process learned that it runs another contract than its installation (module docstring)."""
+
+        return self._draining is not None
+
     # -- the agent's side (called on the agent's own loop) --------------------------------
 
     def attach(self, agent: Any, *, agent_type: str, definition: str, nc: Any) -> None:

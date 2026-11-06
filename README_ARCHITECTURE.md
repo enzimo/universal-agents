@@ -4451,8 +4451,12 @@ again; a join refused that way is not asked for again either. It drains every ag
 agent's own loop. Queued task work still runs on today's queues in this phase, so draining
 an agent means: it leaves the queues every agent of its type shares (its type's queue and,
 for the team lead, the team's), whose messages stay there for another agent of the type,
-which the lead's worker pools start when tasks wait, or for the next team lead; the lead's
-process starts no pool or scheduled worker; no draining agent claims a due schedule, whose
+which the lead's worker pools start when tasks wait, or for the next team lead; no agent
+starts in the process: every start goes through `AgentInstantiationService.launch`, which
+refuses while the process drains (`process_runs_another_message_contract`, logged once per
+request; the model's `instantiate_agent` is told plainly that the process takes no new work),
+and the controllers and the lead's takeover of dead agents' work do not ask while it drains;
+no draining agent claims a due schedule, whose
 run would be a task of its own, so the schedule stays due and the next team lead, on the
 installation's contract, fires it once at its first scheduler pass (a run missed meanwhile
 is not made up, and a final run late beyond `missed_one_time_after_seconds` is turned off

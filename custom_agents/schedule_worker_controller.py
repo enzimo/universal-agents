@@ -503,11 +503,11 @@ class ScheduleWorkerController:
 
 
 async def reconcile_schedule_workers(agent: Any) -> None:
-    from custom_agents.contract_drain import is_contract_draining
+    from custom_agents.contract_drain import process_drains
 
     if not getattr(agent, "is_team_lead", False) or agent._local_team_runtime is None:
         return
-    if is_contract_draining(agent):
+    if process_drains(agent):
         return  # the process runs another message contract: it starts no workers (custom_agents.contract_drain)
     try:
         await ScheduleWorkerController(agent).reconcile()
