@@ -152,15 +152,25 @@ def start_lease_loss_wind_down(
 
 
 async def may_start_next_task(agent: Any) -> bool:
-    """While winding down, only a started task that is resuming may run here."""
+    """While winding down, only a started task that is resuming may run here.
+
+    So too for a pool worker whose process runs another message contract, until its
+    running turns end and it winds down (``custom_agents.contract_drain``).
+    """
 
     state: Optional[LeaseLossWindDown] = getattr(agent, "_lease_loss_wind_down", None)
-    if state is None:
+    draining = getattr(agent, "_contract_drain", None)
+    if state is None and not getattr(draining, "holds_back_unstarted", False):
         return True
     next_task_id = await agent.task_manager.operations_runtime.run(
         partial(_peek_next_task_id, agent.task_manager)
     )
-    return next_task_id is None or next_task_id in state.resumable_task_ids
+    if next_task_id is None:
+        return True
+    if state is not None:
+        return next_task_id in state.resumable_task_ids
+    info = await agent.task_manager.operations_runtime.run(agent.task_manager.get_task_info, next_task_id)
+    return info is not None and _has_started(agent.task_manager, info)
 
 
 async def hand_back_new_request(

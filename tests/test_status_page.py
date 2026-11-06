@@ -186,6 +186,24 @@ def test_agents_without_a_session_are_a_problem_saying_who_why_and_what_to_do() 
     assert "asked for again" in by_id["agent_without_session:lead:session_runtime_error"].action
 
 
+def test_a_host_on_another_contract_is_a_problem_naming_both_digests_and_what_to_do() -> None:
+    """Contract README "Versions": its agents take no new work; installing one release everywhere ends it."""
+
+    from assistant_gateway.team_view import host_findings
+
+    ours, theirs = "1" * 64, "2" * 64
+    found = host_findings([], {"lead": theirs, "agent-Researcher": theirs}, ours)
+    assert [finding.finding_id for finding in found] == ["host_other_contract:agent-Researcher",
+                                                         "host_other_contract:lead"]
+    assert all(finding.severity is StatusSeverity.PROBLEM for finding in found)
+    lead = found[1]
+    assert lead.title == "The team lead's process runs another release's message contract"
+    assert "takes no new work" in lead.summary and "chats are answered as unavailable" in lead.summary
+    assert "same release" in lead.action and "restart the whole team" in lead.action
+    assert theirs in lead.details and ours in lead.details
+    assert found[0].source == "Process agent-Researcher"
+
+
 @pytest.mark.asyncio
 async def test_the_status_page_shows_what_the_hosts_records_list(tmp_path) -> None:
     from assistant_gateway.team_view import host_findings

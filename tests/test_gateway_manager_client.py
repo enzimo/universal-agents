@@ -313,7 +313,9 @@ async def test_a_lead_whose_host_stops_writing_is_reported_unavailable_within_35
         async def put(self, record, key, document):
             agents._hosts[key] = _Held(document["sequence"], "host", SimpleNamespace(
                 document=SimpleNamespace(expires_at=document["expires_at"]),
-                body=SimpleNamespace(certificate=SimpleNamespace(membership_epoch=1))))
+                body=SimpleNamespace(certificate=SimpleNamespace(membership_epoch=1)),
+                signer=SimpleNamespace(runtime=LEAD_HOST, membership_epoch=1), other_contract=False,
+                their_contract_sha256=None))
             agents._rebuild()
 
     lead_host = MessageHost(layout=None, profile=SimpleNamespace(runtime=LEAD_HOST), nc=None, clock=lambda: now[0])
@@ -367,6 +369,62 @@ async def test_a_lead_whose_host_stops_writing_is_reported_unavailable_within_35
     assert client.manager_id is None and view.lead() is None
     gone_after = (reported_at - last_write).total_seconds()
     assert LIVENESS_LIFETIME.total_seconds() <= gone_after <= 35.0
+
+
+@pytest.mark.asyncio
+async def test_a_lead_whose_host_runs_another_contract_takes_no_chats() -> None:
+    """Contract README "Versions": readers send a host on another contract no new work, and a person's chat is
+    new work for the team lead, so the gateway counts that lead unavailable. It stays on the Team page, not
+    accepting work, so commands about the tasks it holds still reach it."""
+
+    start = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
+    store = SimpleNamespace(contract_sha256="1" * 64)
+    agents = TeamAgents(SimpleNamespace(clock=lambda: start, live=SimpleNamespace(trust=SimpleNamespace(store=store))),
+                        "team_test")
+    agents._agents["lead_1"] = _Held(1, "agent", SimpleNamespace(
+        signer=SimpleNamespace(runtime=LEAD_HOST),
+        body=SimpleNamespace(state="idle", session="session_lead", agent_type="TeamArchitect",
+                             display_name="TeamLead", accepting_work=True, since=format_timestamp(start))))
+    agents._placements["lead_1"] = _Held(1, "placement", SimpleNamespace(body=SimpleNamespace(host=LEAD_HOST,
+                                                                                              host_epoch=1)))
+    agents._roles["session_lead"] = "lead"
+
+    def host_record(theirs):
+        return _Held(1, "host", SimpleNamespace(
+            document=SimpleNamespace(expires_at=format_timestamp(start + timedelta(seconds=20))),
+            body=None if theirs else SimpleNamespace(certificate=SimpleNamespace(membership_epoch=1)),
+            signer=SimpleNamespace(runtime=LEAD_HOST, membership_epoch=1, teams=frozenset({"team_test"})),
+            other_contract=theirs is not None, their_contract_sha256=theirs))
+
+    unavailable: list = []
+    client = _client(_FakeManagerRuntime(), settings=_settings(manager_id=None), unavailable=unavailable)
+    shown: list[AgentStatus] = []
+
+    async def on_lead(status: AgentStatus) -> None:
+        await client.apply_manager_status(status, source="agent_records")
+
+    view = GatewayTeamView("team_test", on_status=lambda status, reported_at, source: shown.append(status),
+                           on_lead=on_lead)
+    view._agents = agents
+    agents.listen(view._changed)
+    agents.ready.set()
+    view.ready.set()
+
+    async def apply_lead_changes() -> None:
+        while not view._leads.empty():
+            await on_lead(view._leads.get_nowait())
+
+    agents._hosts[LEAD_HOST] = host_record(None)
+    agents._rebuild()
+    await apply_lead_changes()
+    assert client.manager_id == "lead_1" and view.lead() is not None and unavailable == []
+
+    agents._hosts[LEAD_HOST] = host_record("2" * 64)
+    agents._rebuild()
+    await apply_lead_changes()
+    assert [item.manager_id for item in unavailable] == ["lead_1"] and client.manager_id is None
+    assert view.lead() is None and view.live_ids() == {"lead_1"}
+    assert shown[-1].self_id == "lead_1" and shown[-1].accepting_work is False and shown[-1].is_exiting is False
 
 
 @pytest.mark.asyncio

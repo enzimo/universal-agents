@@ -10,6 +10,11 @@ certificate for the issuer's installation, runtime and membership epoch, and the
 agent session the frame names (README, "Who sent it"). Nothing the frame says about
 its sender counts until those records confirm it.
 
+A join or renewal from a host on another pre-release contract (README, "Versions") is
+read for its contract digest before the rest of its body, so that host learns
+``protocol_mismatch`` instead of a refusal of a body another contract shaped:
+``VerifiedFrame.other_contract`` marks it, like ``TrustStore.verify`` marks a host record.
+
 Verification has no side effects. A receiver that admits a frame records
 ``VerifiedFrame.replay_key`` with ``VerifiedFrame.frame_digest`` in the same
 transaction as the admission, so a redelivery is recognised and other content under
@@ -267,6 +272,13 @@ class VerifiedAuthority:
 
 @dataclass(frozen=True)
 class VerifiedFrame:
+    """A frame that passed the receiver's checks.
+
+    ``other_contract`` marks a join or renewal whose host runs another pre-release contract
+    (README, "Versions"): everything before its body was checked (``verify_frame``), but its
+    body was not read, so ``body`` is None and ``their_contract_sha256`` names that contract.
+    """
+
     frame: Frame
     body: Any
     certificate: Optional[HostCertificate]  # None for a join, signed by the key it presents
@@ -275,6 +287,8 @@ class VerifiedFrame:
     replay_key: ReplayKey
     frame_digest: str
     raw: dict[str, Any] = field(repr=False)
+    other_contract: bool = False
+    their_contract_sha256: Optional[str] = None
 
 
 def _newer_minor(raw: Mapping[str, Any]) -> bool:
@@ -367,14 +381,16 @@ def _verify_signature(raw: Mapping[str, Any], frame: Frame, public_key: Ed25519P
         raise FrameRefused("bad_signature", at="/signature") from error
 
 
-def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore, now: datetime) -> None:
+def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore, now: datetime, *,
+                 read_body: bool = True) -> None:
     """A join speaks for its own new host only (README, "Installation traffic").
 
     Its key must not be revoked, by its key id or by its public key under any key id,
     and the receiver needs a current revocations record to know that. It names the installation scope, no agent, epoch zero and an unreserved
     runtime id; its body asks for that runtime in that installation, and only for roles a
     joining host may hold (the kind's senders, which the receiver cannot check against a
-    certificate the host does not have yet).
+    certificate the host does not have yet). The body is not read (``read_body=False``) for
+    a join of another contract, except the key it presents, which its signature needed.
     """
 
     issuer = frame.issuer
@@ -397,6 +413,8 @@ def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: Tr
             raise FrameRefused("wrong_issuer", "a host joins at epoch zero", at=f"/issuer/{field_name}")
     if issuer.runtime.startswith(RESERVED_RUNTIME_PREFIXES):
         raise FrameRefused("wrong_issuer", "runtime ids starting with x- or _ are reserved", at="/issuer/runtime")
+    if not read_body:
+        return
     body = raw["body"]
     for field_name in ("runtime", "installation"):
         if body.get(field_name) != getattr(issuer, field_name):
@@ -491,6 +509,19 @@ def _verify_issuer(frame: Frame, spec: Optional[KindSpec], certificate: HostCert
     if asked.target == "agent" and issuer.agent != asked.id:
         # Results and answers are accepted only from the agent that holds the work.
         raise FrameRefused("wrong_issuer", "the reply comes from another agent than the one asked", at="/issuer/agent")
+
+
+def _other_contract(raw: Mapping[str, Any], spec: Optional[KindSpec], is_reply: bool, trust: TrustStore) -> Optional[str]:
+    """The contract digest a join or renewal names when it is not the receiver's own (README, "Versions").
+
+    Only requests whose body carries the host's digest (``contract_sha256``: joins and
+    renewals) are read this way; it is read on its own, as ``TrustStore.other_contract``
+    reads a host record's.
+    """
+
+    if is_reply or spec is None or "contract_sha256" not in spec.body_shape.get("properties", {}):
+        return None
+    return trust.other_contract(raw.get("body"))
 
 
 def _verify_renewal(raw: Mapping[str, Any], frame: Frame, certificate: HostCertificate) -> None:
@@ -1061,7 +1092,10 @@ def verify_frame(
 ) -> VerifiedFrame:
     """Check one received frame in the registry's order; raise ``FrameRefused`` on the first failure.
 
-    ``headers`` are the NATS headers the frame arrived with, ``{}`` when it arrived
+    A join or renewal that names another pre-release contract's digest is checked for
+    everything before its body (its signature, which for a join needs the key it presents,
+    its issuer, sender, audience, subject, times and replay) and returned with
+    ``other_contract`` set and no body (module docstring). ``headers`` are the NATS headers the frame arrived with, ``{}`` when it arrived
     with none (nats-py reports that as None), or None only for a frame read from
     storage. ``answering`` is the request a reply answers; replies are refused
     without it. ``stored_at`` is when a stream stored a queued frame: JetStream's
@@ -1092,15 +1126,16 @@ def verify_frame(
         _verify_signature(raw, frame, certificate.public_key)
     if body_digest(raw["body"]) != frame.body_digest:
         raise FrameRefused("bad_digest", at="/body_digest")
+    theirs = _other_contract(raw, spec, is_reply, trust)
     if certificate is None:
         assert spec is not None  # only a known kind proves possession
-        _verify_join(raw, frame, spec, trust, now)
+        _verify_join(raw, frame, spec, trust, now, read_body=theirs is None)
     else:
         session = _session(frame, trust)
         _verify_revocation(frame, certificate, session, trust, now)
         _verify_epochs(certificate, spec, trust)
         _verify_issuer(frame, spec, certificate, session, issued_at, is_reply, answering)
-        if not is_reply:
+        if not is_reply and theirs is None:
             _verify_renewal(raw, frame, certificate)
         _verify_sender(frame, certificate, session, spec, is_reply, trust, issued_at, receiver)
     _verify_audience(frame, receiver, answering if is_reply else None)
@@ -1113,6 +1148,10 @@ def verify_frame(
         raise FrameRefused("replayed", "this message id was admitted with other content", at="/message_id")
     if spec is None:
         raise FrameRefused("unknown_kind", frame.kind, at="/kind")
+    if theirs is not None:
+        return VerifiedFrame(frame=frame, body=None, certificate=certificate, session=session, authority=None,
+                             replay_key=replay_key, frame_digest=digest, raw=raw, other_contract=True,
+                             their_contract_sha256=theirs)
     model, shape = body_model(frame.kind)
     # The body as this version knows it: a newer minor's unknown optional fields are
     # dropped. Checks that look inside the body start from a field only when the schema

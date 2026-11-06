@@ -10,6 +10,11 @@ has joined (``ready``).
 An instance whose launcher did not prepare the message hosts' trust folder (a gateway
 run by hand, without ``docker.launch_headless``) has no bootstrap bundle: the host does
 not start, and a command says so.
+
+A gateway that runs another contract than the installation (README "Versions": while the
+label is a pre-release, the authority answers its join ``protocol_mismatch``) cannot join
+until it runs the installation's release; it does not ask again, and a command says why
+at once.
 """
 
 from __future__ import annotations
@@ -21,9 +26,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from custom_messages.wire.frame import VerifiedFrame
+from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_transport.protocol1.authority_tokens import command_token
 from custom_transport.protocol1.host_runtime import MessageHost
-from custom_transport.protocol1.joining import HostProfile
+from custom_transport.protocol1.joining import HostProfile, JoinRefused
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
@@ -67,6 +73,10 @@ class GatewayMessageHost:
     _task: Optional[asyncio.Task[None]] = None
     # Who is live and who leads, read once joined (assistant_gateway.team_view).
     team_view: Optional[Any] = None
+    # The contract this gateway runs: its code's, unless a test runs it on another.
+    contract_sha256: str = CONTRACT_SHA256
+    # Why it cannot join for good: it runs another contract than the installation (module docstring).
+    _refusal: Optional[str] = None
 
     def observe_team(self, view: Any) -> None:
         """Read the team's agent records into ``view`` once joined (``GatewayTeamView.run``)."""
@@ -76,7 +86,8 @@ class GatewayMessageHost:
     def start(self, nc: Any) -> None:
         """Join and keep the host up in the background; returns at once."""
 
-        self.host = MessageHost(self.layout, gateway_profile(self.team), nc, logger=self.logger)
+        self.host = MessageHost(self.layout, gateway_profile(self.team), nc, logger=self.logger,
+                                contract_sha256=self.contract_sha256)
         self._task = asyncio.create_task(self._run(), name="gateway_message_host")
 
     async def _run(self) -> None:
@@ -85,11 +96,20 @@ class GatewayMessageHost:
             try:
                 await self.host.start()
                 break
+            except JoinRefused as refused:
+                if refused.outcome == "protocol_mismatch":
+                    # Logged by the host with both digests; asking again cannot change it.
+                    self._refusal = ("This gateway runs another message contract than the installation; install "
+                                     "the installation's release here and start it again.")
+                    self._ready.set()
+                    return
+                self.logger.exception("The gateway could not join as a message host; trying again. "
+                                      "event=gateway_host_join_failed")
             except Exception:
                 self.logger.exception("The gateway could not join as a message host; trying again. "
                                       "event=gateway_host_join_failed")
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=10)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=10)
         if self._stop.is_set():
             return
         self._ready.set()
@@ -105,6 +125,8 @@ class GatewayMessageHost:
             await asyncio.wait_for(self._ready.wait(), timeout=timeout)
         except asyncio.TimeoutError as error:
             raise GatewayHostUnavailable("The gateway has not joined the installation yet.") from error
+        if self._refusal is not None:
+            raise GatewayHostUnavailable(self._refusal)
         return self.host
 
     async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str,

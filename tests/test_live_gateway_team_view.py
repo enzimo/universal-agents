@@ -186,3 +186,70 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
         await gateway.close()
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_on_the_status_page(
+    broker: str, tmp_path: Path,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Contract README "Versions": a chat is new work for the team lead, so a lead whose host runs another contract
+    is unavailable to the gateway; it stays on the Team page, not accepting work, and the Status page names its
+    host and both digests."""
+
+    from assistant_gateway.status_page import StatusPage
+    from custom_messages.wire.kinds import CONTRACT_SHA256
+    from tests.test_live_team_services import OTHER_CONTRACT, run_on_another_contract
+    from tests.test_status_page import _config, _Notices
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    lead_profile = lead_host_profile(TEAM, ("TeamArchitect", "Researcher"), 2)
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), lead_profile)
+        services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
+        gateway = GatewayMessageHost(layout, TEAM)
+        leads: list[AgentStatus] = []
+        shown: list[AgentStatus] = []
+
+        async def on_lead(status: AgentStatus) -> None:
+            leads.append(status)
+
+        view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: shown.append(status),
+                               on_lead=on_lead, details_seconds=30)
+        gateway.observe_team(view)
+        gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        assert await view.wait_ready(20)
+
+        async def no_keys() -> dict:
+            return {"endpoints": []}
+
+        page = StatusPage(config=_config(tmp_path), model_key_status=no_keys, agent_statuses=lambda: [],
+                          send_notice_once=_Notices(), host_findings=view.host_findings)
+
+        async def keeps(agent, reason):
+            return None
+
+        async def holds(agent):
+            return True  # it still holds work: it drains, and keeps its agents meanwhile
+
+        lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
+                                     drain_agent=keeps, holds_work=holds)
+        lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
+                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
+        await _until(lambda: view.lead() is not None and leads and not leads[-1].is_exiting)
+
+        assert lead_host.host is not None
+        run_on_another_contract(lead_host.host)
+        await lead_host.host.report_now()
+        await _until(lambda: leads[-1].is_exiting)  # for the manager client: unavailable, no chats
+        assert view.lead() is None and view.live_ids() == {"lead_1"}
+        assert shown[-1].self_id == "lead_1" and shown[-1].accepting_work is False and not shown[-1].is_exiting
+        found = [finding for finding in (await page.report()).findings
+                 if finding.finding_id == f"host_other_contract:{LEAD_HOST_RUNTIME}"]
+        assert len(found) == 1 and OTHER_CONTRACT in found[0].details and CONTRACT_SHA256 in found[0].details
+
+        await lead_host.stop()
+        await gateway.close()
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
