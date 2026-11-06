@@ -628,3 +628,61 @@ async def test_an_instance_that_lost_the_lock_leaves_the_host_record_to_the_one_
             await asyncio.wait_for(serving, timeout=10)
         record = json.loads((await (await worker.nc.jetstream().key_value("UA1_HOSTS")).get(TEAM_SERVICES_RUNTIME)).value)
         assert record["body"]["state"] == "accepting"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["unsubscribe", "drained_record"])
+async def test_a_stop_whose_last_steps_fail_still_releases_the_lock(broker: str, tmp_path: Path, failing: str) -> None:
+    """A failed unsubscribe or "drained" host record still releases the lock, and its error is still raised.
+
+    Otherwise the next instance, such as the restart of every service, waits out the lease and the clock tolerance.
+    """
+
+    from types import SimpleNamespace
+
+    from nats.js.errors import KeyNotFoundError
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        worker = await host(stack, broker, layout, WORKER)
+        services = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        if failing == "drained_record":
+            published = services.publish_liveness
+
+            async def publish_liveness(state: str = "accepting") -> None:
+                if state == "drained":
+                    raise RuntimeError("NATS did not store the drained record")
+                await published(state)
+
+            services.publish_liveness = publish_liveness  # type: ignore[method-assign]
+        else:
+            started = services.start
+
+            async def start(*, report: bool = True):
+                live = await started(report=report)
+                serve = live.serve
+
+                async def serve_and_fail_to_unsubscribe(*args, **kwargs):
+                    subscription = await serve(*args, **kwargs)
+
+                    async def unsubscribe() -> None:
+                        await subscription.unsubscribe()
+                        raise RuntimeError("the connection dropped while unsubscribing")
+
+                    return SimpleNamespace(unsubscribe=unsubscribe)
+
+                live.serve = serve_and_fail_to_unsubscribe  # type: ignore[method-assign]
+                return live
+
+            services.start = start  # type: ignore[method-assign]
+        serving = asyncio.create_task(serve_team(services, TEAM, stop))
+        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        stop.set()
+        with pytest.raises(RuntimeError, match="drained record|unsubscribing"):
+            await asyncio.wait_for(serving, timeout=10)
+        locks = await worker.nc.jetstream().key_value("UA1_LOCKS")
+        with pytest.raises(KeyNotFoundError):
+            await locks.get(lock_key(TEAM))
+
