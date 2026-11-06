@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Final, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,8 +30,8 @@ from custom_messages.contracts.task_v1 import Task
 HANDBACK_NOT_STARTED = "not_started"
 HANDBACK_INTERRUPTED = "interrupted"
 # Why a worker winds down and hands work back (``WorkerLeaseLossEvidenceV1.cause``).
-WIND_DOWN_LEASE_LOST = "launch_lease_lost"
-WIND_DOWN_OTHER_CONTRACT = "other_message_contract"
+WIND_DOWN_LEASE_LOST: Final = "launch_lease_lost"
+WIND_DOWN_OTHER_CONTRACT: Final = "other_message_contract"
 WindDownCause = Literal["launch_lease_lost", "other_message_contract"]
 MAX_HANDBACK_ERROR_ENTRIES = 10
 MAX_HANDBACK_ACTION_NOTES = 50
