@@ -48,15 +48,16 @@
     "task_id": "task_sub_7f_1",
     "resources": [
       "file:team/reports/q3.md",
+      "file:team/reports/q4/",
+      "file:team/archive/2025.md",
       "record:knowledge_page:personal:travel-plans",
       "record:memory_fact:usermem:42",
       "record:schedule:sched_1",
       "record:objective:obj_1",
-      "record:heartbeat_item:hb_1",
       "account:cli:google:person"
     ]
   },
   "idempotency_key": "shared_work.check:IMQuGl6hMXPWR2gI0bDtVRByjyio_jmpZcss1JZ4z5E",
-  "body_digest": "vlxgJGokvpCOJWnZuFyCv4xwClRGMhCShUuRWbREBEc",
-  "signature": "StYrocYfpQOZTVT51QzS9WDD8sQzH-cn8GbhY87lQv_rWboFvcV0AWfJDhom8CNod7w8lofLwaJPYPsjwTiIBA"
+  "body_digest": "EtXagi8bIPXGG5RDFOK8XcxIZbkTUrnCmQe_DGpqGxs",
+  "signature": "IF4Fu7571Z933tH0sr8Ja-3IPeYpOVCZ7cTD9u1h8OUP3ElDP9dcwRNY1QNjrRmRtsI2j7P269NZmLYPpYP8CA"
 }

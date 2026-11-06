@@ -1,0 +1,44 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "tasks.inventory.reply",
+  "message_id": "01928f3a-7b2c-7c48-8000-000000000c48",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "host",
+    "id": "gateway-1",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7401-8000-000000000401",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "roots": [],
+    "schedules": [
+      {
+        "schedule_id": "sched_user_once_inline",
+        "name": "Dentist reminder",
+        "action": {
+          "type": "fixed_message"
+        },
+        "next_fire_at": "2026-10-27T15:00:00.000Z",
+        "enabled": true
+      }
+    ],
+    "total": 1
+  },
+  "causation_id": "01928f3a-7b2c-7401-8000-000000000401",
+  "idempotency_key": "tasks.inventory.reply:arWXh8WhCI6HwuQ0_q8l60h9gcCV_zNBjmpuEJmZ9wE",
+  "body_digest": "eojfMOesBH-9Gn19IbeDJf9whInDJEvxfwe8V1HuNeQ",
+  "signature": "SpYrvGrGVbKhR4mit09UB-gffielH4hm3sejWCMTHnlrg5cTdPl_TdHgBGDkw8W5ztkGUJ32I626Op85v1R-Cw"
+}

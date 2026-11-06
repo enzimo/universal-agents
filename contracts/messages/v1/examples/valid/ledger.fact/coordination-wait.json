@@ -1,0 +1,37 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "ledger.fact",
+  "message_id": "01928f3a-7b2c-7c36-8000-000000000c36",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "lead"
+  },
+  "subject": "ua.v1.team_example.team-services-1.work.control.lead",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-23T04:30:00.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "fact_id": "fact_31",
+    "task_id": "task_sub_7f_1",
+    "fact": {
+      "type": "wait",
+      "kind": "claimed_resource",
+      "case_id": "wait_1",
+      "state": "open",
+      "until": "2026-10-22T05:05:00.000Z"
+    }
+  },
+  "idempotency_key": "ledger.fact:jCR_5D1kf1GYT5X0vJbKdnadoqZ4SDFDRKeOvSStRrw",
+  "body_digest": "W-Ef3KIYiLTpJTvkpkrhfjKnyLbq4qAQcdmDnFiyHwU",
+  "signature": "IqU46ym945pkJmNkqtj4rygf_GlLk0R22CFIwXi5Jjmk1VcaM4eFsRLiu5SbycyA_zmkrsJT4K0xMo1SsxuNDQ"
+}

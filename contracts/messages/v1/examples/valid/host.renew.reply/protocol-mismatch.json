@@ -24,10 +24,11 @@
   "body": {
     "outcome": "protocol_mismatch",
     "accepted": "1.0-pre",
-    "install": "Install Universal Agents 0.10.0 or later, which runs protocol 1.0-pre."
+    "accepted_contract_sha256": "5d1f8a0c6b7e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a",
+    "install": "Install the Universal Agents release that runs protocol 1.0-pre with contract digest 5d1f8a0c…0f9a."
   },
   "causation_id": "01928f3a-7b2c-7704-8000-000000000704",
   "idempotency_key": "host.renew.reply:bTqTsJTPsYOjxfmJ-SqfRU-DHTgE_J_PBhQ2o4Wi6iI",
-  "body_digest": "IAa4ncHP2G_oK6FeKSsOJBulp5xAYhEdfsmWIKiS2NY",
-  "signature": "Jl_cmfNjCenhG5rbOKrsYEMEPJ1c5Bvi-VMV4CcwzFVkYznrrdYrfmTZtV8WDMBUnxhLsajfxRRO-TwzeHp5BQ"
+  "body_digest": "A1Rbm9cevXp54kqvDHMKx6J3hh06Fa62o7hM2sEuJ-Y",
+  "signature": "7mLuwELsgrmmUg3k80cxB3TV4rAt2UcrG5btzF_mBFrZTm83Qq5TT3bm1i-Ajzt3jQv1MMlimCRY1xshbyXzDA"
 }

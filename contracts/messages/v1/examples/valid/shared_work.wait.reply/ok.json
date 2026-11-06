@@ -25,10 +25,10 @@
     "outcome": "ok",
     "wait_id": "wait_1",
     "ends_by": "2026-10-22T04:45:00.000Z",
-    "holder_waiting_for_person": false
+    "holder_waiting_for_person": true
   },
   "causation_id": "01928f3a-7b2c-7c27-8000-000000000c27",
   "idempotency_key": "shared_work.wait.reply:zYh37_hOsi0mNOyjbU6Ycg-DS6O-gtA4zVOSAhZBwb8",
-  "body_digest": "GH_hkYfynYKWW_L_OWKzWHdDSXRg6ZlhL4aQdXs9-9M",
-  "signature": "w32nm5pazrfswwmiyKJ3J-36TGQh7fpFUWeUs65srwTtx6g73iLOfXfi1045IMIHh8jI4jmVgjVZXRRfd1F4CQ"
+  "body_digest": "iXhtajTc6JyEOielqK36YLdMZXIZKM7teUKLCjDCg3M",
+  "signature": "Mrd4iUjF2VKescmWG9NHoTf6INuWYwH08QYi_eiCAZSPqfpGlN8UBiKGTVUC41Hq3mqSdcudtmjE0wnXHbR0Aw"
 }

@@ -180,11 +180,14 @@
               "type": "string",
               "enum": [
                 "change_conflict",
-                "other_request_form"
+                "other_request_form",
+                "claimed_resource",
+                "other_request"
               ]
             },
             "case_id": {
-              "$ref": "../common.schema.json#/$defs/record_id"
+              "$ref": "../common.schema.json#/$defs/record_id",
+              "description": "The change review's case, or for a coordination wait (claimed_resource, other_request) the wait id."
             },
             "state": {
               "type": "string",

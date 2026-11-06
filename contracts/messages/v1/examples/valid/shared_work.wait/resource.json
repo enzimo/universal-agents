@@ -49,10 +49,11 @@
     "task_id": "task_sub_7f_1",
     "on": {
       "type": "resource",
-      "resource": "file:team/reports/q3.md"
+      "resource": "file:team/reports/q3.md",
+      "reason": "Updating the Q3 figures."
     }
   },
   "idempotency_key": "shared_work.wait:EC8awx9BuDsVpiJfak-vSy2YxAVSxkSErLNxzmtJFtg",
-  "body_digest": "_GssAkccLpXxozhKU8TmsjKpx_dvUxultq__D52_p10",
-  "signature": "ho_dBXfKYSYasnkFvx4F9Po11mM5r1FiRPrUMaNgPtJCI6_mU7viGh9gz0_PoKkzERHOIB8M2ElL_oznfI3nDg"
+  "body_digest": "RrzE5EhJ2kJ5yV3yRBX7TdFdIb_xqnEWi2E0lNkD2LM",
+  "signature": "qTv4rOdPHEicB9GKrYmA2wZZCXPbcMOVsWgRbXb4EqVrdVYKp76nG42yUM0ugF1ZFeeeQgxfgiRC4vTuYYv5Aw"
 }
