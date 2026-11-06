@@ -262,3 +262,170 @@ async def test_a_refused_session_is_asked_for_again_and_listed_in_the_host_recor
         await lead.stop()
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+class _QueueWorker:
+    """A stand-in agent that takes its type's tasks from the queue all agents of the type share, as today's queued
+    work does, and holds each task it took until it runs or hands it back.
+
+    Its drain (``AgentProcessHost.drain_agent``) stops taking tasks; ``hand_back`` returns what it holds to the
+    queue unacknowledged, so the queue gives it to another agent of the type. The real drain of an agent is
+    ``custom_agents.contract_drain`` (tests/test_contract_drain.py).
+    """
+
+    def __init__(self, agent_id: str, js, *, runs: bool) -> None:
+        self.agent = _agent(agent_id)
+        self.js, self.runs = js, runs
+        self.held: list = []
+        self.ran: list[str] = []
+        self.taking = asyncio.Event()
+        self.drained = asyncio.Event()
+
+    async def take(self, stop: asyncio.Event) -> None:
+        from nats.errors import TimeoutError as NatsTimeoutError
+
+        queue = await self.js.pull_subscribe("work.Researcher", durable="workers_Researcher")
+        while not stop.is_set():
+            await self.taking.wait()
+            try:
+                messages = await queue.fetch(1, timeout=0.2)
+            except NatsTimeoutError:
+                continue
+            for message in messages:
+                if not self.taking.is_set():  # drained while it waited: not taken
+                    await message.nak()
+                elif self.runs:
+                    self.ran.append(message.data.decode())
+                    await message.ack()
+                else:
+                    self.held.append(message)
+
+    async def drain(self, agent, reason: str) -> None:
+        self.taking.clear()
+        self.drained.set()
+
+    async def holds_work(self, agent) -> bool:
+        return bool(self.held)
+
+    async def hand_back(self) -> None:
+        for message in self.held:
+            await message.nak()
+        self.held.clear()
+
+    async def tasks_list(self, agent, verified):
+        return {"outcome": "ok", "tasks": [], "total": len(self.held), "queued_count": len(self.held),
+                "current_count": 0, "queue_digest": f"held-{len(self.held)}"}
+
+
+@pytest.mark.asyncio
+async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_up_its_agent(
+    broker: str, tmp_path: Path, caplog,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Contract README "Versions" and plan 13B.12: a host on another contract digest takes no new work and gets
+    no new placement, still answers a person's command about the task it holds, drains (its record says
+    ``draining``, then ``drained``), hands back its unfinished task, which another host's agent then runs, and
+    renews only to give up its agent.
+
+    Host B joined on the installation's contract and then runs another one, as a host that kept running while
+    the rest of the installation moved to another pre-release contract (``run_on_another_contract``). It learns
+    it from the team services' host record.
+    """
+
+    from nats.js.api import RetentionPolicy, StreamConfig
+
+    from custom_messages.wire.kinds import CONTRACT_SHA256
+    from tests.test_live_team_services import OTHER_CONTRACT, run_on_another_contract
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    a_profile = startup_agent_host_profile(TEAM, "agent-Researcher-1", "Researcher")
+    b_profile = startup_agent_host_profile(TEAM, "agent-Researcher-2", "Researcher")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), a_profile,
+                           b_profile)
+        services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        relays = Relays(services_host, TEAM, "TeamArchitect", logging.getLogger("test.relays"))
+        serving = asyncio.create_task(serve_team(services_host, TEAM, stop, [relays.handlers()]))
+        gateway = GatewayMessageHost(layout, TEAM)
+        gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        await gateway.ready(timeout=20)
+        # The type's queue, shared by every agent of the type.
+        js = (await connect(stack, broker, "work-queue")).jetstream()
+        await js.add_stream(StreamConfig(name="WORK_Researcher", subjects=["work.Researcher"],
+                                         retention=RetentionPolicy.WORK_QUEUE))
+
+        a_worker, b_worker = _QueueWorker("researcher_a", js, runs=True), _QueueWorker("researcher_b", js, runs=False)
+        a_host = AgentProcessHost(layout, a_profile, TEAM)
+        b_host = AgentProcessHost(layout, b_profile, TEAM, handlers={"tasks.list": b_worker.tasks_list},
+                                  drain_agent=b_worker.drain, holds_work=b_worker.holds_work, drain_poll_seconds=0.2)
+        a_host.attach(a_worker.agent, agent_type="Researcher", definition=DEFINITION,
+                      nc=await connect(stack, broker, a_profile.runtime))
+        b_host.attach(b_worker.agent, agent_type="Researcher", definition=DEFINITION,
+                      nc=await connect(stack, broker, b_profile.runtime))
+        await _until(lambda: _has_session(a_host, "researcher_a") and _has_session(b_host, "researcher_b"))
+        takers = [asyncio.create_task(worker.take(stop)) for worker in (a_worker, b_worker)]
+
+        # B takes the first task and holds it; then A takes tasks too.
+        b_worker.taking.set()
+        await js.publish("work.Researcher", b"task-1")
+        await _until(lambda: len(b_worker.held) == 1)
+        a_worker.taking.set()
+
+        async def b_record():
+            assert b_host.host is not None and b_host.host.records is not None
+            # Readers of the installation's contract cannot read the rest of B's record; one of B's own can.
+            stored = await b_host.host.records.read_report("host", b_profile.runtime, now=b_host.host.clock())
+            assert stored is not None
+            return stored.record
+
+        assert b_host.host is not None
+        with caplog.at_level(logging.INFO):
+            run_on_another_contract(b_host.host)
+            await _until(lambda: b_worker.drained.is_set(), timeout=30)  # the team services' record, within 10 s
+            assert b_host.host.installation_contract == CONTRACT_SHA256
+            assert (await b_record()).body.state == "draining"
+            # The installation's readers see that B's record names another contract, and no more.
+            assert services_host.records is not None
+            seen = await services_host.records.read_report("host", b_profile.runtime, now=services_host.clock())
+            assert seen is not None and seen.record.other_contract
+            assert seen.record.their_contract_sha256 == OTHER_CONTRACT
+
+            # No new work: the next task goes to A. No new placement: an agent attached to B now gets no session.
+            await js.publish("work.Researcher", b"task-2")
+            await _until(lambda: a_worker.ran == ["task-2"])
+            late = _agent("researcher_late")
+            b_host.attach(late, agent_type="Researcher", definition=DEFINITION, nc=None)
+            await asyncio.sleep(0.5)
+            assert b_host.agents["researcher_late"].session is None
+            placements = await (await services_host.nc.jetstream().key_value("UA1_PLACEMENT")).keys()
+            assert f"{TEAM}.researcher_late" not in placements
+
+            # A person's command about the task B holds still reaches it, signed as its agent.
+            body = {"request_id": "cmd-1", "agent": "researcher_b", "offset": 0, "limit": 20}
+            reply = await gateway.command("tasks.list", body, person_ref=PERSON, request_id="cmd-1")
+            assert reply.raw["body"]["queue_digest"] == "held-1", reply.raw["body"]
+
+            # B hands its task back; A runs it. B then holds nothing: it gives its agents up and says so.
+            epoch = b_host.host.identity.certificate.membership_epoch
+            await b_worker.hand_back()
+            await _until(lambda: a_worker.ran == ["task-2", "task-1"])
+            await _until(lambda: b_host.host.state == "drained" and not b_host.agents, timeout=20)
+            assert (await b_record()).body.state == "drained"
+            given_up = b_host.host.identity.certificate
+            assert (given_up.agent_types, given_up.session_limit) == (frozenset(), 0)
+            assert given_up.membership_epoch == epoch + 1
+            gone = await gateway.command("tasks.list", {**body, "request_id": "cmd-2"}, person_ref=PERSON,
+                                         request_id="cmd-2")
+            assert gone.raw["body"] == {"outcome": "runtime_error", "message": AGENT_UNAVAILABLE_TEXT}
+
+        assert caplog.text.count("event=protocol1_host_other_contract") == 1
+        assert "event=agent_host_drained" in caplog.text and "event=host_renewal_gave_up_agents" in caplog.text
+        assert "event=agent_session_refused_other_contract" not in caplog.text  # B asked for no new session
+
+        for taker in takers:
+            taker.cancel()
+        await a_host.stop()
+        await b_host.stop()
+        await gateway.close()
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
