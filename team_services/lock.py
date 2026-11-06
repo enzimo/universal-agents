@@ -9,6 +9,23 @@ clock tolerance). The lock names the process instance, a random id chosen at sta
 only the runtime: a second copy of the same host, or a restart while the old process
 still runs, has the same runtime id and must still wait.
 
+Taking the lock (``acquire``):
+- An instance serves only once its own create or compare-and-set update of the key has
+  succeeded.
+- A failure of NATS or of the connection to it, such as NATS not answering in time, no
+  responders, a JetStream error or a dropped connection, is tried again every
+  ``RETRY_EVERY`` until the lock is taken or the process is stopped. It is logged the
+  first time and whenever the error changes (``event=team_services_lock_acquire_failed``),
+  and once NATS answers again (``event=team_services_lock_acquire_recovered``). Letting
+  the error escape stopped a standby, or a first instance starting while NATS was briefly
+  unavailable, and with it the whole team.
+- No lease bounds these attempts, so only such failures are tried again. A closed NATS
+  client, which never reconnects, an invalid key and a malformed lock record still stop
+  the process.
+- A create whose write reached NATS while its answer was lost leaves the key naming this
+  instance: the next attempt finds its own name and takes the lock by updating from the
+  key's revision, not as a takeover.
+
 Keeping the lock (``keep``):
 - A renewal that finds another instance holding the lock has lost it: this instance
   stops serving at once (``LockLost``, ``event=team_services_lock_lost``).
@@ -38,7 +55,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
-from nats.js.errors import KeyNotFoundError, KeyWrongLastSequenceError
+from nats.errors import ConnectionClosedError
+from nats.errors import Error as NatsError
+from nats.js.errors import InvalidKeyError, KeyNotFoundError, KeyWrongLastSequenceError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
@@ -47,8 +66,12 @@ from custom_messages.wire.values import parse_timestamp
 LOCKS_BUCKET = "UA1_LOCKS"
 LEASE = timedelta(seconds=30)
 RENEW_EVERY = timedelta(seconds=10)
-# After a failed renewal, how soon it is tried again while the lease lasts (module docstring).
+# After a failed renewal, or a failed attempt to take the lock, how soon it is tried again (module docstring).
 RETRY_EVERY = timedelta(seconds=2)
+# Failures of NATS or of the connection to it, which taking the lock tries again; a JetStream error is a NATS error.
+_UNAVAILABLE = (NatsError, OSError, asyncio.TimeoutError)
+# Failures among those that trying again cannot cure: a closed client never reconnects, an invalid key stays invalid.
+_LASTING = (ConnectionClosedError, InvalidKeyError)
 _SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
 _LOGGER = logging.getLogger(__name__)
 
@@ -129,11 +152,31 @@ class SingleInstanceLock:
         return None
 
     async def acquire(self, stop: asyncio.Event) -> bool:
-        """Wait until this instance holds the lock; ``False`` if ``stop`` is set first."""
+        """Wait until this instance holds the lock; ``False`` if ``stop`` is set first (module docstring)."""
 
         reported: Optional[str] = None
+        failures = 0
+        failing: Optional[type] = None
         while not stop.is_set():
-            held = await self.try_acquire()
+            try:
+                held = await self.try_acquire()
+            except Exception as error:
+                if not isinstance(error, _UNAVAILABLE) or isinstance(error, _LASTING):
+                    raise
+                failures += 1
+                if type(error) is not failing:
+                    self.logger.warning("The team services lock could not be taken; trying again every %s seconds. "
+                                        "event=team_services_lock_acquire_failed team=%s instance=%s attempt=%s "
+                                        "error=%s: %s", RETRY_EVERY.seconds, self.team, self.instance, failures,
+                                        type(error).__name__, error)
+                    failing = type(error)
+                await _wait_or_stop(stop, RETRY_EVERY.total_seconds())
+                continue
+            if failures:
+                self.logger.info("NATS answered the team services lock again after failed attempts. "
+                                 "event=team_services_lock_acquire_recovered team=%s instance=%s failed_attempts=%s",
+                                 self.team, self.instance, failures)
+                failures, failing = 0, None
             if held is None:
                 self.logger.info("Holding the team services lock. event=team_services_lock_held team=%s runtime=%s "
                                  "instance=%s", self.team, self.runtime, self.instance)

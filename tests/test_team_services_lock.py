@@ -1,4 +1,4 @@
-"""Keeping the team services' single-instance lock through failed renewals (team_services.lock).
+"""Taking and keeping the team services' single-instance lock through NATS failures (team_services.lock).
 
 A stand-in key-value bucket answers or fails each call as a test says, on a fake clock: the
 lock's waits return at once and move the clock on. The lock over a real NATS server is
@@ -15,11 +15,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 import pytest
+from nats.errors import ConnectionClosedError, NoRespondersError
 from nats.errors import TimeoutError as NatsTimeoutError
-from nats.js.errors import KeyNotFoundError, KeyWrongLastSequenceError
+from nats.js.errors import InvalidKeyError, KeyNotFoundError, KeyWrongLastSequenceError, ServiceUnavailableError
 
 from team_services import lock as lock_module
-from team_services.lock import LEASE, RENEW_EVERY, LockLost, SingleInstanceLock, lock_key
+from team_services.lock import LEASE, RENEW_EVERY, RETRY_EVERY, LockLost, SingleInstanceLock, lock_key
 
 START = datetime(2026, 11, 5, 9, 0, tzinfo=timezone.utc)
 TEAM = "team_one"
@@ -32,16 +33,20 @@ class _Entry:
 
 
 class _Bucket:
-    """One key-value bucket; ``failures`` decides what each ``update`` does before it is applied."""
+    """One key-value bucket; ``failure`` and ``create_failure`` decide what each write does before it is applied."""
 
     def __init__(self) -> None:
         self.entries: dict[str, _Entry] = {}
         self.revision = 0
         self.updates = 0
+        self.creates = 0
         # Called with the update's number; returns an error to raise, or None to apply it.
         self.failure: Callable[[int], Optional[Exception]] = lambda number: None
         # An update applied whose answer is lost: the write lands, then this error is raised.
         self.lost_answer: Callable[[int], Optional[Exception]] = lambda number: None
+        # The same two for each create.
+        self.create_failure: Callable[[int], Optional[Exception]] = lambda number: None
+        self.lost_create_answer: Callable[[int], Optional[Exception]] = lambda number: None
 
     def _write(self, key: str, value: bytes) -> int:
         self.revision += 1
@@ -49,9 +54,17 @@ class _Bucket:
         return self.revision
 
     async def create(self, key: str, value: bytes) -> int:
+        self.creates += 1
+        error = self.create_failure(self.creates)
+        if error is not None:
+            raise error
         if key in self.entries:
             raise KeyWrongLastSequenceError(description="wrong last sequence")
-        return self._write(key, value)
+        revision = self._write(key, value)
+        lost = self.lost_create_answer(self.creates)
+        if lost is not None:
+            raise lost
+        return revision
 
     async def update(self, key: str, value: bytes, last: Optional[int] = None) -> int:
         self.updates += 1
@@ -200,3 +213,94 @@ async def test_a_removed_lock_is_a_lost_lock(world) -> None:
 
     with pytest.raises(LockLost, match="was removed"):
         await held.keep(asyncio.Event())
+
+
+@pytest.mark.asyncio
+async def test_taking_the_lock_tries_again_while_nats_fails_and_logs_each_kind_of_error_once(world, caplog) -> None:
+    now, bucket, held = world
+    errors = [NatsTimeoutError(), NatsTimeoutError(), NatsTimeoutError(), NoRespondersError(), ServiceUnavailableError(),
+              ConnectionRefusedError(111, "Connection refused")]
+    bucket.create_failure = lambda number: errors[number - 1] if number <= len(errors) else None
+
+    with caplog.at_level(logging.INFO):
+        assert await held.acquire(asyncio.Event()) is True
+
+    # Tried again every 2 seconds, and served only after its own create succeeded.
+    assert bucket.creates == len(errors) + 1
+    assert now[0] - START == RETRY_EVERY * len(errors)
+    assert _holder(bucket)["instance"] == held.instance
+    assert held.revision == bucket.entries[lock_key(TEAM)].revision and held.lease_ends_at == now[0] + LEASE
+    # Logged the first time and when the error changed, not on every attempt.
+    failed = [record.getMessage() for record in caplog.records if "event=team_services_lock_acquire_failed" in record.getMessage()]
+    assert [line.split("error=")[1].split(":")[0] for line in failed] == [
+        "TimeoutError", "NoRespondersError", "ServiceUnavailableError", "ConnectionRefusedError"]
+    assert "attempt=1 " in failed[0] and "attempt=4 " in failed[1]
+    assert "event=team_services_lock_acquire_recovered" in caplog.text and f"failed_attempts={len(errors)}" in caplog.text
+    assert "event=team_services_lock_held" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_stop_while_taking_the_lock_fails_ends_the_wait_without_serving(world, caplog) -> None:
+    now, bucket, held = world
+    stop = asyncio.Event()
+
+    def failing(number: int) -> Exception:
+        if number == 3:
+            stop.set()
+        return NatsTimeoutError()
+
+    bucket.create_failure = failing
+
+    with caplog.at_level(logging.INFO):
+        assert await held.acquire(stop) is False
+
+    assert bucket.creates == 3
+    assert lock_key(TEAM) not in bucket.entries and held.lease_ends_at is None
+    assert caplog.text.count("event=team_services_lock_acquire_failed") == 1
+    assert "event=team_services_lock_held" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_create_whose_answer_was_lost_takes_the_lock_on_the_next_attempt(world, caplog) -> None:
+    now, bucket, held = world
+    # The create reaches NATS, but its answer never arrives.
+    bucket.lost_create_answer = lambda number: NatsTimeoutError() if number == 1 else None
+
+    with caplog.at_level(logging.INFO):
+        assert await held.acquire(asyncio.Event()) is True
+
+    # The next attempt found the key naming this instance and updated it from the key's revision.
+    entry = bucket.entries[lock_key(TEAM)]
+    assert entry.revision == 2 and held.revision == 2 and bucket.updates == 1
+    assert _holder(bucket)["instance"] == held.instance
+    assert caplog.text.count("event=team_services_lock_acquire_failed") == 1
+    assert "event=team_services_lock_held" in caplog.text
+    assert "event=team_services_lock_taken_over" not in caplog.text
+    assert "event=team_services_standby" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [b"not json", b'{"runtime": "team-services", "instance": "other"}',
+                                   b'{"runtime": "team-services", "instance": "other", "lease_ends_at": "soon"}'])
+async def test_a_malformed_lock_record_is_not_tried_again(world, caplog, value: bytes) -> None:
+    now, bucket, held = world
+    bucket.entries[lock_key(TEAM)] = _Entry(value, 1)
+
+    with caplog.at_level(logging.INFO), pytest.raises((ValueError, KeyError)):
+        await held.acquire(asyncio.Event())
+
+    assert bucket.creates == 1 and now[0] == START
+    assert "event=team_services_lock_acquire_failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ConnectionClosedError(), InvalidKeyError("team_services.team one")])
+async def test_a_failure_that_trying_again_cannot_cure_is_not_tried_again(world, caplog, error: Exception) -> None:
+    now, bucket, held = world
+    bucket.create_failure = lambda number: error
+
+    with caplog.at_level(logging.INFO), pytest.raises(type(error)):
+        await held.acquire(asyncio.Event())
+
+    assert bucket.creates == 1 and now[0] == START
+    assert "event=team_services_lock_acquire_failed" not in caplog.text
