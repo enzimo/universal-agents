@@ -4306,8 +4306,14 @@ it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, hol
 30-second lease renewed every 10 seconds. The lock names the process instance, not only
 the runtime, so a second copy of the same host, or a restart while the old process still
 runs, waits as a standby, logs which instance serves, and takes over when the lease runs
-out or the first releases it on a clean stop. An instance that finds another holding the
-lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
+out or the first releases it on a clean stop. A stop releases the lock even when
+unsubscribing or writing the last host record failed, after that record, so the next
+instance does not wait out the lease. Every instance runs as one host with one
+certificate, so an instance that takes the lock first signs with the host's newest
+certificate in `UA1_CERTS`, which the serving instance may have renewed while this one
+waited (a replaced certificate signs nothing new five minutes after its replacement, and
+readers and the authority then refuse it), and renews it at once when it is due. An
+instance that finds another holding the lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
 short outage) is tried again every 2 seconds while the lease lasts, each failure logged
 (`team_services_lock_renew_failed`), and the instance keeps serving: its lease still keeps
 others out, and stopping would stop the whole team, because the launcher stops every
