@@ -1,0 +1,44 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "schedules.get.reply",
+  "message_id": "01928f3a-7b2c-7c43-8000-000000000c43",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "host",
+    "id": "gateway-1",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7c42-8000-000000000c42",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "schedule_id": "sched_user_once_inline",
+    "seen_version": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "action": {
+      "type": "fixed_message"
+    },
+    "detail": {
+      "text": "{\"assigned_agent_type\": null, \"cron_expression\": null, \"cron_timezone\": null, \"enabled\": true, \"expires_at_utc\": null, \"final_run_in_progress\": false, \"interval_ms\": null, \"management_class\": \"user\", \"next_fire_at\": \"2026-10-27T15:00:00+00:00\", \"objective_id\": null, \"owner_canonical_user_id\": \"person_7c1\", \"paused_until\": null, \"problem_statement\": \"Call the dentist to confirm Tuesday's appointment.\", \"record_digest\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"remaining_runs\": 1, \"repeat_count\": 0, \"schedule_id\": \"sched_user_once_inline\", \"schedule_memory\": {}, \"schedule_name\": \"Dentist reminder\", \"system_schedule_kind\": null}",
+      "offset": 0,
+      "total_chars": 660,
+      "sha256": "efe929be7d770b8624b39b24aaadd6a94190a7c9770175fcf46d70c10d96a5d1"
+    },
+    "delivery_ref": "dr_Wm9vbVJvb21XZWJDaGF0",
+    "conversation_id": "conversation_1"
+  },
+  "causation_id": "01928f3a-7b2c-7c42-8000-000000000c42",
+  "idempotency_key": "schedules.get.reply:lznSu47jf2FT6sObtuwrUXUzYkrMlKpvMz3FTRQVUhQ",
+  "body_digest": "8TGFcjXlOu4xtVfHUwzFWUKgrqIcYpe-HDgY3YqRnG4",
+  "signature": "-SD33bOyJ3vzzsheKYQUGbXUv_zlmg-NhJPiYMLEvXArTGmAFuCfHwMbduhkUDRdDnG0cmNS4LDCtJM8YVMZAg"
+}

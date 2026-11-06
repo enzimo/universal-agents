@@ -78,6 +78,36 @@
               },
               "next_child_offset": {
                 "$ref": "../common.schema.json#/$defs/count"
+              },
+              "claims": {
+                "description": "The request's live claims, newest first; absent when it holds none.",
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/coordination_claim"
+                },
+                "minItems": 1,
+                "maxItems": 8
+              },
+              "claims_total": {
+                "description": "How many live claims it holds in all; present with claims.",
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "waiting_for": {
+                "description": "What one of the request's tasks waits for, and until when; absent when none waits.",
+                "type": "object",
+                "properties": {
+                  "on": {
+                    "$ref": "../common.schema.json#/$defs/coordination_wait_target"
+                  },
+                  "ends_by": {
+                    "$ref": "../common.schema.json#/$defs/timestamp"
+                  }
+                },
+                "required": [
+                  "on",
+                  "ends_by"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -103,6 +133,9 @@
                 "minLength": 1,
                 "maxLength": 500
               },
+              "action": {
+                "$ref": "../common.schema.json#/$defs/schedule_action"
+              },
               "next_fire_at": {
                 "$ref": "../common.schema.json#/$defs/timestamp"
               },
@@ -115,6 +148,7 @@
             },
             "required": [
               "schedule_id",
+              "action",
               "enabled"
             ],
             "additionalProperties": false

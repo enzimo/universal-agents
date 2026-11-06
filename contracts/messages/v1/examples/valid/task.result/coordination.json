@@ -40,31 +40,78 @@
     "coordination": [
       {
         "event": "waited_for_resource",
-        "resource": "file:team/reports/q3.md",
-        "ended": "claim_granted"
+        "waits": [
+          {
+            "resource": "file:team/reports/q3.md",
+            "ended": "claim_granted"
+          },
+          {
+            "resource": "file:team/archive/2025.md",
+            "ended": "limit_reached"
+          },
+          {
+            "resource": "record:memory_fact:usermem:12",
+            "ended": "record_removed"
+          }
+        ],
+        "total": 3
       },
       {
         "event": "waited_for_request",
-        "other_root_task_id": "task_root_8a",
-        "ended": "limit_reached"
+        "waits": [
+          {
+            "other_root_task_id": "task_root_8a",
+            "ended": "limit_reached"
+          },
+          {
+            "other_root_task_id": "run_sched_1_0430",
+            "ended": "request_ended"
+          }
+        ],
+        "total": 2
       },
       {
         "event": "wait_refused",
-        "reason": "loop"
+        "refusals": [
+          {
+            "on": "resource",
+            "resource": "file:team/reports/q4/",
+            "reason": "loop"
+          },
+          {
+            "on": "resource",
+            "resource": "file:team/reports/",
+            "reason": "holds_claim"
+          },
+          {
+            "on": "request",
+            "other_root_task_id": "task_root_1",
+            "reason": "own_request"
+          }
+        ],
+        "total": 3
       },
       {
         "event": "write_refused",
-        "resource": "file:team/reports/q4/draft.md"
+        "resources": [
+          "file:team/reports/q4/draft.md"
+        ],
+        "total": 1
       },
       {
         "event": "claim_ran_out",
         "resources": [
           "file:team/reports/"
-        ]
+        ],
+        "total": 1
       },
       {
         "event": "note_left",
-        "resource": "file:team/reports/"
+        "resources": [
+          "file:team/reports/",
+          "file:team/reports/q3.md"
+        ],
+        "total": 3
       }
     ],
     "outcome": {
@@ -90,6 +137,6 @@
     }
   },
   "idempotency_key": "task.result:z_5YgSSypgJ8HvL_NuX_FL0rxXFDP9y9OSWPzn3MA9c",
-  "body_digest": "WjBaJ16Lfx8ZSsuLLgn3sVzx6YEljJPXF8zyE90KgzU",
-  "signature": "BBnU9z5r6N9EAgCxQURmGJn0ZoXFSIpM0wZl8bsPouLmmvyh87Lh-5fJXJNoK6FTUrZElxenEVa2qw5az29gBA"
+  "body_digest": "adiCmt-RzC4lEauCcS-cBa1UHSn6xnFlEmqkQPTGpfw",
+  "signature": "Q_QCNOHYH819YWoQM05r9pOzQUF9Li2KbTOLGg8tvpA1JQhGi-WfCb9HKXajUv0lB5_tmgbID2l6KJ7rdAzdAA"
 }

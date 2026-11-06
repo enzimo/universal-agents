@@ -130,6 +130,9 @@ class ScheduleOperations:
         row: dict[str, Any] = {
             "schedule_id": schedule.schedule_id,
             "management_class": schedule.management_class.value,
+            # A stored schedule's payload is always a task for a model turn (ScheduledMessage.payload);
+            # no stored schedule sends a fixed message.
+            "action": {"type": "task"},
             "timing": _timing(schedule),
             "enabled": bool(schedule.enabled),
             "timing_revision": int(getattr(schedule, "timing_revision", 0) or 0),
