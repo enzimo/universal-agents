@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Awaitable, Callable, Optional
 from access_control.ownership import PRIVATE_UPDATE, objective_access
+from custom_agents.contract_drain import is_contract_draining
 from custom_agents.access_runtime import resolve_meta_identity, verified_meta_person_id
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run
@@ -2025,9 +2026,15 @@ async def _schedule_claim_scope(agent: Any) -> tuple[bool, bool]:
     2026-10-29). At the limit of parallel lanes such a run waits in the queue
     like any other parallel request. Before, every claim waited for the main
     lane, so these runs started late whenever ordinary work was running.
+
+    An agent whose process runs another message contract claims none
+    (``custom_agents.contract_drain``): a fired run is admitted as this
+    agent's own task, which a draining agent must not take on. The schedule
+    stays due and unclaimed, so the next team lead, on the installation's
+    contract, fires it once at its first pass and moves it on from then.
     """
 
-    if getattr(agent, "paused", False):
+    if getattr(agent, "paused", False) or is_contract_draining(agent):
         return False, False
     task_manager = getattr(agent, "task_manager", None)
     main_lane_free = not getattr(agent, "main_lane_busy", False) and (

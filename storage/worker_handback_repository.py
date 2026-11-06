@@ -1,5 +1,8 @@
 """Durable record of tasks returned by workers that lost their launch lease.
 
+A worker whose process runs another message contract than its installation
+returns its tasks the same way; the evidence's ``cause`` tells which.
+
 The TeamLead saves each handback before acting on it, so a restart or a
 redelivered message never loses or duplicates returned work. The handback id
 is deterministic per worker launch and task (worker_handback_v1), which makes
@@ -185,7 +188,7 @@ class WorkerHandbackRepository:
             conn.commit()
 
     def interruption_count(self, team_id: str, task_id: str) -> int:
-        """How many runs of this task were interrupted by a lost lease.
+        """How many runs of this task were stopped mid-run and handed back, whatever the cause.
 
         Task ids are unique per request and a finished task is never handed
         back again, so every interrupted handback for a task id is part of one
@@ -204,7 +207,7 @@ class WorkerHandbackRepository:
     def interrupted_for_tasks(
         self, team_id: str, task_ids: frozenset[str]
     ) -> tuple[WorkerTaskHandbackV1, ...]:
-        """Interrupted handbacks for any of these tasks, oldest first."""
+        """Interrupted handbacks for any of these tasks, oldest first, whatever the cause."""
 
         if not task_ids:
             return ()
