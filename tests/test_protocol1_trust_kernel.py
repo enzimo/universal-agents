@@ -72,7 +72,10 @@ def test_nats_server_accepts_the_generated_user_key(tmp_path: Path) -> None:
     checked = subprocess.run([server, "-c", str(config), "-t"], capture_output=True, text=True, timeout=30)
     assert checked.returncode == 0, checked.stderr
     bad = tmp_path / "bad.conf"
-    bad.write_text(f'authorization {{ users: [ {{ nkey: "{keys.nats_public_key[:-1]}A" }} ] }}\n')
+    # Another last character breaks the checksum; "A" itself would leave about one key in 32 unchanged.
+    damaged = keys.nats_public_key[:-1] + ("A" if keys.nats_public_key[-1] != "A" else "B")
+    assert damaged != keys.nats_public_key
+    bad.write_text(f'authorization {{ users: [ {{ nkey: "{damaged}" }} ] }}\n')
     assert subprocess.run([server, "-c", str(bad), "-t"], capture_output=True, text=True, timeout=30).returncode != 0
 
 
