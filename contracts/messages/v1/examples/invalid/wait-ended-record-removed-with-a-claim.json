@@ -1,0 +1,22 @@
+{
+  "description": "A wait on a record that was removed ends without a grant, so its end carries no claim: a record that later takes the same number is another resource.",
+  "refusal": "invalid_body",
+  "at": "/body/ended/claim",
+  "base": "wait.ended/record-removed.json",
+  "changes": [
+    {
+      "set": "/body/ended/claim",
+      "to": {
+        "claim_id": "claim_15",
+        "resources": [
+          "record:memory_fact:usermem:12"
+        ],
+        "ends_at": "2026-10-22T04:45:00.000Z",
+        "extensions_left": 2,
+        "reason": "Updating the trip dates."
+      }
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"wait.ended\", \"message_id\": \"01928f3a-7b2c-7c3f-8000-000000000c3f\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\"}, \"subject\": \"ua.v1.team_example.team-services-1.work.control.researcher-2\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-23T04:30:00.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"wait_id\": \"wait_9\", \"root_task_id\": \"task_root_7f\", \"task_id\": \"task_sub_7f_1\", \"ended\": {\"why\": \"record_removed\", \"claim\": {\"claim_id\": \"claim_15\", \"resources\": [\"record:memory_fact:usermem:12\"], \"ends_at\": \"2026-10-22T04:45:00.000Z\", \"extensions_left\": 2, \"reason\": \"Updating the trip dates.\"}}}, \"idempotency_key\": \"wait.ended:_9hM2iqy7sWMwfyjrfDhYxGW4FZbdJQoW8mcWJ8OxsU\", \"body_digest\": \"xDgGlMl_WzH1sUHz4NgIMLkwgiOFeJFYpL6ZZGP1OxE\", \"signature\": \"jr3fSa-VPZeoXFdhsVrK7nywvrQR9yjBvebrD8APCsX-9MuP6ZHvq3Ei-shxD5pr946YyZvGJcKxhAJvekg8Aw\"}"
+}

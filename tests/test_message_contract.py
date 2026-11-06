@@ -1445,6 +1445,32 @@ def test_every_value_of_a_coordination_message_has_a_valid_example(kind: str) ->
     assert not missing, missing
 
 
+# README, "Schedules": where a schedule's action type travels besides schedules.install.
+SCHEDULE_ACTION_PLACES = {
+    "schedules.list.reply": ".schedules[].action.type",
+    "schedules.get.reply": ".action.type",
+    "schedules.update": ".action.type",
+    "tasks.inventory.reply": ".schedules[].action.type",
+}
+
+
+@pytest.mark.parametrize("kind", sorted(SCHEDULE_ACTION_PLACES))
+def test_schedule_action_types_match_install_and_each_has_a_valid_example(kind: str) -> None:
+    install: dict = {}
+    variant_values(body_schema_file("schedules.install"),
+                   json.loads((CONTRACT / "schemas" / body_schema_file("schedules.install")).read_text(encoding="utf-8")),
+                   "", install)
+    place = SCHEDULE_ACTION_PLACES[kind]
+    file = body_schema_file(kind)
+    wanted: dict = {}
+    fixed_values(file, json.loads((CONTRACT / "schemas" / file).read_text(encoding="utf-8")), "", wanted)
+    assert wanted[place] == install[".action.type"] == {"task", "fixed_message"}
+    seen: dict = {}
+    for path in (EXAMPLES / "valid" / kind).glob("*.json"):
+        example_values(json.loads(path.read_text(encoding="utf-8"))["body"], "", {place: wanted[place]}, seen)
+    assert seen.get(place) == wanted[place], seen
+
+
 def test_coordination_replies_at_their_limits_fit_in_one_frame() -> None:
     """README, "Coordination between a person's requests" ("Reply size"): the caps were chosen to fit a frame.
 

@@ -133,6 +133,9 @@
                 "minLength": 1,
                 "maxLength": 500
               },
+              "action": {
+                "$ref": "../common.schema.json#/$defs/schedule_action"
+              },
               "next_fire_at": {
                 "$ref": "../common.schema.json#/$defs/timestamp"
               },
@@ -145,6 +148,7 @@
             },
             "required": [
               "schedule_id",
+              "action",
               "enabled"
             ],
             "additionalProperties": false

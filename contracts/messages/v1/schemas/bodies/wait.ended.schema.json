@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/wait.ended.schema.json",
   "title": "wait.ended body",
-  "description": "A request's wait ended: it now holds the claim, the other request ended, or the wait reached its limit.",
+  "description": "A request's wait ended: it now holds the claim, the other request ended, the record it waited for was removed, or the wait reached its limit.",
   "type": "object",
   "properties": {
     "wait_id": {
@@ -60,6 +60,19 @@
           "required": [
             "why",
             "other_root_task_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "The record it waited for was deleted, or removed by its store after its end, so the wait ends without a grant. A record that later takes the same number is another resource.",
+          "properties": {
+            "why": {
+              "const": "record_removed"
+            }
+          },
+          "required": [
+            "why"
           ],
           "additionalProperties": false
         },

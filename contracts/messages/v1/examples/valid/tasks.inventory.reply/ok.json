@@ -74,6 +74,9 @@
       {
         "schedule_id": "schedule_id_1",
         "name": "Example name",
+        "action": {
+          "type": "task"
+        },
         "next_fire_at": "2026-10-22T04:30:00.000Z",
         "enabled": true,
         "objective_id": "objective_research"
@@ -82,6 +85,6 @@
     "total": 2
   },
   "causation_id": "01928f3a-7b2c-7401-8000-000000000401",
-  "body_digest": "QLHlx9OpxZMc_MEM6gyLG0pNV7QKRAQ1FN7pQQ-eNt4",
-  "signature": "HM0IAEzBvRDxpYs7klP4waQICVaENr2VXMhmehaEDlvtyKGkAVSAj0bROpl7U9TiflVfhl-TSw7YM2beBILSAQ"
+  "body_digest": "5bpu1peqVSNwcfztuFBNEzv89faifguu4z0Xdd6n1p0",
+  "signature": "6vUpBmUP2UkQvD7Rr-FT6wkyKz_z_6gCLEisQB2EVNEA7rJa7bFUK2r-tiecjgqKisYG-ctj-jELGewP1A8iCA"
 }

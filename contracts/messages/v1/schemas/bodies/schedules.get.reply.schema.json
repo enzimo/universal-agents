@@ -17,6 +17,10 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
+        "action": {
+          "description": "Every page carries the schedule's action type, outside the detail text.",
+          "$ref": "../common.schema.json#/$defs/schedule_action"
+        },
         "detail": {
           "type": "object",
           "properties": {
@@ -64,6 +68,7 @@
         "outcome",
         "schedule_id",
         "seen_version",
+        "action",
         "detail"
       ],
       "additionalProperties": false

@@ -854,6 +854,58 @@
       ],
       "additionalProperties": false
     },
+    "coordination_own_seen_claim": {
+      "description": "One of the asking request's own live claims on, above or under a resource it asked about, as shared_work.claim lists its own (holder this_request), so the model sees which claim to use, extend or release.",
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/record_id"
+        },
+        "resource": {
+          "$ref": "#/$defs/resource_key"
+        },
+        "relation": {
+          "description": "Where the claimed resource sits: the resource asked about, a folder above it, or something under it.",
+          "type": "string",
+          "enum": [
+            "exact",
+            "above",
+            "below"
+          ]
+        },
+        "ends_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "holder": {
+          "type": "object",
+          "properties": {
+            "whose": {
+              "const": "this_request"
+            },
+            "agent": {
+              "$ref": "#/$defs/agent_id"
+            },
+            "reason": {
+              "$ref": "#/$defs/short_text"
+            }
+          },
+          "required": [
+            "whose",
+            "agent",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "claim_id",
+        "resource",
+        "relation",
+        "ends_at",
+        "holder"
+      ],
+      "additionalProperties": false
+    },
     "coordination_seen_note": {
       "description": "A note left on a resource. Another person's note shows only that one exists; team maintenance's shows its text to every request.",
       "oneOf": [
@@ -978,6 +1030,7 @@
                     "type": "string",
                     "enum": [
                       "claim_granted",
+                      "record_removed",
                       "limit_reached"
                     ]
                   }
@@ -1069,7 +1122,8 @@
                         "type": "string",
                         "enum": [
                           "own_request",
-                          "loop"
+                          "loop",
+                          "holds_claim"
                         ]
                       }
                     },
@@ -2084,6 +2138,23 @@
         "undefined",
         "waiting"
       ]
+    },
+    "schedule_action": {
+      "description": "What each run of a schedule does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "task",
+            "fixed_message"
+          ]
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
     },
     "text_content": {
       "description": "UTF-8 plain text, inline or held in the object store. Use a blob when the whole serialized frame would exceed its size limit.",

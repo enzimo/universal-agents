@@ -1,0 +1,18 @@
+{
+  "description": "A wait refused because this request already holds a claim there lists that claim, so the model sees which one to release.",
+  "refusal": "invalid_body",
+  "at": "/body/claims",
+  "base": "shared_work.wait.reply/holds_claim.json",
+  "changes": [
+    {
+      "set": "/body/claims",
+      "to": []
+    },
+    {
+      "set": "/body/claims_total",
+      "to": 0
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"shared_work.wait.reply\", \"message_id\": \"01928f3a-7b2c-7c41-8000-000000000c41\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"agent\", \"id\": \"researcher-2\", \"runtime\": \"worker-host-1\"}, \"subject\": \"_INBOX.worker-host-1.01928f3a-7b2c-7c40-8000-000000000c40\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"holds_claim\", \"claims\": [], \"claims_total\": 0, \"message\": \"This request already holds team/reports/q3.md. Release it before waiting for the folder, or finish with it first.\"}, \"causation_id\": \"01928f3a-7b2c-7c40-8000-000000000c40\", \"idempotency_key\": \"shared_work.wait.reply:LscIQZbl6if0wu7yj4Lia4Ep7Ns-mX9OwjBIoiamMwQ\", \"body_digest\": \"4RrmVpdM-35Q3y4lIFis2_rXqmBFIV8g_uqXWPH6FY4\", \"signature\": \"CFZOgA_IAT06bNjPthnSJBBdEVvh9SUiX8bwZRT6BX7hAUiW5MgOSqrNCOMZxr5BYnxht9b4ddpfpcGJK_aiDQ\"}"
+}
