@@ -35,7 +35,7 @@ TEAM = "team"
 WORKER_TYPE = "WebResearchAgent"
 
 
-def _handback(task_id: str, attempt: int, *, parent_task_id=None) -> WorkerTaskHandbackV1:
+def _handback(task_id: str, attempt: int, *, parent_task_id=None, **cause: str) -> WorkerTaskHandbackV1:
     launch_id = f"launch_{attempt}"
     return WorkerTaskHandbackV1(
         handback_id=handback_identity(
@@ -49,6 +49,7 @@ def _handback(task_id: str, attempt: int, *, parent_task_id=None) -> WorkerTaskH
             lease_lost_at_utc=datetime.now(timezone.utc),
             reason="stale_launch_lease",
             recent_scheduler_errors=(f"OperationalError: database is locked ({attempt})",),
+            **cause,
         ),
         handed_back=HandedBackTaskV1(
             task_id=task_id,
@@ -155,6 +156,28 @@ async def test_third_interruption_cancels_the_task_and_opens_a_review(lead):
         "worker_3",
     ]
     assert "notify_user" in review.problem_statement
+
+
+@pytest.mark.asyncio
+async def test_hand_backs_of_a_process_on_another_contract_do_not_count_toward_the_limit(lead, caplog):
+    """A worker whose process runs another message contract hands its work back without any fault
+    (custom_agents.contract_drain): those hand-backs are sent out again but start no streak, and the lead's log
+    names the reason. Lost leases after them are counted from one."""
+
+    from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_OTHER_CONTRACT
+
+    with caplog.at_level(logging.WARNING, logger="test.escalation"):
+        drained = [await _receive(lead, _handback("t1", attempt, cause=WIND_DOWN_OTHER_CONTRACT))
+                   for attempt in (1, 2, 3)]
+    assert drained == [HANDBACK_STATUS_REDISPATCHED] * 3
+    assert not lead.task_manager.is_execution_cancelled("t1")
+    lead._handle_task_request.assert_not_awaited()
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "another message contract" in logged and "launch lease" not in logged
+
+    lost = [await _receive(lead, _handback("t1", attempt)) for attempt in (4, 5, 6)]
+    assert lost == [HANDBACK_STATUS_REDISPATCHED, HANDBACK_STATUS_REDISPATCHED, HANDBACK_STATUS_ESCALATED]
+    assert "interrupted 3 times in a row" in lead.cancel_responses.await_args.args[4]
 
 
 @pytest.mark.parametrize(("count", "expected"), [(2, False), (3, True), (4, False), (5, False), (6, True)])

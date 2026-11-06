@@ -1,7 +1,8 @@
 """Notice carried by a task that the TeamLead sends out again after a handback.
 
-When a worker loses its launch lease mid-task, the task runs again on another
-worker. The earlier run may already have sent messages or taken other actions,
+When a worker hands a task back mid-run, because it lost its launch lease or
+because its process runs another message contract than its installation, the
+task runs again on another worker. The earlier run may already have sent messages or taken other actions,
 so the re-dispatched request carries this notice in ``MessageMeta``. The
 receiving worker turns it into a one-time runtime instruction for the task's
 first turn: check what already happened before repeating anything.
@@ -53,8 +54,8 @@ def render_redispatch_directive(notice: TaskRedispatchNoticeV1) -> str | None:
     if notice.prior_disposition != "interrupted":
         return None
     lines = [
-        "This task already ran on another worker, which lost its launch lease "
-        f"and was stopped mid-run (interruption {notice.interruption_count}). "
+        "This task already ran on another worker, which was stopped mid-run "
+        f"(interruption {notice.interruption_count}). "
         "Start the task again, but do not assume earlier work did or did not "
         "happen.",
     ]
