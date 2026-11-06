@@ -191,3 +191,101 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
         await lead_host.stop()
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_on_another_contract_gets_no_new_work_still_answers_probes_and_is_given_up(
+    broker: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Contract README "Versions" and plan 13B.12, with two agent hosts: the team lead's process (the lead and a
+    Researcher worker) and a startup Researcher's process that runs another contract.
+
+    The lead's directory keeps the other worker, so the watchdog's ``task.probe`` about the task it holds is
+    answered, but marks it as taking no work, so delegation picks the lead's own worker. Its host drains: its
+    record says ``draining``, the next task on the type's queue goes to the lead's worker, the task it held is
+    handed back and run there, and then it gives up its agent (``drained``) and renews to hold none.
+    """
+
+    from nats.js.api import RetentionPolicy, StreamConfig
+
+    from custom_agents.team_directory import live_agent_status
+    from tests.test_live_agent_hosts import _QueueWorker
+    from tests.test_live_team_services import OTHER_CONTRACT, run_on_another_contract
+
+    from custom_agents import turn_registry
+
+    monkeypatch.setattr(turn_registry, "executing_task_ids", lambda agent: set())
+    layout = InstanceLayout.at(tmp_path / "instance")
+    lead_profile = lead_host_profile(TEAM, ("TeamArchitect", "Researcher"), 2)
+    worker_profile = startup_agent_host_profile(TEAM, WORKER_RUNTIME, "Researcher")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), lead_profile, worker_profile)
+        services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
+        js = (await connect(stack, broker, "work-queue")).jetstream()
+        await js.add_stream(StreamConfig(name="WORK_Researcher", subjects=["work.Researcher"],
+                                         retention=RetentionPolicy.WORK_QUEUE))
+
+        lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True)
+        ours = _QueueWorker("worker_a", js, runs=True)
+        ours.agent = stand_in("worker_a", "Researcher-A", "Researcher", is_lead=False)
+        theirs = _QueueWorker("worker_b", js, runs=False)
+        theirs.agent = stand_in("worker_b", "Researcher-B", "Researcher", is_lead=False)
+        lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
+        worker_host = AgentProcessHost(layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
+                                       drain_agent=theirs.drain, holds_work=theirs.holds_work, drain_poll_seconds=0.2)
+        lead_nc = await connect(stack, broker, LEAD_HOST_RUNTIME)
+        lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_nc, state=("idle", True))
+        lead_host.attach(ours.agent, agent_type="Researcher", definition=DEFINITION, nc=lead_nc, state=("idle", True))
+        worker_host.attach(theirs.agent, agent_type="Researcher", definition=DEFINITION,
+                           nc=await connect(stack, broker, WORKER_RUNTIME), state=("idle", True))
+        await _until(lambda: {"worker_a", "worker_b"} <= set(lead.known_agents.agent_map))
+        monkeypatch.setattr(agent_requests, "_PROCESS_HOST", lead_host)
+        takers = [asyncio.create_task(worker.take(stop)) for worker in (ours, theirs)]
+
+        # The other worker takes the first task and holds it; then the lead's worker takes tasks too.
+        theirs.taking.set()
+        await js.publish("work.Researcher", b"task-1")
+        await _until(lambda: len(theirs.held) == 1)
+        theirs.agent.tasks["task-1"] = SimpleNamespace(state="accepted", task=SimpleNamespace(task_state=[]))
+        ours.taking.set()
+
+        with caplog.at_level(logging.WARNING):
+            assert worker_host.host is not None
+            run_on_another_contract(worker_host.host)
+            await _until(lambda: theirs.drained.is_set(), timeout=30)  # the team services' record, within 10 s
+            await worker_host.host.report_now()  # its record names its contract now
+            await _until(lambda: lead.known_agents.agent_map["worker_b"].accepting_work is False)
+
+            # Still listed, taking no work: delegation picks the lead's own worker.
+            assert lead_host.team_agents is not None
+            assert lead_host.team_agents.agent("worker_b").other_contract == OTHER_CONTRACT
+            assert live_agent_status(lead, "Researcher").self_id == "worker_a"
+            assert live_agent_status(lead, "Researcher", "Researcher-B") is None
+            # The watchdog's probe about the task it holds is still answered.
+            probe = await lead_host.ask("task.probe", {"task_id": "task-1"}, "worker_b", sender_agent="lead_1")
+            assert (probe["known"], probe["state"]) == (True, "accepted")
+            # No new work: the next task on the type's queue goes to the lead's worker.
+            await js.publish("work.Researcher", b"task-2")
+            await _until(lambda: ours.ran == ["task-2"])
+
+            # It hands its task back; the lead's worker runs it; the other host gives its agent up.
+            await theirs.hand_back()
+            await _until(lambda: ours.ran == ["task-2", "task-1"])
+            await _until(lambda: worker_host.host.state == "drained" and not worker_host.agents, timeout=20)
+            await _until(lambda: "worker_b" not in lead.known_agents.agent_map)
+            assert worker_host.host.identity.certificate.agent_types == frozenset()
+
+        # The lead's process logged the other host once, with both digests, not at every record it wrote.
+        logged = [record.getMessage() for record in caplog.records
+                  if "event=team_agents_host_other_contract" in record.getMessage()
+                  and f"host={WORKER_RUNTIME} " in record.getMessage()]
+        assert len(logged) == 1 and OTHER_CONTRACT in logged[0]
+
+        for taker in takers:
+            taker.cancel()
+        await worker_host.stop()
+        await lead_host.stop()
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)

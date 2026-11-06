@@ -35,6 +35,15 @@ The hosts' records also say which of their parts are not healthy (``components``
 an agent whose session the team services refused, which has no record of its own and so
 no place in the view; ``host_components`` gives those of the team's live hosts, for the
 gateway's Status page (plan 13B.5).
+
+A host record that names another contract digest than this reader's (contract README
+"Versions": while the label is a pre-release, hosts of one installation refuse a peer whose
+digest differs) is authentic, but its body is not read. Its agents stay in the view, so
+control messages for the tasks they hold still reach them, marked with their host's
+digest (``TeamAgent.other_contract``): they take no new work (``TeamAgent.takes_work``) and
+no agent is placed on that host. Each such host is logged once with both digests
+(``event=team_agents_host_other_contract``), and ``other_contract_hosts`` lists the live
+ones for the gateway's Status page.
 """
 
 from __future__ import annotations
@@ -75,6 +84,14 @@ class TeamAgent:
     host: str
     session: str
     is_lead: bool
+    # The contract digest the agent's host runs when it is not this reader's (module docstring).
+    other_contract: Optional[str] = None
+
+    @property
+    def takes_work(self) -> bool:
+        """Whether new work may go to the agent: it accepts work, and its host runs this reader's contract."""
+
+        return self.accepting_work and self.other_contract is None
 
 
 @dataclass(frozen=True)
@@ -110,6 +127,8 @@ class TeamAgents:
         self._roles: dict[str, str] = {}
         # Records refused for a reason that can pass, by (record, name): their key and raw bytes.
         self._retrying: dict[tuple[str, str], tuple[str, bytes]] = {}
+        # (host, its digest) of each host already logged as running another contract.
+        self._other_contracts_logged: set[tuple[str, str]] = set()
         self._view: Mapping[str, TeamAgent] = MappingProxyType({})
         self._listeners: list[Callable[[frozenset[str], frozenset[str]], None]] = []
         self.ready = asyncio.Event()
@@ -148,6 +167,23 @@ class TeamAgents:
                 continue
             found.extend(HostComponent(runtime, str(item.component), str(item.state), _present(item.code))
                          for item in record.body.components if item.state != "healthy")
+        return found
+
+    def other_contract_hosts(self) -> dict[str, str]:
+        """The team's hosts whose record has not expired and names another contract, with that digest.
+
+        Call it on the reader's loop.
+        """
+
+        now = self._host.clock()
+        found: dict[str, str] = {}
+        for runtime, held in sorted(self._hosts.items()):
+            record = held.record
+            if not record.other_contract or record.signer is None or self.team not in record.signer.teams:
+                continue
+            expires_at = _present(record.document.expires_at)
+            if expires_at is not None and parse_timestamp(expires_at) > now and record.their_contract_sha256:
+                found[runtime] = record.their_contract_sha256
         return found
 
     def lead(self) -> Optional[TeamAgent]:
@@ -222,7 +258,19 @@ class TeamAgents:
         held[name] = _Held(verified.document.sequence, verified.digest, verified)
         if record == "agent":
             await self._learn_role(verified)
+        elif verified.other_contract and verified.their_contract_sha256:
+            self._log_other_contract(name, verified.their_contract_sha256)
         return True
+
+    def _log_other_contract(self, runtime: str, theirs: str) -> None:
+        if (runtime, theirs) in self._other_contracts_logged:
+            return
+        self._other_contracts_logged.add((runtime, theirs))
+        self._logger.warning("A host runs another message contract than this reader: it gets no new work and no "
+                             "agent is placed on it; control messages for the tasks it holds still reach it. "
+                             "event=team_agents_host_other_contract team=%s host=%s their_contract_sha256=%s "
+                             "contract_sha256=%s", self.team, runtime, theirs,
+                             self._host.live.trust.store.contract_sha256)
 
     async def _retry_refused(self) -> None:
         """Verify again the records refused for a reason that can pass (module docstring)."""
@@ -313,13 +361,17 @@ class TeamAgents:
         expires_at = _present(host.record.document.expires_at)
         if expires_at is None or parse_timestamp(expires_at) <= now:
             return None
-        if int(host.record.body.certificate.membership_epoch) < int(placed.host_epoch):
+        # The certificate the host record is signed with, which its body names; read from the signer, since the
+        # body of a host on another contract is not read (module docstring).
+        assert host.record.signer is not None  # hosts sign their own records
+        if host.record.signer.membership_epoch < int(placed.host_epoch):
             return None
         session = str(body.session)
         return TeamAgent(agent=agent_id, agent_type=str(body.agent_type), display_name=_present(body.display_name),
                          state=str(body.state), accepting_work=bool(body.accepting_work),
                          since=parse_timestamp(str(body.since)), host=signer.runtime, session=session,
-                         is_lead=self._roles.get(session) == "lead")
+                         is_lead=self._roles.get(session) == "lead",
+                         other_contract=host.record.their_contract_sha256 if host.record.other_contract else None)
 
 
 def _present(value: Any) -> Any:

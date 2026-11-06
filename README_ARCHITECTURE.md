@@ -4269,7 +4269,13 @@ freshly signed revocations record. The authority:
   the launcher now lists, say), it gets a new one with the next membership epoch that
   replaces it. While
   the contract is a pre-release, a host running another contract digest gets
-  `protocol_mismatch`;
+  `protocol_mismatch`, naming the digest the authority runs. The digest is read before
+  the rest of a join or renewal (`verify_frame` marks such a frame `other_contract`), so
+  a host of another revision learns this even when that revision shapes the body
+  differently. The one exception is a renewal that only gives up the host's agents (its
+  profile without agent types or sessions, `HostProfile.giving_up`): it is answered on
+  any contract, when this revision can read it, with a certificate that grants no agents,
+  so a host on another contract can hand its agents over;
 - keeps every certificate it issued, so a restarted authority still recognises the
   hosts that renew.
 
@@ -4300,6 +4306,20 @@ carry is not asked for, and the caller is told. When a frame or
 record names a certificate or an agent session this host does not hold yet, it reads it
 from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
 checks the frame again, once.
+
+**A host on another contract.** While the contract's label is a pre-release, hosts of one
+installation refuse a peer whose contract digest differs (`kinds.CONTRACT_SHA256`, the one
+reading of it; joins, renewals and host records carry it). A host learns that it runs
+another contract than the installation from the team services' host record, which it reads
+when it starts and whenever it changes (`MessageHost.follow_contract`), or from a
+`protocol_mismatch` answer to its join or renewal. It logs both digests once
+(`protocol1_host_other_contract`) and tells its listeners, which drain its work; its record
+then says `draining` and, once it holds nothing, `drained`. From then on it renews only to
+give up its agents: a renewal for more is turned away, so it asks for none while it drains,
+and the renewal once drained gets a certificate that grants no agents. Readers cannot read
+the rest of such a host's record, only that it names another digest, and that it is
+authentic. Under one launcher every process starts from the same release, so this happens
+only when a process is restarted on its own after the code under it changed.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
 `team-services` with the `team_services` role (plan decision 44; scheduled runs are still
@@ -4342,7 +4362,11 @@ They serve the team's address (`svc.team`) and answer, so far:
 - `sessions.renew` and `sessions.close`, for sessions on the asking host; a close removes
   the placement unless the agent is handed over. A renewal is refused (`not_allowed`) for a
   session that has ended or whose placement is no longer the agent's current one, so a
-  session closed earlier never comes back when its agent is placed on the same host again;
+  session closed earlier never comes back when its agent is placed on the same host again.
+  A host whose record names another contract digest gets no new placement (`sessions.open`
+  answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
+  its sessions are still renewed and closed, so it keeps receiving control messages for the
+  tasks it holds while it finishes or hands them back;
 - people's memory commands, `memory.list`, `.show`, `.create`, `.replace`, `.delete` and
   `.undo` (`team_services.memory`), which the gateway sent the team lead's process as a
   durable `ManagerMemoryCommand` until phase 2. They run the same memory service on the
@@ -4486,6 +4510,36 @@ A record the reader cannot verify yet for a reason that can pass (the writer's c
 is not readable yet while hosts join, revocations not current, a record dated just ahead
 of its clock) is kept and verified again at each check, since placements and an idle
 agent's record are written only once (`event=team_agents_record_refused retrying=true`).
+A host record that names another contract digest is authentic but its body is not read, so
+the host's certificate epoch comes from the record's signer. Its agents stay in the view,
+so control messages about the tasks they hold still reach them, marked with that digest
+(`TeamAgent.other_contract`): they take no new work (`TeamAgent.takes_work`), the host is
+logged once with both digests (`event=team_agents_host_other_contract`), and
+`other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
+says it takes no work too.
+
+**An agent process on another contract drains** (`custom_agents.agent_host`,
+`custom_agents.contract_drain`). When its host learns that the process runs another
+contract than the installation (from the team services' host record, which it follows from
+its join on, or from `protocol_mismatch`), it opens no session and asks for no refused one
+again; a join refused that way is not asked for again either. It drains every agent on the
+agent's own loop. Queued task work still runs on today's queues in this phase, so draining
+an agent means: it leaves the queues every agent of its type shares (its type's queue and,
+for the team lead, the team's), whose messages stay there for another agent of the type,
+which the lead's worker pools start when tasks wait, or for the next team lead; the lead's
+process starts no pool or scheduled worker; the turns in progress finish; a pool worker
+starts no task it has not started and, once its running turns ended, winds down as after a
+lost launch lease, returning those tasks to the team lead, which sends them out again on
+the type's queue, then exits. The team lead and startup agents have no way to hand a task
+back yet (that comes with `task.handback` and the queued work of protocol 1), so they
+finish what they already admitted. The host's record says `draining` meanwhile; its
+agents' sessions are still renewed, so requests about the tasks they hold still reach them.
+Once no agent holds an unfinished task or a waiting request, the host closes their sessions
+(`handed_over`), its record says `drained` and it renews only to give its agents up
+(`event=agent_host_drained`). A process that never joined drains its agents the same way,
+with no record to write. Under one launcher this happens only when a process, such as the
+team lead's after a restart of `manager`, starts on code that changed under the running
+installation.
 
 **Agents asking each other** (step 7b, `custom_agents.agent_host`,
 `custom_agents.live_controls`, `custom_agents.team_directory`): each agent process reads
@@ -4495,7 +4549,9 @@ agent's own loop. An entry says only what the records say: id, type, name, lead 
 paused, busy, and whether it accepts work. When an agent's record said it was exiting, the
 team lead fails the subtasks it asked that agent for by name, as presence's exit did; an
 agent whose host only stopped reporting leaves the directory but is not given up for (the
-subtask watchdog handles work that never comes back). Agents ask each other on
+subtask watchdog handles work that never comes back). An agent whose host runs another
+contract stays in the directory, so the requests below about the tasks it holds still reach
+it, but its entry says it accepts no work and delegation passes it over. Agents ask each other on
 `ctl.agent.<agent>`, signed with the asking agent's session, through
 `custom_agents.agent_requests` (`ask_agent`, `announce`, `team_view`, which hold this
 process's host apart from the host's own module so the import graph stays free of loops):
@@ -4561,7 +4617,12 @@ problem per process and reason, naming the agents (`<agent type>-<agent id>`), s
 in plain words (the worker limit reached, a type the process may not run, a type name no
 certificate can carry, ...) and what to do, such as raising the worker limit and making a
 team-wide restart. It goes once the session opens or the agent stops; starting up, before
-the first answer, is no finding. At start the gateway waits up
+the first answer, is no finding. A host whose record names another contract digest than
+the gateway's keeps its agents on the Team page, not accepting work, so people's commands
+about the tasks they hold still reach them; a team lead on such a host counts as
+unavailable, since a chat is new work, and the Status page shows one problem per such host
+naming both digests and saying to install one release everywhere and restart the whole
+team. At start the gateway waits up
 to 15 seconds to read the records, and marks a saved route unavailable when no live lead
 is in them. Before this the gateway asked for the lead on the operational subject at start
 ("discovery"), followed presence, and polled the lead's consumer and heartbeat every 5

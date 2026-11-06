@@ -543,7 +543,7 @@ class TrustStore:
             # The longest lifetime counts from when a record was written, so that time has come.
             raise FrameRefused("not_yet_valid", "a trust record is not dated ahead of the receiver's clock", at="/issued_at")
         if report and document.record == HOST:
-            theirs = self._other_contract(raw)
+            theirs = self.other_contract(raw.get("body"))
             if theirs is not None:
                 # Authentic, but shaped by another contract: the reader decides what it means.
                 assert signer is not None
@@ -559,19 +559,20 @@ class TrustStore:
             self._check_state_report(document, body, signer)
         return VerifiedRecord(document=document, body=body, signer=signer, digest=digest)
 
-    def _other_contract(self, raw: Mapping[str, Any]) -> Optional[str]:
-        """The contract digest a host record names, read before its body, when it is not this receiver's own.
+    def other_contract(self, body: Any) -> Optional[str]:
+        """The contract digest a host record's, join's or renewal's body names, read before the rest of it,
+        when it is not this receiver's own.
 
-        While the label is a pre-release, two contracts can share it and shape a host record
-        differently, so a reader reads the digest on its own before the rest of the body
-        (README, "Versions"). It sends that host no new work, places no agent on it and logs
-        both digests; it still counts the host's custody windows from these records. A record
-        without a well-formed digest is read strictly, and refused there.
+        While the label is a pre-release, two contracts can share it and shape these bodies
+        differently, so a receiver reads the digest on its own before the rest of the body
+        (README, "Versions"): ``verify`` for a host record, ``verify_frame`` for a join or
+        renewal. A reader of host records sends that host no new work, places no agent on it
+        and logs both digests; it still counts the host's custody windows from these records.
+        A body without a well-formed digest is read strictly, and refused there.
         """
 
         if not PROTOCOL.endswith("-pre"):
             return None
-        body = raw.get("body")
         theirs = body.get("contract_sha256") if isinstance(body, Mapping) else None
         if isinstance(theirs, str) and _CONTRACT_DIGEST.fullmatch(theirs) and theirs != self.contract_sha256:
             return theirs

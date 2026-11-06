@@ -10,6 +10,10 @@ loop, here.
 - **What an entry says.** Only what the records say: id, type, name, team lead or not,
   paused, busy, and whether it accepts work. Details an agent reports about itself (its
   current task, tools, skills, findings) are asked with ``agent.status`` when needed.
+- **An agent whose host runs another message contract** (contract README "Versions") stays
+  in the directory, so control requests about the tasks it holds (``task.probe``, pause,
+  resume, exit, status) still go to it, but it takes no new work: its entry says it does
+  not accept work, and delegation passes it over (``TeamAgent.takes_work``).
 - **Leaving.** An agent that drops out of the view leaves the directory. When its record
   said it was exiting, the team lead fails the subtasks it asked that agent for by name,
   as it did when presence announced an exit. An agent whose host only stopped reporting
@@ -45,7 +49,7 @@ def directory_status(item: TeamAgent, team_id: Optional[str]) -> AgentStatus:
         is_paused=item.state == "paused",
         is_executing=item.state == "busy",
         is_busy=item.state == "busy",
-        accepting_work=item.accepting_work,
+        accepting_work=item.takes_work,
         is_exiting=False,
         last_seen_at=datetime.now(timezone.utc).isoformat(),
         status_type=MessageMetaType.RESPONSE,
@@ -124,7 +128,7 @@ def live_agent_status(agent: Any, named_agent_type: Optional[str],
     else:
         candidates = view.of_type(str(named_agent_type or ""))
     for item in candidates:
-        if item.agent == str(agent.id) or not item.accepting_work:
+        if item.agent == str(agent.id) or not item.takes_work:
             continue
         if named_agent_type and item.agent_type != named_agent_type:
             continue

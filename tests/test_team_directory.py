@@ -132,6 +132,25 @@ def test_a_live_agent_is_found_by_type_or_name_from_the_view(monkeypatch: pytest
     assert live_agent_status(asker, "TeamArchitect") is None
 
 
+@pytest.mark.asyncio
+async def test_an_agent_on_a_host_of_another_contract_stays_listed_and_gets_no_new_work(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Contract README "Versions": control requests about what it holds still go to it; delegation passes it over."""
+
+    other = TeamAgent(agent="worker_1", agent_type="Researcher", display_name="Researcher-1", state="idle",
+                      accepting_work=True, since=NOW, host="agent-Researcher", session="s-worker_1", is_lead=False,
+                      other_contract="0" * 64)
+    owner = directory_owner()
+    await apply_team_change(owner, {}, {"worker_1": other}, frozenset({"worker_1"}), frozenset())
+    entry = owner.known_agents.agent_map["worker_1"]
+    assert entry.accepting_work is False and owner._agent_id_by_name == {"Researcher-1": "worker_1"}
+
+    view = _View(other, member("worker_2", "Researcher-2"))
+    monkeypatch.setattr(agent_requests, "team_view", lambda: view)
+    assert live_agent_status(owner, "Researcher").self_id == "worker_2"
+    assert live_agent_status(owner, "Researcher", "Researcher-1") is None
+
+
 def test_without_a_view_nothing_is_found_and_that_is_logged(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     monkeypatch.setattr(agent_requests, "team_view", lambda: None)
     with caplog.at_level(logging.WARNING):
