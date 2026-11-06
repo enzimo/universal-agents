@@ -6,7 +6,9 @@ trust, renewal) and the lock's lease until it is stopped. Losing the lock (anoth
 instance holds it, or its lease ran out without a successful renewal) stops the process
 with an error, so the launcher stops the team rather than letting two instances serve. A
 renewal that only failed, such as NATS not answering for a few seconds, is tried again
-while the lease lasts and does not stop anything (``team_services.lock``).
+while the lease lasts and does not stop anything. An attempt to take the lock that failed
+that way is tried again too, until it succeeds or the process is stopped
+(``team_services.lock``).
 """
 
 from __future__ import annotations
