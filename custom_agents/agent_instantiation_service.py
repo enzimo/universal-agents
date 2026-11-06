@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from custom_agents.contract_drain import LAUNCH_REFUSED_OTHER_CONTRACT, process_drains
 from custom_agents.schedule_repair_guidance import (
     AGENT_DEFINITION_CHANGED,
     SCHEDULE_LAUNCH_INTENT_CHANGED,
@@ -41,6 +40,22 @@ from storage.agent_launch_repository import (
 # number and start time (runtime_hosting.process_run), so the team lead can
 # later prove whether the process is gone.
 PROCESS_HOST_ID = current_process_identity().text()
+
+
+# Why ``launch`` refused a start: the process runs another message contract than its installation
+# (``custom_agents.contract_drain``), so it takes no new work and starts no agents.
+LAUNCH_REFUSED_OTHER_CONTRACT = "process_runs_another_message_contract"
+# What the model is told when it asks such a process to start an agent.
+NO_NEW_WORK_MESSAGE = (
+    "This process runs another message contract than its installation, so it takes no new work and starts no "
+    "agents. It finishes or hands back what it holds; ask again once the installation's release runs here."
+)
+
+
+def _drains(agent: Any) -> bool:
+    """``contract_drain.is_contract_draining``, read here directly: that module's wind-down reads this one."""
+
+    return getattr(agent, "_contract_drain", None) is not None
 
 
 def current_worker_limits(agent: Any) -> ScheduleWorkersConfig:
@@ -144,7 +159,7 @@ class AgentInstantiationService:
         occurrence_id: str | None = None,
         join_pending: bool | None = None,
     ) -> AgentLaunchResultV1:
-        if process_drains(self.agent):
+        if _drains(self.agent):
             return self._refused_while_draining(agent_type, source, request_id)
         try:
             if mcp_profile_names:
@@ -352,7 +367,7 @@ class AgentInstantiationService:
                     AgentLaunchResultV1(status="denied", reason="same_team_required"),
                 ),
             )
-        if process_drains(self.agent):
+        if _drains(self.agent):
             # One refusal and one log line for the whole request (custom_agents.contract_drain).
             refused = self._refused_while_draining(request.named_agent_type, source, request.request_id)
             return AgentCreationResultV1(request_id=request.request_id,

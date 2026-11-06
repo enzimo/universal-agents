@@ -18,9 +18,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from custom_agents.agent_host import configure_process_host
-from custom_agents.agent_instantiation_service import AgentInstantiationService
-from custom_agents.contract_drain import LAUNCH_REFUSED_OTHER_CONTRACT, ContractDrain
+from custom_agents.agent_instantiation_service import LAUNCH_REFUSED_OTHER_CONTRACT, AgentInstantiationService
+from custom_agents.contract_drain import ContractDrain
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
 from custom_messages.contracts.control_v1 import AgentCreationRequest
 from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState
@@ -50,20 +49,6 @@ def test_a_draining_process_starts_no_agent_from_any_source(lead, caplog, source
     assert lead.starts == []
     assert AgentLaunchRepository(lead.task_manager.storage_settings).list("team") == ()
     assert len(_refusals(caplog)) == 1 and f"source={source}" in _refusals(caplog)[0]
-
-
-def test_a_process_whose_host_learned_of_the_other_contract_starts_nothing_before_its_agents_drain(lead) -> None:
-    """The host learns it first; each agent's own drain then runs on that agent's loop."""
-
-    class _Host:
-        draining = True
-
-    configure_process_host(_Host())  # type: ignore[arg-type]
-    try:
-        result = AgentInstantiationService(lead).launch(agent_type="Worker", owner_id="owner", request_id="start-2")
-    finally:
-        configure_process_host(None)
-    assert result.reason == LAUNCH_REFUSED_OTHER_CONTRACT and lead.starts == []
 
 
 def test_the_model_is_told_plainly_that_the_process_takes_no_new_work(lead, caplog, monkeypatch) -> None:

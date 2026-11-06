@@ -68,7 +68,7 @@ def _instantiate_agent_request(
 def _refused_for_another_contract(result: AgentCreationResultV1) -> Optional[str]:
     """The model's answer when the process runs another message contract and starts no agents; else None."""
 
-    from custom_agents.contract_drain import LAUNCH_REFUSED_OTHER_CONTRACT, NO_NEW_WORK_MESSAGE
+    from custom_agents.agent_instantiation_service import LAUNCH_REFUSED_OTHER_CONTRACT, NO_NEW_WORK_MESSAGE
 
     if result.results and all(item.reason == LAUNCH_REFUSED_OTHER_CONTRACT for item in result.results):
         return json.dumps({"error": NO_NEW_WORK_MESSAGE, "reason_code": LAUNCH_REFUSED_OTHER_CONTRACT})

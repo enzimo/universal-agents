@@ -36,13 +36,12 @@ draining an agent means:
 waiting to be admitted, so the host gives an agent up only once it holds nothing.
 
 **No agent starts in a draining process.** Every start goes through
-``AgentInstantiationService.launch``, which refuses while ``process_drains`` (reason
+``AgentInstantiationService.launch``, which refuses while the agent that asks drains (reason
 ``LAUNCH_REFUSED_OTHER_CONTRACT``, one log line): a new agent would take new work here, and a
-replacement for a dead agent would adopt that agent's saved work. The periodic callers that
-would otherwise be refused at every pass, the worker pool and scheduled-worker controllers and
-the lead's takeover of dead agents' work, ask first and do nothing while it drains. A
-draining process learns of it from its host before every agent's own drain has run, so the
-check asks both.
+replacement for a dead agent would adopt that agent's saved work. Only the team lead's process
+starts agents, and the lead drains with its process. The periodic callers that would otherwise
+be refused at every pass, the worker pool and scheduled-worker controllers and the lead's
+takeover of dead agents' work, ask first and do nothing while it drains.
 """
 
 from __future__ import annotations
@@ -73,28 +72,8 @@ class ContractDrain:
     task: Optional[asyncio.Task[Any]] = field(default=None, repr=False)
 
 
-# Why ``AgentInstantiationService.launch`` refused a start in a draining process (module docstring).
-LAUNCH_REFUSED_OTHER_CONTRACT = "process_runs_another_message_contract"
-# What the model is told when it asks such a process to start an agent.
-NO_NEW_WORK_MESSAGE = (
-    "This process runs another message contract than its installation, so it takes no new work and starts no "
-    "agents. It finishes or hands back what it holds; ask again once the installation's release runs here."
-)
-
-
 def is_contract_draining(agent: Any) -> bool:
     return getattr(agent, "_contract_drain", None) is not None
-
-
-def process_drains(agent: Any) -> bool:
-    """Whether ``agent``'s process runs another message contract: the agent drains, or its process's host knows."""
-
-    if is_contract_draining(agent):
-        return True
-    from custom_agents.agent_host import process_host
-
-    host = process_host()
-    return host is not None and host.draining
 
 
 def is_pool_worker(agent: Any) -> bool:

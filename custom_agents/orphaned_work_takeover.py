@@ -27,7 +27,7 @@ from typing import Any
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_agents.agent_liveness import LivenessPurpose, latest_launch, owner_liveness, retain_decisions
-from custom_agents.contract_drain import process_drains
+from custom_agents.contract_drain import is_contract_draining
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ async def take_over_orphaned_work(agent: Any, *, now: datetime | None = None, cl
         return 0
     if not getattr(agent, "same_role_runtime_takeover_enabled", True):
         return 0
-    if process_drains(agent):
+    if is_contract_draining(agent):
         # This process runs another message contract: it starts no replacement (custom_agents.contract_drain),
         # and asking at every pass would only be refused and logged each time.
         return 0
