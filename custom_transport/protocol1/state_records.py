@@ -41,9 +41,11 @@ class StoredRecord:
 class StateRecords:
     """One host's reads and writes of signed records in the key-value buckets."""
 
-    def __init__(self, js: Any, identity: HostIdentity, trust: PersistentTrustStore, *,
+    def __init__(self, js: Any, identity: Callable[[], HostIdentity], trust: PersistentTrustStore, *,
                  fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> None:
         self._js = js
+        # The host's identity as it is now: a renewal or a new join changes its certificate,
+        # and every record is signed with the one its frames are signed with.
         self._identity = identity
         self._trust = trust
         # Reads a writer's certificate this host does not hold yet (``MessageHost.fetch_trust``).
@@ -55,20 +57,21 @@ class StateRecords:
 
         spec = STATE_RECORDS[record]
         spec.body_model.validate_python(dict(body))
-        certificate = self._identity.certificate
+        identity = self._identity()
+        certificate = identity.certificate
         document: dict[str, Any] = {
             "record": record,
             "protocol": PROTOCOL,
             "key": key,
             "writer": {"type": "host", "installation": certificate.installation, "runtime": certificate.runtime,
-                       "membership_epoch": certificate.membership_epoch, "key_id": self._identity.keys.key_id},
+                       "membership_epoch": certificate.membership_epoch, "key_id": identity.keys.key_id},
             "sequence": sequence,
             "issued_at": format_timestamp(issued_at),
         }
         if expires_at is not None:
             document["expires_at"] = format_timestamp(expires_at)
         document["body"] = dict(body)
-        return sign_state(document, self._identity.keys.application_key)
+        return sign_state(document, identity.keys.application_key)
 
     async def put(self, record: str, key: str, document: Mapping[str, Any], *,
                   last_revision: Optional[int] = None) -> int:

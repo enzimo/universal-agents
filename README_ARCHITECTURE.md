@@ -4251,7 +4251,11 @@ reads the authority's newest revocations record at start and every half hour, re
 certificate when two thirds of its life are gone, and writes its own liveness record
 (`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
 within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
-writes do not make a running host look gone; nothing moves because of it. When a frame or
+writes do not make a running host look gone; nothing moves because of it. It signs its
+frames and its records (its host record, and the placements, sessions and agent records it
+writes) with one identity, so a renewal switches all of them at once: a record still signed
+with the old certificate would name another certificate than its signer, or be refused once
+the old one's overlap ends. When a frame or
 record names a certificate or an agent session this host does not hold yet, it reads it
 from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
 checks the frame again, once.

@@ -13,6 +13,7 @@ import socket
 import subprocess
 import time
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from pathlib import Path
 
 import nats
@@ -21,6 +22,7 @@ import pytest
 from custom_transport.protocol1.host_keys import ensure_host_keys, load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
+from custom_transport.protocol1.live import utc_now
 from docker import message_hosts
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
@@ -80,9 +82,13 @@ async def installation(stack: AsyncExitStack, url: str, layout: InstanceLayout, 
 
 
 async def team_services(stack: AsyncExitStack, url: str, layout: InstanceLayout, stop: asyncio.Event) -> asyncio.Task:
+    return (await team_services_host(stack, url, layout, stop))[1]
+
+
+async def team_services_host(stack: AsyncExitStack, url: str, layout: InstanceLayout,
+                             stop: asyncio.Event) -> tuple[MessageHost, asyncio.Task]:
     host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, url, TEAM_SERVICES_RUNTIME))
-    task = asyncio.create_task(serve_team(host, TEAM, stop))
-    return task
+    return host, asyncio.create_task(serve_team(host, TEAM, stop))
 
 
 async def host(stack: AsyncExitStack, url: str, layout: InstanceLayout, profile: HostProfile) -> MessageHost:
@@ -214,3 +220,50 @@ async def test_operations_not_served_yet_are_answered_unsupported() -> None:
     assert services.served == frozenset({"sessions.open", "sessions.renew", "sessions.close"})
     with pytest.raises(Unsupported):
         await services.handle(SimpleNamespace(frame=SimpleNamespace(kind="shared_work.count")))  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_renews_its_certificate_keeps_writing_records_readers_accept(broker: str, tmp_path: Path) -> None:
+    """Plan 13B.12: after a renewal, host records, placements and sessions are signed with the new certificate."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        services, serving = await team_services_host(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        other = await host(stack, broker, layout, OTHER)
+        assert other.records is not None and services.records is not None
+        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        # Renewal comes on day 20 of 30; here both hosts renew at once.
+        await worker.renew()
+        await services.renew()
+        assert worker.identity.certificate.membership_epoch == services.identity.certificate.membership_epoch == 2
+
+        # The worker's next host record names the new certificate and is signed with it.
+        await worker.publish_liveness("accepting")
+        report = await other.records.read_report("host", WORKER.runtime, now=other.clock())
+        assert report is not None and report.record.signer is not None
+        assert report.record.signer.membership_epoch == report.record.body.certificate.membership_epoch == 2
+
+        # The team services place and sign with theirs.
+        opened = await open_session(worker, "researcher-2")
+        assert opened["outcome"] == "ok" and opened["session"]["writer"]["membership_epoch"] == 2
+        placement = await other.records.read_report("placement", f"{TEAM}.researcher-2", now=other.clock())
+        assert placement is not None and placement.record.signer is not None
+        assert placement.record.signer.membership_epoch == 2
+
+        # Once the old certificates sign nothing more (5 minutes after their replacement), what the
+        # hosts write is still accepted.
+        later = utc_now() + timedelta(minutes=6)
+        body = placement.record.document.model_dump(mode="json")["body"]
+        moved = services.records.signed("placement", f"{TEAM}.researcher-2", body,
+                                        sequence=placement.record.document.sequence + 1, issued_at=later)
+        accepted = other.live.trust.store.verify(json.dumps(moved).encode(), record="placement", now=later)
+        assert accepted.signer is not None and accepted.signer.membership_epoch == 2
+        host_record = worker.records.signed("host", WORKER.runtime, worker.liveness_body("accepting"),
+                                            sequence=report.record.document.sequence + 1, issued_at=later,
+                                            expires_at=later + timedelta(seconds=30))
+        assert other.live.trust.store.verify(json.dumps(host_record).encode(), record="host", now=later).signer is not None
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)

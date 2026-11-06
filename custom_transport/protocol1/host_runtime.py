@@ -61,6 +61,8 @@ class MessageHost:
 
     @property
     def identity(self) -> HostIdentity:
+        """The one identity this host signs frames and records with (``live.identity``)."""
+
         assert self.live is not None, "start() first"
         return self.live.identity
 
@@ -72,9 +74,11 @@ class MessageHost:
         trust = PersistentTrustStore.open(read_bundle(self.layout.trust_bootstrap_path),
                                           self.layout.host_trust_dir(self.profile.runtime), now)
         certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger)
-        identity = HostIdentity(keys, certificate)
-        self.live = LiveHost(self.nc, identity, trust, clock=self.clock, logger=self.logger, fetch_trust=self.fetch_trust)
-        self.records = StateRecords(self.nc.jetstream(), identity, trust, fetch_trust=self.fetch_trust)
+        self.live = LiveHost(self.nc, HostIdentity(keys, certificate), trust, clock=self.clock, logger=self.logger,
+                             fetch_trust=self.fetch_trust)
+        # One identity: records are signed with what the live host signs frames with, so a
+        # renewal or a new join switches both at once.
+        self.records = StateRecords(self.nc.jetstream(), lambda: self.identity, trust, fetch_trust=self.fetch_trust)
         self._started_at = now
         await self.refresh_trust()
         await self.publish_liveness("accepting")
@@ -160,12 +164,18 @@ class MessageHost:
         await self.records.put("host", runtime, document)
 
     async def renew_if_due(self) -> None:
-        """Renew the certificate once two thirds of its life are gone; keep the old one until the new one is held."""
+        """Renew the certificate once two thirds of its life are gone."""
 
         certificate = self.identity.certificate
         life = certificate.expires_at - certificate.issued_at
         if self.clock() < certificate.issued_at + life * 2 / 3:
             return
+        await self.renew()
+
+    async def renew(self) -> None:
+        """Renew the certificate now; keep the old one until the new one is held."""
+
+        certificate = self.identity.certificate
         assert self.live is not None
         reply = await self.live.request("host.renew", {
             "renew_id": f"renew-{certificate.runtime}-{certificate.membership_epoch}",
