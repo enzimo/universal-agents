@@ -15,8 +15,8 @@ and the registry's write rules for ``certificate`` and ``revocations``:
   any of them can write ``UA1_CERTS``. The authority uses a record it reads there (the
   revocations record to sign again, a certificate to hand back) only when it verifies
   against the authority's own key; it never signs again what does not verify. It signs
-  the next revocations record from the newest one it verified, from the bucket, the
-  bootstrap bundle or its own kept trust state. When the bucket holds a record that
+  the next revocations record from the newest one it verified: the bucket's, the
+  bootstrap bundle's or the one it signed last. When the bucket holds a record that
   does not verify and it has verified none, it does not start (``RevocationsUnverified``):
   an empty list would accept every revoked host again.
 - **The bootstrap bundle** carries the authority keys, the authority's own
