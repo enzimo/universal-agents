@@ -2548,6 +2548,53 @@ def stop_external_processes(
             before_external_shutdown()
 
 
+MESSAGE_SERVICES_START_ERRORS = (OSError, RuntimeError, ValueError)
+
+
+def start_message_services_before_services(
+    services: MessageServices,
+    *,
+    external_processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+    before_external_shutdown: Callable[[], None] | None,
+) -> bool:
+    """Start the installation authority and the team services; ``False`` when they could not start.
+
+    Like the stream preparation before it, every failure, interruption included, stops
+    what already started: the message services (``MessageServices.stop``; a process that
+    was still starting is stopped by ``docker.message_hosts``) and the managed services.
+    Expected failures become a refusal; unexpected ones keep their traceback. Each
+    process's environment is its own: the NATS login and nothing else
+    (``env_secrets.PROCESS_INSTALLATION_AUTHORITY``, ``PROCESS_TEAM_SERVICES``, renamed
+    secrets included).
+    """
+
+    try:
+        services.start()
+        return True
+    except BaseException as exc:
+        for cleanup, event in (
+            (lambda: services.stop(terminate_process), "message_services_start_stop_failed"),
+            (lambda: stop_external_processes(external_processes, before_external_shutdown),
+             "message_services_start_cleanup_failed"),
+        ):
+            try:
+                cleanup()
+            except BaseException:
+                LOGGER.exception(
+                    "Cleanup failed after the message services' start stopped. event=%s start_error_type=%s",
+                    event,
+                    type(exc).__name__,
+                )
+        if not isinstance(exc, MESSAGE_SERVICES_START_ERRORS):
+            raise
+        LOGGER.error(
+            "Headless launch refused: the installation authority or the team services could not start. "
+            "event=message_services_start_failed error=%s",
+            exc,
+        )
+        return False
+
+
 def prepare_message_streams_before_services(
     config_path: Path,
     gateway_env: Mapping[str, str],
@@ -2830,23 +2877,16 @@ def main() -> int:
         config.layout,
         lambda: message_hosts_to_approve(GatewayInstanceConfig.load_for_process(config_path)),
         build_installation_authority_command(config_path, repo_root=REPO_ROOT),
-        environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env),
+        environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env, renamed=renamed_secrets),
         build_team_services_command(config_path, repo_root=REPO_ROOT),
-        environment_for(PROCESS_TEAM_SERVICES, inherited_env),
+        environment_for(PROCESS_TEAM_SERVICES, inherited_env, renamed=renamed_secrets),
         cwd=REPO_ROOT,
     )
-    try:
-        message_services.start()
-    except (OSError, RuntimeError, ValueError) as exc:
-        try:
-            message_services.stop(terminate_process)
-        finally:
-            stop_external_processes(external_processes, cleanup_managed_openshell)
-        LOGGER.error(
-            "Headless launch refused: the installation authority or the team services could not start. "
-            "event=message_services_start_failed error=%s",
-            exc,
-        )
+    if not start_message_services_before_services(
+        message_services,
+        external_processes=external_processes,
+        before_external_shutdown=cleanup_managed_openshell,
+    ):
         return 2
 
     return run_supervised(

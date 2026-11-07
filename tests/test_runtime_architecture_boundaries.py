@@ -831,11 +831,36 @@ def test_large_facades_cannot_grow(
 # ADR-019: durable work is pulled, never pushed. Only the transport adapter
 # subscribes to NATS, and nothing creates a deliver group (the push consumer
 # shape that handed work to busy agents). Protocol 1's live module subscribes only
-# to request/reply addresses (custom_transport.protocol1.live.serve), which hold no
-# queued work; its queued kinds are pulled like today's.
+# to request/reply and event addresses (custom_transport.protocol1.live.serve), which
+# hold no queued work; its queued kinds are pulled like today's.
 NATS_SUBSCRIBERS = {"custom_transport/nats_adapter.py", "custom_transport/nats_pull.py",
                     "custom_transport/protocol1/live.py"}
-NATS_CLIENT_NAMES = ("_js", "js", "jetstream", "_nc", "nc", "nats_client")
+# The names a raw NATS connection or JetStream context goes by; ``nats_connection`` is the
+# adapter's property that hands the connection to the protocol 1 kernel.
+NATS_CLIENT_NAMES = ("_js", "js", "jetstream", "_nc", "nc", "nats_client", "nats_connection")
+# What a raw handle can do: send, subscribe, and reach buckets, streams and consumers.
+NATS_CLIENT_CALLS = frozenset({
+    "publish", "request", "subscribe", "pull_subscribe", "pull_subscribe_bind", "jetstream",
+    "key_value", "create_key_value", "delete_key_value", "object_store", "create_object_store",
+    "delete_object_store", "add_stream", "update_stream", "delete_stream", "purge_stream", "stream_info",
+    "add_consumer", "delete_consumer",
+})
+# The only modules that use a raw NATS handle at all (plan 13B.6). Everything else goes
+# through them, so the flush before sending (custom_transport.send_barrier), the
+# requester's-inbox rule for answers and the pull-only rule each live in one place. A
+# key-value watch is an ordered push subscription on state, never work; it is reachable
+# only through a bucket these modules bind. A module that needs a raw handle is added
+# here in the same change, with its reason.
+NATS_CLIENT_MODULES = {
+    "custom_transport/nats_adapter.py": "the transport adapter: publishing, delivery, object store",
+    "custom_transport/nats_pull.py": "pull consumers for queued work",
+    "custom_transport/nats_consumer_reconciler.py": "removes consumers the topology no longer names",
+    "custom_transport/nats_topology.py": "creates and updates the streams",
+    "custom_transport/protocol1/live.py": "protocol 1 requests, replies and served addresses",
+    "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
+    "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",
+    "installation_authority/service.py": "the topology owner's buckets, and the certificates it keeps in UA1_CERTS",
+}
 
 
 def _production_python_files() -> list[Path]:
@@ -847,6 +872,18 @@ def _production_python_files() -> list[Path]:
             for part in path.relative_to(REPO_ROOT).parts
         )
     ]
+
+
+def _handle_name(node: ast.expr) -> str | None:
+    """The name a call's receiver goes by: ``self.nc`` is ``nc``, ``self.nc.jetstream()`` is ``jetstream``."""
+
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Call):
+        return _handle_name(node.func)
+    return None
 
 
 def test_work_is_pulled_and_only_the_transport_adapter_subscribes() -> None:
@@ -863,11 +900,42 @@ def test_work_is_pulled_and_only_the_transport_adapter_subscribes() -> None:
             if (
                 isinstance(func, ast.Attribute)
                 and func.attr in {"subscribe", "pull_subscribe", "pull_subscribe_bind"}
-                and ast.unparse(func.value).split(".")[-1] in NATS_CLIENT_NAMES
+                and _handle_name(func.value) in NATS_CLIENT_NAMES
                 and relative not in NATS_SUBSCRIBERS
             ):
                 offenders.append(f"{relative}:{node.lineno} {func.attr}")
     assert offenders == []
+
+
+def test_only_the_listed_modules_use_a_raw_nats_handle() -> None:
+    offenders: list[str] = []
+    for path in _production_python_files():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if relative in NATS_CLIENT_MODULES:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in NATS_CLIENT_CALLS
+                and _handle_name(node.func.value) in NATS_CLIENT_NAMES
+            ):
+                offenders.append(f"{relative}:{node.lineno} {node.func.attr}")
+    assert offenders == []
+
+
+@pytest.mark.parametrize("source", [
+    "adapter.nats_connection.subscribe('ua.v1.>', cb=handle)",
+    "await self.nc.publish('ua.v1.x', b'')",
+    "bucket = await self.nc.jetstream().key_value('UA1_AGENTS')",
+    "await js.object_store('UA1_FILES')",
+])
+def test_the_raw_nats_handle_check_sees_each_way_in(source: str) -> None:
+    (call,) = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr in NATS_CLIENT_CALLS
+               and node.func.attr != "jetstream"]
+    assert _handle_name(call.func.value) in NATS_CLIENT_NAMES
 
 
 # Who may write Objective records. A new record is inserted (creation and the

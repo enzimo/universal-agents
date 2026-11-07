@@ -7,10 +7,12 @@ signed state document. Readers verify every record they read: trust records
 state reports are checked with ``TrustStore.verify``. Where a record is stored adds no
 trust, so nothing read from a bucket is used before that check.
 
-Writers take each sequence above the one they last wrote; records whose readers keep
-the highest sequence (the block list, revocations) also take at least the record's
-issue time in milliseconds, so a writer restored from a backup never writes a lower
-one (registry write rules).
+Writers take each sequence above the highest in the bucket (a placement takes the next
+one, with compare-and-set on the bucket revision); records whose readers keep the
+highest sequence (the block list, revocations) also take at least the record's issue
+time in milliseconds, so a writer restored from a backup never writes a lower one
+(registry write rules). A record read under another key than its own is refused: a
+copy of another agent's record is not this one's.
 """
 
 from __future__ import annotations

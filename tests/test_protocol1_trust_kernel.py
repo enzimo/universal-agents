@@ -16,17 +16,21 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, reply_audience, verify_frame
 from custom_messages.wire.models import Frame
 from custom_messages.wire.refusals import FrameRefused
-from custom_transport.protocol1 import host_keys, nkeys
+from custom_messages.wire.trust import RETENTION, SKEW, sign_state
+from custom_transport.protocol1 import host_keys, nkeys, private_files
 from custom_transport.protocol1.bootstrap import BootstrapBundle, BootstrapError, read_bundle, write_bundle
 from custom_transport.protocol1.host_keys import HostKeys, KeyFileError
 from custom_transport.protocol1.identity import HostIdentity, IdentityError
 from custom_transport.protocol1.ids import new_message_id
 from custom_transport.protocol1.live import LiveHost, request_subject, serving_subject
-from custom_transport.protocol1.trust_state import PersistentTrustStore
+from custom_transport.protocol1 import trust_state
+from custom_transport.protocol1.trust_state import DAMAGED_MARK, TRUST_STATE_FILENAME, PersistentTrustStore
 from runtime_settings.instance_layout import InstanceLayout
 from tests import message_contract_support as fixtures
 
@@ -90,10 +94,54 @@ def test_host_keys_are_made_once_and_readable_only_by_their_owner(tmp_path: Path
     # Key ids hold no underscore (contract key_id), runtime ids may.
     assert keys.key_id.startswith("lead-host-1.") and "_" not in keys.key_id
     path = layout.host_trust_dir("lead_host-1") / host_keys.HOST_KEYS_FILENAME
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    # Every folder it made is owner-only, not just the host's own (plan 13B.3).
+    for folder in (layout.trust_dir, layout.trust_dir / "hosts", path.parent):
+        assert stat.S_IMODE(folder.stat().st_mode) == 0o700, folder
+    assert not [name for name in os.listdir(path.parent) if name.startswith(private_files.TEMPORARY_PREFIX)]
     path.chmod(0o640)
     with pytest.raises(KeyFileError, match="readable only by its owner"):
         host_keys.load_host_keys(layout, "lead_host-1")
+
+
+def test_a_key_object_never_prints_its_secrets(tmp_path: Path) -> None:
+    keys, _ = host_keys.ensure_host_keys(InstanceLayout.at(tmp_path), "lead-host-1")
+    authority, _ = host_keys.ensure_authority_keys(InstanceLayout.at(tmp_path), "install_one")
+    assert "nats_seed" not in repr(keys) and repr(keys.nats_seed) not in repr(keys)
+    assert "application_key" not in repr(keys) and "private_key" not in repr(authority)
+    assert keys.key_id in repr(keys) and authority.key_id in repr(authority)
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.parametrize("damage", ["folder", "link", "not_json", "unknown_version", "wrong_key_id"])
+def test_a_damaged_key_file_is_refused_with_a_key_file_error(tmp_path: Path, damage: str) -> None:
+    layout = InstanceLayout.at(tmp_path)
+    host_keys.ensure_host_keys(layout, "worker-host-1")
+    path = layout.host_trust_dir("worker-host-1") / host_keys.HOST_KEYS_FILENAME
+    document = json.loads(path.read_text())
+    path.unlink()
+    if damage == "folder":
+        path.mkdir()
+    elif damage == "link":
+        (tmp_path / "elsewhere.json").write_text(json.dumps(document))
+        (tmp_path / "elsewhere.json").chmod(0o600)
+        path.symlink_to(tmp_path / "elsewhere.json")
+    else:
+        if damage == "unknown_version":
+            document["version"] = 99
+        elif damage == "wrong_key_id":
+            document["application_key"]["key_id"] = "worker-host-1.0000000000000000"
+        path.write_text("{not json" if damage == "not_json" else json.dumps(document))
+        path.chmod(0o600)
+    before = _open_descriptors()
+    expected = {"folder": "regular file", "link": "regular file", "not_json": "damaged",
+                "unknown_version": "unknown format", "wrong_key_id": "another key id"}[damage]
+    with pytest.raises(KeyFileError, match=expected):
+        host_keys.load_host_keys(layout, "worker-host-1")
+    assert _open_descriptors() == before
 
 
 def test_a_key_another_process_wrote_first_is_kept(tmp_path: Path, monkeypatch) -> None:
@@ -107,7 +155,7 @@ def test_a_key_another_process_wrote_first_is_kept(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(Path, "exists", lambda self: False if self == path else real_exists(self))
     keys, created = host_keys.ensure_host_keys(layout, "gateway")
     assert not created and keys.key_id == winner.key_id
-    assert not [name for name in os.listdir(path.parent) if name.startswith(".key-write-")]
+    assert not [name for name in os.listdir(path.parent) if name.startswith(private_files.TEMPORARY_PREFIX)]
 
 
 def test_a_missing_or_foreign_key_file_is_refused(tmp_path: Path) -> None:
@@ -136,6 +184,13 @@ def test_the_authority_key_names_its_installation(tmp_path: Path) -> None:
     assert created and authority.installation == "install_one" and "_" not in authority.key_id
     assert host_keys.load_authority_keys(layout).key_id == authority.key_id
     assert layout.is_instance_private(layout.trust_authority_dir)
+    path = layout.trust_authority_dir / host_keys.AUTHORITY_KEY_FILENAME
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    # The same installation gets the same key; another installation's key is refused, not handed out.
+    again, created_again = host_keys.ensure_authority_keys(layout, "install_one")
+    assert again.key_id == authority.key_id and not created_again
+    with pytest.raises(KeyFileError, match="belongs to installation 'install_one', not 'install_two'"):
+        host_keys.ensure_authority_keys(layout, "install_two")
 
 
 # -- the bootstrap bundle and kept trust records --------------------------------------------------
@@ -175,51 +230,232 @@ def test_a_missing_or_damaged_bundle_is_refused(tmp_path: Path) -> None:
         read_bundle(tmp_path / "bootstrap.json")
 
 
+def revocations(now, *, sequence: int, entries: list[dict] | None = None, installation: str = "install_example") -> bytes:
+    """A revocations record of ``installation`` current at ``now`` (written an hour before), with ``entries`` if given."""
+
+    if installation == "install_example":
+        document = json.loads(fixtures.current_revocations(now, sequence=sequence))
+    else:
+        document = json.loads((fixtures.TRUST / "revocations" / f"{installation}.json").read_text())
+        written = now - timedelta(hours=1)
+        document["sequence"], document["issued_at"] = sequence, format_timestamp(written)
+        document["body"]["expires_at"] = format_timestamp(written + timedelta(days=1))
+    if entries is not None:
+        document["body"]["entries"] = entries
+    return json.dumps(sign_state(document, fixtures.private_key(document["writer"]["key_id"]))).encode()
+
+
+def revoked_entry(certificate_id: str, runtime: str, key_id: str, *, key_expires_at) -> dict:
+    return {"certificate_id": certificate_id, "runtime": runtime, "key_id": key_id,
+            "key_expires_at": format_timestamp(key_expires_at), "membership_epoch": 1,
+            "revoked_at": format_timestamp(fixtures.NOW - timedelta(days=1)), "reason": "compromised"}
+
+
+def kept_file(folder: Path) -> dict:
+    return json.loads((folder / TRUST_STATE_FILENAME).read_text())
+
+
+def kept_sequences(folder: Path, installation: str = "install_example") -> list[int]:
+    return [record["sequence"] for record in kept_file(folder)["revocations"].get(installation, [])]
+
+
+LATER = fixtures.NOW + timedelta(days=3)
+# The examples' revoked entry: listed by every record these tests sign unless they say otherwise.
+OLD_ENTRY = json.loads((fixtures.TRUST / "revocations" / "install_example.json").read_text())["body"]["entries"][0]
+
+
 def test_the_newest_revocations_record_survives_a_restart(tmp_path: Path) -> None:
     """README "Trust over time": receivers keep the newest record they verified, also across restarts."""
 
-    later = fixtures.NOW + timedelta(days=3)
     trust = PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW)
-    assert not trust.store.revocations_current("install_example", later)
-    assert trust.add(fixtures.current_revocations(later, sequence=500), now=later)
+    assert not trust.store.revocations_current("install_example", LATER)
+    assert trust.add(revocations(LATER, sequence=500), now=LATER)
+    assert stat.S_IMODE((tmp_path / TRUST_STATE_FILENAME).stat().st_mode) == 0o600
     # Restarted from the same, older bundle: the newer record is still held.
-    reopened = PersistentTrustStore.open(example_bundle(), tmp_path, later)
-    assert reopened.store.revocations_current("install_example", later)
+    reopened = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    assert reopened.store.revocations_current("install_example", LATER)
     # An older record written back is not taken over the newer one.
-    assert not reopened.add(fixtures.current_revocations(later, sequence=200), now=later)
+    assert not reopened.add(revocations(LATER, sequence=200), now=LATER)
+    assert kept_sequences(tmp_path) == [500]
+
+
+def test_a_record_first_read_from_the_bundle_is_kept_too(tmp_path: Path) -> None:
+    """The record the store holds is kept, wherever it came from; a later, older bundle cannot bring back an older one."""
+
+    PersistentTrustStore.open(example_bundle(revocations=revocations(LATER, sequence=600)), tmp_path, LATER)
+    assert kept_sequences(tmp_path) == [600]
+    reopened = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    assert reopened.store.revocations_current("install_example", LATER)
+    assert not reopened.add(revocations(LATER, sequence=550), now=LATER)
 
 
 def test_a_newer_bundle_record_wins_over_an_older_kept_one(tmp_path: Path) -> None:
-    later = fixtures.NOW + timedelta(days=3)
     PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW).add(
-        fixtures.current_revocations(fixtures.NOW + timedelta(hours=2), sequence=150), now=fixtures.NOW + timedelta(hours=2))
-    reopened = PersistentTrustStore.open(example_bundle(revocations=fixtures.current_revocations(later, sequence=600)),
-                                         tmp_path, later)
-    assert reopened.store.revocations_current("install_example", later)
+        revocations(fixtures.NOW + timedelta(hours=2), sequence=150), now=fixtures.NOW + timedelta(hours=2))
+    reopened = PersistentTrustStore.open(example_bundle(revocations=revocations(LATER, sequence=600)), tmp_path, LATER)
+    assert reopened.store.revocations_current("install_example", LATER)
+    assert kept_sequences(tmp_path) == [600]
 
 
-def test_unreadable_kept_records_are_logged_and_the_bundle_still_serves(tmp_path: Path, caplog) -> None:
-    (tmp_path / "trust-state.json").write_text("{not json")
+def test_reading_a_block_list_keeps_the_revocations_record(tmp_path: Path) -> None:
+    """A save for another reason writes the revocations record too (it used to write an empty map over it)."""
+
+    record = (fixtures.EXAMPLES / "state" / "valid" / "block_list" / "team.json").read_bytes()
+    trust = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    assert trust.add(revocations(LATER, sequence=500), now=LATER)
+    reopened = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    reopened.verify_block_list(record, team="team_example", now=LATER)
+    assert kept_sequences(tmp_path) == [500]
+    assert PersistentTrustStore.open(example_bundle(), tmp_path, LATER).store.revocations_current("install_example", LATER)
+
+
+def test_an_entry_a_newer_record_left_out_early_is_still_revoked_after_a_restart(tmp_path: Path) -> None:
+    """README "Trust over time": an entry left out before nothing its key signed can be accepted is kept.
+
+    The older record that lists it is kept beside the newer one, also when the newer
+    one comes from the bundle, so the restarted store rebuilds the same list.
+    """
+
+    entry = revoked_entry("cert_stolen", "worker-host-7", "test-stolen-key-1", key_expires_at=LATER + timedelta(days=20))
+    trust = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    assert trust.add(revocations(LATER, sequence=300, entries=[OLD_ENTRY, entry]), now=LATER)
+    assert trust.add(revocations(LATER, sequence=400, entries=[OLD_ENTRY]), now=LATER)
+    assert trust.store.key_revoked("install_example", "worker-host-7", "test-stolen-key-1")
+    assert kept_sequences(tmp_path) == [300, 400]
+    reopened = PersistentTrustStore.open(example_bundle(revocations=revocations(LATER, sequence=500, entries=[OLD_ENTRY])),
+                                         tmp_path, LATER)
+    assert reopened.store.key_revoked("install_example", "worker-host-7", "test-stolen-key-1")
+    assert kept_sequences(tmp_path) == [300, 500]
+    # Once nothing that key signed can be accepted, the older record is let go. The store
+    # judges an entry at the newer record's issue time, an hour before the clock here.
+    much_later = LATER + timedelta(days=20) + RETENTION + SKEW + timedelta(hours=2)
+    gone = PersistentTrustStore.open(example_bundle(revocations=revocations(much_later, sequence=900, entries=[OLD_ENTRY])),
+                                     tmp_path, much_later)
+    assert not gone.store.key_revoked("install_example", "worker-host-7", "test-stolen-key-1")
+    assert kept_sequences(tmp_path) == [900]
+
+
+def test_another_installations_kept_record_waits_for_its_agreement(tmp_path: Path, caplog) -> None:
+    """A peer's record verifies only once its agreement is read; until then it stays kept and comes first."""
+
+    agreement = (fixtures.TRUST / "agreements" / "install_peer.json").read_bytes()
+    trust = PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW)
+    assert trust.add(agreement, now=fixtures.NOW)
+    assert trust.add(revocations(fixtures.NOW, sequence=70, installation="install_peer"), now=fixtures.NOW)
+    reopened = PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW)
+    assert "kept_revocations_waiting" in caplog.text and not reopened.store.revocations_current("install_peer", fixtures.NOW)
+    # A save for another reason keeps the waiting record.
+    reopened.verify_block_list((fixtures.EXAMPLES / "state" / "valid" / "block_list" / "team.json").read_bytes(),
+                               team="team_example", now=fixtures.NOW)
+    assert kept_sequences(tmp_path, "install_peer") == [70]
+    # The agreement arrives: the kept record is taken at once, before an older copy from the bucket.
+    assert reopened.add(agreement, now=fixtures.NOW)
+    assert reopened.store.revocations_current("install_peer", fixtures.NOW)
+    assert not reopened.add(revocations(fixtures.NOW, sequence=60, installation="install_peer"), now=fixtures.NOW)
+
+
+def test_a_kept_record_dated_ahead_of_a_clock_that_went_back_waits_until_it_verifies(tmp_path: Path) -> None:
+    trust = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    assert trust.add(revocations(LATER, sequence=500), now=LATER)
+    behind = LATER - timedelta(hours=3)
+    reopened = PersistentTrustStore.open(example_bundle(), tmp_path, behind)
+    # Kept beside the bundle's older record, which is all this store could check.
+    assert kept_sequences(tmp_path) == [1, 500]
+    # The next record this host adds, once the clock is right again, comes after the kept one.
+    assert not reopened.add(revocations(LATER, sequence=450), now=LATER)
+    assert reopened.store.revocations_current("install_example", LATER)
+    assert kept_sequences(tmp_path) == [500]
+
+
+def test_two_store_objects_on_one_folder_keep_each_others_records(tmp_path: Path) -> None:
+    """A second copy of a host starting while the first still runs never drops what the first kept."""
+
+    record = (fixtures.EXAMPLES / "state" / "valid" / "block_list" / "team.json").read_bytes()
+    first = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    second = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    assert first.add(revocations(LATER, sequence=500), now=LATER)
+    second.verify_block_list(record, team="team_example", now=fixtures.NOW)
+    # The second still holds only the bundle's record; it writes the first's beside it.
+    assert kept_sequences(tmp_path) == [1, 500] and kept_file(tmp_path)["block_lists"]["team_example"][0] == 412
+    # The second takes the first's record as its own once it checks it.
+    assert not second.add(revocations(LATER, sequence=450), now=LATER)
+    assert second.store.revocations_current("install_example", LATER)
+    assert kept_sequences(tmp_path) == [500]
+
+
+def test_a_failed_save_is_tried_again_at_the_next_change(tmp_path: Path, monkeypatch, caplog) -> None:
+    trust = PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    real_write = trust_state.write_private_file
+
+    def full_disk(path, content, **options):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(trust_state, "write_private_file", full_disk)
+    assert trust.add(revocations(LATER, sequence=500), now=LATER)
+    assert "trust_state_save_failed" in caplog.text and kept_sequences(tmp_path) == [1]
+    monkeypatch.setattr(trust_state, "write_private_file", real_write)
+    # The same record again: the store already holds it, and the save it missed happens now.
+    assert not trust.add(revocations(LATER, sequence=500), now=LATER)
+    assert kept_sequences(tmp_path) == [500]
+    assert not [name for name in os.listdir(tmp_path) if name.startswith(private_files.TEMPORARY_PREFIX)]
+
+
+@pytest.mark.parametrize("content", [
+    "{not json",
+    "[]",
+    "null",
+    json.dumps({"version": 1, "revocations": {}, "block_list": {}}),  # another format version
+    json.dumps({"version": 2, "revocations": [], "block_lists": {}}),
+    json.dumps({"version": 2, "revocations": {"install_example": [{"record": "certificate"}]}, "block_lists": {}}),
+    json.dumps({"version": 2, "revocations": {}, "block_lists": {"team_example": [412]}}),
+])
+def test_an_unreadable_kept_file_is_set_aside_and_the_bundle_still_serves(tmp_path: Path, caplog, content: str) -> None:
+    (tmp_path / TRUST_STATE_FILENAME).write_text(content)
+    (tmp_path / TRUST_STATE_FILENAME).chmod(0o600)
     trust = PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW)
     assert "trust_state_unreadable" in caplog.text
     assert trust.store.revocations_current("install_example", fixtures.NOW)
+    aside = [path for path in tmp_path.iterdir() if path.name.startswith(TRUST_STATE_FILENAME + DAMAGED_MARK)]
+    assert len(aside) == 1 and aside[0].read_text() == content
+    # The next save writes a new file; the damaged one stays for whoever looks into it.
+    assert trust.add(revocations(LATER, sequence=500), now=LATER)
+    assert kept_sequences(tmp_path) == [500] and aside[0].exists()
 
 
-def test_the_highest_block_list_sequence_survives_a_restart(tmp_path: Path) -> None:
+def test_a_kept_file_others_can_read_is_set_aside(tmp_path: Path, caplog) -> None:
+    PersistentTrustStore.open(example_bundle(), tmp_path, LATER).add(revocations(LATER, sequence=500), now=LATER)
+    (tmp_path / TRUST_STATE_FILENAME).chmod(0o644)
+    PersistentTrustStore.open(example_bundle(), tmp_path, LATER)
+    assert "trust_state_unreadable" in caplog.text and "readable by others" in caplog.text
+
+
+def test_a_block_list_is_returned_whenever_it_is_current_and_never_older(tmp_path: Path) -> None:
+    """The highest sequence survives a restart; the same list again, also after a restart, is still the list."""
+
     record = (fixtures.EXAMPLES / "state" / "valid" / "block_list" / "team.json").read_bytes()
     trust = PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW)
-    assert trust.verify_block_list(record, now=fixtures.NOW) is not None
-    assert trust.verify_block_list(record, now=fixtures.NOW) is None  # the same list again
+    assert trust.verify_block_list(record, team="team_example", now=fixtures.NOW).document.sequence == 412
+    assert trust.verify_block_list(record, team="team_example", now=fixtures.NOW).document.sequence == 412
     reopened = PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW)
-    assert reopened.verify_block_list(record, now=fixtures.NOW) is None
+    assert reopened.verify_block_list(record, team="team_example", now=fixtures.NOW).document.sequence == 412
     older = json.loads(record)
     older["sequence"] -= 1
-    from custom_messages.wire.trust import sign_state
-
     resigned = json.dumps(sign_state(older, fixtures.private_key(older["writer"]["key_id"]))).encode()
     with pytest.raises(FrameRefused) as refused:
-        reopened.verify_block_list(resigned, now=fixtures.NOW)
+        reopened.verify_block_list(resigned, team="team_example", now=fixtures.NOW)
     assert refused.value.code == "replayed"
+
+
+def test_a_block_list_read_as_another_teams_or_not_a_record_is_refused(tmp_path: Path) -> None:
+    record = (fixtures.EXAMPLES / "state" / "valid" / "block_list" / "team.json").read_bytes()
+    trust = PersistentTrustStore.open(example_bundle(), tmp_path, fixtures.NOW)
+    with pytest.raises(FrameRefused) as refused:
+        trust.verify_block_list(record, team="team_other", now=fixtures.NOW)
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/key")
+    for data in (b"{not json", b"[]", b"null"):
+        with pytest.raises(FrameRefused):
+            trust.verify_block_list(data, team="team_example", now=fixtures.NOW)
+    assert kept_file(tmp_path)["block_lists"] == {}
 
 
 # -- identity and signing -------------------------------------------------------------------------
@@ -245,7 +481,7 @@ def test_an_identity_signs_only_for_its_certificate_and_its_agents() -> None:
 
 def test_a_signed_request_and_its_reply_verify_as_the_contract_says() -> None:
     worker = LiveHost(None, example_identity("worker-host-1", "test-worker-key-1", 3),
-                      PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"), {}, {}), clock=lambda: fixtures.NOW)
+                      PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent")), clock=lambda: fixtures.NOW)
     request = worker.sign("sessions.renew", {"request_id": "renew_1", "session": "s-researcher-2-1"},
                           {"installation": "install_example", "team": "team_example", "target": "team_services",
                            "id": "team_example"}, team="team_example")
@@ -256,7 +492,7 @@ def test_a_signed_request_and_its_reply_verify_as_the_contract_says() -> None:
     assert verified.frame.kind == "sessions.renew"
     # The team services' reply names the host, goes to its inbox, and the worker host accepts it.
     services = LiveHost(None, example_identity("team-services-1", "test-services-key-1", 2),
-                        PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"), {}, {}), clock=lambda: fixtures.NOW)
+                        PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent")), clock=lambda: fixtures.NOW)
     session = json.loads((fixtures.TRUST / "sessions" / "researcher-2.json").read_text())
     reply = services.sign("sessions.renew.reply", {"outcome": "ok", "session": session},
                           reply_audience(verified.frame), team="team_example",
@@ -270,8 +506,8 @@ def test_a_signed_request_and_its_reply_verify_as_the_contract_says() -> None:
 
 def test_a_body_the_schema_refuses_is_never_signed() -> None:
     worker = LiveHost(None, example_identity("worker-host-1", "test-worker-key-1", 3),
-                      PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"), {}, {}), clock=lambda: fixtures.NOW)
-    with pytest.raises(Exception, match="session"):
+                      PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent")), clock=lambda: fixtures.NOW)
+    with pytest.raises(ValidationError, match="session"):
         worker.sign("sessions.renew", {"request_id": "renew_1"},
                     {"installation": "install_example", "team": "team_example", "target": "team_services",
                      "id": "team_example"}, team="team_example")

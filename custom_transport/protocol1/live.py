@@ -9,18 +9,29 @@ refused request at once with the refusal's code and known pointer
 (README "Refused requests"), never its detail.
 
 Requests use NATS request/reply with this host's own inbox prefix
-(``_INBOX.<runtime>``), which the connection sets (``NatsTransportAdapter``). Every
-frame is checked before a handler sees it; a handler receives only a
-``VerifiedFrame``. Events and queued work are not sent here.
+(``_INBOX.<runtime>``), which the connection sets (``NatsTransportAdapter``);
+``request`` refuses a connection with another prefix, whose answers no receiver would
+send. A receiver answers, with a reply or a refusal, only on the requester's own inbox
+(``custom_messages.wire.frame.answer_subject``): NATS lets it publish its one answer
+past its own grants (``allow_responses``), so an answer on a subject the requester
+chose, such as a JetStream API subject, would act with the receiver's rights. A
+request naming any other reply subject is dropped unanswered, before its handler
+runs, and logged (``protocol1_reply_subject_refused``).
+
+Every frame is checked before a handler sees it; a handler receives only a
+``VerifiedFrame``. Each request is checked and recorded as it arrives, then handled in
+a task of its own, so one slow handler does not hold the address (``serve``). Events
+and queued work are not sent here.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
 
@@ -31,6 +42,7 @@ from custom_messages.wire.frame import (
     REPLY_SUFFIX,
     Receiver,
     VerifiedFrame,
+    answer_subject,
     expected_idempotency_key,
     reply_audience,
     sign_frame,
@@ -41,6 +53,7 @@ from custom_messages.wire.kinds import (
     INSTALLATION_SCOPE,
     KINDS,
     PROTOCOL,
+    REPLY_INBOX_PREFIX,
     SUBJECT_PREFIX,
 )
 from custom_messages.wire.models import Frame
@@ -55,7 +68,7 @@ from custom_messages.wire.refusals import (
 from custom_messages.wire.spec import KindSpec
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.ids import new_message_id
-from custom_transport.protocol1.replay import LiveReplayRecord
+from custom_transport.protocol1.replay import LiveReplayRecord, accepted_until
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from custom_transport.send_barrier import before_send
 
@@ -66,6 +79,12 @@ Handler = Callable[[VerifiedFrame], Awaitable[Mapping[str, Any]]]
 TrustFetcher = Callable[[bytes], Awaitable[bool]]
 # Refusals another record could cure: a certificate or session this receiver does not hold yet.
 _CURABLE = frozenset({"unknown_key", "wrong_issuer"})
+# Requests one address holds at once, waiting or running. Past this a request is answered
+# ``handler_failed`` at once: the contract has no "busy" code, and that one tells the
+# requester to stop waiting rather than wait out the expiry; the receiver logs why.
+MAX_OPEN_REQUESTS = 64
+# How many requests of the kinds a caller lets run side by side run at once per address.
+MAX_SIDE_BY_SIDE = 16
 
 
 class ServiceUnavailable(RuntimeError):
@@ -180,6 +199,20 @@ def raise_if_refused(kind: str, subject: str, message: Any, logger: logging.Logg
 
 
 @dataclass
+class _ServedAddress:
+    """One address a host serves: who it receives as, its handler, and the requests it holds."""
+
+    receiver: Receiver
+    handler: Handler
+    agent: Optional[str]
+    side_by_side_kinds: frozenset[str]
+    # Kinds not listed run one at a time, in the order they arrived; asyncio.Lock wakes waiters first come, first served.
+    in_order: asyncio.Lock = field(default_factory=asyncio.Lock)
+    side_by_side: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(MAX_SIDE_BY_SIDE))
+    open_requests: int = 0
+
+
+@dataclass
 class LiveHost:
     """One host's live messaging: it signs as ``identity`` and checks with ``trust``."""
 
@@ -193,6 +226,8 @@ class LiveHost:
 
     def __post_init__(self) -> None:
         self.replay = LiveReplayRecord()
+        self._handling: set[asyncio.Task[None]] = set()
+        self._inbox_checked = False
 
     async def verify(self, data: bytes, **checks: Any) -> VerifiedFrame:
         """``verify_frame``, reading once from the buckets a certificate or session this host does not hold yet."""
@@ -241,6 +276,7 @@ class LiveHost:
         and ``FrameRefused`` when the reply itself fails verification.
         """
 
+        self._check_own_inbox()
         frame = self.sign(kind, body, audience, team=team, agent=agent, authority=authority)
         data, headers = self.encode(frame)
         spec, _ = _spec(kind)
@@ -262,65 +298,154 @@ class LiveHost:
         self.replay.admit(verified, now)
         return verified
 
+    def _check_own_inbox(self) -> None:
+        """Refuse to send requests on a connection whose reply inbox is not this host's own.
+
+        Receivers answer only on ``_INBOX.<requester runtime>.``, so on another prefix
+        every request would wait out its expiry.
+        """
+
+        if self._inbox_checked:
+            return
+        expected = REPLY_INBOX_PREFIX.format(runtime=self.identity.runtime) + "."
+        inbox = self.nc.new_inbox()
+        if not inbox.startswith(expected):
+            raise RuntimeError(f"The NATS connection's reply inbox {inbox.rsplit('.', 1)[0]} is not this host's own "
+                               f"({expected[:-1]}); connect with NatsTransportConfig.reply_inbox_runtime.")
+        self._inbox_checked = True
+
     # -- serving --------------------------------------------------------------------------------
 
     async def serve(self, address: str, receiver: Receiver, handler: Handler, *,
-                    agent: Optional[str] = None) -> Any:
+                    agent: Optional[str] = None, side_by_side_kinds: Iterable[str] = ()) -> Any:
         """Answer requests at one of this host's addresses; returns the NATS subscription.
 
         ``receiver`` is who this host receives as there (the team services of a team,
         an agent it runs, the installation service); ``agent`` signs the replies for
         that agent when the address is an agent's.
+
+        Each request is checked and recorded in the replay record as it arrives, then
+        handled in a task of its own, so the subscription keeps reading while a handler
+        waits. Requests run one at a time, in the order they arrived, unless their kind
+        is in ``side_by_side_kinds``: handlers that only wait on another host (a relay)
+        and change nothing this host decides in order. Those run side by side, at most
+        ``MAX_SIDE_BY_SIDE`` at once. An address holds at most ``MAX_OPEN_REQUESTS``
+        requests, waiting or running; one more is answered ``handler_failed`` at once and
+        logged (``protocol1_address_busy``). A request still waiting when it can be
+        accepted no more is not handled: its requester stopped waiting
+        (``protocol1_request_ended_waiting``).
         """
 
+        side_by_side = frozenset(side_by_side_kinds)
+        for kind in side_by_side:
+            _spec(kind)  # a misspelt kind fails here, not silently later
+        served = _ServedAddress(receiver, handler, agent, side_by_side)
         subject = serving_subject(address, receiver.team, receiver.id)
 
         async def on_message(message: Any) -> None:
-            await self._answer(message, receiver, handler, agent)
+            try:
+                await self._receive(message, served)
+            except Exception:
+                # Sending the answer failed (the flush before sending, or NATS); nothing was sent.
+                self.logger.exception("A request's answer could not be sent. event=protocol1_answer_failed subject=%s",
+                                      message.subject)
 
         return await self.nc.subscribe(subject, cb=on_message)
 
-    async def _answer(self, message: Any, receiver: Receiver, handler: Handler, agent: Optional[str]) -> None:
-        now = self.clock()
+    async def drain(self) -> None:
+        """Wait until every request this host has started handling has finished."""
+
+        while self._handling:
+            await asyncio.gather(*list(self._handling), return_exceptions=True)
+
+    async def _receive(self, message: Any, served: _ServedAddress) -> None:
+        """Check one arriving request and start handling it; runs in the subscription's order."""
+
+        answer_to: Optional[str] = None
+        if message.reply:
+            answer_to = answer_subject(message.subject, message.reply)
+            if answer_to is None:
+                self.logger.warning("A request names a reply subject that is not its sender's inbox; it is dropped "
+                                    "unanswered. event=protocol1_reply_subject_refused subject=%s reply=%s",
+                                    message.subject, message.reply)
+                return
         try:
-            verified = await self.verify(message.data, receiver=receiver, arrived_on=message.subject, now=now,
+            now = self.clock()
+            verified = await self.verify(message.data, receiver=served.receiver, arrived_on=message.subject, now=now,
                                          replay=self.replay.lookup, headers=dict(message.headers or {}))
+            self.replay.admit(verified, now)
         except FrameRefused as refused:
             self.logger.warning("A request was refused. event=protocol1_frame_refused subject=%s code=%s at=%s detail=%s",
                                 message.subject, refused.code, refused.known_at, refused.detail)
-            await self._refuse(message, refused)
+            await self._refuse(answer_to, refused)
             return
-        self.replay.admit(verified, now)
+        except Exception:
+            # This host's defect, not the sender's; the requester still stops waiting.
+            self.logger.exception("A request could not be checked. event=protocol1_check_failed subject=%s",
+                                  message.subject)
+            await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
+            return
+        if served.open_requests >= MAX_OPEN_REQUESTS:
+            self.logger.warning("An address holds too many requests; this one is answered handler_failed. "
+                                "event=protocol1_address_busy subject=%s kind=%s message_id=%s open_requests=%s",
+                                message.subject, verified.frame.kind, verified.frame.message_id, served.open_requests)
+            await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
+            return
+        served.open_requests += 1
+        task = asyncio.create_task(self._handle(answer_to, verified, served))
+        self._handling.add(task)
+        task.add_done_callback(self._handling.discard)
+
+    async def _handle(self, answer_to: Optional[str], verified: VerifiedFrame, served: _ServedAddress) -> None:
+        frame = verified.frame
+        gate = served.side_by_side if frame.kind in served.side_by_side_kinds else served.in_order
+        try:
+            async with gate:
+                if self.clock() >= accepted_until(frame):
+                    self.logger.warning("A request waited past its expiry and is not handled; its requester stopped "
+                                        "waiting. event=protocol1_request_ended_waiting kind=%s message_id=%s",
+                                        frame.kind, frame.message_id)
+                    return
+                await self._answer(answer_to, verified, served)
+        except Exception:
+            self.logger.exception("A request's answer could not be sent. event=protocol1_answer_failed kind=%s "
+                                  "message_id=%s", frame.kind, frame.message_id)
+        finally:
+            served.open_requests -= 1
+
+    async def _answer(self, answer_to: Optional[str], verified: VerifiedFrame, served: _ServedAddress) -> None:
+        """Run the handler and answer on the requester's inbox; a request with no reply subject (an event) gets nothing."""
+
         frame = verified.frame
         try:
-            body = await handler(verified)
+            body = await served.handler(verified)
         except Unsupported:
-            await self._refuse(message, FrameRefused(UNSUPPORTED, at="/kind"))
+            await self._refuse(answer_to, FrameRefused(UNSUPPORTED, at="/kind"))
             return
         except Exception:
             self.logger.exception("A request's handler failed. event=protocol1_handler_failed kind=%s message_id=%s",
                                   frame.kind, frame.message_id)
-            await self._refuse(message, FrameRefused(HANDLER_FAILED))
+            await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
             return
-        if not message.reply:
+        if answer_to is None:
             return
-        team = INSTALLATION_SCOPE if frame.issuer.team == INSTALLATION_SCOPE else receiver.team
+        team = INSTALLATION_SCOPE if frame.issuer.team == INSTALLATION_SCOPE else served.receiver.team
         try:
-            reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=agent,
-                              subject=message.reply, answering=frame)
+            reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=served.agent,
+                              subject=answer_to, answering=frame)
         except Exception:
             # A reply the schema refuses is this host's defect; the requester still stops waiting.
             self.logger.exception("A reply could not be built. event=protocol1_reply_failed kind=%s message_id=%s",
                                   frame.kind, frame.message_id)
-            await self._refuse(message, FrameRefused(HANDLER_FAILED))
+            await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
             return
         data, headers = self.encode(reply)
         await before_send()
-        await self.nc.publish(message.reply, data, headers=headers)
+        await self.nc.publish(answer_to, data, headers=headers)
 
-    async def _refuse(self, message: Any, refused: FrameRefused) -> None:
+    async def _refuse(self, answer_to: Optional[str], refused: FrameRefused) -> None:
         """Answer a refused request at once, with only its code and known pointer (README "Refused requests")."""
 
-        if message.reply:
+        if answer_to is not None:
             await before_send()
-            await self.nc.publish(message.reply, b"", headers=refusal_headers(refused))
+            await self.nc.publish(answer_to, b"", headers=refusal_headers(refused))
