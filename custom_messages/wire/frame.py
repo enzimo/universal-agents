@@ -24,6 +24,7 @@ the same id is refused as ``replayed``.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
@@ -67,7 +68,7 @@ from custom_messages.wire.values import parse_timestamp
 
 __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
-    "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
+    "answer_subject", "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
     "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_frame",
     "sign_renew_key_proof", "signing_bytes", "verify_authority_token", "verify_frame",
 ]
@@ -601,6 +602,49 @@ def reply_audience(request: Frame) -> dict[str, str]:
     if issuer.team == INSTALLATION_SCOPE:
         return {**base, "target": "installation_service", "id": issuer.runtime}
     return {**base, "target": HOST_TARGET, "id": issuer.runtime}
+
+
+# A sender slot or runtime id: one subject token of id characters (common.schema.json ids).
+_SLOT_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
+# A NATS subject token that is not a wildcard and holds no whitespace.
+_PLAIN_TOKEN = re.compile(r"[^\s*>]+")
+# Tokens of the subject root (ua.v1); the team token and the sender slot follow it.
+_ROOT_TOKENS = len(SUBJECT_ROOT.rstrip(".").split("."))
+
+
+def answer_subject(request_subject: str, reply_subject: Optional[str]) -> Optional[str]:
+    """The NATS subject to answer a request on, or ``None`` when the receiver must not answer (README, "Replies").
+
+    NATS ``allow_responses`` lets a receiver publish one answer to whatever reply subject
+    the request names, past the receiver's own grants. A requester could otherwise name a
+    JetStream API or key-value subject and have the answer, even an empty refusal,
+    written there with the receiver's rights (an empty message on
+    ``$JS.API.STREAM.DELETE.<stream>`` deletes the stream). So a receiver answers, with a
+    signed reply or a refusal, only on the requester's own inbox:
+    ``_INBOX.<sender slot>.<token>...``, with at least one token after the slot and no
+    wildcard, where the sender slot is the one in the subject the request arrived on
+    (``ua.v1.<team>.<slot>.`` or ``ua.v1._install.<slot>.svc``). The requester's NATS
+    publish permissions fix that slot to its own runtime id, so it can only name its
+    own inbox. A peer installation's slot (``x-<installation>``) gets no answer, since
+    request/reply stays inside one installation. A receiver that gets ``None`` drops the
+    request without answering and logs it.
+    """
+
+    if not reply_subject or not request_subject.startswith(SUBJECT_ROOT):
+        return None
+    tokens = request_subject.split(".")
+    if len(tokens) < _ROOT_TOKENS + 3:  # the team, the sender slot and at least one address token
+        return None
+    slot = tokens[_ROOT_TOKENS + 1]
+    if not _SLOT_TOKEN.fullmatch(slot) or slot.startswith(RESERVED_RUNTIME_PREFIXES):
+        return None
+    inbox = REPLY_INBOX_PREFIX.format(runtime=slot) + "."
+    if not reply_subject.startswith(inbox):
+        return None
+    rest = reply_subject[len(inbox):].split(".")
+    if not all(_PLAIN_TOKEN.fullmatch(token) for token in rest):
+        return None
+    return reply_subject
 
 
 def _verify_audience(frame: Frame, receiver: Receiver, answering: Optional[Frame] = None) -> None:

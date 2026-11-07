@@ -33,6 +33,7 @@ import pytest
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 
+from custom_messages.wire import frame as wire_frame
 from custom_messages.wire.kinds import KINDS
 from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
@@ -587,6 +588,63 @@ async def test_installation_requests_reach_the_authority_and_dead_letters_keep_r
             await js.get_last_msg(dead_letters, raw_subject)
         await worker.publish_refused(f"$JS.API.STREAM.MSG.GET.{dead_letters}")
         assert worker.errors.empty() and authority.errors.empty() and services.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_receiver_answers_only_the_requesters_inbox(isolated_broker) -> None:
+    """README, "Answering only the requester's inbox": a reply subject the requester chose is no write path.
+
+    allow_responses lets the team services publish one answer to any reply subject, so a
+    worker that names a JetStream API subject as its reply subject gets the stream deleted
+    by a receiver that answers blindly. A receiver that answers through
+    ``answer_subject`` leaves it alone and still answers a request from the worker's inbox.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        services = await connect(stack, isolated_broker, "services")
+        worker = await connect(stack, isolated_broker, "worker")
+        js = admin.nc.jetstream()
+        refusal = {"UA-Refused": "invalid_body", "UA-Refused-At": "/body"}
+        address = f"ua.v1.{TEAM}.worker-host-1.svc.team"
+
+        async def blindly(message):
+            await services.nc.publish(message.reply, b"", headers=refusal)
+
+        # Without the rule, the answer to a request deletes a stream the worker may not touch.
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        blind = await services.nc.subscribe(f"ua.v1.{TEAM}.*.svc.team", cb=blindly)
+        await flush_fully(services.nc)
+        await worker.nc.publish(address, b"{}", reply="$JS.API.STREAM.DELETE.UA1_WORK")
+        await worker.nc.flush()
+        async def stream_names() -> list[str]:
+            return [info.config.name for info in await js.streams_info()]
+
+        deadline = time.monotonic() + 2
+        while "UA1_WORK" in await stream_names() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        assert "UA1_WORK" not in await stream_names()
+        await blind.unsubscribe()
+
+        dropped: list[tuple[str, str]] = []
+
+        async def answer(message):
+            subject = wire_frame.answer_subject(message.subject, message.reply)
+            if subject is None:
+                dropped.append((message.subject, message.reply))
+                return
+            await services.nc.publish(subject, b"", headers=refusal)
+
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        await subscribe_ready(services, f"ua.v1.{TEAM}.*.svc.team", answer)
+        for reply in ("$JS.API.STREAM.DELETE.UA1_WORK", f"$KV.UA1_LOCKS.team_services.{TEAM}", "_INBOX.lead-host-1.x"):
+            await worker.nc.publish(address, b"{}", reply=reply)
+        await worker.nc.flush()
+        answered = await worker.nc.request(address, b"{}", timeout=2)
+        assert answered.headers == refusal and answered.data == b""
+        assert [subject for subject, _reply in dropped] == [address] * 3
+        assert (await js.stream_info("UA1_WORK")).config.name == "UA1_WORK"
+        assert services.errors.empty() and worker.errors.empty()
 
 
 @pytest.mark.asyncio

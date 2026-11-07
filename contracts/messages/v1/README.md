@@ -100,8 +100,9 @@ replier needs nothing beyond the request (`custom_messages.wire.frame.reply_audi
 - otherwise the requesting host itself (target `host`, its runtime id): a gateway, the team
   services or the scheduler asking for itself, or a host asking for its agents' sessions.
 
-The audience runtime is always the requester's runtime, whose inbox the reply goes to. A
-reply that names anything else is refused as `wrong_audience`. Only replies name the `host`
+The audience runtime is always the requester's runtime, whose inbox the reply goes to; a
+receiver answers no request whose reply subject is not that inbox ("Answering only the
+requester's inbox"). A reply that names anything else is refused as `wrong_audience`. Only replies name the `host`
 target; a request addressed to a host is refused (`subject_mismatch`), and so is a host
 reply whose id is not its runtime.
 
@@ -941,11 +942,26 @@ minor, or does not serve, and `handler_failed` when its handler failed before it
 answer), and `UA-Refused-At`, the refusal's pointer up to the last field
 the receiver's schema knows (`FrameRefused.known_at`), so a name the sender chose never
 comes back. It carries no detail and is not signed: the requester takes it only as a
-reason to stop waiting and logs the code; it never treats it as a decision. NATS lets only
-the receiver of a request answer it, once (`allow_responses`), so no other host can send
-it. A requester that gets no answer within the frame's expiry, or "no responders", treats
-the service as unavailable. Queued work is never answered this way: it is set aside
-("Dead letters") or, for a temporary refusal, left queued.
+reason to stop waiting and logs the code; it never treats it as a decision. Where each
+host has its own NATS credential, only the receiver of a request may answer it, once
+(`allow_responses`); while hosts share one NATS login ("Installation traffic",
+"Replies"), any local process could send such an answer, which is one more reason it
+decides nothing. A requester that gets no answer within the frame's expiry, or "no
+responders", treats the service as unavailable. Queued work is never answered this way: it
+is set aside ("Dead letters") or, for a temporary refusal, left queued.
+
+**Answering only the requester's inbox.** `allow_responses` lets a receiver publish its one
+answer to whatever reply subject the request names, past the receiver's own grants. A
+requester could name a JetStream API or key-value subject instead of its inbox and have the
+answer written there with the receiver's rights: an empty refusal on
+`$JS.API.STREAM.DELETE.<stream>` deletes that stream. So a receiver answers, with a signed
+reply or a refusal, only when the reply subject is the requester's own inbox,
+`_INBOX.<sender slot>.<token>...` with at least one token after the slot and no wildcard,
+where the sender slot is the one in the subject the request arrived on
+(`ua.v1.<team>.<slot>.…` or `ua.v1._install.<slot>.svc`). The requester's publish
+permissions fix that slot to its own runtime id. Any other request is dropped unanswered
+and logged with its subject and reply subject
+(`custom_messages.wire.frame.answer_subject`).
 
 **Header size.** JetStream counts headers in a stream's maximum message size. The largest
 header block these five headers allow, in NATS's `NATS/1.0` header format, is 891 bytes;

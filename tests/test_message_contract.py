@@ -1166,6 +1166,58 @@ def test_a_refused_request_is_answered_with_its_code_and_known_pointer_only() ->
     assert f"`{REFUSAL_HEADER}`, the refusal code" in readme and f"`{REFUSAL_AT_HEADER}`, the refusal's pointer" in readme
 
 
+@pytest.mark.parametrize(("request_subject", "reply_subject"), [
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.abc"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.abc.7"),
+    ("ua.v1.team_example.gateway-1.ctl.agent.lead", "_INBOX.gateway-1.Zq9-x_1"),
+    ("ua.v1._install.new-host-1.svc", "_INBOX.new-host-1.join"),
+])
+def test_a_receiver_answers_on_the_requesters_own_inbox(request_subject: str, reply_subject: str) -> None:
+    """README, "Answering only the requester's inbox": the sender slot of the request's subject owns the inbox."""
+
+    assert wire_frame.answer_subject(request_subject, reply_subject) == reply_subject
+
+
+@pytest.mark.parametrize(("request_subject", "reply_subject"), [
+    # Where the answer would be written with the receiver's rights.
+    ("ua.v1.team_example.worker-host-1.svc.team", "$JS.API.STREAM.DELETE.KV_UA1_CERTS"),
+    ("ua.v1._install.new-host-1.svc", "$JS.API.STREAM.DELETE.UA1_WORK"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "$KV.UA1_LOCKS.team_services.team_example"),
+    ("ua.v1.team_example.gateway-1.ctl.agent.lead", "ua.v1.team_example.gateway-1.work.agent.lead"),
+    # Another runtime's inbox, or an inbox prefix that only starts like the requester's.
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.lead-host-1.abc"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-10.abc"),
+    # The inbox itself without a token, wildcards and empty tokens.
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.*"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.>"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1..abc"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.a b"),
+    # No reply subject, a subject outside protocol 1, and a peer installation's slot.
+    ("ua.v1.team_example.worker-host-1.svc.team", None),
+    ("ua.v1.team_example.worker-host-1.svc.team", ""),
+    ("other.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.abc"),
+    ("ua.v1.team_example.worker-host-1", "_INBOX.worker-host-1.abc"),
+    ("ua.v1.team_example.x-install_peer.svc.team", "_INBOX.x-install_peer.abc"),
+])
+def test_a_receiver_answers_no_other_reply_subject(request_subject: str, reply_subject: str | None) -> None:
+    """README, "Answering only the requester's inbox": anything else is dropped unanswered."""
+
+    assert wire_frame.answer_subject(request_subject, reply_subject) is None
+
+
+def test_every_request_address_puts_the_sender_slot_where_answer_subject_reads_it() -> None:
+    """Each request/reply address, filled for a sender, gives a subject whose own inbox answer_subject accepts."""
+
+    addresses = TRANSPORT["classes"]["request_reply"]
+    for address in [*addresses["addresses"], *addresses["installation_addresses"]]:
+        filled = address.format(agent="lead", sender="worker-host-1")
+        subject = (f"ua.v1.{filled}" if address.startswith(TRANSPORT["installation_scope"] + ".")
+                   else f"ua.v1.team_example.worker-host-1.{filled}")
+        assert wire_frame.answer_subject(subject, "_INBOX.worker-host-1.x") == "_INBOX.worker-host-1.x", address
+        assert wire_frame.answer_subject(subject, "_INBOX.another-host.x") is None, address
+
+
 def test_key_value_grants_let_a_host_write_only_its_own_records() -> None:
     """README, "Key-value grants": each writer's keys are filled for one host, never as a wildcard of an id."""
 
