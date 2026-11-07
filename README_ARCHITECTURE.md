@@ -4276,6 +4276,26 @@ invalidation, selection changes and the validate/import sequence.
 
 ## Message hosts and their trust
 
+**Where each kind of traffic runs (end of message contract phase 2).** Phase 2 moved what
+the team services answer from shared stores, what an agent answers about itself, and who is
+live; work itself stays on the old envelopes until phase 3:
+
+| On protocol 1 (signed frames and records) | On the old envelopes until phase 3 |
+| --- | --- |
+| Joining, certificates, revocations (the installation authority) | Requests, delegated work and results on the work stream |
+| Agent sessions and placement (`sessions.*`) | Creating schedules, and scheduled runs and their signing (decision 66) |
+| People's memory, knowledge, topics and schedule lists and controls (`svc.team`) | Stopping and reading running work: task cancel, inventory, progress, probe and steer, Objectives, a person's standing (decision 67) |
+| The Tasks page's lists and removals and the context dump, relayed to the agent | The gateway's task progress, parent-task probe and thread guidance on `.operational` (decision 68) |
+| Agents asking each other: `agent.status`, `.pause`, `.resume`, `.exit`, `task.probe` | A lead's guidance for delegated work, through the holder's control mailbox (decision 59) |
+| The `skills.changed` team event | Dead letters: today's stream and notices (decision 71) |
+| Agent and host records: who is live, who leads, busy or idle | |
+
+The presence stream, the heartbeat broadcast, the broadcast subject and the gateway's
+discovery of the lead are gone. Upgrading in place: the launcher creates the trust folder
+and keys, the installation authority creates the `UA1_*` streams and buckets, and the first
+start deletes the old presence stream. An installation with an external NATS server needs
+the authority's account to create streams and buckets, and server 2.15.1 or later.
+
 The message contract (`contracts/messages/v1`) has every process that sends its
 messages sign them as a host, with a key of its own, and every receiver check who
 signed against records that chain to the installation's authority keys.
@@ -4302,7 +4322,8 @@ signed against records that chain to the installation's authority keys.
 - **Signed records** (`state_records`): records in the key-value buckets, signed by
   their writer, with compare-and-set for placements, and verified on every read.
 
-Protocol 1 requests, replies, refusals and key-value writes await
+Protocol 1 joins, requests, replies, refusals, events and key-value writes and
+deletions await
 `custom_transport.send_barrier.before_send()` before sending. They use the same
 flush barrier as the NATS adapter, so a power loss cannot undo an agent's local
 records after another process has acted on its message. A failed flush prevents
