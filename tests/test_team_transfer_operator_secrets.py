@@ -5,6 +5,8 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
+import pytest
+
 from internal_credentials import parse_env_file
 from team_transfer.container import TransferReader
 from team_transfer.crypto import new_key_derivation
@@ -72,3 +74,69 @@ def test_operator_secrets_travel_encrypted_and_generated_keys_are_made_fresh(tmp
     assert codex.read_text() == CODEX_AUTH and stat.S_IMODE(codex.stat().st_mode) == 0o600
     report = next((target / "runtime" / "team-import").glob("report-*.json")).read_text()
     assert BOT_TOKEN not in report and MODEL_KEY not in report and "codex-refresh-value" not in report
+
+
+EXTERNAL_NATS = "nats://external.example:4222"
+LOCAL_NATS = "nats://127.0.0.1:4222"
+
+
+@pytest.mark.parametrize(
+    ("saved_nats_url", "team_env_nats_url", "shell_nats_url", "carried"),
+    [
+        pytest.param(EXTERNAL_NATS, None, LOCAL_NATS, True, id="external-instance-local-shell"),
+        pytest.param(LOCAL_NATS, EXTERNAL_NATS, LOCAL_NATS, True, id="external-in-team-env-local-shell"),
+        pytest.param(LOCAL_NATS, None, EXTERNAL_NATS, False, id="local-instance-external-shell"),
+    ],
+)
+def test_the_instance_not_the_commands_environment_decides_whether_nats_credentials_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_nats_url: str, team_env_nats_url: str | None, shell_nats_url: str, carried: bool
+) -> None:
+    # The operator's shell may name a NATS server the instance does not use.
+    # Credentials for an external server move; the ones generated for a local
+    # server are made fresh by the new instance.
+    monkeypatch.setenv("NATS_URL", shell_nats_url)
+    monkeypatch.setenv("NATS_SERVERS", shell_nats_url)
+    path, config = new_instance(tmp_path, "alpha", "team_a")
+    config.transport.nats_url = saved_nats_url
+    config.transport.nats_servers = [saved_nats_url]
+    config.save(path)
+    team_env = "NATS_USER=nats-user-value\nNATS_PASSWORD=nats-password-value\n"
+    if team_env_nats_url:
+        team_env += f"NATS_URL={team_env_nats_url}\n"
+    config.layout.team_env_path.write_text(team_env)
+    out = tmp_path / "team.uatransfer"
+    export_team(
+        export_source(path), out, PASSPHRASE, owner_person_id="usr_owner", sections=SECTIONS,
+        key_derivation=new_key_derivation(**FAST_KEYS),
+    )
+
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        from team_transfer.sections import read_section_records
+
+        names = {r["name"] for r in read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version)}
+    assert names & {"NATS_USER", "NATS_PASSWORD"} == ({"NATS_USER", "NATS_PASSWORD"} if carried else set())
+
+
+def test_with_secrets_from_the_environment_the_commands_environment_is_the_instances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Run inside the instance's container, the export sees its environment.
+    for name, value in (
+        ("NATS_URL", EXTERNAL_NATS), ("NATS_SERVERS", EXTERNAL_NATS),
+        ("NATS_USER", "nats-user-value"), ("NATS_PASSWORD", "nats-password-value"),
+    ):
+        monkeypatch.setenv(name, value)
+    path, config = new_instance(tmp_path, "alpha", "team_a")
+    config.launch.secrets_source = "environment"
+    config.save(path)
+    out = tmp_path / "team.uatransfer"
+    export_team(
+        export_source(path), out, PASSPHRASE, owner_person_id="usr_owner", sections=SECTIONS,
+        key_derivation=new_key_derivation(**FAST_KEYS),
+    )
+
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        from team_transfer.sections import read_section_records
+
+        carried = {r["name"]: r["value"] for r in read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version)}
+    assert carried["NATS_USER"] == "nats-user-value" and carried["NATS_PASSWORD"] == "nats-password-value"
