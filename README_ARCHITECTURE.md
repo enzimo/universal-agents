@@ -4329,9 +4329,14 @@ The authority:
   its own certificate at two thirds of its life and signs with the new one from then on,
   and once a day forgets old trust records and deletes from `UA1_CERTS` the certificates
   receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). A failed
-  step is tried again a minute later. Running hosts read the authority's renewed
-  certificate from `UA1_CERTS` when a reply names it; a joining host reads the bundle
-  again (`joining.join(bundle_path=...)`). When its NATS connection closes for good the
+  step is tried again a minute later. Hosts read the authority's renewed certificate from
+  `UA1_CERTS` when a reply names it, joining hosts too (`joining.join(fetch_trust=...)`,
+  the same lookup as `MessageHost.fetch_trust`): a host on another machine holds its own
+  copy of the bundle, made when it was set up, which never learns of the new certificate.
+  The contract's pre-join permissions (`joining_host.json`) do not let a host that has not
+  joined read `UA1_CERTS`; with one NATS login shared by every process in this phase the
+  lookup works for every host here, and per-host credentials need a decision on how a first
+  join gets the renewed certificate. When its NATS connection closes for good the
   authority exits, so the launcher's supervisor sees it;
 - keeps in its own trust folder (`installation_authority.ledger`,
   `trust/hosts/authority/issued.json`) the highest membership epoch it issued per host,
@@ -4378,6 +4383,167 @@ is still starting and checks the returned certificate against the bundle's autho
 keys. The hosts still share one NATS login, so a join returns no NATS credential. An
 external NATS server's login must therefore be allowed to create streams and key-value
 buckets (user docs, "Docker", external NATS).
+
+**Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
+reads the authority's newest revocations record at start and every half hour, renews its
+certificate when two thirds of its life are gone (each renewal's id names the certificate,
+the release and the contract digest, so retries keep it and a host upgraded in place never
+gets an earlier renewal's stored answer back), and writes its own liveness record
+(`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
+within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
+writes do not make a running host look gone; nothing moves because of it. Liveness has a
+loop of its own: the trust and certificate upkeep (the revocations record every half hour,
+forgetting trust records nothing can still need every six hours, `TrustStore.forget`,
+renewal when due) runs beside it, so a renewal that waits 30 seconds for the authority, one
+the authority keeps refusing, or a join for more agent types that holds the certificate's
+lock never delays or skips a write; once the host stops, no write goes out and a renewal
+still waiting is cut off (it is asked again with the same id). The record lists the parts of
+the host that are not healthy (`components`, at most 16, each with a code saying why), such
+as an agent whose session was refused, and then says the host is `degraded`, since it still
+serves the rest; a component the contract cannot carry is left out and logged
+(`protocol1_host_components_invalid`), so it never stops the record. When they change, the
+host writes its record again at once.
+It signs its frames and its records (its host record, and the placements, sessions and agent records it
+writes) with one identity, so a renewal switches all of them at once: a record still signed
+with the old certificate would name another certificate than its signer, or be refused once
+the old one's overlap ends. A host whose certificate lacks an agent type it now runs, such
+as a specialist the team created while it runs, joins again for it (`MessageHost.rejoin`):
+the join asks for the types its certificate names plus the new ones, the authority grants
+it whole or refuses it, and a granted join gives a certificate at the next membership epoch
+that the host signs everything with from then on. A type whose name no certificate can
+carry is not asked for, and the caller is told. When a frame or
+record names a certificate or an agent session this host does not hold yet, it reads it
+from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
+checks the frame again, once; a join reply too (`joining.join(fetch_trust=...)`). A lookup
+that fails is logged (`protocol1_trust_lookup_failed`) and the frame is refused as it was,
+at once.
+
+**A host on another contract.** While the contract's label is a pre-release, hosts of one
+installation refuse a peer whose contract digest differs (`kinds.CONTRACT_SHA256`, the one
+reading of it; joins, renewals and host records carry it). A host learns that it runs
+another contract than the installation from the team services' host record, which it reads
+when it starts and whenever it changes (`MessageHost.follow_contract`; only a record the team
+services signed counts, and the watch starts again after a NATS failure), or from a
+`protocol_mismatch` answer to its join or renewal. It logs both digests once
+(`protocol1_host_other_contract`) and tells its listeners, which drain its work; its record
+then says `draining` and, once it holds nothing, `drained`. From then on it renews only to
+give up its agents: a renewal for more is turned away, so it asks for none while it drains,
+and the renewal once drained gets a certificate that grants no agents. Readers cannot read
+the rest of such a host's record, only that it names another digest, and that it is
+authentic, and that its key and runtime name the host that signed it: a host writes only its
+own liveness record, so no host can say another runs another contract
+(`TrustStore._checked`). Under one launcher every process starts from the same release, so
+this happens only when a process is restarted on its own after the code under it changed.
+
+**The team services** (`team_services`, `assistant_cli run-team-services`) run as host
+`team-services` with the `team_services` role (plan decision 44; scheduled runs are still
+signed in the team lead's process, so no `scheduler` role), started by the launcher right
+after the authority. They use a placement or session they
+read from `UA1_PLACEMENT` or `UA1_CERTS` only when it verifies (signed by a team services
+host and stored under its own key), since every process shares one NATS login and can
+write there: one that does not counts as absent and is logged with its key and the
+refusal (`team_services_record_refused`), and a renewal or close signs again only the
+session they hold. One instance serves a team at a time:
+it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, holding a
+30-second lease renewed every 10 seconds. The lock names the process instance, not only
+the runtime, so a second copy of the same host, or a restart while the old process still
+runs, waits as a standby, logs which instance serves, and takes over when the lease runs
+out or the first releases it on a clean stop. The lease is kept from the moment an instance
+takes the lock, also while it prepares to serve, and an instance that loses it before it
+serves serves nothing. A lock value no instance can have written (an empty one, or a lease
+ending later than a whole lease from now plus the clock tolerance: another process on the
+shared login, or a holder whose clock ran ahead) is taken over once the key's revision stayed
+unchanged for a lease (`team_services_lock_invalid`), since a live holder renews every 10
+seconds. A stop releases the lock even when
+unsubscribing or writing the last host record failed, after that record, so the next
+instance does not wait out the lease. Every instance runs as one host with one
+certificate, so an instance that takes the lock first signs with the host's newest
+certificate in `UA1_CERTS`, which the serving instance may have renewed while this one
+waited (a replaced certificate signs nothing new five minutes after its replacement, and
+readers and the authority then refuse it), renews it at once when it is due, and reads the
+current revocations record, since a standby may have waited longer than the one it read at
+start lasts. An
+instance that finds another holding the lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
+short outage) is tried again every 2 seconds while the lease lasts, each failure logged
+(`team_services_lock_renew_failed`), and the instance keeps serving: its lease still keeps
+others out, and stopping would stop the whole team, because the launcher stops every
+service when one exits. When the lease runs out unrenewed it tries one last
+compare-and-set at the revision it wrote, cut off well before a standby may take over: it
+succeeds only when no other instance wrote the lock since, so nobody else served, and the
+instance keeps serving (`team_services_lock_lease_resumed`). That is what a laptop's sleep
+or a paused virtual machine looks like, since the event loop's timers stop with the machine
+while the wall clock runs on. Otherwise it stops (`team_services_lock_lease_ended`), since a
+standby may take over from then on. A NATS connection that closed for good stops it at once
+(`team_services_nats_closed`), and every lost lock ends the process with exit code 1. A renewal
+whose write reached NATS but whose answer was lost is recognised by the lock still naming
+this instance, not taken as a lost lock. Taking the lock follows the same rule: when NATS
+or the connection to it fails while a standby checks the lock, or while a first instance
+starts during a short outage, the attempt is tried again every 2 seconds until it succeeds
+or the process is stopped, logged the first time and whenever the error changes
+(`team_services_lock_acquire_failed`). The instance serves only after its own write of the
+lock succeeded, and a malformed lock record or a closed NATS connection still stops it.
+Every instance writes the same host record (`team-services` in `UA1_HOSTS`), so only the
+one that holds the lock writes it, once it serves: a standby never looks like the serving
+instance, the record appearing means the team services answer, and an instance that lost
+the lock writes it no more.
+They serve the team's address (`svc.team`) and answer, so far:
+
+- `sessions.open`: the host's certificate must allow the agent's type and have room under
+  its session limit, and the agent must not run on another host (agents stay on their
+  host; `already_placed` names it). The placement is written with compare-and-set, under a
+  sequence that never goes back, also after a close deleted the key (its signed sequence is
+  the placement's fencing token); the session, naming the placement's revision, is signed
+  into `UA1_CERTS`, and its start is the placement's `placed_at`, which each new placement
+  of an agent moves later. Only the team lead's type on a lead host gets the `lead` role;
+- `sessions.renew` and `sessions.close`, for sessions on the asking host. A renewal is
+  refused (`not_allowed`) for a session that has ended or whose placement is no longer the
+  one it was opened for (its host and `placed_at`), so a session closed earlier never comes
+  back when its agent is placed on the same host again. A close removes the session's own
+  placement unless the agent is handed over, never a newer placement of the agent; a session
+  that has already ended is not signed again (the answer is its recorded end), so a
+  repeated or late close changes nothing, while a retry still finishes a close whose
+  removal failed. A handover to another host comes with phase 3's custody windows: until
+  then a placement a `handed_over` close kept still names the old host, and only that host
+  may place the agent again. Every refusal is logged (`agent_session_refused`, with the
+  outcome, agent and host).
+  A host whose record names another contract digest gets no new placement (`sessions.open`
+  answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
+  its sessions are still renewed and closed, so it keeps receiving control messages for the
+  tasks it holds while it finishes or hands them back.
+
+Every other operation is answered `unsupported` at once; today's team operations still
+run in the team lead's process and move here one at a time.
+
+They also look after their own records every half hour (`SessionService.maintain`): after
+they renew, they write each placement an earlier certificate of theirs signed again under
+the current one, the same placement (body and `placed_at` unchanged) under the next
+sequence, since a reader that forgot the old certificate refuses what it signed (contract
+"State reports outlive certificates"); and they delete from `UA1_CERTS` the sessions
+receivers have forgotten (`custom_messages.wire.trust.kept_for`). Signing a placement again
+gives it a new revision, which is why a session's placement is recognised by its host and
+`placed_at`, not by the revision it names.
+
+**Starting and restarting the authority and the team services** (`docker.message_hosts.MessageServices`).
+The launcher starts the team lead, the startup agents and the gateway only once the team
+services serve. Once they hold the lock, answer at `svc.team` and have written their host
+record, they write `runtime/team-services-serving.json` naming their process
+(`team_services.serving`); the
+launcher removes that file before it starts them and waits until it names the process it
+started. A cleanly stopped instance releases the lock, so the next one serves at once.
+After an unclean stop the new instance waits until the stopped one's lease runs out (up to
+38 seconds), and the launcher waits with it, for at most 98 seconds, saying every 10
+seconds what it waits for (`message_service_waiting`); then the launch is refused. A
+process that is not ready in time, or whose wait ends any other way, is stopped, so nothing
+a failed start began keeps running, and a stop signal during the wait (`docker stop`,
+Ctrl+C) stops what started, the team services releasing their lock, and ends the launch
+cleanly (`message_services_start_stopped`). A
+restart of everything (the configuration editor's, or an approved `all` restart) stops the
+other processes, then the team services and the authority. It then writes
+`expected-hosts.json` again from the saved configuration, and starts the authority, the
+team services and the rest in that order, each once the one before is ready, with each
+process's copies of saved settings recomputed (`docker.settings_environment`). So the
+authority approves what the saved settings allow now, and the team services read their
+settings again. If either cannot start again, the runtime stops.
 
 ## Certificate trust
 

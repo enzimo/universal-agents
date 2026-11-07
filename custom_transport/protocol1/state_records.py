@@ -20,9 +20,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncIterator, Callable, Mapping, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
 
-from nats.js.errors import KeyNotFoundError
+from nats.js.errors import BadRequestError, KeyNotFoundError, KeyWrongLastSequenceError, NoKeysError, NotFoundError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.buckets import bucket_name
@@ -32,6 +32,28 @@ from custom_messages.wire.trust import VerifiedRecord, sign_state
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from custom_transport.send_barrier import before_send
+
+# JetStream's error code for a write that names another last revision of the key.
+WRONG_LAST_SEQUENCE = 10071
+
+
+def wrong_revision(error: BaseException) -> bool:
+    """Whether a key-value write failed because the key is no longer at the revision it named.
+
+    nats-py raises ``KeyWrongLastSequenceError`` for a refused create or update, but reports
+    a refused delete as a ``BadRequestError`` with JetStream's wrong-last-sequence code.
+    """
+
+    return isinstance(error, KeyWrongLastSequenceError) or (
+        isinstance(error, BadRequestError) and error.err_code == WRONG_LAST_SEQUENCE)
+
+
+def rising_sequence(previous: int, issued_at: datetime) -> int:
+    """The next sequence of a record whose readers keep the highest: above ``previous`` and at least
+    the issue time in milliseconds, so a writer that lost the record it wrote (a deleted key, a
+    restore from a backup) still never writes a lower one (README "Sequences never go back")."""
+
+    return max(previous + 1, int(issued_at.timestamp() * 1000))
 
 
 @dataclass(frozen=True)
@@ -45,12 +67,22 @@ class StoredRecord:
 class StateRecords:
     """One host's reads and writes of signed records in the key-value buckets."""
 
-    def __init__(self, js: Any, identity: Callable[[], HostIdentity], trust: PersistentTrustStore) -> None:
+    @classmethod
+    def on_connection(cls, nc: Any, identity: Callable[[], HostIdentity], trust: PersistentTrustStore, *,
+                      fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> "StateRecords":
+        """Records on a host's NATS connection; its JetStream handle stays in this module (NATS_CLIENT_MODULES)."""
+
+        return cls(nc.jetstream(), identity, trust, fetch_trust=fetch_trust)
+
+    def __init__(self, js: Any, identity: Callable[[], HostIdentity], trust: PersistentTrustStore, *,
+                 fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> None:
         self._js = js
         # The host's identity as it is now: a renewal or a new join changes its certificate,
         # and every record is signed with the one its frames are signed with.
         self._identity = identity
         self._trust = trust
+        # Reads a writer's certificate this host does not hold yet (``MessageHost.fetch_trust``).
+        self._fetch_trust = fetch_trust
 
     async def _bucket(self, record: str, key: Optional[str] = None, *, team: Optional[str] = None) -> Any:
         """Bind the contract's bucket; a record key starts with its team for per-team buckets.
@@ -112,7 +144,12 @@ class StateRecords:
         entry = await self._get(record, key)
         if entry is None:
             return None
-        verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        try:
+            verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        except FrameRefused as refused:
+            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
+                raise
+            verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
         if verified.document.key != key:
             raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
         return StoredRecord(int(entry.revision), verified)
@@ -120,13 +157,63 @@ class StateRecords:
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
         """Read one trust record (certificate, revocations, session, agreement) into the trust store.
 
-        Returns whether the store took it as new; a missing key takes nothing.
+        Returns whether the store took it as new; a missing key takes nothing. A record
+        whose signer's certificate this host does not hold yet, such as a session the team
+        services signed before they renewed, is taken after reading that certificate.
         """
 
         entry = await self._get(record, key)
         if entry is None:
             return False
-        return self._trust.add(entry.value, now=now)
+        try:
+            return self._trust.add(entry.value, now=now)
+        except FrameRefused as refused:
+            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
+                raise
+            return self._trust.add(entry.value, now=now)
+
+    def writer(self) -> HostIdentity:
+        """The identity this host signs records with now."""
+
+        return self._identity()
+
+    async def raw(self, record: str, key: str) -> Optional[tuple[int, bytes]]:
+        """The key's revision and stored bytes, unverified, for a writer's own upkeep; ``None`` when it holds none."""
+
+        entry = await self._get(record, key)
+        return None if entry is None else (int(entry.revision), entry.value)
+
+    async def revision(self, record: str, key: str) -> int:
+        """The key's current revision whatever it holds, so a compare-and-set can replace it; 0 when absent or deleted."""
+
+        bucket = await self._bucket(record, key)
+        try:
+            entry = await bucket.get(key)
+        except KeyNotFoundError:
+            return 0
+        return int(entry.revision)
+
+    async def delete(self, record: str, key: str, *, last_revision: int) -> bool:
+        """Delete the key only while it is at ``last_revision``; ``False`` when another write came first."""
+
+        bucket = await self._bucket(record, key)
+        await before_send()
+        try:
+            await bucket.delete(key, last=last_revision)
+        except BadRequestError as error:
+            if not wrong_revision(error):
+                raise
+            return False
+        return True
+
+    async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
+        """The keys of ``record``'s bucket that start with ``prefix``; none when the bucket is empty."""
+
+        bucket = await self._bucket(record, team=team)
+        try:
+            return [key for key in await bucket.keys() if key.startswith(prefix)]
+        except (NoKeysError, NotFoundError):
+            return []
 
     async def _get(self, record: str, key: str) -> Any:
         bucket = await self._bucket(record, key)

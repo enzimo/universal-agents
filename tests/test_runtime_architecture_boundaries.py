@@ -860,6 +860,7 @@ NATS_CLIENT_MODULES = {
     "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
     "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",
     "installation_authority/service.py": "the topology owner's buckets, and the certificates it keeps in UA1_CERTS",
+    "team_services/lock.py": "the team services' single-instance lock in UA1_LOCKS, an unsigned lease",
 }
 
 

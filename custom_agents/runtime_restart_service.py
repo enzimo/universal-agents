@@ -393,6 +393,8 @@ def capture_runtime_restart_impact(agent: Any, scope: str) -> RuntimeRestartImpa
         "manager": ("manager",),
         "gateway": ("gateway",),
         "all": (
+            "installation_authority",
+            "team_services",
             "manager",
             "configured_startup_agents",
             "activity_collector",

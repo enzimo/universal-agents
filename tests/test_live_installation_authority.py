@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from contextlib import AsyncExitStack
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from custom_transport.protocol1 import host_keys, joining
 from custom_transport.protocol1.contract_files import transport
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.identity import HostIdentity
+from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile, JoinRefused, join
 from custom_transport.protocol1.live import LiveHost, RequestRefused, answer_headers, encode, raise_if_refused, utc_now
 from custom_transport.protocol1.replay import LiveReplayRecord
@@ -687,6 +689,8 @@ async def test_the_authority_keeps_its_records_current_by_the_wall_clock(broker:
         assert parse_timestamp(revocations["body"]["expires_at"]) - parse_timestamp(revocations["issued_at"]) \
             == REVOCATIONS_LIFETIME
         early_trust = host_trust(layout, WORKER.runtime, clock())
+        # A host on another machine gets its own copy of the bundle when it is set up.
+        early_bundle = layout.trust_bootstrap_path.read_bytes()
         clock.now = started + timedelta(hours=5)
         await authority.upkeep(clock())
         assert authority._revocations == revocations
@@ -711,9 +715,16 @@ async def test_the_authority_keeps_its_records_current_by_the_wall_clock(broker:
         with pytest.raises(FrameRefused) as refused:
             await join(worker_nc, worker_keys, early_trust, WORKER, clock=clock)
         assert refused.value.code == "unknown_key"
-        certificate = await join(worker_nc, worker_keys, early_trust, WORKER, clock=clock,
-                                 bundle_path=layout.trust_bootstrap_path)
-        assert certificate.membership_epoch == 1
+        # On that other machine the copy never learns of the renewal, and is never read again: the host reads the
+        # certificate the reply names from UA1_CERTS (MessageHost.fetch_trust) and checks it against the copy's
+        # authority keys.
+        elsewhere = InstanceLayout.at(tmp_path / "another-machine")
+        shutil.copytree(layout.host_trust_dir(WORKER.runtime), elsewhere.host_trust_dir(WORKER.runtime))
+        elsewhere.trust_bootstrap_path.write_bytes(early_bundle)
+        remote = MessageHost(elsewhere, WORKER, worker_nc, clock=clock)
+        await remote.start(report=False)
+        assert remote.identity.certificate.membership_epoch == 1
+        assert elsewhere.trust_bootstrap_path.read_bytes() == early_bundle
 
 
 @pytest.mark.asyncio
@@ -849,15 +860,15 @@ async def test_a_damaged_or_forged_newer_certificate_neither_returns_a_replaced_
 @pytest.mark.asyncio
 async def test_a_host_that_joins_before_the_authority_serves_waits_for_it(broker: str, tmp_path: Path) -> None:
     """The join waits through "no responders"; the bundle it opened held no authority certificate yet, so it reads
-    the bundle again for the certificate of the reply."""
+    the certificate of the reply from UA1_CERTS."""
 
     layout = InstanceLayout.at(tmp_path / "instance")
-    worker_keys = prepare(layout)
+    prepare(layout)
     async with AsyncExitStack() as stack:
-        worker_nc = await connect(stack, broker, WORKER.runtime)
-        trust = host_trust(layout, WORKER.runtime)
-        waiting = asyncio.create_task(join(worker_nc, worker_keys, trust, WORKER, bundle_path=layout.trust_bootstrap_path))
+        worker = MessageHost(layout, WORKER, await connect(stack, broker, WORKER.runtime))
+        waiting = asyncio.create_task(worker.start(report=False))
         await asyncio.sleep(1.5)
         assert not waiting.done()
         await start_authority(stack, broker, layout)
-        assert (await asyncio.wait_for(waiting, timeout=30)).membership_epoch == 1
+        await asyncio.wait_for(waiting, timeout=30)
+        assert worker.identity.certificate.membership_epoch == 1

@@ -971,6 +971,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--env", default=None, help="Optional .env file to load before connecting"
     )
 
+    run_team_services = subparsers.add_parser(
+        "run-team-services",
+        help="Run the team services, which place agents and sign their sessions",
+    )
+    run_team_services.add_argument(
+        "--config", required=False, default=None, help="Path to instance_config.yaml"
+    )
+    run_team_services.add_argument(
+        "--env", default=None, help="Optional .env file to load before connecting"
+    )
+
     run_broker = subparsers.add_parser(
         "run-secure-tool-broker", help="Run the credential-owning secure CLI broker"
     )
@@ -3969,6 +3980,12 @@ async def _run_installation_authority_service(
     await run_installation_authority(_load_gateway_instance_config(config_path, env_path=env_path))
 
 
+async def _run_team_services_service(config_path: str, *, env_path: str | None = None) -> None:
+    from team_services.process import run_team_services
+
+    await run_team_services(_load_gateway_instance_config(config_path, env_path=env_path))
+
+
 async def _run_secure_tool_broker_service(
     config_path: str,
     *,
@@ -5405,6 +5422,14 @@ def main() -> None:
     if args.command == "run-installation-authority":
         asyncio.run(
             _run_installation_authority_service(
+                _ensure_instance_config_ready(args.config),
+                env_path=args.env,
+            )
+        )
+        return
+    if args.command == "run-team-services":
+        asyncio.run(
+            _run_team_services_service(
                 _ensure_instance_config_ready(args.config),
                 env_path=args.env,
             )
