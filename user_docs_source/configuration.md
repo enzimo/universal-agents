@@ -871,8 +871,8 @@ transport:
 Generated agent mailboxes are deleted during clean shutdown and expire after
 this delay when a process crashes. Explicit `agent.agent_id` mailboxes, team
 lead routes, named-worker queues, and gateway routes remain persistent. The
-runtime requires NATS Server 2.10 or newer for the consumer ownership metadata;
-the bundled image includes a newer pinned release.
+runtime requires NATS Server 2.15.1 or newer (see "Surviving a power loss");
+the bundled image pins that release.
 
 Every durable consumer is a pull consumer: an agent asks for its next message
 when it can act on it. Workers of one type share one queue and ask for a task
@@ -880,6 +880,53 @@ only while they are free, so a busy worker never holds tasks another worker
 could run. Upgrading from a release that used push consumers replaces them on
 the first start (each replacement is logged as `nats_consumer_replaced`);
 messages still in the stream are kept and delivered by the new consumers.
+
+### Surviving a power loss
+
+Once the runtime has accepted a message or sent one, a power loss does not undo
+it:
+
+- The managed local NATS server writes every confirmed message to disk before
+  it confirms it (`jetstream { sync_interval: always }`). It also accepts the
+  longest credentials hosts will use: its `max_control_line` is 69,632 bytes
+  (the message contract's largest credential, 65,536 bytes, plus 4,096 bytes
+  for the rest of the connection line). Its private configuration file gets
+  both settings on every start.
+- An agent's own records (its tasks, conversations, status and storage use)
+  reach the disk before the agent sends any message or acknowledges one.
+  Every other database the runtime writes, the secure tool broker's credential
+  catalog included, is on the disk when each commit returns.
+
+This needs storage that really writes to the disk when asked: a local disk, or
+a network share that passes those requests on to its disk. A share that
+confirms them early makes the guarantee void. It applies to both the databases
+(`/data/dbs`) and the message server's store (`/data/services/nats`); see "Keep
+the databases on local disk" in the Docker guide. With
+`transport.storage: memory`, queued work is lost whenever the NATS server
+restarts, and the runtime logs a warning (`nats_streams_in_memory`).
+
+An external NATS server needs the same two settings and version 2.15.1 or
+later. The values come from `contracts/messages/v1/generated/transport.json`
+(`server`, and `limits.max_credential_bytes` plus 4,096 bytes). The runtime
+logs an error at start when the bundled server is older than 2.15.1.
+
+What it costs, measured on a local container disk where one flush takes about
+4 ms:
+
+- A short agent task takes about 10 ms longer (about 100 ms instead of
+  90 ms): its records are flushed a few times per task rather than at each of
+  its roughly 30 commits.
+- Each confirmed message, and each acknowledgement, on the managed NATS server
+  takes about 4 ms instead of 0.1 ms. With 16 senders at once, one stream
+  confirms about 200 messages per second.
+
+On slower storage these grow with the time one flush takes. A commit or flush
+that takes longer than a second is logged (`sqlite_commit_slow`,
+`sqlite_flush_slow`). If the disk refuses a flush, the agent stops sending and
+acknowledging messages and logs `sqlite_flush_failed_sending_stopped`: a retry
+could wrongly report success. Fix the disk and restart the runtime; agents then
+recover from what is on the disk, and NATS delivers again what they had not
+acknowledged.
 
 ## Worker pools
 

@@ -4,9 +4,13 @@ import gc
 import logging
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
+
+from contextlib import closing
+from pathlib import Path
 
 import pytest
 
@@ -524,7 +528,7 @@ def test_preparing_creates_nothing_when_read_only_or_in_memory(tmp_path):
     assert prepare_sqlite_database(":memory:") is False
 
 
-def test_synchronous_normal_comes_before_the_wal_switch(tmp_path):
+def test_synchronous_normal_comes_before_the_wal_switch(tmp_path, monkeypatch):
     class _Recording:
         """A real connection that records each statement it runs."""
 
@@ -539,6 +543,8 @@ def test_synchronous_normal_comes_before_the_wal_switch(tmp_path):
         def setconfig(self, *args):
             return self._conn.setconfig(*args)
 
+    # The product's level, not the one tests/conftest.py lowers this process to.
+    monkeypatch.setattr(sqlite_connection, "SQLITE_SYNCHRONOUS", "FULL")
     path = str(tmp_path / "fresh.db")
     raw = sqlite3.connect(path)
     try:
@@ -547,9 +553,386 @@ def test_synchronous_normal_comes_before_the_wal_switch(tmp_path):
     finally:
         raw.close()
     # The new file's switch then needs one disk flush fewer while it holds the file's locks.
-    assert recording.statements.index("PRAGMA synchronous=NORMAL") < recording.statements.index(
-        "PRAGMA journal_mode=WAL"
-    )
+    switch = recording.statements.index("PRAGMA journal_mode=WAL")
+    assert recording.statements.index("PRAGMA synchronous=NORMAL") < switch
+    # After the switch every commit is flushed.
+    assert recording.statements.index("PRAGMA synchronous=FULL") > switch
+
+
+def test_every_connection_commits_to_the_disk_before_returning(tmp_path, monkeypatch):
+    """A store records before publishing and admits before acknowledging, so no commit may be lost on power loss."""
+
+    # The product's setting, read in a fresh process: tests/conftest.py lowers it for this one.
+    product = subprocess.run(
+        [sys.executable, "-c", "import storage.sqlite_connection as s; print(s.SQLITE_SYNCHRONOUS)"],
+        check=True, capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1],
+    ).stdout.strip()
+    assert product == "FULL"
+    monkeypatch.setattr(sqlite_connection, "SQLITE_SYNCHRONOUS", product)
+    path = str(tmp_path / "dbs" / "any_store.db")
+    os.makedirs(os.path.dirname(path))
+    with sqlite_connection.connect_sqlite(path) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+
+
+def test_on_macos_commits_use_the_full_flush(tmp_path, monkeypatch):
+    """macOS's fsync can leave a commit in the drive's cache; fullfsync flushes it."""
+
+    monkeypatch.setattr(sqlite_connection, "_on_macos", lambda: True)
+    with sqlite_connection.connect_sqlite(str(tmp_path / "mac.db")) as conn:
+        assert conn.execute("PRAGMA fullfsync").fetchone()[0] == 1
+        assert conn.execute("PRAGMA checkpoint_fullfsync").fetchone()[0] == 1
+    monkeypatch.setattr(sqlite_connection, "_on_macos", lambda: False)
+    with sqlite_connection.connect_sqlite(str(tmp_path / "linux.db")) as conn:
+        assert conn.execute("PRAGMA fullfsync").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(("setting", "level"), [("FULL", 2), ("NORMAL", 1)])
+def test_the_brokers_credential_catalog_commits_like_every_other_store(tmp_path, monkeypatch, setting, level):
+    """The broker opens its credential catalog itself and still gets the shared setup.
+
+    SQLite's own default depends on how it was built, so NORMAL is checked too: the store
+    applies the shared level (configure_sqlite_connection) rather than relying on the default.
+    """
+
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore
+
+    monkeypatch.setattr(sqlite_connection, "SQLITE_SYNCHRONOUS", setting)
+    store = CredentialCatalogStore(tmp_path / "credential_catalog.db")
+    with closing(store._connect()) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == level
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10_000
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+# -- Flushing before sending (module docstring) ------------------------------------------
+
+
+@pytest.fixture
+def deferring_process(monkeypatch):
+    """This process defers opted-in stores' flushes, as an agent process does; flushes are recorded."""
+
+    flushed: list[str] = []
+    monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", True)
+    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", {})
+    monkeypatch.setattr(sqlite_connection, "_FOLDER_FLUSHED", set())
+    real_flush = sqlite_connection._flush_descriptor
+
+    def recording_flush(fd):
+        flushed.append(os.readlink(f"/proc/self/fd/{fd}"))
+        real_flush(fd)
+
+    monkeypatch.setattr(sqlite_connection, "_flush_descriptor", recording_flush)
+    return flushed
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the flushed file's name from /proc")
+def test_a_deferred_store_commits_without_a_flush_and_is_flushed_before_sending(tmp_path, deferring_process):
+    path = str(tmp_path / "agent.db")
+    with connect_sqlite(path, defer_flush=True) as conn:
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL: no flush in the commit
+        conn.execute("CREATE TABLE IF NOT EXISTS work (value TEXT)")
+        conn.execute("INSERT INTO work VALUES ('saved')")
+    assert sqlite_connection.has_unflushed_commits()
+
+    sqlite_connection.flush_unflushed_commits()
+
+    # The WAL that holds the commits, then once the folder that holds its entry.
+    assert deferring_process == [f"{os.path.realpath(path)}-wal", os.path.realpath(str(tmp_path))]
+    assert not sqlite_connection.has_unflushed_commits()
+    with connect_sqlite(path, defer_flush=True) as conn:
+        conn.execute("INSERT INTO work VALUES ('again')")
+    sqlite_connection.flush_unflushed_commits()
+    assert deferring_process[2:] == [f"{os.path.realpath(path)}-wal"]  # the folder only the first time
+
+
+def test_reads_and_autocommitted_writes_are_noted_correctly(tmp_path, deferring_process):
+    path = str(tmp_path / "agent.db")
+    with connect_sqlite(path, defer_flush=True) as conn:
+        conn.execute("SELECT 1").fetchone()
+        conn.execute("PRAGMA table_info(sqlite_master)").fetchall()
+    assert not sqlite_connection.has_unflushed_commits(), "a read leaves nothing to flush"
+
+    conn = connect_sqlite(path, defer_flush=True)
+    conn.isolation_level = None  # each statement commits by itself, without commit()
+    conn.execute("CREATE TABLE autocommitted (value TEXT)")
+    conn.close()
+    assert sqlite_connection.has_unflushed_commits(), "closing notes autocommitted writes"
+
+
+def test_only_opted_in_stores_of_a_deferring_process_skip_the_flush(tmp_path, deferring_process, monkeypatch):
+    monkeypatch.setattr(sqlite_connection, "SQLITE_SYNCHRONOUS", "FULL")
+    with connect_sqlite(str(tmp_path / "other.db")) as conn:
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+        conn.execute("CREATE TABLE work (value TEXT)")
+    assert not sqlite_connection.has_unflushed_commits()
+
+    # A process that never deferred (the gateway, the broker) ignores the request.
+    monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", False)
+    with connect_sqlite(str(tmp_path / "agent.db"), defer_flush=True) as conn:
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+        conn.execute("CREATE TABLE work (value TEXT)")
+    assert not sqlite_connection.has_unflushed_commits()
+
+
+def test_a_failed_flush_keeps_the_commits_noted_and_stops_the_send(tmp_path, deferring_process, monkeypatch, caplog):
+    path = str(tmp_path / "agent.db")
+    with connect_sqlite(path, defer_flush=True) as conn:
+        conn.execute("CREATE TABLE work (value TEXT)")
+
+    def failing_flush(_fd):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(sqlite_connection, "_flush_descriptor", failing_flush)
+    with caplog.at_level(logging.ERROR, logger=sqlite_connection.__name__):
+        with pytest.raises(OSError):
+            sqlite_connection.flush_unflushed_commits()
+    assert "event=sqlite_flush_failed" in caplog.text
+    assert os.path.realpath(path) in caplog.text
+    assert sqlite_connection.has_unflushed_commits(), "the next send tries again"
+
+
+def test_schema_setup_commits_without_a_flush_and_data_still_with_one(tmp_path, monkeypatch):
+    """Schema setup re-runs at every start, so it needs no flush; data commits keep theirs (module docstring)."""
+
+    monkeypatch.setattr(sqlite_connection, "SQLITE_SYNCHRONOUS", "FULL")
+    statements: list[str] = []
+    with connect_sqlite(str(tmp_path / "store.db")) as conn:
+        conn.set_trace_callback(statements.append)
+        conn.execute("CREATE TABLE IF NOT EXISTS work (value TEXT)")
+        conn.execute("ALTER TABLE work ADD COLUMN detail TEXT")
+        conn.execute("INSERT INTO work (value) VALUES ('kept')")
+        conn.commit()
+        conn.execute("BEGIN")
+        conn.execute("CREATE INDEX IF NOT EXISTS work_value ON work (value)")  # part of a transaction: unchanged
+        conn.execute("COMMIT")
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+
+    assert statements[:6] == [
+        "PRAGMA synchronous=NORMAL",
+        "CREATE TABLE IF NOT EXISTS work (value TEXT)",
+        "PRAGMA synchronous=FULL",
+        "PRAGMA synchronous=NORMAL",
+        "ALTER TABLE work ADD COLUMN detail TEXT",
+        "PRAGMA synchronous=FULL",
+    ]
+    data_and_transaction = statements[6:]
+    assert not any(s.startswith("PRAGMA synchronous=") for s in data_and_transaction)
+
+
+def test_a_sender_arriving_during_a_flush_waits_for_it(tmp_path, deferring_process, monkeypatch):
+    """A second sender must not find the file un-noted while the first sender's flush still runs."""
+
+    path = os.path.realpath(str(tmp_path / "agent.db"))
+    Path(f"{path}-wal").write_bytes(b"frames")
+    sqlite_connection._note_unflushed_commit(path)
+    inside, release = threading.Event(), threading.Event()
+    flushes: list[str] = []
+
+    def slow_flush(fd):
+        flushes.append("flush")
+        if len(flushes) == 1:
+            inside.set()
+            release.wait(5)
+
+    monkeypatch.setattr(sqlite_connection, "_flush_descriptor", slow_flush)
+    monkeypatch.setattr(sqlite_connection, "_FOLDER_FLUSHED", {path})
+    first = threading.Thread(target=sqlite_connection.flush_unflushed_commits)
+    first.start()
+    assert inside.wait(5)
+    assert sqlite_connection.has_unflushed_commits(), "still noted while its flush runs"
+    sqlite_connection._note_unflushed_commit(path)  # a commit lands during that flush
+    second_done = threading.Event()
+    second = threading.Thread(target=lambda: (sqlite_connection.flush_unflushed_commits(), second_done.set()))
+    second.start()
+    assert not second_done.wait(0.2), "the second sender waits for the running flush"
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert second_done.is_set()
+    assert flushes == ["flush", "flush"], "the commit that landed during the first flush is flushed again"
+    assert not sqlite_connection.has_unflushed_commits()
+
+
+def test_on_macos_a_volume_that_refuses_the_full_flush_gets_fsync(monkeypatch):
+    import fcntl
+
+    calls: list[str] = []
+    monkeypatch.setattr(sqlite_connection, "_on_macos", lambda: True)
+    monkeypatch.setattr(fcntl, "F_FULLFSYNC", 51, raising=False)
+
+    def refusing(fd, command):
+        calls.append("F_FULLFSYNC")
+        raise OSError(45, "Operation not supported")
+
+    monkeypatch.setattr(fcntl, "fcntl", refusing)
+    monkeypatch.setattr(os, "fsync", lambda fd: calls.append("fsync"))
+    sqlite_connection._flush_descriptor(0)
+    assert calls == ["F_FULLFSYNC", "fsync"]
+
+
+def test_a_folder_that_cannot_be_flushed_is_reported_not_fatal(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger=sqlite_connection.__name__):
+        sqlite_connection._flush_folder(str(tmp_path / "missing"))
+    assert "event=sqlite_folder_flush_failed" in caplog.text
+
+
+def test_a_slow_commit_is_logged(tmp_path, monkeypatch, caplog):
+    """With FULL the flush happens inside the commit, while the write lock is held."""
+
+    monkeypatch.setattr(sqlite_connection, "SLOW_SQLITE_OPERATION_SECONDS", 0.0)
+    path = str(tmp_path / "slow.db")
+    with caplog.at_level(logging.WARNING, logger=sqlite_connection.__name__):
+        with connect_sqlite(path) as conn:
+            conn.execute("CREATE TABLE work (value TEXT)")
+            conn.execute("INSERT INTO work VALUES ('a')")
+            conn.commit()
+    commits = [record for record in caplog.records if "event=sqlite_commit_slow" in record.getMessage()]
+    assert len(commits) == 2  # the explicit commit and the block's own
+    assert path in commits[0].getMessage()
+
+
+# -- Every database the product writes gets the shared setup -------------------------------
+
+_SQLITE_MODULES = {"sqlite3", "pysqlite3", "pysqlite3.dbapi2"}
+
+
+def _sqlite_opens(source: str) -> list[tuple[int, bool]]:
+    """Each direct SQLite open in a module: (line, whether it gets the shared setup or writes nothing).
+
+    Follows the forms a module can use: ``import sqlite3 as db``, ``from sqlite3 import connect``,
+    ``from pysqlite3 import dbapi2``, and a driver chosen at run time (``importlib.import_module``
+    or ``driver = sqlite3``). An open is fine when its function calls
+    ``configure_sqlite_connection``, opens read-only (``mode=ro`` with ``query_only``), or opens an
+    in-memory database. Comments do not count.
+    """
+
+    import ast
+
+    tree = ast.parse(source)
+    modules: set[str] = set()
+    connects: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _SQLITE_MODULES:
+                    modules.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module in _SQLITE_MODULES:
+            for alias in node.names:
+                if alias.name == "connect":
+                    connects.add(alias.asname or alias.name)
+                elif alias.name == "dbapi2":
+                    modules.add(alias.asname or alias.name)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            value = node.value
+            loaded = (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr == "import_module"
+                and value.args
+                and isinstance(value.args[0], ast.Constant)
+                and "sqlite" in str(value.args[0].value)
+            )
+            if loaded or (isinstance(value, ast.Name) and value.id in modules):
+                modules.add(node.targets[0].id)
+
+    def opens(call: ast.Call) -> bool:
+        func = call.func
+        if isinstance(func, ast.Name):
+            return func.id in connects
+        if isinstance(func, ast.Attribute) and func.attr == "connect":
+            target = func.value
+            if isinstance(target, ast.Attribute) and target.attr == "dbapi2":
+                target = target.value
+            return isinstance(target, ast.Name) and target.id in modules
+        return False
+
+    def strings(scope: ast.AST) -> list[str]:
+        return [n.value for n in ast.walk(scope) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+    def calls_configure(scope: ast.AST) -> bool:
+        for n in ast.walk(scope):
+            if isinstance(n, ast.Call):
+                name = n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+                if name == "configure_sqlite_connection":
+                    return True
+        return False
+
+    scopes: list[ast.AST] = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    found = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and opens(node)):
+            continue
+        scope = min(
+            (s for s in scopes if s.lineno <= node.lineno <= (s.end_lineno or s.lineno)),
+            key=lambda s: (s.end_lineno or s.lineno) - s.lineno,
+            default=tree,
+        )
+        texts = strings(scope)
+        read_only = any("mode=ro" in t for t in texts) and any("query_only" in t for t in texts)
+        in_memory = bool(node.args) and isinstance(node.args[0], ast.Constant) and node.args[0].value == ":memory:"
+        found.append((node.lineno, calls_configure(scope) or read_only or in_memory))
+    return found
+
+
+@pytest.mark.parametrize(
+    ("source", "fine"),
+    [
+        ("import sqlite3 as db\ndef f(p):\n    return db.connect(p)\n", False),
+        ("from sqlite3 import connect\ndef f(p):\n    return connect(p)\n", False),
+        ("from pysqlite3 import dbapi2 as drv\ndef f(p):\n    return drv.connect(p)\n", False),
+        ("import importlib\ndef f(p):\n    d = importlib.import_module('pysqlite3')\n    return d.connect(p)\n", False),
+        (  # a comment naming the shared setup is not the shared setup
+            "import sqlite3\ndef f(p):\n    # configure_sqlite_connection\n    return sqlite3.connect(p)\n",
+            False,
+        ),
+        (
+            "import sqlite3\nfrom storage import sqlite_connection\ndef f(p):\n    c = sqlite3.connect(p)\n"
+            "    sqlite_connection.configure_sqlite_connection(c, db_path=p)\n    return c\n",
+            True,
+        ),
+        (
+            "import sqlite3\ndef f(p):\n    uri = f'{p}?mode=ro'\n    c = sqlite3.connect(uri, uri=True)\n"
+            "    c.execute('PRAGMA query_only = ON')\n    return c\n",
+            True,
+        ),
+        ("import sqlite3\ndef f():\n    driver = sqlite3\n    return driver.connect(':memory:')\n", True),
+    ],
+)
+def test_the_open_check_finds_every_form(source, fine):
+    assert [ok for _line, ok in _sqlite_opens(source)] == [fine]
+
+
+def test_product_code_opens_sqlite_only_with_the_shared_setup():
+    """Every database the product writes gets this module's setup (module docstring).
+
+    Stores open SQLite through ``connect_sqlite``; any other open must call
+    ``configure_sqlite_connection``, read only, or stay in memory. The files that open SQLite
+    themselves are listed, so a new one is reviewed.
+    """
+
+    root = Path(__file__).resolve().parents[1]
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.py"], cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.split()
+    opening: dict[str, list[tuple[int, bool]]] = {}
+    for name in tracked:
+        if name.startswith("tests/") or name == "storage/sqlite_connection.py":
+            continue
+        found = _sqlite_opens((root / name).read_text(encoding="utf-8"))
+        if found:
+            opening[name] = found
+    assert {name: [line for line, ok in found if not ok] for name, found in opening.items()} == {
+        name: [] for name in opening
+    }
+    assert sorted(opening) == [
+        "custom_agents/pinned_memory_source.py",
+        "scripts/upgrade_schema_fixture.py",
+        "secure_tool_broker/credential_catalog_store.py",
+    ]
 
 
 def test_a_lock_failure_names_the_process_also_without_a_caller_logger(tmp_path, caplog):
