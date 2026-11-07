@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/sessions.close.schema.json",
+  "title": "sessions.close request",
+  "description": "A host reports that one of its agents' sessions ended.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The host's id for this request; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "session": {
+      "$ref": "../common.schema.json#/$defs/session_id"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "exited",
+        "failed",
+        "handed_over"
+      ]
+    }
+  },
+  "required": [
+    "request_id",
+    "session",
+    "reason"
+  ],
+  "additionalProperties": false
+}

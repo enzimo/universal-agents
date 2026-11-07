@@ -1337,19 +1337,28 @@ async def _handle_task_request(
     # may read storage (schedule run identities), so it runs in a thread.
     owner_person_id = await asyncio.to_thread(verified_meta_person_id, self, normalized_meta)
     if task_request.parent_task_id is None:
-        try:
-            normalized_meta = ensure_task_conversation_context(
+        request_meta = normalized_meta
+
+        def join_conversation() -> Any:
+            return ensure_task_conversation_context(
                 conversation_store=self._conversation_store,
                 team_id=self.team_id,
                 owner_agent_id=self.id,
                 owner_agent_name=self.name,
                 task_request=task_request,
                 msg_header=msg_header,
-                msg_meta=normalized_meta,
+                msg_meta=request_meta,
                 owner_person_id=owner_person_id,
                 owner_named_agent_type=self.named_agent_type,
                 deleted_by_cleanup=partial(followup_conversation_deleted, self),
             )
+
+        try:
+            # Its writes block, more so on a slow disk, so they run on the task
+            # manager's lane, not on the loop that handles the agent's messages;
+            # the lane runs one operation at a time, which keeps two requests'
+            # turns in one conversation in order as the loop did.
+            normalized_meta = await self.task_manager.operations_runtime.run(join_conversation)
         except ValueError as exc:
             self._logger.warning(
                 f"[{self.id}] Rejecting task {task_request.task_id}: {exc}"
@@ -1395,8 +1404,10 @@ async def _handle_task_request(
     if task_request.parent_task_id is None and getattr(
         normalized_meta, "conversation_id", None
     ):
-        record_task_conversation_history(
-            task_manager=self.task_manager,
+        # A task-manager change, so on its lane like every other one, not on the
+        # loop. A closure: the lane copies its arguments, and the manager is live.
+        await self.task_manager.operations_runtime.run(
+            partial(record_task_conversation_history, task_manager=self.task_manager),
             task_id=task_request.task_id,
             conversation_id=normalized_meta.conversation_id,
             followup_to_task_id=getattr(normalized_meta, "followup_to_task_id", None),

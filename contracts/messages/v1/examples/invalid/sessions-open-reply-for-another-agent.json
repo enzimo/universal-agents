@@ -1,0 +1,14 @@
+{
+  "description": "The session in a reply places the agent the host asked for.",
+  "refusal": "invalid_body",
+  "at": "/body/session/body/agent",
+  "base": "sessions.open.reply/ok.json",
+  "changes": [
+    {
+      "set": "/body/session/body/agent",
+      "to": "researcher-9"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"sessions.open.reply\", \"message_id\": \"01928f3a-7b2c-7d02-8000-000000000d02\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"host\", \"id\": \"worker-host-1\", \"runtime\": \"worker-host-1\"}, \"subject\": \"_INBOX.worker-host-1.01928f3a-7b2c-7d01-8000-000000000d01\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"session\": {\"record\": \"agent_session\", \"protocol\": \"1.0-pre\", \"key\": \"session.install_example.team_example.s-researcher-3-1\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"session\": \"s-researcher-3-1\", \"installation\": \"install_example\", \"team\": \"team_example\", \"agent\": \"researcher-9\", \"agent_type\": \"researcher\", \"agent_role\": \"worker\", \"runtime\": \"worker-host-1\", \"placement_revision\": 13, \"started_at\": \"2026-10-22T04:30:00.000Z\", \"ends_at\": \"2026-10-29T04:00:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"PgSaPR2vybaA8cx9BYYKidrT2mvXq7ysgrxnpuuJj2E\", \"signature\": \"9Lp0s1Zmvvglusa1qsDjuAC1TyQWC75VIgX6vcbexpNCR8yP1mK3MhaS7WGd1N_SZRCYDEHM2TrltkypiHkQAA\"}}, \"causation_id\": \"01928f3a-7b2c-7d01-8000-000000000d01\", \"idempotency_key\": \"sessions.open.reply:qmtAD6PHu3tQl7GC5BTqgfjITseV0dTWp-i3NnOdKLo\", \"body_digest\": \"hbEszHMhbVoF7UX5b6vVhQPsZPEdDlUKQqZzbOBk89M\", \"signature\": \"AmkXZNGIAzrVBobZAe2TKNaCtkpSZZx-LhUh7jWjJOG-v3u7SVLIl1C-_IwLXuQoU63cb4Tm78S4IVQxHYK1Ag\"}"
+}

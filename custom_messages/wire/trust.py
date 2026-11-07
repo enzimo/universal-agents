@@ -534,7 +534,7 @@ class TrustStore:
             # The longest lifetime counts from when a record was written, so that time has come.
             raise FrameRefused("not_yet_valid", "a trust record is not dated ahead of the receiver's clock", at="/issued_at")
         if report and document.record == HOST:
-            theirs = self._other_contract(raw)
+            theirs = self.other_contract(raw.get("body"))
             if theirs is not None:
                 # Authentic, but shaped by another contract: the reader decides what it means.
                 assert signer is not None
@@ -550,19 +550,20 @@ class TrustStore:
             self._check_state_report(document, body, signer)
         return VerifiedRecord(document=document, body=body, signer=signer, digest=digest)
 
-    def _other_contract(self, raw: Mapping[str, Any]) -> Optional[str]:
-        """The contract digest a host record names, read before its body, when it is not this receiver's own.
+    def other_contract(self, body: Any) -> Optional[str]:
+        """The contract digest a host record's, join's or renewal's body names, read before the rest of it,
+        when it is not this receiver's own.
 
-        While the label is a pre-release, two contracts can share it and shape a host record
-        differently, so a reader reads the digest on its own before the rest of the body
-        (README, "Versions"). It sends that host no new work, places no agent on it and logs
-        both digests; it still counts the host's custody windows from these records. A record
-        without a well-formed digest is read strictly, and refused there.
+        While the label is a pre-release, two contracts can share it and shape these bodies
+        differently, so a receiver reads the digest on its own before the rest of the body
+        (README, "Versions"): ``verify`` for a host record, ``verify_frame`` for a join or
+        renewal. A reader of host records sends that host no new work, places no agent on it
+        and logs both digests; it still counts the host's custody windows from these records.
+        A body without a well-formed digest is read strictly, and refused there.
         """
 
         if not PROTOCOL.endswith("-pre"):
             return None
-        body = raw.get("body")
         theirs = body.get("contract_sha256") if isinstance(body, Mapping) else None
         if isinstance(theirs, str) and _CONTRACT_DIGEST.fullmatch(theirs) and theirs != self.contract_sha256:
             return theirs
@@ -891,6 +892,14 @@ class TrustStore:
         return str(body.installation)
 
     def _keep_session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> tuple[str, str, str]:
+        session = self._session(document, body, signer)
+        entry = (session.installation, session.team, session.session)
+        self._sessions[entry] = session
+        return entry
+
+    def _session(self, document: State, body: Any, signer: Optional[HostCertificate]) -> AgentSession:
+        """A checked session record: signed by a team services host of its own team, under its own key."""
+
         assert signer is not None  # sessions are host-signed (registry signer: host)
         self._same_installation(document, body.installation)
         if body.team not in signer.teams:
@@ -900,13 +909,24 @@ class TrustStore:
         started_at, ends_at = parse_timestamp(body.started_at), parse_timestamp(body.ends_at)
         if ends_at <= started_at:
             raise FrameRefused("invalid_body", "a session must end after it starts", at="/body/ends_at")
-        entry = (body.installation, body.team, body.session)
-        self._sessions[entry] = AgentSession(
+        return AgentSession(
             session=body.session, installation=body.installation, team=body.team, agent=body.agent,
             agent_type=body.agent_type, agent_role=body.agent_role, runtime=body.runtime,
             placement_revision=body.placement_revision, started_at=started_at, ends_at=ends_at, signer=signer,
         )
-        return entry
+
+    def issued_session(self, raw: Mapping[str, Any]) -> AgentSession:
+        """Verify a session record carried in a sessions.open or sessions.renew reply, without keeping it.
+
+        ``raw`` is the record's JSON object as received inside the frame, which its
+        signature covers. The host that asked keeps it afterwards with ``add``, so it can
+        sign frames for the agent.
+        """
+
+        if raw.get("record") != AGENT_SESSION:
+            raise FrameRefused("invalid_body", "a session reply returns an agent session record", at="/record")
+        record = self._checked(raw)
+        return self._session(record.document, record.body, record.signer)
 
     def _keep_agreement(self, document: State, body: Any, _signer: Optional[HostCertificate]) -> str:
         if body.installation != self.installation or body.peer == self.installation:
