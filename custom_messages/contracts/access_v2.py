@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -1352,6 +1353,23 @@ class PersonStanding(StrEnum):
     REMOVED = "removed"  # taken off the team; their work and personal records are deleted or held
 
 
+# A person's opaque reference (protocol 1 ``person_ref``): "p-" and 22 random base64url characters.
+PERSON_REF_PATTERN = r"^p-[A-Za-z0-9_-]{22}$"
+
+
+def new_person_ref() -> str:
+    """A fresh opaque person reference: 128 random bits (16 bytes are 22 base64url characters), which tell
+    nothing about the person."""
+
+    return f"p-{secrets.token_urlsafe(16)}"
+
+
+def is_person_ref(value: str) -> bool:
+    """Whether ``value`` has the form of an opaque person reference, never a person's id or name."""
+
+    return re.fullmatch(PERSON_REF_PATTERN, value) is not None
+
+
 class TeamPersonV1(AccessContractModel):
     """One person's current standing and roles in a team, as the gateway last recorded them.
 
@@ -1368,6 +1386,14 @@ class TeamPersonV1(AccessContractModel):
     schema_version: Literal[1] = 1
     team_id: str = Field(min_length=1, max_length=120)
     person_id: str = Field(min_length=1, max_length=240)
+    # The person's opaque reference in protocol 1 frames (plan decision 64): random,
+    # kept for as long as the person is in the team. person_id can be a display name,
+    # which no frame may carry. Required, so no copy is ever written or read with a
+    # made-up one: the gateway gives a person their stored reference, or a new one
+    # (``new_person_ref``) the first time, and the access store keeps the one it holds
+    # (``AccessRepository.record_person``). Records written before references existed
+    # are read only through ``from_earlier_record``.
+    person_ref: str = Field(pattern=PERSON_REF_PATTERN)
     standing: PersonStanding
     roles: tuple[str, ...] = ()
     changed_at_utc: datetime
@@ -1377,6 +1403,22 @@ class TeamPersonV1(AccessContractModel):
         if self.roles and self.standing is not PersonStanding.ACTIVE:
             raise ValueError("Only an active person holds roles.")
         return self
+
+    @classmethod
+    def from_earlier_record(cls, payload_json: str | bytes) -> "TeamPersonV1":
+        """A stored record that an earlier version may have written, given a new reference when it has none.
+
+        Records from before references existed (0.9) are read in two places only: the
+        access store's in-place upgrade step, which stores the new reference, and
+        ``memory export``, which reads an older instance's database for people's
+        standing and never uses the reference. Every other reader reads records that
+        carry one.
+        """
+
+        data = json.loads(payload_json)
+        if isinstance(data, dict) and "person_ref" not in data:
+            data["person_ref"] = new_person_ref()
+        return cls.model_validate(data)
 
 
 class AccountLinkRequestV1(AccessContractModel):
@@ -1605,10 +1647,13 @@ __all__ = [
     "SchedulePermitV1",
     "ScheduleRunIdentityV1",
     "SignedSchedulePermitV1",
+    "PERSON_REF_PATTERN",
     "PersonStanding",
     "SubjectKind",
     "SubjectRefV1",
     "TeamPersonV1",
+    "is_person_ref",
+    "new_person_ref",
     "ToolSetupState",
     "ToolSetupStateV1",
     "TargetKind",

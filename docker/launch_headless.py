@@ -127,6 +127,7 @@ from env_secrets import (
 )
 from runtime_settings.secret_names import configured_secret_names
 from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
+from assistant_gateway.message_host import GATEWAY_RUNTIME, gateway_profile
 from installation_authority.expected_hosts import ExpectedHost
 from secure_tool_broker.credential_state import resolve_broker_credentials_dir
 from secure_tool_broker.defaults import resolve_secure_tool_broker_internal_base_url
@@ -2661,7 +2662,10 @@ def message_hosts_to_approve(config: GatewayInstanceConfig) -> dict[str, Expecte
     so a saved change to what a host may ask for takes effect with that restart.
     """
 
-    return {TEAM_SERVICES_RUNTIME: expected_host(config.layout, team_services_profile(config.manager.team_id))}
+    return {
+        TEAM_SERVICES_RUNTIME: expected_host(config.layout, team_services_profile(config.manager.team_id)),
+        GATEWAY_RUNTIME: expected_host(config.layout, gateway_profile(config.manager.team_id)),
+    }
 
 
 def main() -> int:

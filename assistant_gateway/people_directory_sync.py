@@ -34,6 +34,16 @@ that tell a person what happened use the returned ``False`` to say so.
 unchanged person keeps their earlier time, so a restart does not make
 everyone look changed. This works the same with authorization on and off; it
 is about people, not access checks.
+
+Each person has an opaque reference (``person_ref``, plan decision 64) that
+protocol 1 frames name them by. A copy gives a person the reference it read
+for them, or a new one the first time; the access store keeps the reference
+it already holds, read inside its write transaction, so a person recorded by
+another writer in between (the running gateway and a command-line run both
+copy people) keeps the one stored first (``AccessRepository.record_person``).
+A full copy reads the store before the gateway's records and drops only people
+it found there (``replace_people(read_before=...)``), so someone the running
+gateway adds while it runs is neither dropped nor given a new reference later.
 """
 
 from __future__ import annotations
@@ -46,7 +56,7 @@ from access_control.people import effective_roles, person_standing
 from assistant_gateway.application.ports import GatewayClock
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.ports.repositories import IdentityRepository
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from storage.access_repository import AccessRepository
 
 # Logged as person_id when the whole team was being written.
@@ -129,7 +139,9 @@ class PeopleDirectorySync:
             if standing is None:
                 continue
             people.append(self._copy(row.canonical_user_id, standing, row.role, previous.get(row.canonical_user_id)))
-        store.replace_people(self._team_id, people, at=self._clock.now_utc())
+        # Read the store before the gateway's records: whoever another writer stores after
+        # this read and the records lack is someone just added, not someone gone.
+        store.replace_people(self._team_id, people, at=self._clock.now_utc(), read_before=previous.keys())
         return Counter(person.standing for person in people)
 
     def _copy(
@@ -148,6 +160,8 @@ class PeopleDirectorySync:
         return TeamPersonV1(
             team_id=self._team_id,
             person_id=person_id,
+            # A person keeps their opaque reference for as long as they are in the team (module docstring).
+            person_ref=previous.person_ref if previous is not None else new_person_ref(),
             standing=standing,
             roles=roles,
             changed_at_utc=changed_at,

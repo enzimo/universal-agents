@@ -40,7 +40,7 @@ from assistant_gateway.storage_usage import (
     usage_notice,
     usage_notice_id,
 )
-from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1, PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1, PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.status_v1 import StatusSeverity
 from runtime_settings.instance_layout import person_folder_name
 from storage.config import resolve_storage_settings
@@ -257,7 +257,7 @@ class _Team:
 
 
 def _person(person_id: str, *, standing: PersonStanding = PersonStanding.ACTIVE, changed: datetime = JOINED) -> TeamPersonV1:
-    return TeamPersonV1(team_id=TEAM, person_id=person_id, standing=standing, changed_at_utc=changed)
+    return TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person_id, standing=standing, changed_at_utc=changed)
 
 
 def _titles(notices: _Notices) -> list[str]:
@@ -531,7 +531,7 @@ def test_the_gateway_tells_active_people_through_the_access_store(tmp_path: Path
     config.gateway.storage_warnings.person_step_gb = 2
     access = AccessRepository(config.manager_storage_settings)
     for person, standing in ((ALICE, PersonStanding.ACTIVE), (BOB, PersonStanding.DISABLED)):
-        access.record_person(TeamPersonV1(team_id=TEAM, person_id=person, standing=standing, changed_at_utc=JOINED))
+        access.record_person(TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person, standing=standing, changed_at_utc=JOINED))
     chat = GatewayStateStore("", storage_settings=config.state_storage_settings)
     for owner in (ALICE, BOB):
         session = _session(chat, owner)

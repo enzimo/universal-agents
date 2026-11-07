@@ -4523,6 +4523,43 @@ receivers have forgotten (`custom_messages.wire.trust.kept_for`). Signing a plac
 gives it a new revision, which is why a session's placement is recognised by its host and
 `placed_at`, not by the revision it names.
 
+**The gateway as a host** (`assistant_gateway.message_host.GatewayMessageHost`): the
+launcher lists the gateway (host `gateway`, role `gateway`) beside the team services, and
+the gateway service joins in the background when its NATS runtime connects, so nothing
+else in the gateway waits for the authority. Only the gateway service runs this host
+(`NatsGatewayManagerRuntime.for_gateway_service`): command-line runs (`ask`, `chat`,
+`cron`, `heartbeat`) open a gateway of their own, and a second process joining as host
+`gateway` would load the gateway's key and mark the running gateway's host record
+`drained` when it ended, so they run none. The gateway sends a person's operation to the
+team services with a command token
+(`custom_transport.protocol1.authority_tokens.command_token`): signed with the gateway's
+own key, bound to that one command (the body field the contract names for the kind,
+`request_id` for most), lasting at most five minutes, and naming the person only by their
+**person reference** (`TeamPersonV1.person_ref`, `p-` and 22 random URL-safe characters,
+plan decision 64); anything else is refused before it is signed. People's canonical ids
+can be names or chat handles, so they never travel in frames. The reference is stored
+with the person in the access store's people table (`access_people.person_ref`, unique
+per team), and created for existing people when an older store is opened. The store
+keeps the reference it holds whenever the people copy is written again, checked inside
+its write transaction, and a full copy drops only people it found in the store before it
+read the gateway's records, so a writer that read the copy before another stored someone
+(the running gateway and a command-line run both copy people) neither drops them nor
+gives them a second reference.
+`AccessRepository.team_person_by_ref` turns a reference back into the person, whatever
+their standing: a receiver checks that the person is active and holds the roles the
+operation needs before it acts for them. The team transfer does not carry the people
+copy, so a moved team's people get new references; nothing outside the instance keeps
+them. After this upgrade an instance cannot go back to 0.9 in place: 0.9 refuses people
+records that carry a reference. A gateway service on an instance whose launcher never
+prepared the message hosts has no bootstrap bundle, so it runs no host and logs
+`event=gateway_host_not_prepared`; one started by hand on an instance the launcher
+prepared joins like any other. Answers to the join that cannot change while the process
+runs (`denied`: the launcher listed another key, team or connection; `protocol_mismatch`)
+end the joining, and a person's command then says why; a join that waits for approval or
+an authority that does not answer is asked again every 10 seconds. Stopping cancels a
+join still under way (it can wait two minutes for the authority), and a joined host
+writes its last record (`drained`) before the gateway closes its connection.
+
 **Starting and restarting the authority and the team services** (`docker.message_hosts.MessageServices`).
 The launcher starts the team lead, the startup agents and the gateway only once the team
 services serve. Once they hold the lock, answer at `svc.team` and have written their host

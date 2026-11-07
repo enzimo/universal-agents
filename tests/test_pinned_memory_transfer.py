@@ -85,6 +85,28 @@ def _texts(rows: list[Any]) -> list[str]:
     return sorted(row.fact_text for row in rows)
 
 
+def test_export_from_an_instance_whose_people_records_predate_references_leaves_out_removed_people(
+    old, tmp_path: Path, capsys
+) -> None:
+    """A 0.9 instance's people records carry no ``person_ref`` (plan decision 64); the export reads their standing."""
+
+    import sqlite3
+
+    old_path, old_config = old
+    with sqlite3.connect(old_config.manager_storage_settings.sqlite_path) as conn:
+        for person_id, payload_json in conn.execute("SELECT person_id, payload_json FROM access_people").fetchall():
+            payload = json.loads(payload_json)
+            del payload["person_ref"]
+            conn.execute("UPDATE access_people SET payload_json=? WHERE person_id=?", (json.dumps(payload), person_id))
+        conn.execute("DROP INDEX access_people_person_ref")
+        conn.execute("ALTER TABLE access_people DROP COLUMN person_ref")
+
+    raw = _export(old_path, tmp_path).read_text(encoding="utf-8")
+
+    assert "Held until deletion." not in raw and "Ana prefers short answers." in raw
+    assert "usr_gone" in capsys.readouterr().out
+
+
 def test_export_import_round_trip_maps_people_and_keeps_history(old, tmp_path: Path, capsys) -> None:
     old_path, old_config = old
     facts_before, events_before = _count(old_config, "pinned_memory_facts_active"), _count(old_config, "pinned_memory_fact_events")

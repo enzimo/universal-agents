@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from assistant_gateway.application.ports import GatewayManagerEnvelopeHandler
 from assistant_gateway.config import GatewayInstanceConfig
@@ -17,6 +17,9 @@ from custom_transport.base import (
 )
 from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
+
+if TYPE_CHECKING:
+    from assistant_gateway.message_host import GatewayMessageHost
 
 
 @dataclass(frozen=True)
@@ -84,8 +87,12 @@ class NatsGatewayManagerRuntime:
         *,
         settings: NatsGatewayManagerRuntimeSettings,
         adapter: NatsTransportAdapter | None = None,
+        message_host: "GatewayMessageHost | None" = None,
     ) -> None:
         self.settings = settings
+        # The gateway service's protocol 1 host; None in every other process that opens a
+        # gateway (assistant_gateway.message_host).
+        self.message_host = message_host
         self._mapper = NatsSubjectMapper(
             team_id=settings.team_id,
             subject_prefix=settings.subject_prefix,
@@ -110,6 +117,9 @@ class NatsGatewayManagerRuntime:
                 user=settings.user,
                 password=settings.password,
                 credentials_file=settings.credentials_file,
+                # The host's requests take their replies on its own inbox, which its
+                # credential may be limited to (custom_transport.protocol1.live).
+                reply_inbox_runtime=message_host.runtime if message_host is not None else None,
             ),
             mapper=self._mapper,
         )
@@ -121,6 +131,7 @@ class NatsGatewayManagerRuntime:
         config: GatewayInstanceConfig,
         *,
         adapter: NatsTransportAdapter | None = None,
+        message_host: "GatewayMessageHost | None" = None,
     ) -> "NatsGatewayManagerRuntime":
         """Build the runtime from the composition root's resolved config."""
 
@@ -129,6 +140,21 @@ class NatsGatewayManagerRuntime:
                 config
             ),
             adapter=adapter,
+            message_host=message_host,
+        )
+
+    @classmethod
+    def for_gateway_service(cls, config: GatewayInstanceConfig) -> "NatsGatewayManagerRuntime":
+        """The gateway service's runtime, the one process that runs the gateway's protocol 1 host.
+
+        Command-line runs build theirs with ``from_gateway_config`` and run no host
+        (assistant_gateway.message_host); nor do they load its code, imported here.
+        """
+
+        from assistant_gateway.message_host import prepared_gateway_host
+
+        return cls.from_gateway_config(
+            config, message_host=prepared_gateway_host(config.layout, config.manager.team_id)
         )
 
     @property
@@ -198,10 +224,18 @@ class NatsGatewayManagerRuntime:
             await self._adapter.close()
             raise
         self._connected = True
+        if self.message_host is not None:
+            # Joins in the background: the gateway's other work never waits for it.
+            self.message_host.start(self._adapter.nats_connection)
 
     async def close(self) -> None:
-        await self._adapter.close()
-        self._connected = False
+        try:
+            if self.message_host is not None:
+                # Before the connection it runs on; it writes its last host record.
+                await self.message_host.close()
+        finally:
+            await self._adapter.close()
+            self._connected = False
 
     def stopped_receivers(self) -> tuple[Any, ...]:
         return self._adapter.stopped_receivers()

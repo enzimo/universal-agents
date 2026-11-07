@@ -29,7 +29,7 @@ from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.people_directory_sync import PeopleDirectorySync
 from assistant_gateway.runtime_ports import MembershipRoleIdentityAuthorizer
 from assistant_gateway.store import GatewayStateStore
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from storage.access_repository import AccessRepository
 from tests.people_directory_support import people_directory
 
@@ -172,7 +172,7 @@ def test_the_full_copy_replaces_the_team_and_marks_it_synced(tmp_path: Path, cap
     _seed(store, {"otto": ("member", "active")}, team="other_team")
     clock = _Clock()
     directory, access = people_directory(tmp_path, store.identity_repository, team_id=TEAM, clock=clock)
-    access.record_person(TeamPersonV1(team_id=TEAM, person_id="gone", standing=PersonStanding.ACTIVE, changed_at_utc=clock.now))
+    access.record_person(TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id="gone", standing=PersonStanding.ACTIVE, changed_at_utc=clock.now))
     assert PeopleDirectory(access, TEAM).synced() is False
 
     with caplog.at_level(logging.INFO, logger="assistant_gateway.people_directory_sync"):
@@ -257,3 +257,131 @@ async def test_gateway_start_copies_everyone_before_sending_maintenance_schedule
         assert access.people_synced_at("team_test") is not None
     finally:
         await gateway.close()
+
+
+def test_a_person_keeps_one_opaque_reference_across_every_copy(tmp_path: Path) -> None:
+    """Plan decision 64: protocol 1 frames name a person by a random reference that never changes."""
+
+    import re
+
+    from custom_messages.contracts.access_v2 import PERSON_REF_PATTERN
+
+    store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
+    _seed(store, {"Olive Smith": ("owner", "active"), "adam": ("admin", "active")})
+    clock = _Clock()
+    directory, access = people_directory(tmp_path, store.identity_repository, team_id=TEAM, clock=clock)
+    directory.record("Olive Smith")
+    reference = access.team_person(TEAM, "Olive Smith").person_ref
+    assert re.fullmatch(PERSON_REF_PATTERN, reference) and "olive" not in reference.lower()
+    clock.now += timedelta(hours=1)
+    directory.sync_all()
+    store.set_gateway_user_status("Olive Smith", "disabled")
+    directory.record("Olive Smith")
+    assert access.team_person(TEAM, "Olive Smith").person_ref == reference
+    assert access.team_person_by_ref(TEAM, reference).person_id == "Olive Smith"
+    assert access.team_person(TEAM, "adam").person_ref != reference
+    assert access.team_person_by_ref(TEAM, "p-" + "x" * 22) is None
+
+
+def test_people_copied_before_references_existed_get_one_when_the_store_opens(tmp_path: Path) -> None:
+    """The in-place upgrade step: an older copy's people get references, which later opens keep."""
+
+    import json
+    import sqlite3
+
+    from tests.people_directory_support import access_store_at
+
+    path = tmp_path / "access.db"
+    access_store_at(tmp_path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX access_people_person_ref")
+        conn.execute("ALTER TABLE access_people DROP COLUMN person_ref")
+        old = {"schema_version": 1, "team_id": TEAM, "person_id": "olive", "standing": "active", "roles": ["owner"],
+               "changed_at_utc": "2026-09-25T12:00:00Z"}
+        conn.execute("INSERT INTO access_people(team_id, person_id, payload_json, changed_at) VALUES (?,?,?,?)",
+                     (TEAM, "olive", json.dumps(old), "2026-09-25T12:00:00+00:00"))
+    upgraded = access_store_at(tmp_path)
+    reference = upgraded.team_person(TEAM, "olive").person_ref
+    assert upgraded.team_person_by_ref(TEAM, reference).person_id == "olive"
+    assert access_store_at(tmp_path).team_person(TEAM, "olive").person_ref == reference
+
+
+def test_a_copy_read_before_another_write_keeps_the_reference_stored_first(tmp_path: Path, caplog) -> None:
+    """The running gateway records someone new while a command-line run copies everyone from an earlier read:
+    the person keeps the reference stored first, which frames may already name them by."""
+
+    store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
+    _seed(store, {"Olive Smith": ("owner", "active")})
+    gateway, access = people_directory(tmp_path, store.identity_repository, team_id=TEAM, clock=_Clock())
+    command_line, _ = people_directory(tmp_path, store.identity_repository, team_id=TEAM, clock=_Clock())
+    read_before = access.team_people(TEAM)  # the command-line run's read: Olive is not recorded yet
+    assert read_before == []
+    assert gateway.record("Olive Smith") is True
+    reference = access.team_person(TEAM, "Olive Smith").person_ref
+
+    real_read = AccessRepository.team_people
+    with pytest.MonkeyPatch.context() as patch, caplog.at_level(logging.INFO, logger="storage.access_repository"):
+        patch.setattr(AccessRepository, "team_people", lambda self, team_id: read_before)
+        assert command_line.sync_all() is not None
+        patch.setattr(AccessRepository, "team_people", real_read)
+    assert access.team_person(TEAM, "Olive Smith").person_ref == reference
+    assert "event=access_person_ref_kept" in caplog.text
+
+    # A full copy whose records were read before the gateway added someone neither drops them nor,
+    # through that, gives them a new reference later.
+    store_before_mia = access.team_people(TEAM)
+    late_copy = PeopleDirectorySync(identity=_StaleTeamList(store.identity_repository), open_store=lambda: access,
+                                    team_id=TEAM, clock=_Clock())
+    _seed(store, {"Mia": ("member", "active")})
+    assert gateway.record("Mia") is True
+    mia = access.team_person(TEAM, "Mia").person_ref
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="storage.access_repository"):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(AccessRepository, "team_people", lambda self, team_id: store_before_mia)
+            assert late_copy.sync_all() is not None
+    assert access.team_person(TEAM, "Mia").person_ref == mia
+    assert "event=access_person_kept_unread" in caplog.text
+    # A full copy that read the store first keeps her too, now from its own records.
+    assert gateway.sync_all() is not None and access.team_person(TEAM, "Mia").person_ref == mia
+
+    # One person's write keeps it the same way.
+    stale = access.team_person(TEAM, "Olive Smith").model_copy(update={"person_ref": new_person_ref()})
+    assert access.record_person(stale).person_ref == reference
+    assert access.team_person(TEAM, "Olive Smith").person_ref == reference
+
+
+class _StaleTeamList:
+    """The gateway's records as a command-line run read them before someone was added."""
+
+    def __init__(self, identity: object) -> None:
+        self._identity = identity
+        self._team = list(identity.list_team_people(TEAM))  # type: ignore[attr-defined]
+
+    def list_team_people(self, team_id: str) -> list:
+        assert team_id == TEAM
+        return self._team
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._identity, name)
+
+
+def test_a_person_record_needs_its_reference_and_only_earlier_records_get_one_made() -> None:
+    """No copy is written or read with a made-up reference; only a record from before references existed gets one."""
+
+    import json
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="person_ref"):
+        TeamPersonV1(team_id=TEAM, person_id="olive", standing=PersonStanding.ACTIVE, changed_at_utc=_Clock().now)
+    with pytest.raises(ValidationError, match="person_ref"):
+        TeamPersonV1(person_ref="olive", team_id=TEAM, person_id="olive", standing=PersonStanding.ACTIVE,
+                     changed_at_utc=_Clock().now)
+    earlier = {"schema_version": 1, "team_id": TEAM, "person_id": "olive", "standing": "active", "roles": ["owner"],
+               "changed_at_utc": "2026-09-25T12:00:00Z"}
+    with pytest.raises(ValidationError, match="person_ref"):
+        TeamPersonV1.model_validate(earlier)
+    given = TeamPersonV1.from_earlier_record(json.dumps(earlier))
+    kept = TeamPersonV1.from_earlier_record(given.model_dump_json())
+    assert kept.person_ref == given.person_ref and given.person_id == "olive"
