@@ -2507,6 +2507,53 @@ def stop_external_processes(
             before_external_shutdown()
 
 
+INSTALLATION_AUTHORITY_START_ERRORS = (OSError, RuntimeError, ValueError)
+
+
+def start_installation_authority_before_services(
+    config: GatewayInstanceConfig,
+    config_path: Path,
+    authority_env: Mapping[str, str],
+    *,
+    external_processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+    before_external_shutdown: Callable[[], None] | None,
+) -> subprocess.Popen[bytes] | None:
+    """Prepare the message hosts' trust and start their installation authority; ``None`` when it could not start.
+
+    Like the stream preparation before it, every failure, interruption included, stops
+    the services already started (``start_installation_authority`` stops the authority
+    itself). Expected failures become a refusal; unexpected ones keep their traceback.
+    ``authority_env`` is the authority's own environment: the NATS login and nothing
+    else (``env_secrets.PROCESS_INSTALLATION_AUTHORITY``, renamed secrets included).
+    """
+
+    try:
+        prepare_message_host_trust(config.layout)
+        return start_installation_authority(
+            config.layout,
+            build_installation_authority_command(config_path, repo_root=REPO_ROOT),
+            authority_env,
+            cwd=REPO_ROOT,
+        )
+    except BaseException as exc:
+        try:
+            stop_external_processes(external_processes, before_external_shutdown)
+        except BaseException:
+            LOGGER.exception(
+                "Managed service cleanup failed after the installation authority's start stopped. "
+                "event=installation_authority_start_cleanup_failed start_error_type=%s",
+                type(exc).__name__,
+            )
+        if not isinstance(exc, INSTALLATION_AUTHORITY_START_ERRORS):
+            raise
+        LOGGER.error(
+            "Headless launch refused: the installation authority could not start. "
+            "event=installation_authority_start_failed error=%s",
+            exc,
+        )
+        return None
+
+
 def prepare_message_streams_before_services(
     config_path: Path,
     gateway_env: Mapping[str, str],
@@ -2775,21 +2822,16 @@ def main() -> int:
         return 2
     # The message hosts' keys and their installation authority, before any host starts
     # (docker.message_hosts).
-    try:
-        prepare_message_host_trust(config.layout)
-        authority_process = start_installation_authority(
-            config.layout,
-            build_installation_authority_command(config_path, repo_root=REPO_ROOT),
-            environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env),
-            cwd=REPO_ROOT,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        stop_external_processes(external_processes, cleanup_managed_openshell)
-        LOGGER.error(
-            "Headless launch refused: the installation authority could not start. "
-            "event=installation_authority_start_failed error=%s",
-            exc,
-        )
+    authority_process = start_installation_authority_before_services(
+        config,
+        config_path,
+        environment_for(
+            PROCESS_INSTALLATION_AUTHORITY, inherited_env, renamed=renamed_secrets
+        ),
+        external_processes=external_processes,
+        before_external_shutdown=cleanup_managed_openshell,
+    )
+    if authority_process is None:
         return 2
     external_processes = (*external_processes, ("installation authority", authority_process))
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -102,3 +103,57 @@ def test_an_authority_that_exits_or_stays_silent_stops_the_launch(tmp_path: Path
         message_hosts.start_installation_authority(layout, ready_bundle_writer(layout, 9), {}, cwd=tmp_path,
                                                    timeout_seconds=1)
     assert json.loads(layout.trust_bootstrap_path.read_text())["records"][1]["sequence"] == 9
+
+
+def test_a_lost_authority_key_starts_a_new_installation(tmp_path: Path, caplog) -> None:
+    """A new key could check nothing the old one signed, so the bundle's id is not reused: every host joins anew."""
+
+    layout = InstanceLayout.at(tmp_path)
+    old = message_hosts.prepare_message_host_trust(layout)
+    write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records(
+        [{"record": "revocations", "sequence": 7}]))
+    (layout.trust_authority_dir / "authority-key.json").unlink()
+    new = message_hosts.prepare_message_host_trust(layout)
+    assert new != old and new.startswith("ua-")
+    assert load_authority_keys(layout).installation == new
+    bundle = read_bundle(layout.trust_bootstrap_path)
+    assert bundle.installation == new and bundle.records == ()
+    assert "event=installation_authority_key_missing" in caplog.text
+
+
+def _recording_popen(monkeypatch) -> list[subprocess.Popen[bytes]]:
+    started: list[subprocess.Popen[bytes]] = []
+    real = subprocess.Popen
+
+    def popen(*args, **kwargs):
+        process = real(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(message_hosts.subprocess, "Popen", popen)
+    return started
+
+
+def test_an_authority_that_is_not_ready_in_time_is_stopped(tmp_path: Path, monkeypatch) -> None:
+    layout = InstanceLayout.at(tmp_path)
+    message_hosts.prepare_message_host_trust(layout)
+    started = _recording_popen(monkeypatch)
+    with pytest.raises(RuntimeError, match="not ready within"):
+        message_hosts.start_installation_authority(layout, [sys.executable, "-c", "import time; time.sleep(30)"], {},
+                                                   cwd=tmp_path, timeout_seconds=0.5)
+    assert started[0].poll() is not None
+
+
+def test_an_interrupted_wait_stops_the_authority(tmp_path: Path, monkeypatch) -> None:
+    layout = InstanceLayout.at(tmp_path)
+    message_hosts.prepare_message_host_trust(layout)
+    started = _recording_popen(monkeypatch)
+
+    def interrupt(*_args) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(message_hosts, "_ready", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        message_hosts.start_installation_authority(layout, [sys.executable, "-c", "import time; time.sleep(30)"], {},
+                                                   cwd=tmp_path, timeout_seconds=10)
+    assert started[0].poll() is not None

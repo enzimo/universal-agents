@@ -4,17 +4,23 @@ The message contract's hosts sign their messages with keys of their own, and an
 installation authority vouches for them (``installation_authority``,
 ``custom_transport.protocol1``). Before it starts any host, the launcher:
 
-1. keeps the installation's id (from the authority's key file or the bootstrap bundle,
-   or a new random one on the first start);
+1. keeps the installation's id, which the authority's key file holds, or picks a new
+   random one when there is no key file: on the first start, and when the key was lost,
+   since nothing the old key signed can be checked any more;
 2. creates any missing key: the authority's, and each host's it starts;
 3. writes the list of hosts the authority approves without asking anyone, with their
-   public keys (``expected-hosts.json``), and the bootstrap bundle's authority keys;
-4. starts the installation authority right after NATS and waits until the bundle carries
-   its certificate and a fresh revocations record, so every later host can join.
+   public keys (``expected-hosts.json``; empty until the launcher starts message hosts),
+   and the bootstrap bundle's authority keys;
+4. starts the installation authority once NATS and the team's message streams are ready,
+   and waits until the bundle carries its certificate and a fresh revocations record, so
+   every later host can join (a join that comes before the authority serves waits for
+   it). The authority is stopped again when it is not ready in time or the wait is
+   interrupted.
 
 Keys are files only their owner can read; each process is given only its own folder
 (``runtime_settings.instance_layout``). A process the launcher stops listing loses
-automatic approval at the next start.
+automatic approval at its next join or renewal. The trust folder and the NATS data are
+backed up together (user docs, "Message host trust").
 """
 
 from __future__ import annotations
@@ -39,14 +45,24 @@ AUTHORITY_READY_TIMEOUT_SECONDS = 60.0
 
 
 def _installation_id(layout: InstanceLayout) -> str:
-    """The installation's id: kept by the authority's key and the bundle, chosen once at random."""
+    """The installation's id: kept by the authority's key, chosen at random when there is none.
+
+    A bundle without its key is not reused: a new key under the old id could check none
+    of the records the old key signed, so every host joins a new installation instead.
+    """
 
     if (layout.trust_authority_dir / AUTHORITY_KEY_FILENAME).exists():
         return load_authority_keys(layout).installation
+    installation = f"ua-{secrets.token_hex(6)}"
     try:
-        return read_bundle(layout.trust_bootstrap_path).installation
+        previous: Optional[str] = read_bundle(layout.trust_bootstrap_path).installation
     except BootstrapError:
-        return f"ua-{secrets.token_hex(6)}"
+        previous = None
+    if previous is not None:
+        LOGGER.warning("The installation authority's key is missing; the instance starts a new installation and "
+                       "every message host joins it again. event=installation_authority_key_missing previous=%s "
+                       "installation=%s", previous, installation)
+    return installation
 
 
 def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, ExpectedHost] | None = None) -> str:
@@ -100,19 +116,40 @@ def _ready(layout: InstanceLayout, sequence_before: int) -> bool:
 
 def start_installation_authority(layout: InstanceLayout, command: list[str], env: Mapping[str, str], *, cwd: Path,
                                  timeout_seconds: float = AUTHORITY_READY_TIMEOUT_SECONDS) -> subprocess.Popen[bytes]:
-    """Start the authority and wait until it signed its records; raise ``RuntimeError`` if it does not."""
+    """Start the authority and wait until it signed its records; raise ``RuntimeError`` if it does not.
+
+    The authority is stopped (and waited for) when it is not ready in time and when the
+    wait ends any other way, Ctrl+C included, so no authority outlives a failed start.
+    """
 
     sequence_before = _revocations_sequence(layout)
     LOGGER.info("Starting the installation authority: %s", " ".join(command))
     process = subprocess.Popen(command, cwd=cwd, env=dict(env))
-    deadline = time.monotonic() + timeout_seconds
-    while not _ready(layout, sequence_before):
-        code = process.poll()
-        if code is not None:
-            raise RuntimeError(f"The installation authority exited with code {code} before it was ready.")
-        if time.monotonic() >= deadline:
-            process.terminate()
-            raise RuntimeError(f"The installation authority was not ready within {timeout_seconds:.0f} seconds.")
-        time.sleep(0.2)
+    try:
+        deadline = time.monotonic() + timeout_seconds
+        while not _ready(layout, sequence_before):
+            code = process.poll()
+            if code is not None:
+                raise RuntimeError(f"The installation authority exited with code {code} before it was ready.")
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"The installation authority was not ready within {timeout_seconds:.0f} seconds.")
+            time.sleep(0.2)
+    except BaseException:
+        _stop(process)
+        raise
     LOGGER.info("The installation authority is ready. event=installation_authority_started")
     return process
+
+
+def _stop(process: subprocess.Popen[bytes], *, timeout_seconds: float = 10.0) -> None:
+    """Stop the authority: ask, wait, and kill it when it does not stop in time."""
+
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        LOGGER.warning("The installation authority did not stop after %.0f seconds; killing it.", timeout_seconds)
+        process.kill()
+        process.wait(timeout=5.0)

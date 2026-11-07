@@ -2056,6 +2056,48 @@ def test_a_launch_stops_when_the_installation_authority_cannot_start(tmp_path: P
     assert "event=installation_authority_start_failed" in caplog.text
 
 
+def test_a_renamed_secret_never_reaches_the_installation_authority(tmp_path: Path, monkeypatch) -> None:
+    """The authority gets the NATS login only, also when a secret's variable has a configured name."""
+
+    import docker.launch_headless as lh
+
+    config_path = _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test",
+        env={"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_PASSWORD": "nats", "TEAM_WEB_CHAT_TOKEN": "web"},
+    )
+    config = GatewayInstanceConfig.load(config_path)
+    config.interactive_apps.internal_website.web_chat_token_env_var = "TEAM_WEB_CHAT_TOKEN"
+    config.save(config_path)
+    environments: list[Mapping[str, str]] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    monkeypatch.setattr(lh, "start_installation_authority",
+                        lambda _layout, _command, env, *, cwd: environments.append(env) or _StandInProcess())
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: 0)
+
+    assert lh.main() == 0
+    assert environments[0]["NATS_PASSWORD"] == "nats" and "TEAM_WEB_CHAT_TOKEN" not in environments[0]
+
+
+def test_an_interrupted_authority_start_stops_the_services_already_started(tmp_path: Path, monkeypatch) -> None:
+    """Ctrl+C while waiting for the authority stops NATS and the other services, then ends the launch."""
+
+    import docker.launch_headless as lh
+
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false"})
+    stopped: list[object] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lh, "start_installation_authority", interrupted)
+    monkeypatch.setattr(lh, "stop_external_processes", lambda processes, cleanup: stopped.append(processes))
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+    with pytest.raises(KeyboardInterrupt):
+        lh.main()
+    assert len(stopped) == 1
+
+
 def test_launch_sets_up_the_message_streams_with_the_gateway_environment_just_before_the_services(
     tmp_path: Path, monkeypatch
 ) -> None:
