@@ -148,6 +148,8 @@ class PeopleDirectorySync:
         return TeamPersonV1(
             team_id=self._team_id,
             person_id=person_id,
+            # A person keeps their opaque reference for as long as they are in the team.
+            **({"person_ref": previous.person_ref} if previous is not None else {}),
             standing=standing,
             roles=roles,
             changed_at_utc=changed_at,

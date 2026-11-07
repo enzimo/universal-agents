@@ -2186,8 +2186,10 @@ def test_the_authority_and_the_team_services_start_after_the_streams_each_ready_
     command, env = steps[2][1]
     assert command[-3:] == ["run-team-services", "--config", str(config_path)] and env["NATS_PASSWORD"] == "nats"
     assert "SECURE_TOOL_BROKER_TOKEN" not in env
-    # The team services are a host the authority approves without asking anyone.
-    assert read_expected_hosts(layout.trust_expected_hosts_path)["team-services"].roles == {"team_services"}
+    # The team services and the gateway are hosts the authority approves without asking anyone.
+    expected = read_expected_hosts(layout.trust_expected_hosts_path)
+    assert expected["team-services"].roles == {"team_services"}
+    assert expected["gateway"].roles == {"gateway"} and expected["gateway"].teams == {"team_test"}
     services = steps[3][1]["message_services"]
     assert services.processes() == (("installation authority", authority), ("team services", team_services))
     assert PROCESS_INSTALLATION_AUTHORITY == "installation_authority"

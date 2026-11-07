@@ -15,6 +15,8 @@ from custom_transport.base import (
     SubscriptionDelivery,
     TransportPublishOptions,
 )
+from assistant_gateway.message_host import GATEWAY_RUNTIME, GatewayMessageHost, prepared_gateway_host
+from runtime_settings.instance_layout import InstanceLayout
 from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
 
@@ -41,6 +43,9 @@ class NatsGatewayManagerRuntimeSettings:
     user: str | None
     password: str | None
     credentials_file: str | None
+    # The instance root, for the gateway's protocol 1 host (its keys and bootstrap bundle);
+    # None runs no host (assistant_gateway.message_host).
+    instance_root: str | None = None
 
     @classmethod
     def from_gateway_config(
@@ -73,6 +78,7 @@ class NatsGatewayManagerRuntimeSettings:
             user=transport.nats_user,
             password=transport.nats_password,
             credentials_file=transport.credentials_file,
+            instance_root=str(config.layout.root),
         )
 
 
@@ -110,10 +116,15 @@ class NatsGatewayManagerRuntime:
                 user=settings.user,
                 password=settings.password,
                 credentials_file=settings.credentials_file,
+                reply_inbox_runtime=GATEWAY_RUNTIME,
             ),
             mapper=self._mapper,
         )
         self._connected = False
+        self.message_host: GatewayMessageHost | None = (
+            prepared_gateway_host(InstanceLayout.at(settings.instance_root), settings.team_id)
+            if settings.instance_root else None
+        )
 
     @classmethod
     def from_gateway_config(
@@ -198,8 +209,13 @@ class NatsGatewayManagerRuntime:
             await self._adapter.close()
             raise
         self._connected = True
+        if self.message_host is not None:
+            # Joins in the background: the gateway's other work never waits for it.
+            self.message_host.start(self._adapter.nats_connection)
 
     async def close(self) -> None:
+        if self.message_host is not None:
+            await self.message_host.close()
         await self._adapter.close()
         self._connected = False
 
