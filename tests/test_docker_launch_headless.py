@@ -1980,10 +1980,122 @@ def _prepare_launch(tmp_path: Path, monkeypatch, *, team_id: str, env: Mapping[s
         "ensure_openshell_gateway": lambda _config, env: None,
         "ensure_openshell_sandbox": lambda _config, env: None,
         "validate_memory_graph_embedding_preflight": lambda *_args, **_kwargs: None,
+        "start_installation_authority": lambda *_args, **_kwargs: _StandInProcess(),
     }.items():
         monkeypatch.setattr(lh, name, replacement)
     monkeypatch.setattr(lh.signal, "signal", lambda *_args: None)
     return config_path
+
+
+class _StandInProcess:
+    """A started process that keeps running, for launches whose services the tests replace."""
+
+    returncode = None
+    pid = 0
+
+    def poll(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def send_signal(self, _signum: int) -> None:
+        pass
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+def test_the_installation_authority_starts_after_the_streams_and_is_watched_with_the_services(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """docker.message_hosts: the trust folder is ready, then the authority, before any host starts."""
+
+    import docker.launch_headless as lh
+    from env_secrets import PROCESS_INSTALLATION_AUTHORITY
+
+    config_path = _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_PASSWORD": "nats"}
+    )
+    steps: list[tuple[str, object]] = []
+    authority = _StandInProcess()
+
+    def start(layout, command, env, *, cwd):
+        steps.append(("authority", (layout, command, env)))
+        return authority
+
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: steps.append(("streams", env)))
+    monkeypatch.setattr(lh, "start_installation_authority", start)
+    monkeypatch.setattr(lh, "run_supervised", lambda **kwargs: steps.append(("services", kwargs)) or 0)
+
+    assert lh.main() == 0
+    assert [name for name, _ in steps] == ["streams", "authority", "services"]
+    layout, command, env = steps[1][1]
+    assert layout.trust_bootstrap_path.exists() and command[-3:] == ["run-installation-authority", "--config",
+                                                                    str(config_path)]
+    assert env["NATS_PASSWORD"] == "nats" and "SECURE_TOOL_BROKER_TOKEN" not in env
+    assert ("installation authority", authority) in steps[2][1]["external_processes"]
+    assert PROCESS_INSTALLATION_AUTHORITY == "installation_authority"
+
+
+def test_a_launch_stops_when_the_installation_authority_cannot_start(tmp_path: Path, monkeypatch, caplog) -> None:
+    import docker.launch_headless as lh
+
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false"})
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("The installation authority exited with code 1 before it was ready.")
+
+    monkeypatch.setattr(lh, "start_installation_authority", fail)
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+    assert lh.main() == 2
+    assert "event=installation_authority_start_failed" in caplog.text
+
+
+def test_a_renamed_secret_never_reaches_the_installation_authority(tmp_path: Path, monkeypatch) -> None:
+    """The authority gets the NATS login only, also when a secret's variable has a configured name."""
+
+    import docker.launch_headless as lh
+
+    config_path = _prepare_launch(
+        tmp_path, monkeypatch, team_id="team_test",
+        env={"TEAM_LOCAL_NATS_ENABLED": "false", "NATS_PASSWORD": "nats", "TEAM_WEB_CHAT_TOKEN": "web"},
+    )
+    config = GatewayInstanceConfig.load(config_path)
+    config.interactive_apps.internal_website.web_chat_token_env_var = "TEAM_WEB_CHAT_TOKEN"
+    config.save(config_path)
+    environments: list[Mapping[str, str]] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    monkeypatch.setattr(lh, "start_installation_authority",
+                        lambda _layout, _command, env, *, cwd: environments.append(env) or _StandInProcess())
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: 0)
+
+    assert lh.main() == 0
+    assert environments[0]["NATS_PASSWORD"] == "nats" and "TEAM_WEB_CHAT_TOKEN" not in environments[0]
+
+
+def test_an_interrupted_authority_start_stops_the_services_already_started(tmp_path: Path, monkeypatch) -> None:
+    """Ctrl+C while waiting for the authority stops NATS and the other services, then ends the launch."""
+
+    import docker.launch_headless as lh
+
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false"})
+    stopped: list[object] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lh, "start_installation_authority", interrupted)
+    monkeypatch.setattr(lh, "stop_external_processes", lambda processes, cleanup: stopped.append(processes))
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+    with pytest.raises(KeyboardInterrupt):
+        lh.main()
+    assert len(stopped) == 1
 
 
 def test_launch_sets_up_the_message_streams_with_the_gateway_environment_just_before_the_services(

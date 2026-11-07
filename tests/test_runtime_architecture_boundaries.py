@@ -858,6 +858,8 @@ NATS_CLIENT_MODULES = {
     "custom_transport/nats_topology.py": "creates and updates the streams",
     "custom_transport/protocol1/live.py": "protocol 1 requests, replies and served addresses",
     "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
+    "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",
+    "installation_authority/service.py": "the topology owner's buckets, and the certificates it keeps in UA1_CERTS",
 }
 
 

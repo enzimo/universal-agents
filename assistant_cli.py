@@ -960,6 +960,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--env", default=None, help="Optional .env file to load before connecting"
     )
 
+    run_authority = subparsers.add_parser(
+        "run-installation-authority",
+        help="Run the installation authority, which signs the message hosts' certificates",
+    )
+    run_authority.add_argument(
+        "--config", required=False, default=None, help="Path to instance_config.yaml"
+    )
+    run_authority.add_argument(
+        "--env", default=None, help="Optional .env file to load before connecting"
+    )
+
     run_broker = subparsers.add_parser(
         "run-secure-tool-broker", help="Run the credential-owning secure CLI broker"
     )
@@ -3950,6 +3961,14 @@ async def _run_activity_collector_service(
     await run_activity_collector(build_collector_runtime_settings(config))
 
 
+async def _run_installation_authority_service(
+    config_path: str, *, env_path: str | None = None
+) -> None:
+    from installation_authority.process import run_installation_authority
+
+    await run_installation_authority(_load_gateway_instance_config(config_path, env_path=env_path))
+
+
 async def _run_secure_tool_broker_service(
     config_path: str,
     *,
@@ -5378,6 +5397,14 @@ def main() -> None:
     if args.command == "run-activity-collector":
         asyncio.run(
             _run_activity_collector_service(
+                _ensure_instance_config_ready(args.config),
+                env_path=args.env,
+            )
+        )
+        return
+    if args.command == "run-installation-authority":
+        asyncio.run(
+            _run_installation_authority_service(
                 _ensure_instance_config_ready(args.config),
                 env_path=args.env,
             )

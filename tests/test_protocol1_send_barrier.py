@@ -16,6 +16,7 @@ from nats.errors import NoRespondersError
 
 from custom_messages.wire.frame import Receiver
 from custom_transport import send_barrier
+from custom_transport.protocol1.joining import HostProfile, join
 from custom_transport.protocol1.live import LiveHost, ServiceUnavailable, Unsupported
 from custom_transport.protocol1.state_records import StateRecords
 from custom_transport.protocol1.trust_state import PersistentTrustStore
@@ -36,7 +37,7 @@ def live_host(connection, runtime, key, epoch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", [
     "request", "reply", "unsupported", "handler_failed", "bad_reply", "invalid_frame",
-    "put", "create", "update",
+    "put", "create", "update", "join",
 ])
 async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeypatch, caplog, operation):
     entered, release = asyncio.Event(), asyncio.Event()
@@ -79,6 +80,11 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
         if operation in {"put", "create", "update"}:
             await records.put("agent", f"{TEAM}.researcher-2", {},
                               last_revision={"put": None, "create": 0, "update": 1}[operation])
+        elif operation == "join":
+            with pytest.raises(ServiceUnavailable):
+                await join(connection, worker.identity.keys, worker.trust,
+                           HostProfile("worker-host-1", (TEAM,), ("worker_host",), ("researcher",), 4),
+                           clock=lambda: fixtures.NOW, deadline_seconds=0)
         elif operation == "request":
             with pytest.raises(ServiceUnavailable):
                 await worker.request("sessions.close", body, AUDIENCE, team=TEAM)
@@ -101,7 +107,7 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
     assert sum(write.await_count for write in writes) == 1
 
     fail = True
-    if operation in {"put", "create", "update", "request"}:
+    if operation in {"put", "create", "update", "request", "join"}:
         with pytest.raises(OSError, match="disk flush failed"):
             await send()
     else:

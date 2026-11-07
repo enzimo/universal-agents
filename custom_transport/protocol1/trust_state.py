@@ -147,6 +147,15 @@ class PersistentTrustStore:
                 self._save()
         return added
 
+    def kept_revocations(self, installation: str) -> list[Record]:
+        """The revocations records this store verified and keeps for ``installation``, oldest first.
+
+        The last is the one the store holds. The installation authority signs its next
+        record from the newest one it verified, these included (``installation_authority``).
+        """
+
+        return [dict(record) for record in self._kept.get(installation, [])]
+
     def _add_kept(self, record: Record, now: datetime) -> None:
         try:
             self.store.add(_encoded(record), now=now)
