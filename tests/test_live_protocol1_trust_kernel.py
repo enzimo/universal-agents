@@ -89,8 +89,8 @@ async def test_a_host_gets_a_session_and_then_signs_for_its_agent(broker: str) -
         session = reply.raw["body"]["session"]
         assert worker.trust.add(json.dumps(session).encode(), now=fixtures.NOW)
         worker.identity = worker.identity.with_session("researcher-3", "s-researcher-3-2")
-        # Now it signs for researcher-3. The team services hold the session too (they read it
-        # from UA1_CERTS), so they verify the frame and reach the handler, which does not serve it.
+        # The identity can now sign for researcher-3, but session lifecycle requests
+        # belong to its host. Holding a session does not let an agent renew it.
         assert services.trust.add(json.dumps(session).encode(), now=fixtures.NOW)
         progress = worker.sign("sessions.renew", {"request_id": "renew_1", "session": "s-researcher-3-2"}, TO_SERVICES,
                                team=TEAM, agent="researcher-3")
@@ -98,7 +98,13 @@ async def test_a_host_gets_a_session_and_then_signs_for_its_agent(broker: str) -
         with pytest.raises(RequestRefused) as refused:
             await worker.request("sessions.renew", {"request_id": "renew_2", "session": "s-researcher-3-2"}, TO_SERVICES,
                                  team=TEAM, agent="researcher-3")
-        assert refused.value.code == "unsupported"
+        assert refused.value.code == "wrong_issuer"
+        # The host-signed request passes verification and reaches the handler,
+        # which serves only sessions.open in this test.
+        with pytest.raises(RequestRefused) as host_refused:
+            await worker.request("sessions.renew", {"request_id": "renew_3", "session": "s-researcher-3-2"},
+                                 TO_SERVICES, team=TEAM)
+        assert host_refused.value.code == "unsupported"
 
 
 @pytest.mark.asyncio

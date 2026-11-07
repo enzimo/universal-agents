@@ -2217,7 +2217,10 @@ class SqliteConversationRepository(_RelationalConversationRepository):
 
 
     def _connect(self) -> sqlite3.Connection:
-        return connect_sqlite(self._db_path, logger=self._logger, row_factory=sqlite3.Row)
+        # The task's conversation turns, written several times per task; in an
+        # agent process they are flushed before its next send
+        # (storage.sqlite_connection, "Flushing before sending").
+        return connect_sqlite(self._db_path, logger=self._logger, row_factory=sqlite3.Row, defer_flush=True)
 
 
 class PostgresConversationRepository(_RelationalConversationRepository):
