@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import AsyncIterator, Iterable
 
 import nats
-from nats.js.errors import NotFoundError
+from nats.js.errors import NoKeysError, NotFoundError
 
 from custom_agents.agent_host import AgentProcessHost, configure_process_host, lead_host_profile
 from custom_agents.relayed_task_controls import RELAYED_HANDLERS
@@ -44,21 +44,25 @@ async def _remove_what_the_team_left(nc, installation: str, team: str) -> None:
     """Remove what this test's installation and team wrote on the shared live server, by exact keys and names.
 
     The ``UA1_*`` buckets are shared by every run on the server, so they stay; only the keys under this
-    test's own installation and team ids go, and the team's dead-letter stream and its other streams.
+    test's own installation and team ids go, and the team's private buckets and streams.
     Host records (``UA1_HOSTS``, keyed by host id alone, which other runs share) expire on their own
     within a minute.
     """
 
     jetstream = nc.jetstream()
     owned = {"UA1_CERTS": (f"host.{installation}.>", f"revocations.{installation}", f"session.{installation}.{team}.>"),
-             "UA1_AGENTS": (f"{team}.>",), "UA1_PLACEMENT": (f"{team}.>",), "UA1_TEAM_VIEW": (f"{team}.>",),
-             "UA1_BLOCK_LIST": (team,), "UA1_LOCKS": (f"team_services.{team}",)}
-    for bucket, keys in owned.items():
-        for key in keys:
-            with contextlib.suppress(NotFoundError):
-                await jetstream.purge_stream(f"KV_{bucket}", subject=f"$KV.{bucket}.{key}")
-    with contextlib.suppress(NotFoundError):
-        await jetstream.delete_stream(f"UA1_DLQ_{team}")
+             "UA1_AGENTS": (f"{team}.>",), "UA1_PLACEMENT": (f"{team}.>",),
+             "UA1_LOCKS": (f"team_services.{team}",)}
+    for name, filters in owned.items():
+        with contextlib.suppress(NotFoundError, NoKeysError):
+            bucket = await jetstream.key_value(name)
+            # The contract forbids purging bucket streams. Delete only this
+            # test's keys with ordinary markers, which keep other teams intact.
+            for key in await bucket.keys(filters=list(filters)):
+                await bucket.delete(key)
+    for stream in (f"KV_UA1_TEAM_VIEW_{team}", f"KV_UA1_BLOCK_LIST_{team}", f"UA1_DLQ_{team}"):
+        with contextlib.suppress(NotFoundError):
+            await jetstream.delete_stream(stream)
     await delete_team_streams(team)
 
 
