@@ -98,6 +98,8 @@ SESSION_REACH = timedelta(seconds=STATE_RECORDS["agent_session"].max_lifetime_se
 # Runtime ids that would read as another installation's sender slot (x-<installation>)
 # or a system id such as the installation scope (_install); transport.yaml defines both.
 RESERVED_RUNTIME_PREFIXES = (PEER_SENDER_SLOT.split("{", 1)[0], INSTALLATION_SCOPE[:1])
+
+
 # Where each trust record's body says when it ends; the record's own expiry, when it
 # has one, must say the same, so the record has one validity window.
 BODY_END = {"certificate": "expires_at", "agent_session": "ends_at", "agreement": "expires_at", "revocations": "expires_at"}
@@ -111,6 +113,21 @@ WRITER_AUTHORITY = "authority"
 # record, so its installation traffic (join and renewal replies) is accepted without a
 # current record, and a host whose record expired can still renew and reconnect.
 AUTHORITY_HOST_ROLE = "installation_authority"
+
+
+def kept_for(record: str) -> Optional[timedelta]:
+    """How long after its newest version was written a receiver keeps a trust record; ``None`` for never.
+
+    README "Trust over time", "Forgetting": the record's ``max_lifetime_seconds`` plus the
+    replay retention and the clock tolerance, and for a certificate an agent session's
+    reach more. The revocations record is never forgotten. ``TrustStore.forget`` uses
+    this, and so do writers, which delete a record from ``UA1_CERTS`` once receivers forget it.
+    """
+
+    lifetime = STATE_RECORDS[record].max_lifetime_seconds
+    if record == REVOCATIONS or lifetime is None:
+        return None
+    return timedelta(seconds=lifetime) + RETENTION + SKEW + (SESSION_REACH if record == CERTIFICATE else timedelta())
 
 
 def within(start: datetime, end: datetime, moment: datetime) -> bool:
@@ -721,10 +738,9 @@ class TrustStore:
         newer one replaces it.
         """
 
-        lifetime = STATE_RECORDS[record].max_lifetime_seconds
-        if record == REVOCATIONS or lifetime is None or self._forgotten_at is None:
+        kept = kept_for(record)
+        if kept is None or self._forgotten_at is None:
             return False
-        kept = timedelta(seconds=lifetime) + RETENTION + SKEW + (SESSION_REACH if record == CERTIFICATE else timedelta())
         return self._forgotten_at - issued_at >= kept
 
     def _revoked_certificate(self, record: str, entry: Any) -> bool:

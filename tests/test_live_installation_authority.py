@@ -6,15 +6,17 @@ contract's README "Installation traffic" and "Trust over time".
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 from contextlib import AsyncExitStack
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import nats
 import pytest
-from nats.js.errors import APIError
+from nats.js.errors import APIError, KeyNotFoundError, NotFoundError
 from nats.js.api import StorageType, StreamConfig
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -24,13 +26,15 @@ from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_s
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
 from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_messages.wire.models import Frame
-from custom_messages.wire.trust import sign_state
+from custom_messages.wire.refusals import FrameRefused
+from custom_messages.wire.trust import kept_for, sign_state
+from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1 import host_keys, joining
 from custom_transport.protocol1.contract_files import transport
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import HostProfile, JoinRefused, join
-from custom_transport.protocol1.live import LiveHost, answer_headers, encode, raise_if_refused, utc_now
+from custom_transport.protocol1.live import LiveHost, RequestRefused, answer_headers, encode, raise_if_refused, utc_now
 from custom_transport.protocol1.replay import LiveReplayRecord
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from docker import message_hosts
@@ -38,7 +42,10 @@ from env_secrets import PROCESS_INSTALLATION_AUTHORITY, environment_for
 from installation_authority.expected_hosts import ExpectedHost, write_expected_hosts
 from installation_authority.service import (
     AUTHORITY_RUNTIME,
+    CERTIFICATE_LIFETIME,
     CERTIFICATES_BUCKET,
+    MAX_EPOCH,
+    REVOCATIONS_LIFETIME,
     InstallationAuthority,
     RevocationsUnverified,
     certificate_key,
@@ -60,17 +67,39 @@ def broker(tmp_path: Path):
         yield url
 
 
-def prepare(layout: InstanceLayout) -> host_keys.HostKeys:
-    """What the launcher does before it starts the authority: keys, the expected hosts and the bundle."""
+def prepare(layout: InstanceLayout, *others: HostProfile) -> host_keys.HostKeys:
+    """What the launcher does before it starts the authority: keys, the expected hosts and the bundle.
+
+    It lists ``WORKER`` and ``others`` and returns ``WORKER``'s keys.
+    """
 
     authority, _ = host_keys.ensure_authority_keys(layout, INSTALLATION)
     host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
-    worker, _ = host_keys.ensure_host_keys(layout, WORKER.runtime)
-    write_expected_hosts(layout.trust_expected_hosts_path, {WORKER.runtime: ExpectedHost(
-        WORKER.runtime, worker.key_id, worker.public_key_text, frozenset(WORKER.roles), frozenset(WORKER.teams),
-        frozenset(WORKER.agent_types), WORKER.session_limit)})
+    list_hosts(layout, WORKER, *others)
     write_bundle(layout.trust_bootstrap_path, BootstrapBundle(INSTALLATION, ((authority.key_id, authority.public_key_text),)))
-    return worker
+    return host_keys.load_host_keys(layout, WORKER.runtime)
+
+
+def list_hosts(layout: InstanceLayout, *profiles: HostProfile) -> None:
+    """The launcher's list: each profile's runtime with its key, allowed what the profile asks for."""
+
+    hosts = {}
+    for profile in profiles:
+        keys, _ = host_keys.ensure_host_keys(layout, profile.runtime)
+        hosts[profile.runtime] = ExpectedHost(profile.runtime, keys.key_id, keys.public_key_text, frozenset(profile.roles),
+                                              frozenset(profile.teams), frozenset(profile.agent_types),
+                                              profile.session_limit)
+    write_expected_hosts(layout.trust_expected_hosts_path, hosts)
+
+
+class Clock:
+    """A clock the test moves: the authority's and the hosts' wall clock."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
 
 
 async def connect(stack: AsyncExitStack, url: str, runtime: str):
@@ -79,15 +108,47 @@ async def connect(stack: AsyncExitStack, url: str, runtime: str):
     return connection
 
 
-async def start_authority(stack: AsyncExitStack, url: str, layout: InstanceLayout) -> InstallationAuthority:
+async def start_authority(stack: AsyncExitStack, url: str, layout: InstanceLayout, **options) -> InstallationAuthority:
     authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
-                                      host_keys.load_host_keys(layout, AUTHORITY_RUNTIME))
+                                      host_keys.load_host_keys(layout, AUTHORITY_RUNTIME), **options)
     await authority.start(await connect(stack, url, AUTHORITY_RUNTIME), teams=[TEAM])
     return authority
 
 
-def host_trust(layout: InstanceLayout, runtime: str) -> PersistentTrustStore:
-    return PersistentTrustStore.open(read_bundle(layout.trust_bootstrap_path), layout.host_trust_dir(runtime), utc_now())
+async def stop_authority(authority: InstallationAuthority) -> None:
+    """Stop answering, as a stopped process does: a restarted authority is then the only one serving."""
+
+    assert authority.live is not None
+    await authority.live.nc.close()
+
+
+def host_trust(layout: InstanceLayout, runtime: str, now: datetime | None = None) -> PersistentTrustStore:
+    return PersistentTrustStore.open(read_bundle(layout.trust_bootstrap_path), layout.host_trust_dir(runtime),
+                                     now or utc_now())
+
+
+async def renew(worker: LiveHost, renew_id: str, *, profile: str = "", contract: str = CONTRACT_SHA256,
+                keep: bool = True, **body: object) -> dict:
+    """Renew ``worker``'s certificate and return the reply's body; ``keep`` takes the new certificate, as a host does.
+
+    ``keep=False`` is a reply the host never got: it still signs with its old certificate.
+    """
+
+    current = worker.identity.certificate
+    reply = await worker.request("host.renew", {
+        "renew_id": renew_id, "certificate_id": current.certificate_id, "membership_epoch": current.membership_epoch,
+        "profile_sha256": profile or WORKER.digest(), "contract_sha256": contract, **body}, AUTHORITY_AUDIENCE,
+        team="_install")
+    answer = reply.raw["body"]
+    validator(body_schema_file("host.renew.reply")).validate(answer)
+    if keep and answer["outcome"] == "ok":
+        now = worker.clock()
+        worker.trust.add(json.dumps(answer["certificate"]).encode(), now=now)
+        renewed = worker.trust.store.host_certificate(INSTALLATION, current.runtime,
+                                                      answer["certificate"]["body"]["membership_epoch"])
+        assert renewed is not None
+        worker.identity = worker.identity.with_certificate(renewed)
+    return answer
 
 
 def forged(document: dict) -> dict:
@@ -135,7 +196,10 @@ async def test_authority_creates_per_team_buckets_with_the_contracts_write_restr
             await js.publish(f"$KV.UA1_AGENTS.{TEAM}.agent2", b"erase all", headers={"Nats-Rollup": "all"})
         await authority.ensure_topology(iter(teams))
         assert (await bucket.get(f"{TEAM}.agent1")).value == b"kept"
-        assert (await js.stream_info(f"UA1_DLQ_{TEAM}")).config.max_msgs_per_subject == 1
+        assert (await js.stream_info("KV_UA1_CERTS")).config.num_replicas == 1
+        # Each team's dead-letter stream comes with phase 3's dead letters (plan decision 71), not now.
+        with pytest.raises(NotFoundError):
+            await js.stream_info(f"UA1_DLQ_{TEAM}")
 
 
 @pytest.mark.asyncio
@@ -178,24 +242,101 @@ async def test_a_renewal_raises_the_epoch_and_the_authority_keeps_its_records_ac
         trust = host_trust(layout, WORKER.runtime)
         certificate = await join(worker_nc, worker_keys, trust, WORKER)
         worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
-        reply = await worker.request("host.renew", {
-            "renew_id": "renew-1", "certificate_id": certificate.certificate_id, "membership_epoch": 1,
-            "profile_sha256": WORKER.digest(), "contract_sha256": CONTRACT_SHA256},
-            {"installation": INSTALLATION, "team": "_install", "target": "installation_service", "id": "authority"},
-            team="_install")
-        renewed = reply.raw["body"]["certificate"]["body"]
+        renewed = (await renew(worker, "renew-1"))["certificate"]["body"]
         assert renewed["membership_epoch"] == 2 and renewed["replaces"] == certificate.certificate_id
+        assert renewed["profile_sha256"] == WORKER.digest()
         sequence = first._revocations["sequence"]
         own_epoch = first._own["body"]["membership_epoch"]
+        await stop_authority(first)
         # A restarted authority keeps its own certificate and signs revocations with a higher sequence.
         second = await start_authority(stack, broker, layout)
         assert second._own["body"]["membership_epoch"] == own_epoch
         assert second._revocations["sequence"] > sequence
-        js = worker_nc.jetstream()
-        hosts = await js.stream_info("KV_UA1_HOSTS")
+        # It still recognises the host's certificate, which it read back from the bucket: the host renews again.
+        again = (await renew(worker, "renew-2"))["certificate"]["body"]
+        assert again["membership_epoch"] == 3 and again["replaces"] == renewed["certificate_id"]
+        hosts = await worker_nc.jetstream().stream_info("KV_UA1_HOSTS")
         assert hosts.config.max_age == transport()["key_value"]["UA1_HOSTS"]["per_key_ttl_seconds"]
-        dead_letters = await js.consumer_info(f"UA1_DLQ_{TEAM}", f"dlq~{TEAM}")
-        assert dead_letters.config.filter_subject == f"ua.v1.{TEAM}.*.dlq.notice.*"
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_retried_after_a_lost_reply_gets_the_same_certificate(broker: str, tmp_path: Path) -> None:
+    """README "Renewing", "Stored outcomes": the retry keeps its renewal id and gets the stored answer, also after a
+    restart; a new renewal id is a new renewal, which replaces the certificate that signs it."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        first = await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        certificate = await join(worker_nc, worker_keys, trust, WORKER)
+        worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
+        lost = (await renew(worker, "renew-lost", keep=False))["certificate"]
+        assert lost["body"]["membership_epoch"] == 2 and lost["body"]["replaces"] == certificate.certificate_id
+        # Still signed by certificate 1, within its overlap: the same certificate, not another one.
+        assert (await renew(worker, "renew-lost", keep=False))["certificate"] == lost
+        # A new renewal replaces the certificate that signs it, never the newest stored one.
+        other = (await renew(worker, "renew-other", keep=False))["certificate"]["body"]
+        assert other["membership_epoch"] == 3 and other["replaces"] == certificate.certificate_id
+        await stop_authority(first)
+        await start_authority(stack, broker, layout)
+        assert (await renew(worker, "renew-lost"))["certificate"] == lost
+        assert worker.identity.certificate.membership_epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_a_renewed_certificate_states_the_profile_it_grants(broker: str, tmp_path: Path) -> None:
+    """README "Identifiers": a renewal that asks for a wider profile keeps its grants, and its certificate says so."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    wider = HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, ("analyst", "researcher"), 8)
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        worker = LiveHost(worker_nc, HostIdentity(worker_keys, await join(worker_nc, worker_keys, trust, WORKER)), trust)
+        body = (await renew(worker, "renew-wider", profile=wider.digest()))["certificate"]["body"]
+        assert body["profile_sha256"] == WORKER.digest() and body["agent_types"] == ["researcher"]
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_host_cannot_renew(broker: str, tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        certificate = await join(worker_nc, worker_keys, trust, WORKER)
+        worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
+        revoked = authority.revocations_record(sequence=authority._revocations["sequence"] + 1, revocation_epoch=2,
+                                               entries=[revocation_entry(certificate)], issued=utc_now())
+        await put_record(await connect(stack, broker, "writer"), revocations_key(INSTALLATION), revoked)
+        await authority._sign_revocations(utc_now())
+        with pytest.raises(RequestRefused) as refused:
+            await renew(worker, "renew-revoked")
+        assert refused.value.code == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_a_host_the_list_no_longer_covers_cannot_renew_its_grants(broker: str, tmp_path: Path) -> None:
+    """The launcher's list decides at each renewal too: a delisted or narrowed host joins again instead."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        worker = LiveHost(worker_nc, HostIdentity(worker_keys, await join(worker_nc, worker_keys, trust, WORKER)), trust)
+        write_expected_hosts(layout.trust_expected_hosts_path, {})
+        assert (await renew(worker, "renew-delisted"))["outcome"] == "not_allowed"
+        list_hosts(layout, HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, (), WORKER.session_limit))
+        assert (await renew(worker, "renew-narrowed"))["outcome"] == "not_allowed"
+        list_hosts(layout, WORKER)
+        assert (await renew(worker, "renew-listed"))["outcome"] == "ok"
 
 
 AUTHORITY_AUDIENCE = {"installation": INSTALLATION, "team": "_install", "target": "installation_service",
@@ -336,6 +477,19 @@ async def test_a_renewal_that_gives_up_every_agent_is_answered_on_any_contract(b
         same = await renew("renew-gives-up-2", giving_up, CONTRACT_SHA256)
         assert same["outcome"] == "ok" and same["certificate"]["body"]["agent_types"] == []
         assert same["certificate"]["body"]["membership_epoch"] == 3
+        # And it narrows a certificate that still holds agents.
+        rejoined = await join(worker_nc, worker_keys, trust, WORKER)
+        assert rejoined.agent_types == frozenset({"researcher"}) and rejoined.membership_epoch == 4
+        worker.identity = worker.identity.with_certificate(rejoined)
+        narrowed = await renew("renew-gives-up-3", giving_up, CONTRACT_SHA256)
+        assert (narrowed["certificate"]["body"]["agent_types"], narrowed["certificate"]["body"]["session_limit"]) == ([], 0)
+        # A give-up of another contract that this revision cannot read (it names another certificate) is turned away.
+        current = worker.identity.certificate
+        unreadable = await worker.request("host.renew", {
+            "renew_id": "renew-gives-up-unreadable", "certificate_id": certificate.certificate_id,
+            "membership_epoch": current.membership_epoch, "profile_sha256": giving_up, "contract_sha256": OTHER_CONTRACT},
+            AUTHORITY_AUDIENCE, team="_install")
+        assert_mismatch("host.renew", unreadable.raw["body"])
 
 
 @pytest.mark.asyncio
@@ -422,12 +576,12 @@ async def test_a_join_never_gets_back_a_certificate_the_authority_did_not_sign(b
         own_key = certificate_key(INSTALLATION, AUTHORITY_RUNTIME, authority._own["body"]["membership_epoch"])
         forged_own = forged(await stored_record(nc, own_key))
         await put_record(nc, own_key, forged_own)
-        # A restarted authority does not take a forged certificate of its own either.
+        await stop_authority(authority)
+        # A restarted authority does not take a forged certificate of its own either: it keeps the one it signed,
+        # from the bundle, and writes it over the forged one.
         restarted = await start_authority(stack, broker, layout)
-        assert restarted._own != forged_own
-        assert restarted._own["body"]["membership_epoch"] == authority._own["body"]["membership_epoch"] + 1
-        assert await stored_record(nc, certificate_key(INSTALLATION, AUTHORITY_RUNTIME,
-                                                       restarted._own["body"]["membership_epoch"])) == restarted._own
+        assert restarted._own == authority._own
+        assert await stored_record(nc, own_key) == authority._own
 
 
 @pytest.mark.asyncio
@@ -482,3 +636,222 @@ async def test_the_launcher_starts_the_real_authority_and_a_listed_host_joins(br
     finally:
         process.terminate()
         assert process.wait(timeout=10) == 0
+
+
+@pytest.mark.asyncio
+async def test_each_join_the_launchers_list_does_not_cover_is_denied_with_its_reason(broker: str, tmp_path: Path) -> None:
+    """Another key for a listed runtime, another team, agent type, more sessions, another connection class."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    other_keys, _ = host_keys.ensure_host_keys(InstanceLayout.at(tmp_path / "elsewhere"), WORKER.runtime)
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        cases = [
+            (other_keys, WORKER, "key_mismatch"),
+            (worker_keys, HostProfile(WORKER.runtime, (TEAM, "team_two"), WORKER.roles, WORKER.agent_types, 4), "team_not_allowed"),
+            (worker_keys, HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, ("analyst",), 4), "role_not_allowed"),
+            (worker_keys, HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, WORKER.agent_types, 5), "over_limit"),
+            (worker_keys, HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, WORKER.agent_types, 4, "intermittent"),
+             "not_approved"),
+            (worker_keys, HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, WORKER.agent_types, 4,
+                                      deployment="third_party"), "not_approved"),
+        ]
+        for number, (keys, profile, reason) in enumerate(cases):
+            frame = joining.sign_join(keys, INSTALLATION, profile, join_id=f"join-case-{number}", issued=utc_now())
+            body = await send_join(worker_nc, frame, trust)
+            validator(body_schema_file("host.join.reply")).validate(body)
+            assert (body["outcome"], body.get("reason")) == ("denied", reason), profile
+        # Nothing was issued for any of them; the listed host still joins as listed.
+        assert (await join(worker_nc, worker_keys, trust, WORKER)).membership_epoch == 1
+
+
+@pytest.mark.asyncio
+async def test_the_authority_keeps_its_records_current_by_the_wall_clock(broker: str, tmp_path: Path) -> None:
+    """Plan 13B.3: the revocations record is signed again when six hours old, also after the machine slept past its
+    end, and the authority renews its own certificate at two thirds of its life and signs with the new one. A host
+    that read the bundle before that renewal still joins: it reads the bundle again for the new certificate."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    started = utc_now()
+    clock = Clock(started)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout, clock=clock)
+        own, revocations = authority._own, authority._revocations
+        lifetime = parse_timestamp(own["body"]["expires_at"]) - parse_timestamp(own["body"]["issued_at"])
+        assert lifetime == CERTIFICATE_LIFETIME
+        assert parse_timestamp(revocations["body"]["expires_at"]) - parse_timestamp(revocations["issued_at"]) \
+            == REVOCATIONS_LIFETIME
+        early_trust = host_trust(layout, WORKER.runtime, clock())
+        clock.now = started + timedelta(hours=5)
+        await authority.upkeep(clock())
+        assert authority._revocations == revocations
+        # The machine slept through the record's end: the first check after waking signs it again.
+        clock.now = started + timedelta(hours=30)
+        await authority.upkeep(clock())
+        assert authority._revocations["sequence"] > revocations["sequence"]
+        assert parse_timestamp(authority._revocations["issued_at"]) - parse_timestamp(revocations["issued_at"]) \
+            >= timedelta(hours=29)
+        assert authority._own == own
+        clock.now = started + timedelta(days=20, minutes=1)
+        await authority.upkeep(clock())
+        renewed = authority._own["body"]
+        assert renewed["membership_epoch"] == own["body"]["membership_epoch"] + 1
+        assert renewed["replaces"] == own["body"]["certificate_id"]
+        assert authority.live is not None and authority.live.identity.certificate.membership_epoch == renewed["membership_epoch"]
+        assert authority._own in read_bundle(layout.trust_bootstrap_path).records
+        reader = await connect(stack, broker, "reader")
+        assert await stored_record(reader, authority._own["key"]) == authority._own
+
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        with pytest.raises(FrameRefused) as refused:
+            await join(worker_nc, worker_keys, early_trust, WORKER, clock=clock)
+        assert refused.value.code == "unknown_key"
+        certificate = await join(worker_nc, worker_keys, early_trust, WORKER, clock=clock,
+                                 bundle_path=layout.trust_bootstrap_path)
+        assert certificate.membership_epoch == 1
+
+
+@pytest.mark.asyncio
+async def test_a_host_gets_its_certificate_back_until_its_last_third(broker: str, tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    started = utc_now()
+    clock = Clock(started)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout, clock=clock)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        assert (await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime, clock()), WORKER,
+                           clock=clock)).membership_epoch == 1
+        clock.now = started + timedelta(days=19)
+        await authority.upkeep(clock())  # as it does every minute: its revocations record stays current
+        assert (await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime, clock()), WORKER,
+                           clock=clock)).membership_epoch == 1
+        clock.now = started + timedelta(days=21)
+        await authority.upkeep(clock())
+        assert (await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime, clock()), WORKER,
+                           clock=clock)).membership_epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_the_authority_starts_again_after_its_certificates_bucket_was_lost(broker: str, tmp_path: Path) -> None:
+    """The trust folder survived the NATS data: the authority writes its certificate back, and no epoch names two
+    certificates, so a host that holds certificate 1 is never given another certificate 1."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        first = await start_authority(stack, broker, layout)
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        before = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        await stop_authority(first)
+        await worker_nc.jetstream().delete_stream("KV_UA1_CERTS")
+        second = await start_authority(stack, broker, layout)
+        assert second._own == first._own
+        assert await stored_record(worker_nc, first._own["key"]) == first._own
+        after = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        assert after.membership_epoch == before.membership_epoch + 1
+
+
+@pytest.mark.asyncio
+async def test_the_authoritys_kept_revocations_record_outlives_a_lost_bundle(broker: str, tmp_path: Path) -> None:
+    """An older record the authority genuinely signed, written back to the bucket after the bundle was rebuilt,
+    does not lift a revocation: the authority signs the next record from the copy it keeps."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout)
+        writer = await connect(stack, broker, "writer")
+        oldest = authority._revocations
+        certificate = await join(await connect(stack, broker, WORKER.runtime), worker_keys,
+                                 host_trust(layout, WORKER.runtime), WORKER)
+        revoked = authority.revocations_record(sequence=oldest["sequence"] + 1, revocation_epoch=2,
+                                               entries=[revocation_entry(certificate)], issued=utc_now())
+        await put_record(writer, revocations_key(INSTALLATION), revoked)
+        signed = await authority._sign_revocations(utc_now())
+        await stop_authority(authority)
+        bundle = read_bundle(layout.trust_bootstrap_path)
+        write_bundle(layout.trust_bootstrap_path, bundle.with_records(()))
+        await put_record(writer, revocations_key(INSTALLATION), oldest)
+        restarted = await start_authority(stack, broker, layout)
+        assert restarted._revocations["body"]["entries"] == signed["body"]["entries"]
+        assert restarted._revocations["body"]["revocation_epoch"] == 2
+        assert await stored_record(writer, revocations_key(INSTALLATION)) == restarted._revocations
+
+
+@pytest.mark.asyncio
+async def test_old_certificates_are_deleted_once_forgotten_and_revoked_ones_kept(broker: str, tmp_path: Path) -> None:
+    other = HostProfile("worker-host-2", (TEAM,), ("worker_host",), ("researcher",), 1)
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout, other)
+    started = utc_now()
+    clock = Clock(started)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout, clock=clock)
+        reader = await connect(stack, broker, "reader")
+        kept_certificate = await join(await connect(stack, broker, WORKER.runtime), worker_keys,
+                                      host_trust(layout, WORKER.runtime), WORKER, clock=clock)
+        other_keys = host_keys.load_host_keys(layout, other.runtime)
+        revoked_certificate = await join(await connect(stack, broker, other.runtime), other_keys,
+                                         host_trust(layout, other.runtime), other, clock=clock)
+        revoked = authority.revocations_record(sequence=authority._revocations["sequence"] + 1, revocation_epoch=2,
+                                               entries=[revocation_entry(revoked_certificate)], issued=clock())
+        await put_record(reader, revocations_key(INSTALLATION), revoked)
+        await authority._sign_revocations(clock())
+        first_own = authority._own
+        forgotten_after = kept_for("certificate")
+        assert forgotten_after is not None
+        clock.now = started + forgotten_after + timedelta(days=1)
+        await authority.upkeep(clock())
+        bucket = await reader.jetstream().key_value(CERTIFICATES_BUCKET)
+        for gone in (certificate_key(INSTALLATION, WORKER.runtime, kept_certificate.membership_epoch), first_own["key"]):
+            with pytest.raises(KeyNotFoundError):
+                await bucket.get(gone)
+        assert (await stored_record(reader, certificate_key(INSTALLATION, other.runtime, 1)))["body"]["runtime"] \
+            == other.runtime
+        assert await stored_record(reader, authority._own["key"]) == authority._own
+
+
+@pytest.mark.asyncio
+async def test_a_damaged_or_forged_newer_certificate_neither_returns_a_replaced_one_nor_blocks_joins(
+        broker: str, tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    wider = HostProfile(WORKER.runtime, WORKER.teams, WORKER.roles, ("analyst", "researcher"), WORKER.session_limit)
+    async with AsyncExitStack() as stack:
+        await start_authority(stack, broker, layout)
+        writer = await connect(stack, broker, "writer")
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        first = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        list_hosts(layout, wider)
+        second = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)
+        assert second.membership_epoch == 2
+        second_key = certificate_key(INSTALLATION, WORKER.runtime, 2)
+        await put_record(writer, second_key, forged(await stored_record(writer, second_key)))
+        # A key at the highest epoch the contract allows, written by any process with the shared login.
+        await put_record(writer, certificate_key(INSTALLATION, WORKER.runtime, MAX_EPOCH),
+                         forged(await stored_record(writer, certificate_key(INSTALLATION, WORKER.runtime, 1))))
+        # Asking for certificate 1's grants again: not certificate 1, which certificate 2 replaced, but a new one.
+        again = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        assert again.membership_epoch == 3 and again.certificate_id != first.certificate_id
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_joins_before_the_authority_serves_waits_for_it(broker: str, tmp_path: Path) -> None:
+    """The join waits through "no responders"; the bundle it opened held no authority certificate yet, so it reads
+    the bundle again for the certificate of the reply."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    worker_keys = prepare(layout)
+    async with AsyncExitStack() as stack:
+        worker_nc = await connect(stack, broker, WORKER.runtime)
+        trust = host_trust(layout, WORKER.runtime)
+        waiting = asyncio.create_task(join(worker_nc, worker_keys, trust, WORKER, bundle_path=layout.trust_bootstrap_path))
+        await asyncio.sleep(1.5)
+        assert not waiting.done()
+        await start_authority(stack, broker, layout)
+        assert (await asyncio.wait_for(waiting, timeout=30)).membership_epoch == 1
