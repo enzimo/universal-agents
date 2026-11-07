@@ -31,6 +31,12 @@
       "installation": "install_example",
       "holder": "team-services-1"
     },
+    "test-services-key-2": {
+      "seed": "wsQPgX7k_-mVij70ytCdJCDVcC7BG6Mb-Ai9CER4SqE",
+      "public_key": "eSHNHDIy-ceQ58Tsy0iM5Z4SFbNqLDFW8z-aom6TqlQ",
+      "installation": "install_example",
+      "holder": "team-services-2"
+    },
     "test-peer-authority-key-1": {
       "seed": "oaKjpKWmp6ipqqusra6vsLGys7S1tre4ubq7vL2-v8A",
       "public_key": "C0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE",
