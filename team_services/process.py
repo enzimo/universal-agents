@@ -21,8 +21,10 @@ import asyncio
 import contextlib
 import logging
 import signal
-from typing import Optional
+from datetime import datetime
+from typing import Callable, Mapping, Optional, Sequence
 
+from access_control.people_directory import PeopleDirectory
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.frame import Receiver
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
@@ -31,8 +33,11 @@ from custom_transport.protocol1.joining import HostProfile
 from custom_transport.protocol1.live import LiveHost
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
+from storage.access_repository import AccessRepository
+from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
-from team_services.service import TeamServices
+from team_services.memory import MemoryOperations
+from team_services.service import Handler, TeamServices
 from team_services.serving import mark_serving
 from team_services.sessions import SessionService
 
@@ -54,8 +59,12 @@ def transport_config(config: GatewayInstanceConfig) -> NatsTransportConfig:
                                credentials_file=transport.credentials_file, reply_inbox_runtime=TEAM_SERVICES_RUNTIME)
 
 
-async def serve_team(host: MessageHost, team: str, stop: asyncio.Event) -> None:
-    """Hold the lock, serve the team's address and keep the host and the lock up until ``stop``."""
+async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
+                     families: Sequence[Mapping[str, Handler]] = ()) -> None:
+    """Hold the lock, serve the team's address and keep the host and the lock up until ``stop``.
+
+    ``families`` are the handlers of people's commands (``team_operations``).
+    """
 
     # Every instance writes the same host record, so it is written only by the one that holds the
     # lock and serves (plan 13B.4): a standby never looks like the serving instance, and the
@@ -65,7 +74,7 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event) -> None:
     if not await lock.acquire(stop):
         return
     try:
-        await _serve_holding_lock(host, live, lock, team, stop)
+        await _serve_holding_lock(host, live, lock, team, stop, families)
     finally:
         # Released whatever happened while serving or stopping, so the next instance (a restart of every
         # service) takes over at once instead of waiting out the lease; an error raised there is still raised.
@@ -73,14 +82,14 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event) -> None:
 
 
 async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock, team: str,
-                              stop: asyncio.Event) -> None:
+                              stop: asyncio.Event, families: Sequence[Mapping[str, Handler]]) -> None:
     # All instances share one host certificate, and a standby may have waited long enough for the serving
     # instance to renew it: sign with the newest before serving or writing anything.
     await host.take_newest_certificate()
     assert host.records is not None  # start() made them
     sessions = SessionService(host.nc.jetstream(), host.records, live.trust, live.identity.installation, host.clock,
                               host.logger)
-    services = TeamServices(sessions)
+    services = TeamServices(sessions, families)
     subscription = await live.serve("svc.team", Receiver(live.identity.installation, team, "team_services", team,
                                                          TEAM_SERVICES_RUNTIME), services.handle)
     await host.nc.flush()
@@ -108,6 +117,16 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
                 await upkeep
 
 
+def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]) -> list[Mapping[str, Handler]]:
+    """The families of people's commands this process answers, on the team's database."""
+
+    storage = config.manager_storage_settings
+    people = PeopleDirectory(AccessRepository(storage), config.manager.team_id)
+    memory = MemoryOperations(create_pinned_memory_repository(storage, logger=_LOGGER), people,
+                              dict(config.agent.memory), clock, _LOGGER)
+    return [memory.handlers()]
+
+
 async def run_team_services(config: GatewayInstanceConfig) -> None:
     team = config.manager.team_id
     adapter = NatsTransportAdapter(config=transport_config(config), mapper=NatsSubjectMapper(team_id=team), logger=_LOGGER)
@@ -118,7 +137,7 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     await adapter.connect()
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
-        await serve_team(host, team, stop)
+        await serve_team(host, team, stop, team_operations(config, host.clock))
     finally:
         with contextlib.suppress(Exception):
             await adapter.close()

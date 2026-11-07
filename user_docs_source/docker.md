@@ -593,7 +593,7 @@ ending in `*` covers every variable that starts with the text before it.
 | --- | --- | --- | --- |
 | `NATS_USER` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check`, `installation_authority`, `team_services` | contents | User name for the NATS message broker; every process that sends or receives team messages. |
 | `NATS_PASSWORD` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check`, `installation_authority`, `team_services` | contents | Password for the NATS message broker; every process that sends or receives team messages. |
-| `POSTGRES_DSN` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check` | contents | PostgreSQL connection string, including its password; every process that stores team records. |
+| `POSTGRES_DSN` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host`, `consumer_check`, `team_services` | contents | PostgreSQL connection string, including its password; every process that stores team records. |
 
 #### Model providers and embeddings
 

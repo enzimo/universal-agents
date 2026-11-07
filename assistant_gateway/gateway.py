@@ -201,7 +201,9 @@ from assistant_gateway.installed_procedures import GatewayInstalledProcedures
 from assistant_gateway.mcp_controls import GatewayMCPControls
 from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
-from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCommandParser
+from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
+from assistant_gateway.team_services_client import AccessStorePersonReferences, MessageHostTeamServices
+from assistant_gateway.application.team_commands import GatewayTeamCommandService, GatewayTeamServices
 from assistant_gateway.ports.repositories import (
     DeliveryRepository,
     IdentityRepository,
@@ -568,6 +570,28 @@ def _agent_presence_observer(
     return record
 
 
+def _team_commands(
+    config: GatewayInstanceConfig,
+    runtime: object,
+    team_services: GatewayTeamServices | None,
+    *,
+    id_generator: GatewayIdGenerator,
+) -> GatewayTeamCommandService:
+    """People's commands that the team services answer (protocol 1, svc.team), one family
+    at a time (assistant_gateway.application.team_commands); tests pass ``team_services``."""
+
+    return GatewayTeamCommandService(
+        team_services=team_services
+        or MessageHostTeamServices(
+            getattr(runtime, "message_host", None),
+            timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
+        ),
+        references=AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id),
+        id_generator=id_generator,
+        logger=logger,
+    )
+
+
 class UserGateway:
     """User-facing NATS gateway with delivery and autonomy services."""
 
@@ -587,6 +611,7 @@ class UserGateway:
         private_authorizer: GatewayPrivateResourceAuthorizer | None = None,
         secure_broker: GatewaySecureBroker | None = None,
         activity_source: GatewayActivitySource | None = None,
+        team_services: GatewayTeamServices | None = None,
     ):
         self.config = config
         self._logger = logger
@@ -1196,7 +1221,10 @@ class UserGateway:
             sessions=self._session_service,
             manager_commands=self._manager_commands,
             submission=self._interactive_submission_service,
-            pinned_memory_parser=RuntimePinnedMemoryCommandParser(),
+            team_commands=_team_commands(
+                config, resolved_manager_runtime, team_services, id_generator=self._id_generator
+            ),
+            pinned_memory=RuntimePinnedMemoryCodec(),
             private_authorizer=self._private_authorizer,
             # Disabling, removing and restoring people (assistant_gateway.person_departure).
             person_lifecycle=build_gateway_person_lifecycle(

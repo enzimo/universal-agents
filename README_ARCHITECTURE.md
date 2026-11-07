@@ -4410,10 +4410,44 @@ They serve the team's address (`svc.team`) and answer, so far:
   A host whose record names another contract digest gets no new placement (`sessions.open`
   answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
   its sessions are still renewed and closed, so it keeps receiving control messages for the
-  tasks it holds while it finishes or hands them back.
+  tasks it holds while it finishes or hands them back;
+- people's memory commands, `memory.list`, `.show`, `.create`, `.replace`, `.delete` and
+  `.undo` (`team_services.memory`), which the gateway sent the team lead's process as a
+  durable `ManagerMemoryCommand` until phase 2. They run the same memory service on the
+  same database, in a worker thread so the lock and upkeep keep running. The person comes
+  only from the command's authority token: its person reference is read back from the
+  gateway's copy of the team's people (`team_services.people`,
+  `PeopleDirectory.person_by_ref`), and a person who is unknown, disabled or removed, or a
+  sender that is not a gateway, is answered `not_allowed`. Agents' own memory operations
+  (root task tokens) are not answered here yet; agents still use their tools in their own
+  process. The same ownership rule decides as before (`access_control.ownership`). A
+  person's command no longer records the chat it came from with the fact's events.
 
 Every other operation is answered `unsupported` at once; today's team operations still
-run in the team lead's process and move here one at a time.
+run in the team lead's process and move here one family at a time.
+
+**Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
+in the manager database): a change command is carried out once however often it is
+retried. The store that makes the change checks for a stored reply under its write
+lock, before changing anything, and stores the reply under the team and the command's
+retry key (the frame's idempotency key) in the same transaction as the change
+(`CommandOutcome`, passed to the memory store's writes). A refusal rolls the change back
+and is stored in a transaction of its own, except outcomes that ask for a retry
+(`runtime_error`, `record_busy` and others). Replies are kept seven days, the longest
+life of an authority token; a repeated key with another body gets the stored reply, and
+both body digests are logged. The table is created when a store that uses it opens, so
+an older database gets it at its first start on this version.
+
+**People's commands from the gateway** (`assistant_gateway.application.team_commands`):
+the gateway reads the person's reference from the access store, gives each command a
+fresh `request_id`, and sends it through its host (`assistant_gateway.team_services_client`);
+it no longer checks memory access itself, since the team services decide. For memory,
+`assistant_gateway.pinned_memory_commands.RuntimePinnedMemoryCodec` keeps the chat
+grammar and rendering: times a person writes are read in their own time zone before
+sending (the contract carries UTC times), `never` clears an expiry, a list asks for at
+most 100 facts, and the typed reply becomes the view the Settings page and the chat
+renderer use. A gateway started without the launcher runs no host, so its memory
+commands say the team services cannot be reached.
 
 **The gateway as a host** (`assistant_gateway.message_host.GatewayMessageHost`): the
 launcher lists the gateway (host `gateway`, role `gateway`) beside the team services, and

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests.memory_support import SYSTEM_MEMORY_WRITER
+from tests.team_services_support import InProcessTeamServices
 import asyncio
 import contextlib
 import json
@@ -13,13 +14,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from live_nats_client import LiveNatsClient, resolve_live_transport_settings
+from live_nats_client import LiveNatsClient, delete_team_streams, resolve_live_transport_settings
 
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from custom_agents.manager_control_runtime import (
-    handle_manager_memory_command,
     handle_manager_schedule_command,
     handle_task_progress_status,
 )
@@ -27,7 +27,7 @@ from custom_agents.schedule_store import ScheduleStore
 from custom_agents.scheduled_runtime import prepare_memory_review_schedule
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_operation_runtime import TaskOperationRuntime
-from custom_messages.contracts.control_v1 import AgentStatus, ManagerMemoryCommand
+from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
@@ -500,14 +500,15 @@ async def test_live_gateway_manager_controls_use_nats_and_separate_storage(tmp_p
 
     # The manager acts only for the person the gateway signed onto each command.
     use_gateway_key(monkeypatch)
+    team_id = new_id("live_decoupled")
     try:
-        await _gateway_manager_controls_over_nats(tmp_path, live_transport)
+        await _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id)
     finally:
         forget_task_context_keys()
+        await delete_team_streams(team_id, transport=live_transport)
 
 
-async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
-    team_id = new_id("live_decoupled")
+async def _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id: str) -> None:
     manager_id = new_id("manager")
     gateway_db = tmp_path / "gateway.db"
     manager_db = tmp_path / "manager.db"
@@ -523,10 +524,13 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
         named_agent_type="TeamArchitect",
     )
     config.transport = live_transport.model_copy(deep=True)
+    # Memory commands go to the team services (tests/test_live_team_memory.py covers them over
+    # NATS); here they run in process on the manager's database, which the gateway never opens.
     gateway = UserGateway(
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(gateway_db)),
+        team_services=InProcessTeamServices(config),
     )
     session = gateway.application.resolve_session(
         session_key=config.user.default_session_key
@@ -647,14 +651,7 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
         async def manager_command_handler(delivery) -> None:
             envelope = delivery.envelope
             content = envelope.msg_content
-            if isinstance(content, ManagerMemoryCommand):
-                await handle_manager_memory_command(
-                    manager,
-                    command=content,
-                    msg_header=envelope.msg_header,
-                    msg_meta=envelope.msg_meta,
-                )
-            elif isinstance(content, ManagerScheduleCommand):
+            if isinstance(content, ManagerScheduleCommand):
                 await handle_manager_schedule_command(
                     manager,
                     command=content,

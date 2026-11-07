@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from access_control.ownership import (
-    OwnershipDecision,
-    PRIVATE_CREATE,
     PRIVATE_DELETE,
     PRIVATE_READ,
     PRIVATE_UPDATE,
@@ -12,8 +10,6 @@ from access_control.ownership import (
     RESOURCE_OBJECTIVE,
     RESOURCE_SCHEDULE,
     RESOURCE_TASK,
-    RESOURCE_TEAM_MEMORY,
-    RESOURCE_USER_MEMORY,
     private_access,
 )
 
@@ -24,15 +20,6 @@ from typing import Any, Optional
 from access_control.entities import PersonPrincipal
 from access_control.identity import ISSUER_GATEWAY, IdentityRejected
 from custom_agents.task_context_runtime import context_verifier
-from custom_agents.pinned_memory_runtime import (
-    PinnedMemoryActor,
-    PinnedMemoryCommand,
-    PinnedMemoryRequestContext,
-    PinnedMemoryService,
-    PinnedMemorySource,
-    pinned_memory_reply,
-    render_pinned_memory_result,
-)
 from custom_agents.control_runtime import stop_task_execution
 from custom_agents.execution_lanes import runs_in_parallel_lane
 from custom_agents.task_human_interaction_blockers import (
@@ -78,7 +65,6 @@ from custom_messages.contracts.control_v1 import (
     PAUSE_OBJECTIVE,
     RESUME_OBJECTIVE,
     STOP_OBJECTIVE,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
     RuntimeWorkCancellationReceipt,
@@ -109,8 +95,6 @@ from custom_messages.enums import (
     RequesterType,
 )
 from custom_messages.records.objectives import ObjectiveHeartbeatLink, ObjectiveScheduleLink
-from storage.change_ledger import ChangeWriter, ChangeWriterKind
-from storage.pinned_memory_repository import PinnedMemoryConflictError
 
 
 @dataclass(frozen=True)
@@ -504,136 +488,6 @@ async def handle_manager_schedule_command(
                 response.message = SCHEDULE_CHANGED_SINCE_LISTED if changed else SYSTEM_SCHEDULE_CHANGE_REFUSED
         if response.success and getattr(agent, "_scheduler_wake", None) is not None:
             agent._scheduler_wake.set()
-    await _send_durable_response(
-        agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
-    )
-
-
-def _authorize_manager_memory_command(
-    command: ManagerMemoryCommand,
-    *,
-    person: CommandPerson,
-) -> OwnershipDecision:
-    payload = command.command
-    action = {
-        "list": PRIVATE_READ,
-        "show": PRIVATE_READ,
-        "create": PRIVATE_CREATE,
-        "delete": PRIVATE_DELETE,
-    }.get(payload.action, PRIVATE_UPDATE)
-    is_team_memory = payload.bank == "coremem"
-    return private_access(
-        person_id=person.canonical_user_id,
-        owner_id=(
-            None if is_team_memory else person.canonical_user_id
-        ),
-        resource_type=(
-            RESOURCE_TEAM_MEMORY if is_team_memory else RESOURCE_USER_MEMORY
-        ),
-        resource_id=(
-            f"{payload.bank}:{payload.memory_id or payload.event_id or 'collection'}"
-        ),
-        action=action,
-        team_id=person.team_id,
-        roles=tuple(person.roles),
-    )
-
-
-async def handle_manager_memory_command(
-    agent: Any,
-    *,
-    command: ManagerMemoryCommand,
-    msg_header: MessageHeader,
-    msg_meta: MessageMeta,
-) -> None:
-    if command.command_type == MessageMetaType.RESPONSE:
-        return
-    response = command.model_copy(deep=True)
-    response.command_type = MessageMetaType.RESPONSE
-    person, refusal = verified_command_person(agent, msg_meta)
-    if not getattr(agent, "is_team_lead", False) or person is None:
-        response.success = False
-        response.rendered_result = refusal or "manager_required"
-        await _send_durable_response(
-            agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
-        )
-        return
-
-    gateway_context = msg_meta.gateway_context
-    payload = command.command
-    decision = _authorize_manager_memory_command(command, person=person)
-    if not decision.allowed:
-        response.success = False
-        response.error_code = "authorization_denied"
-        response.rendered_result = decision.reason
-        agent._logger.warning(
-            "[%s] Manager denied pinned-memory command. "
-            "event=manager_memory_authorization_denied actor=%s bank=%s "
-            "action=%s reason=%s",
-            agent.id,
-            person.canonical_user_id,
-            payload.bank,
-            payload.action,
-            decision.reason,
-        )
-        await _send_durable_response(
-            agent,
-            content=response,
-            incoming_header=msg_header,
-            incoming_meta=msg_meta,
-        )
-        return
-    service = PinnedMemoryService(
-        agent._pinned_memory_repository,
-        config=dict(getattr(agent, "memory_config", {}) or {}),
-        command_origin="gateway",
-        logger=agent._logger,
-    )
-    parsed = PinnedMemoryCommand(**payload.model_dump())
-    context = PinnedMemoryRequestContext(
-        team_id=agent.team_id,
-        # The person the gateway signed for, in their own controls: their edits count against requests.
-        writer=ChangeWriter(ChangeWriterKind.PERSON, person_id=person.canonical_user_id),
-        canonical_user_id=person.canonical_user_id,
-        request_timezone=msg_meta.request_timezone,
-        source=PinnedMemorySource(
-            conversation_id=msg_meta.conversation_id,
-            gateway_session_key=getattr(gateway_context, "session_key", None),
-            channel_name=getattr(gateway_context, "channel_name", None),
-            chat_id=getattr(gateway_context, "chat_id", None),
-            thread_id=getattr(gateway_context, "thread_id", None),
-        ),
-        actor=PinnedMemoryActor(
-            kind="user",
-            id=person.canonical_user_id,
-        ),
-    )
-    try:
-        result = service.execute(parsed, context=context)
-        response.success = True
-        response.result = pinned_memory_reply(result)
-        response.rendered_result = render_pinned_memory_result(
-            result,
-            timezone_name=context.request_timezone,
-        )
-    except PinnedMemoryConflictError as exc:
-        response.success = False
-        response.error_code = "conflict"
-        response.rendered_result = str(exc)
-    except ValueError as exc:
-        response.success = False
-        response.error_code = "invalid_request"
-        response.rendered_result = f"Pinned memory command failed: {exc}"
-    except Exception as exc:
-        agent._logger.warning(
-            "[%s] Gateway pinned-memory command failed. event=manager_memory_command_failed action=%s",
-            agent.id,
-            payload.action,
-            exc_info=True,
-        )
-        response.success = False
-        response.error_code = "runtime_error"
-        response.rendered_result = f"Pinned memory command failed: {exc}"
     await _send_durable_response(
         agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
     )
