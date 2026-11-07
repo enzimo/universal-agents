@@ -143,6 +143,7 @@ class StateRecords:
         """Remove one of this host's own records (an agent's record when it has left); absent is fine."""
 
         bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
+        await before_send()
         await bucket.delete(key)
 
     async def keys(self, record: str) -> list[str]:
