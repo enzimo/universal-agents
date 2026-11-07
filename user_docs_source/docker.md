@@ -255,10 +255,13 @@ per-stream limit.
 
 For an external NATS cluster, follow the
 [NATS 2.15 upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15).
-It recommends upgrading older 2.14 clusters to at least 2.14.7 before 2.15,
-postponing stream and consumer scaling or moves until every node is upgraded,
-and downgrading only to 2.14.7 or later. The included single-server deployment
-does not perform a rolling cluster upgrade.
+That guide recommends upgrading older 2.14 clusters to at least 2.14.7 before
+2.15, postponing stream and consumer scaling or moves until every node is
+upgraded, and downgrading only to 2.14.7 or later. The included single-server
+deployment does not perform a rolling cluster upgrade. Also give every server
+`jetstream { sync_interval: always }` and a `max_control_line` of at least
+69,632 bytes, which the included server gets automatically (see "Surviving a
+power loss" in the configuration guide).
 
 ### Keep the databases on local disk
 
@@ -271,19 +274,29 @@ been measured waiting 30 seconds, and the gateway's chat apps and Web Chat wait
 with it. Each process keeps one connection open to every database it uses, which
 avoids most re-reads, but writes still go to the share.
 
-When the rest of the instance must stay on a share, mount a local volume over
-just the databases:
+Keeping confirmed work through a power loss needs the same: storage that
+writes to its disk when asked to (see "Surviving a power loss" in the
+configuration guide). A share that confirms such requests early can lose the
+last saved tasks and queued messages when the power fails. On local storage,
+or a share that honours them, nothing the team already accepted or sent is
+lost. A commit or flush that takes longer than a second is logged
+(`sqlite_commit_slow`, `sqlite_flush_slow`), so slow storage shows before
+writers start failing with "database is locked".
+
+When the rest of the instance must stay on a share, mount local volumes over
+the databases and the message server's store:
 
 ```bash
 docker run --rm -d \
   --name team-assistant \
   -v /mnt/share/instance:/data \
   -v team-assistant-dbs:/data/dbs \
+  -v team-assistant-nats:/data/services/nats \
   team-assistant
 ```
 
-Copy the existing `dbs/` folder, including every `-wal` and `-shm` file, into the
-new volume while the container is stopped. A slow database call is logged as
+Copy the existing `dbs/` folder, including every `-wal` and `-shm` file, and the
+`services/nats` folder into the new volumes while the container is stopped. A slow database call is logged as
 `event=sqlite_open_slow` or `event=sqlite_statement_slow` with the database,
 the thread, `on_event_loop` and the process (`pid` and `program`);
 `on_event_loop=true` means it held up the gateway's chat apps and Web Chat too.

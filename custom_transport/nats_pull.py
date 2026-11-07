@@ -46,6 +46,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from custom_transport.base import FetchPolicy
 from custom_transport.dead_letters import REASON_HANDLER_FAILED
+from custom_transport.send_barrier import before_send
 
 # The metadata schema of consumers this release creates. Consumers of the
 # push-delivery release carried "consumer-lifecycle-v1".
@@ -113,6 +114,15 @@ async def return_or_end(
             # JetStream would stop delivering it anyway.
             with contextlib.suppress(Exception):
                 await set_aside()
+        try:
+            # What the failed handler recorded is on the disk before the message ends.
+            await before_send()
+        except Exception:
+            # It is not: keep the message in its stream rather than end it
+            # (JetStream delivers it no more after its last attempt either way).
+            with contextlib.suppress(Exception):
+                await message.nak(delay=UNHANDLED_RETURN_DELAY_SECONDS)
+            return RETURNED
         with contextlib.suppress(Exception):
             await message.term()
         return ENDED

@@ -132,3 +132,8 @@ class StateSpec:
     body_model: TypeAdapter[Any]
     # What a newer minor's record body may hold that this version knows (see prune).
     body_shape: Any
+
+    def bucket_for(self, team: str) -> str:
+        """The bucket that holds this record of ``team``: a bucket per team names it, any other is shared."""
+
+        return self.bucket.replace("{team}", team)

@@ -57,6 +57,7 @@ from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.ids import new_message_id
 from custom_transport.protocol1.replay import LiveReplayRecord
 from custom_transport.protocol1.trust_state import PersistentTrustStore
+from custom_transport.send_barrier import before_send
 
 _SUBJECT_ROOT = SUBJECT_PREFIX.split("{team}", 1)[0]
 Handler = Callable[[VerifiedFrame], Awaitable[Mapping[str, Any]]]
@@ -227,6 +228,7 @@ class LiveHost:
         data, headers = self.encode(frame)
         spec, _ = _spec(kind)
         wait = min(timeout if timeout is not None else spec.expiry_seconds, spec.expiry_seconds)
+        await before_send()
         try:
             message = await self.nc.request(frame["subject"], data, timeout=wait, headers=headers)
         except (NoRespondersError, NatsTimeoutError) as error:
@@ -296,10 +298,12 @@ class LiveHost:
             await self._refuse(message, FrameRefused(HANDLER_FAILED))
             return
         data, headers = self.encode(reply)
+        await before_send()
         await self.nc.publish(message.reply, data, headers=headers)
 
     async def _refuse(self, message: Any, refused: FrameRefused) -> None:
         """Answer a refused request at once, with only its code and known pointer (README "Refused requests")."""
 
         if message.reply:
+            await before_send()
             await self.nc.publish(message.reply, b"", headers=refusal_headers(refused))
