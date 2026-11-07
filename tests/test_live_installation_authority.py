@@ -40,6 +40,7 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from docker import message_hosts
 from env_secrets import PROCESS_INSTALLATION_AUTHORITY, environment_for
 from installation_authority.expected_hosts import ExpectedHost, write_expected_hosts
+from installation_authority.ledger import ISSUED_FILENAME
 from installation_authority.service import (
     AUTHORITY_RUNTIME,
     CERTIFICATE_LIFETIME,
@@ -757,9 +758,12 @@ async def test_the_authority_starts_again_after_its_certificates_bucket_was_lost
 
 
 @pytest.mark.asyncio
-async def test_the_authoritys_kept_revocations_record_outlives_a_lost_bundle(broker: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize("issue_record_lost", [False, True])
+async def test_the_authoritys_kept_revocations_record_outlives_a_lost_bundle(broker: str, tmp_path: Path,
+                                                                              issue_record_lost: bool) -> None:
     """An older record the authority genuinely signed, written back to the bucket after the bundle was rebuilt,
-    does not lift a revocation: the authority signs the next record from the copy it keeps."""
+    does not lift a revocation: the authority signs the next record from the copy it keeps, or, with its issue
+    record lost too, from the one its trust store keeps (trust-state.json)."""
 
     layout = InstanceLayout.at(tmp_path / "instance")
     worker_keys = prepare(layout)
@@ -777,6 +781,8 @@ async def test_the_authoritys_kept_revocations_record_outlives_a_lost_bundle(bro
         bundle = read_bundle(layout.trust_bootstrap_path)
         write_bundle(layout.trust_bootstrap_path, bundle.with_records(()))
         await put_record(writer, revocations_key(INSTALLATION), oldest)
+        if issue_record_lost:
+            (layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME).unlink()
         restarted = await start_authority(stack, broker, layout)
         assert restarted._revocations["body"]["entries"] == signed["body"]["entries"]
         assert restarted._revocations["body"]["revocation_epoch"] == 2

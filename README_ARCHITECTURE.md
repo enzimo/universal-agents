@@ -4343,7 +4343,8 @@ The authority:
   certificate it hands back) only when it verifies against the authority's own key:
   every process shares one NATS login and can write there. A key whose record does not
   verify counts for nothing, at any epoch. It signs the next revocations record from the
-  newest one it verified: in the bucket, the bundle, its kept copy or its memory. It writes
+  newest one it verified: in the bucket, the bundle, its kept copy, the ones its trust
+  store keeps (`trust-state.json`) or its memory. It writes
   over a record that does not verify. When the bucket holds a record that does not verify
   and it has verified none, it does not start, since an empty list would accept every
   revoked host again; its log (`event=installation_authority_start_refused`) says to

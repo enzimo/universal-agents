@@ -11,11 +11,11 @@ file names public keys only.
 from __future__ import annotations
 
 import json
-import os
-import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+
+from custom_transport.protocol1.private_files import write_private_file
 
 _VERSION = 1
 
@@ -59,12 +59,4 @@ def write_expected_hosts(path: Path, hosts: Mapping[str, ExpectedHost]) -> None:
                        "session_limit": host.session_limit, "connection_class": host.connection_class,
                        "deployment": host.deployment}
         for host in hosts.values()}}
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(document, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    write_private_file(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())

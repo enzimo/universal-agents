@@ -4,8 +4,8 @@ The authority writes its certificates and revocations record to ``UA1_CERTS``, b
 bucket is not its own memory: any process with the shared NATS login can delete or
 overwrite a key there, and a NATS server can lose its store while the instance's trust
 folder survives. Three things must outlive that, so the authority keeps them in its own
-trust folder (``trust/hosts/authority/issued.json``, owner-only), written before the record
-reaches the bucket:
+trust folder (``trust/hosts/authority/issued.json``, owner-only, written whole by
+``custom_transport.protocol1.private_files``) before the record reaches the bucket:
 
 - **The highest membership epoch it issued, per runtime.** An epoch names one certificate
   only (README "Trust over time"), and hosts, the bootstrap bundle and the authority's own
@@ -38,6 +38,7 @@ from typing import Any, Mapping, Optional
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS
 from custom_messages.wire.values import parse_timestamp
+from custom_transport.protocol1.private_files import read_private_file, write_private_file
 
 ISSUED_FILENAME = "issued.json"
 # README "Stored outcomes": kept at least as long as an authority token can last.
@@ -72,10 +73,10 @@ class IssueLedger:
 
         ledger = cls(folder / ISSUED_FILENAME, installation, logger=logger)
         try:
-            document = json.loads(ledger.path.read_text(encoding="utf-8"))
+            document = json.loads(read_private_file(ledger.path))
         except FileNotFoundError:
             return ledger
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError) as error:  # NotAPrivateFile is a ValueError
             ledger._set_aside(error)
             return ledger
         try:
@@ -159,26 +160,4 @@ class IssueLedger:
                          for key, held in sorted(self._renewals.items())},
             "revocations": self._revocations,
         }
-        _write_private_json(self.path, document)
-
-
-def _write_private_json(path: Path, document: Mapping[str, Any]) -> None:
-    """Replace ``path`` with ``document``, owner-only; readers see the old or the new file, never a part."""
-
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    folder = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(folder)
-    finally:
-        os.close(folder)
+        write_private_file(self.path, json.dumps(document, sort_keys=True).encode())

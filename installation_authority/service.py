@@ -41,8 +41,8 @@ Rules from the message contract's README ("Installation traffic", "Trust over ti
   revocations record to sign again, a certificate to hand back) only when it verifies
   against the authority's own key; it never signs again what does not verify. It signs
   the next revocations record from the newest one it verified: the bucket's, the
-  bootstrap bundle's, the copy it keeps (``ledger.IssueLedger``) or the one it signed
-  last. When the bucket holds a record that does not verify and it has verified none, it
+  bootstrap bundle's, the copy it keeps (``ledger.IssueLedger``), the ones its trust
+  store keeps (``trust-state.json``) or the one it signed last. When the bucket holds a record that does not verify and it has verified none, it
   does not start (``RevocationsUnverified``): an empty list would accept every revoked
   host again.
 - **What it keeps itself.** The bucket can lose a key while the trust folder survives, so
@@ -91,7 +91,7 @@ from custom_transport.protocol1.joining import AUTHORITY_SERVICE_ID, HostProfile
 from custom_transport.protocol1.live import LiveHost, Unsupported, utc_now
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from installation_authority.expected_hosts import ExpectedHost, read_expected_hosts
-from installation_authority.ledger import IssueLedger
+from installation_authority.ledger import ISSUED_FILENAME, IssueLedger
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
@@ -188,7 +188,7 @@ class InstallationAuthority:
         self._revocations: dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._forgotten_at: Optional[datetime] = None
-        self._ledger = IssueLedger(layout.host_trust_dir(AUTHORITY_RUNTIME) / "issued.json", self.installation,
+        self._ledger = IssueLedger(layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME, self.installation,
                                    logger=logger)
         # The authority host's trust store, opened first at start: it keeps the newest
         # revocations record across restarts and serves the live host afterwards.
@@ -349,8 +349,8 @@ class InstallationAuthority:
     # -- revocations ------------------------------------------------------------------------------
 
     def _newest_revocations(self, stored: Optional[bytes], now: datetime) -> Optional[dict[str, Any]]:
-        """The newest revocations record this authority signed: the one it signed last, its kept copy, the bundle's
-        or the bucket's (``stored``).
+        """The newest revocations record this authority signed: the one it signed last, its kept copy, the ones its
+        trust store keeps, the bundle's or the bucket's (``stored``).
 
         Returns ``None`` only when there is no record at all, on the first start. Raises
         ``AuthorityClockBehind`` when its newest records were signed later than this
@@ -361,6 +361,8 @@ class InstallationAuthority:
 
         key = revocations_key(self.installation)
         held: list[Mapping[str, Any]] = [record for record in (self._revocations, self._ledger.revocations) if record]
+        if self._trust is not None:
+            held += self._trust.kept_revocations(self.installation)
         held += [record for record in read_bundle(self.layout.trust_bootstrap_path).records
                  if record.get("record") == "revocations"]
         verified: list[dict[str, Any]] = []
@@ -380,7 +382,8 @@ class InstallationAuthority:
         if refused_stored is not None:
             raise RevocationsUnverified(
                 f"The stored revocations record {key} does not verify ({refused_stored.code}) and the authority holds no "
-                "verified copy (its issue record, the bootstrap bundle and the bucket), so it cannot tell which hosts "
+                "verified copy (its issue record, its trust state, the bootstrap bundle and the bucket), so it cannot "
+                "tell which hosts "
                 "are revoked and does not start. Restore the instance's trust folder from the backup taken with the "
                 f"NATS data, or delete {key} from the {CERTIFICATES_BUCKET} bucket to start an empty list, which "
                 "forgets every revocation.")

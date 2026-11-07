@@ -107,7 +107,7 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
     assert sum(write.await_count for write in writes) == 1
 
     fail = True
-    if operation in {"put", "create", "update", "request"}:
+    if operation in {"put", "create", "update", "request", "join"}:
         with pytest.raises(OSError, match="disk flush failed"):
             await send()
     else:
