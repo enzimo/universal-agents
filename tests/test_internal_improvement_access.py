@@ -63,7 +63,7 @@ from custom_tools.providers.schedules import (
 from tests.task_work_support import acting_as, set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
 from tests.test_internal_improvement_runtime import _Manager, _Worker
@@ -347,7 +347,7 @@ def _record_first_user(world, standing: PersonStanding = PersonStanding.ACTIVE) 
     roles = ("admin", "owner") if standing is PersonStanding.ACTIVE else ()
     AccessRepository(world.tasks.storage_settings).replace_people(
         TEAM,
-        [TeamPersonV1(team_id=TEAM, person_id=FIRST_USER, standing=standing, roles=roles, changed_at_utc=NOW)],
+        [TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=FIRST_USER, standing=standing, roles=roles, changed_at_utc=NOW)],
         at=NOW,
     )
 

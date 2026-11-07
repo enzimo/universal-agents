@@ -46,7 +46,7 @@ from custom_agents.schedule_store import ScheduleStore
 from custom_agents.scheduled_runtime import _enqueue_owner_run, _prepared_heartbeat_run, _signed_heartbeat_runs
 from custom_agents.task_context_runtime import run_owner
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.control_v1 import PersonWorkOutcomeV1
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -115,7 +115,7 @@ def _people(agent: SimpleNamespace, *people: tuple[str, PersonStanding, tuple[st
     AccessRepository(agent.task_manager.storage_settings).replace_people(
         TEAM,
         [
-            TeamPersonV1(team_id=TEAM, person_id=person, standing=standing, roles=roles, changed_at_utc=NOW)
+            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person, standing=standing, roles=roles, changed_at_utc=NOW)
             for person, standing, roles in people
         ],
         at=NOW,

@@ -124,9 +124,9 @@ from storage.table_columns import ensure_column, table_column_names
 logger = logging.getLogger(__name__)
 
 # The partial unique index that allows one active account link per tool and owner.
+ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active"
 # Lookups by a person's opaque reference, unique within a team (plan decision 64).
 PERSON_REF_INDEX = "access_people_person_ref"
-ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active"
 # The index that finds the grants one decision stored (``GrantV1.approval_id``).
 APPROVAL_ID_INDEX = "access_grants_approval"
 # The open write transaction that the owning thread's other store operations
@@ -517,8 +517,8 @@ class AccessRepository:
         Copies written before references existed have none; each gets a random one,
         in its record and in the ``person_ref`` column, in one transaction with the
         unique index. Later opens find the column, the index and no person without a
-        reference with reads, and take no write lock. The gateway keeps each person's
-        reference whenever it writes the copy again (``people_directory_sync``).
+        reference with reads, and take no write lock. Every later write keeps the
+        reference stored with the person (``record_person``, ``replace_people``).
         """
 
         with self._connect() as conn:
@@ -530,8 +530,10 @@ class AccessRepository:
             conn.begin_write()
             ensure_column(conn, "access_people", "person_ref", "TEXT", logger=logger)
             rows = conn.execute("SELECT team_id, person_id, payload_json FROM access_people WHERE person_ref IS NULL").fetchall()
-            for team_id, person_id, payload_json in rows:
-                person = TeamPersonV1.model_validate_json(payload_json)
+            for row in rows:
+                # By position: a PostgreSQL row is a mapping, and unpacking it gives its column names.
+                team_id, person_id = row[0], row[1]
+                person = TeamPersonV1.from_earlier_record(row[2])
                 conn.execute(
                     f"UPDATE access_people SET payload_json={p}, person_ref={p} WHERE team_id={p} AND person_id={p}",
                     (person.model_dump_json(), person.person_ref, team_id, person_id),
@@ -1040,18 +1042,24 @@ class AccessRepository:
 
     # -- people (the gateway's copy, access_control.people_directory) --------------
 
-    def record_person(self, person: TeamPersonV1) -> None:
-        """Store one person's current standing and roles (the gateway, after a change)."""
+    def record_person(self, person: TeamPersonV1) -> TeamPersonV1:
+        """Store one person's current standing and roles (the gateway, after a change); returns what was stored.
+
+        A person already stored keeps their reference (``_keeping_references``).
+        """
 
         with self._connect() as conn:
             conn.begin_write()
-            self._upsert_person(conn, person)
+            [stored] = self._keeping_references(conn, person.team_id, [person], person_id=person.person_id)
+            self._upsert_person(conn, stored)
             conn.commit()
+        return stored
 
-    def replace_people(self, team_id: str, people: Iterable[TeamPersonV1], *, at: datetime) -> None:
+    def replace_people(self, team_id: str, people: Iterable[TeamPersonV1], *, at: datetime) -> list[TeamPersonV1]:
         """Store everyone the gateway knows in the team, drop anyone it no longer knows, and mark the team synced.
 
-        One transaction, so a reader never sees half a sync.
+        One transaction, so a reader never sees half a sync. Everyone still in the team
+        keeps their stored reference (``_keeping_references``); returns what was stored.
         """
 
         p = self.dialect.bind
@@ -1060,6 +1068,7 @@ class AccessRepository:
             raise ValueError("Every person must belong to the team being synced.")
         with self._connect() as conn:
             conn.begin_write()
+            people = self._keeping_references(conn, team_id, people)
             conn.execute(f"DELETE FROM access_people WHERE team_id={p}", (team_id,))
             for person in people:
                 self._upsert_person(conn, person)
@@ -1069,6 +1078,38 @@ class AccessRepository:
                 (team_id, _utc(at)),
             )
             conn.commit()
+        return people
+
+    def _keeping_references(self, conn: Any, team_id: str, people: list[TeamPersonV1], *,
+                            person_id: str | None = None) -> list[TeamPersonV1]:
+        """``people`` with the reference already stored for each of them (plan decision 64), read under the write lock.
+
+        A person's reference never changes while they are in the team: frames and
+        records already name them by it. A writer gives a person their reference as it
+        read it before its transaction, or a new one for someone it did not find, so
+        another writer may have stored the person in between (the gateway recording
+        someone new while a command-line run copies everyone). The reference stored
+        then is the one kept, and the change is logged. ``person_id`` limits the read
+        to one person.
+        """
+
+        p = self.dialect.bind
+        query = f"SELECT person_id, person_ref FROM access_people WHERE team_id={p} AND person_ref IS NOT NULL"
+        parameters: tuple[str, ...] = (team_id,)
+        if person_id is not None:
+            query += f" AND person_id={p}"
+            parameters += (person_id,)
+        stored = {str(row[0]): str(row[1]) for row in conn.execute(query, parameters).fetchall()}
+        kept: list[TeamPersonV1] = []
+        for person in people:
+            reference = stored.get(person.person_id)
+            if reference is not None and reference != person.person_ref:
+                logger.info("Kept the reference stored with a person; the copy being written was read before "
+                            "another write stored them. event=access_person_ref_kept team_id=%s person_id=%s",
+                            team_id, person.person_id)
+                person = person.model_copy(update={"person_ref": reference})
+            kept.append(person)
+        return kept
 
     def _upsert_person(self, conn: Any, person: TeamPersonV1) -> None:
         p = self.dialect.bind
@@ -1089,7 +1130,12 @@ class AccessRepository:
         return TeamPersonV1.model_validate_json(row[0]) if row else None
 
     def team_person_by_ref(self, team_id: str, person_ref: str) -> TeamPersonV1 | None:
-        """The person an opaque reference names in a team, if any (protocol 1 frames name people by it)."""
+        """The person an opaque reference names in a team, if any (protocol 1 frames name people by it).
+
+        Returned whatever their standing: a receiver acting on a command token checks
+        that the person is active and holds the roles the operation needs before it
+        acts for them, as ``access_control.people_directory`` does for scheduled runs.
+        """
 
         p = self.dialect.bind
         with self._connect() as conn:
