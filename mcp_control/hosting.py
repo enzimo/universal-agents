@@ -188,6 +188,33 @@ class MCPHostedServerDefinitionV1(BaseModel):
         )
 
 
+class HostedMCPStartFailureV1(BaseModel):
+    """Why the broker could not start the sidecar of a server set to run, and when it last tried.
+
+    The broker writes it beside the server's running state and deletes it when
+    a start succeeds or the server is stopped; the server stays set to run, so
+    the broker tries again at its next start and when an agent uses the tools.
+    A missing file means no failure, so instances that never wrote one need no
+    upgrade step.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = 1
+    hosted_server_id: str = Field(min_length=1, max_length=240)
+    reason: str = Field(min_length=1, max_length=4000)
+    failed_at: datetime
+
+
+def start_failure_sentence(failure: HostedMCPStartFailureV1) -> str:
+    """The plain words lists of hosted servers use for a server set to run whose sidecar did not start."""
+
+    return (
+        f"Set to run, but it could not start: {failure.reason} "
+        f"(last tried {failure.failed_at:%Y-%m-%d %H:%M} UTC)"
+    )
+
+
 class MCPHostingPaths(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
@@ -196,6 +223,7 @@ class MCPHostingPaths(BaseModel):
     state: Path
     tokens: Path
     logs: Path
+    start_failures: Path
     lock: Path
 
     def ensure(self) -> None:
@@ -205,6 +233,7 @@ class MCPHostingPaths(BaseModel):
             self.state,
             self.tokens,
             self.logs,
+            self.start_failures,
         ):
             path.mkdir(parents=True, mode=0o700, exist_ok=True)
 
@@ -221,6 +250,7 @@ def resolve_mcp_hosting_paths(config: Any) -> MCPHostingPaths:
         state=state,
         tokens=state / "tokens",
         logs=state / "logs",
+        start_failures=state / "start-failures",
         lock=state / ".hosting.lock",
     )
 
@@ -331,6 +361,29 @@ class MCPHostedServerStore:
             (self.paths.definitions / f"{removed.hosted_server_id}.json").unlink()
         return removed
 
+    def _start_failure_path(self, hosted_server_id: str) -> Path:
+        return self.paths.start_failures / f"{str(hosted_server_id or '').strip()}.json"
+
+    def record_start_failure(self, hosted_server_id: str, reason: str, *, at: datetime) -> HostedMCPStartFailureV1:
+        """Keep why the server's sidecar could not start (the broker, for a server set to run)."""
+
+        failure = HostedMCPStartFailureV1(hosted_server_id=hosted_server_id, reason=reason[:4000], failed_at=at)
+        with _lock(self.paths):
+            _atomic_json(self._start_failure_path(hosted_server_id), failure)
+        return failure
+
+    def clear_start_failure(self, hosted_server_id: str) -> None:
+        """Forget the last start failure: the sidecar started, or the server was stopped."""
+
+        with _lock(self.paths):
+            self._start_failure_path(hosted_server_id).unlink(missing_ok=True)
+
+    def start_failure(self, hosted_server_id: str) -> HostedMCPStartFailureV1 | None:
+        path = self._start_failure_path(hosted_server_id)
+        if not path.is_file():
+            return None
+        return HostedMCPStartFailureV1.model_validate_json(path.read_text(encoding="utf-8"))
+
 
 
 
@@ -358,11 +411,13 @@ __all__ = [
     "HOSTED_MCP_SCHEMA_VERSION",
     "HostedMCPBehavior",
     "HostedMCPLifecycle",
+    "HostedMCPStartFailureV1",
     "HostedMCPToolDefinitionV1",
     "MCPHostedServerDefinitionV1",
     "MCPHostedServerStore",
     "MCPHostingPaths",
     "resolve_hosted_broker_config",
     "resolve_mcp_hosting_paths",
+    "start_failure_sentence",
 ]
 

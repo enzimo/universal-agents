@@ -123,6 +123,30 @@ test("Approve and Reject appear only on pending connections this person can deci
   assert.match(connectionRow(f, "conn-1").textContent, /Who may use it: grants on mcp:crawl4ai \(Access page\)/);
 });
 
+function hostedServer(overrides = {}) {
+  return {
+    hosted_server_id: "mcp_host_echo", definition_digest: DIGEST, server_name: "echo", purpose: "Echo.",
+    lifecycle: "running", target_agent_types: ["TeamArchitect"], tools: ["echo"], bind_host: "127.0.0.1",
+    port: 41000, available_actions: ["stop"], start_failure: null, ...overrides,
+  };
+}
+
+test("a hosted server set to run that could not start says why instead of only its chosen state", async () => {
+  const f = fixture();
+  await activated(f, { team: teamPayload({ hosted_mcp_servers: [
+    hostedServer(),
+    hostedServer({ hosted_server_id: "mcp_host_blocked", server_name: "blocked", start_failure: {
+      reason: "127.0.0.1:41000 is already in use", failed_at: "2026-09-25T14:00:00Z",
+    } }),
+  ] }) });
+  const rows = byTag(f.content, "tr").filter(row => /echo|blocked/.test(row.textContent));
+  const blocked = rows.find(row => /blocked/.test(row.textContent));
+  const running = rows.find(row => /echo/.test(row.textContent));
+  assert.match(blocked.textContent, /Set to run, but it could not start: 127\.0\.0\.1:41000 is already in use \(last tried /);
+  assert.match(running.textContent, /running/);
+  assert.doesNotMatch(running.textContent, /could not start/);
+});
+
 test("an installed connection reads as installed; grants decide who may use it", () => {
   assert.equal(connectionStatusLabel(connection({ lifecycle: "active" })), "Installed");
   assert.equal(connectionStatusLabel(connection({ lifecycle: "pending" })), "Waiting for approval");

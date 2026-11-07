@@ -18,13 +18,14 @@ token.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import httpx
 import pytest
@@ -822,6 +823,8 @@ async def test_a_sidecar_left_over_from_an_earlier_broker_stops_the_start_and_sa
         assert "Stop that process" in message, message
         assert earlier_broker._processes[definition.hosted_server_id].returncode is None
         assert definition.hosted_server_id not in restarted_broker._processes
+        # Not set to run: the person who started it got the reason in the answer.
+        assert MCPHostedServerStore(resolve_mcp_hosting_paths(config)).start_failure(definition.hosted_server_id) is None
     finally:
         await restarted_broker.close()
         await earlier_broker.close()
@@ -910,3 +913,119 @@ async def test_the_mcp_chat_command_shows_why_a_start_failed() -> None:
     )
 
     assert PORT_TAKEN in result.text
+
+
+# -- a server set to run whose sidecar cannot start says so wherever it is listed ----------
+
+
+@contextlib.contextmanager
+def _port_held_by_a_leftover() -> Iterator[int]:
+    """A port another process listens on, as a sidecar left over from an earlier broker run does."""
+
+    with socket.socket() as leftover:
+        leftover.bind(("127.0.0.1", 0))
+        leftover.listen()
+        yield leftover.getsockname()[1]
+
+
+async def _broker_start(config: Any) -> None:
+    """What a broker start does for hosted servers: start every server set to run, then (here) stop."""
+
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        await broker.restore()
+    finally:
+        await broker.close()
+
+
+@pytest.mark.asyncio
+async def test_a_server_set_to_run_whose_sidecar_cannot_start_stays_set_to_run_and_is_listed_with_why(
+    tmp_path: Path,
+) -> None:
+    config, _path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+
+    [listed] = MCPHostingAdministration(config).list_public()
+    assert listed["lifecycle"] == "running", "the state people chose stays, so the next broker start tries again"
+    assert f"127.0.0.1:{port} is already in use" in listed["start_failure"]["reason"]
+    assert listed["start_failure"]["failed_at"]
+    assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
+        HostedMCPLifecycle.RUNNING
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_later_start_that_succeeds_clears_the_reason(tmp_path: Path) -> None:
+    config, _path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+    assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is not None
+
+    # The leftover is gone; the next broker start brings the server up.
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        await broker.restore()
+        assert broker._processes[definition.hosted_server_id].returncode is None
+        assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is None
+    finally:
+        await broker.close()
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_server_clears_the_reason(tmp_path: Path) -> None:
+    config, _path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        assert (await broker.stop(definition.hosted_server_id))["already_stopped"] is True
+    finally:
+        await broker.close()
+
+    assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is None
+
+
+@pytest.mark.asyncio
+async def test_every_list_of_hosted_servers_says_why_a_server_set_to_run_is_not_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from assistant_gateway.application.manager_control_command_service import _render_mcp_inventory
+    from tests.test_status_page import _page
+
+    config, path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+    said = "Set to run, but it could not start:"
+
+    # Web Chat's MCP settings and the /mcp command use the same projection.
+    [shown] = [WebHostedMCPServerV1.model_validate(item) for item in MCPHostingAdministration(config).list_public()]
+    assert shown.start_failure is not None and "already in use" in shown.start_failure.reason
+    inventory = _render_mcp_inventory([], [shown])
+    assert said in inventory and f"127.0.0.1:{port} is already in use" in inventory
+
+    # The agents' list.
+    agent = change_agent(config, path, authorization_enabled=False)
+    listing = await asyncio.to_thread(_call_tool, agent, hosted_mcp_servers, action="list")
+    [listed] = listing["hosted_servers"]
+    assert listed["status"].startswith(said) and "already in use" in listed["status"]
+
+    # The Status page, until the server starts.
+    report = await _page(config).report()
+    [finding] = [item for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")]
+    assert finding.finding_id == f"hosted_mcp_server_not_started:{definition.hosted_server_id}"
+    assert "echo" in finding.title and "already in use" in str(finding.details)
+    assert "stop the process that holds it" in finding.action
+
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        await broker.restore()
+        report = await _page(config).report()
+    finally:
+        await broker.close()
+    assert not [item for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")]

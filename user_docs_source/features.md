@@ -1037,6 +1037,14 @@ sidecar left over from a broker that stopped abruptly, the start fails and says
 so; stop that process (`ps -ef | grep mcp_control.managed_server` shows it) and
 start the server again.
 
+A server stays set to run even when its sidecar could not start, for example
+after a container restart while a leftover process held its port: the broker
+tries again whenever it starts and when an agent uses the server's tools.
+Meanwhile Settings → Runtime, Settings → Team, the `/mcp` list and the agents'
+list of hosted servers say "Set to run, but it could not start", with the
+reason and when the broker last tried, and the Status page lists it as a
+problem. That clears as soon as the server starts, or when someone stops it.
+
 Open **Settings → Runtime** to review MCP connections and hosted
 servers alongside Objectives and schedules. Only administrators see the
 approve, reject, disable, remove, install, start and stop buttons (with
@@ -1179,9 +1187,9 @@ disappears once it is fixed:
 
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
-  is not answering, the secure tool broker does not answer, TeamLead
-  stopped reporting, or a disk the instance uses is nearly full (95% by
-  default).
+  is not answering, a hosted MCP server set to run could not start, the
+  secure tool broker does not answer, TeamLead stopped reporting, or a disk
+  the instance uses is nearly full (95% by default).
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved
   setting or a key saved with `/auth model`, memory search that stopped

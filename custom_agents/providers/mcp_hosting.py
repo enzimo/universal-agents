@@ -27,6 +27,7 @@ from mcp_control.hosting import (
     MCPHostedServerDefinitionV1,
     MCPHostedServerStore,
     resolve_mcp_hosting_paths,
+    start_failure_sentence,
 )
 from mcp_control.registry import (
     MCPConnectionLifecycle,
@@ -40,6 +41,11 @@ from mcp_control.registry import (
 
 LOGGER = logging.getLogger(__name__)
 HOSTED_LIFECYCLE_OPERATIONS = ("start", "stop")
+_STATE_WORDS = {
+    HostedMCPLifecycle.PENDING: "Proposed; installing it needs a person's approval",
+    HostedMCPLifecycle.STOPPED: "Installed and stopped",
+    HostedMCPLifecycle.REMOVED: "Removed",
+}
 
 
 class MCPHostingAdministration:
@@ -53,20 +59,41 @@ class MCPHostingAdministration:
         )
 
     def list_public(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "hosted_server_id": item.hosted_server_id,
-                "definition_digest": item.definition_digest,
-                "server_name": item.server_name,
-                "purpose": item.purpose,
-                "lifecycle": item.lifecycle.value,
-                "target_agent_types": list(item.target_agent_types),
-                "tools": [tool.name for tool in item.tools],
-                "bind_host": item.bind_host,
-                "port": item.port,
-            }
-            for item in self.store.list_definitions()
-        ]
+        """Every hosted server: the state people chose and, for one set to run, why it could not start."""
+
+        listed = []
+        for item in self.store.list_definitions():
+            failure = (
+                self.store.start_failure(item.hosted_server_id)
+                if item.lifecycle == HostedMCPLifecycle.RUNNING
+                else None
+            )
+            listed.append(
+                {
+                    "hosted_server_id": item.hosted_server_id,
+                    "definition_digest": item.definition_digest,
+                    "server_name": item.server_name,
+                    "purpose": item.purpose,
+                    "lifecycle": item.lifecycle.value,
+                    "target_agent_types": list(item.target_agent_types),
+                    "tools": [tool.name for tool in item.tools],
+                    "bind_host": item.bind_host,
+                    "port": item.port,
+                    "start_failure": (
+                        None if failure is None else {"reason": failure.reason, "failed_at": failure.failed_at}
+                    ),
+                }
+            )
+        return listed
+
+    def describe_state(self, hosted_server_id: str) -> str:
+        """The server's state in plain words, as the agents' list gives it."""
+
+        definition = self.store.require(hosted_server_id)
+        if definition.lifecycle == HostedMCPLifecycle.RUNNING:
+            failure = self.store.start_failure(hosted_server_id)
+            return "Running" if failure is None else start_failure_sentence(failure)
+        return _STATE_WORDS[definition.lifecycle]
 
     def propose_by_agent(
         self,
