@@ -100,10 +100,11 @@ replier needs nothing beyond the request (`custom_messages.wire.frame.reply_audi
 - otherwise the requesting host itself (target `host`, its runtime id): a gateway, the team
   services or the scheduler asking for itself, or a host asking for its agents' sessions.
 
-The audience runtime is always the requester's runtime, whose inbox the reply goes to. A
-reply that names anything else is refused as `wrong_audience`. Only replies name the `host`
-target; a request addressed to a host is refused (`subject_mismatch`), and so is a host
-reply whose id is not its runtime.
+The audience runtime is always the requester's runtime, whose inbox the reply goes to; a
+receiver answers no request whose reply subject is not that inbox ("Answering only the
+requester's inbox"). A reply that names anything else is refused as `wrong_audience`, a host
+reply whose id is not its runtime among them. Only replies name the `host` target; a request
+addressed to a host is refused (`subject_mismatch`).
 
 ## Who may talk to whom
 
@@ -519,7 +520,7 @@ holder, and the custody window says when.
 follows the `connection_class` in the certificate of the holder's host:
 - A `connected` host (the installation's main machine, a server) gets
   `{renewed_by: host_record, seconds}`: standard 300, at least 60 and at most 3,600. The host
-  record that the host writes every 10 seconds renews it.
+  record that the host writes every 10 seconds, each lasting at most 30 seconds, renews it.
 - An `intermittent` host (an edge device, a laptop) gets `{renewed_by: reconnection, ends_at}`:
   standard 5 days after the confirmation, and never more than 7 days after the frame that
   carries it was issued (body rule `ends_within`, refused as `invalid_body` at
@@ -630,7 +631,7 @@ signed lists:
 2. **The task's access list** (`task_access_list`): what this task may use there, which the
    team services work out with the same access decision for every tool on the host's list.
 3. **The team's block list** (state record `block_list`), which the team services sign into
-   `UA1_BLOCK_LIST`.
+   their team's `UA1_BLOCK_LIST_<team>`.
 
 A call runs only when its tool is on the host's list, the task's access list gives it the
 level the call needs (or holds a one-time approval for that exact action), and no block in
@@ -842,9 +843,10 @@ its control queue's consumers, its control address, and the key of its agent rec
 which a NATS user JWT's base64url encoding turns into about 1,215 bytes. Each worker pool adds
 three subjects, 349 bytes with a 24-character agent type. `tests/test_message_contract.py`
 recomputes these figures from the generated templates. A credential is at most
-`max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt` field's limit, so the
-authority places no more agents and pools on one host than its credential can name: with
-the longest ids, about 45 agents beside 10 worker pools. The id caps exist for this; with
+`max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt` field's limit, so no more
+agents and pools are placed on one host than its credential can name: the team services
+refuse an open beyond it (`limit_reached`, "Agent sessions"). With the longest ids, that is
+about 45 agents beside 10 worker pools. The id caps exist for this; with
 64-character ids a host held about 25. A host writes only its own agents' records, rather
 than any agent record of its team: readers would refuse another host's record, but agent
 records are written only when they change, so an overwritten one would stay missing until
@@ -860,13 +862,19 @@ each role's templates for the host (`custom_messages.wire.permissions.host_permi
   the host runs and each edge it serves, with `{team}` set to that agent's, pool's or
   edge's own team. A host that serves two teams and runs team A's `researcher` therefore
   gets no grant on team B's `researcher`;
-- any other subject with `{team}` is repeated for each team the host serves.
+- any other subject with `{team}` is repeated for each team the host serves;
+- `{installation}` becomes the host's own installation, and a subject that names `{peer}` is
+  repeated for each installation the installation's agreements name ("Key-value grants").
 
 These placeholders never become wildcards. Clients use `_INBOX.<runtime>` as their inbox
-prefix. Hosts cannot reach another host's, another team's or another role's consumers, and
-cannot read streams directly, except the team services, which read their own team's agent
-stream to withdraw work. Only the two roles below create, change or delete JetStream
-objects or messages. The live conformance tests prove both allowed and refused operations.
+prefix. Hosts cannot reach another host's, another team's or another role's queue
+consumers. Hosts read no queue stream directly, except the team services, which read their
+own team's agent stream to withdraw work and their own team's dead letters ("Dead
+letters"); bucket readers read their buckets' streams through direct gets and watches
+("Key-value grants"). Only the topology owner and the team services (withdrawing work, and
+keeping dead letters) create, change or delete JetStream objects or stored messages; bucket
+readers create only their own unnamed watch consumers, and writers change only their own
+keys. The live conformance tests prove both allowed and refused operations.
 
 **Who sets up the streams.** The topology owner (`topology_owner` in `transport.yaml`) is
 the installation authority. It already decides which hosts serve which teams, agents and
@@ -941,11 +949,26 @@ minor, or does not serve, and `handler_failed` when its handler failed before it
 answer), and `UA-Refused-At`, the refusal's pointer up to the last field
 the receiver's schema knows (`FrameRefused.known_at`), so a name the sender chose never
 comes back. It carries no detail and is not signed: the requester takes it only as a
-reason to stop waiting and logs the code; it never treats it as a decision. NATS lets only
-the receiver of a request answer it, once (`allow_responses`), so no other host can send
-it. A requester that gets no answer within the frame's expiry, or "no responders", treats
-the service as unavailable. Queued work is never answered this way: it is set aside
-("Dead letters") or, for a temporary refusal, left queued.
+reason to stop waiting and logs the code; it never treats it as a decision. Where each
+host has its own NATS credential, only the receiver of a request may answer it, once
+(`allow_responses`); while hosts share one NATS login ("Installation traffic",
+"Replies"), any local process could send such an answer, which is one more reason it
+decides nothing. A requester that gets no answer within the frame's expiry, or "no
+responders", treats the service as unavailable. Queued work is never answered this way: it
+is set aside ("Dead letters") or, for a temporary refusal, left queued.
+
+**Answering only the requester's inbox.** `allow_responses` lets a receiver publish its one
+answer to whatever reply subject the request names, past the receiver's own grants. A
+requester could name a JetStream API or key-value subject instead of its inbox and have the
+answer written there with the receiver's rights: an empty refusal on
+`$JS.API.STREAM.DELETE.<stream>` deletes that stream. So a receiver answers, with a signed
+reply or a refusal, only when the reply subject is the requester's own inbox,
+`_INBOX.<sender slot>.<token>...` with at least one token after the slot and no wildcard,
+where the sender slot is the one in the subject the request arrived on
+(`ua.v1.<team>.<slot>.…` or `ua.v1._install.<slot>.svc`). The requester's publish
+permissions fix that slot to its own runtime id. Any other request is dropped unanswered
+and logged with its subject and reply subject
+(`custom_messages.wire.frame.answer_subject`).
 
 **Header size.** JetStream counts headers in a stream's maximum message size. The largest
 header block these five headers allow, in NATS's `NATS/1.0` header format, is 891 bytes;
@@ -1186,28 +1209,64 @@ A host signs frames for an agent only while a session places that agent on it ("
 it"). It gets each session from its team's services, which place the agent and sign the
 session record:
 - **`sessions.open`** names the agent, its type and the digest of the definition the host
-  will run. The team services check the roster (only the team's designated lead gets the
-  lead role), the host's certificate (its agent types and session limit) and the id limits,
-  write the placement with compare-and-set, store the signed session in `UA1_CERTS` and
-  return it. An agent that runs on another host is refused with `already_placed`, naming
-  that host: agents stay on their host and move only by a handover ("Custody windows").
-  A host that already runs as many agents as its certificate allows gets `limit_reached`.
-- **`sessions.renew`** re-signs one of the host's sessions while the host is connected,
-  with a higher sequence; a session lasts at most 7 days.
+  will run. The team services check the host's certificate (its agent types and session
+  limit) and the id limits, write the placement with compare-and-set, store the signed
+  session in `UA1_CERTS` and return it. They give the lead role only to the team lead's agent
+  type on a host whose certificate holds the `lead_host` role; until a team has a roster,
+  nothing else limits it to one lead. An agent that runs on another host is refused with
+  `already_placed`, naming that host: agents stay on their host and move only by a handover
+  ("Custody windows"). A host that already runs as many agents as its certificate allows, or
+  as its NATS credential can name ("Credential size"), gets `limit_reached`. An open for an
+  agent already placed on the asking host places it there again, with the placement's next
+  sequence, and signs a new session; the earlier session names the earlier placement, so it
+  can no longer be renewed and ends with its end time.
+- **`sessions.renew`** re-signs one of the host's sessions while the host is connected: the
+  next sequence and a new end, at most 7 days away, and every other field as it was. It is
+  refused with `not_allowed` when the session has ended (closed, or past its end) or names an
+  earlier placement of its agent than the current one, so a closed session never comes back,
+  not even when its agent was placed on the same host again. The host then stops signing
+  under that session and opens a new one if it still runs the agent.
 - **`sessions.close`** records a session's actual end when its agent exits, fails or is
-  handed over.
+  handed over: the team services sign the session again with that end, so it covers nothing
+  dated after it, and remove the placement unless the agent was handed over (the new host's
+  open replaces it). Closing a session that has already ended answers `ok` with its recorded
+  end and changes nothing.
 
-The host asks for itself, so these requests name no agent and carry no token; their
-replies go to the host ("Replies"). Before it keeps a returned session (`TrustStore.add`),
-the host checks it like a join reply's certificate, and refuses the reply as
-`invalid_body` at `/body/session/...` when the session:
+Renew and close answer `not_found` for a session that does not place its agent on the asking
+host, so no host renews or ends another host's sessions. Where hosts have their own NATS
+credentials, an open that adds an agent is followed by a certificate renewal whose credential
+names the agent's subjects ("Credentials follow placement"); until then the host cannot read
+the agent's queues or write its agent record.
+
+**Restarts.** A host that starts again first closes the sessions an earlier run of it left
+open (it finds them in `UA1_CERTS` under its runtime id), then opens sessions for the agents
+it now runs. A session it cannot close ends with its end time.
+
+**Repeating a session operation.** The session operations keep no stored outcome ("Stored
+outcomes"): their outcome is the records in `UA1_PLACEMENT` and `UA1_CERTS`, and no
+transaction holds both those records and an outcome stored in the team services' database.
+Each one is safe to repeat instead:
+- a host that lost an open's reply asks again and gets a new session for the same agent on
+  itself (above);
+- the team services write the placement before the session, so a failure between the two
+  leaves the agent placed on the asking host without a session, which the host's next open
+  completes;
+- a repeated renewal signs the session again; a repeated close changes nothing.
+
+The host asks for itself, so these requests name no agent (one signed as an agent is refused
+as `wrong_issuer` at `/issuer/agent`) and carry no token; their replies go to the host
+("Replies"). Before it keeps a returned session (`TrustStore.add`), the host checks it like a
+join reply's certificate, and refuses the reply as `invalid_body` at `/body/session/...` when
+the session:
 - does not verify against the certificate of the team services host that replied, or that
   host signed no session (`/body/session/writer`);
 - is for another team than the one asked (`/body/session/body/team`);
 - places the agent on another host (`/body/session/body/runtime`);
 - for an open, names another agent or type than asked (`/body/session/body/agent`,
   `agent_type`); for a renewal, another session than the one it named
-  (`/body/session/body/session`).
+  (`/body/session/body/session`), or, when the host holds that session, changes anything but
+  its end (the agent, its type and role, the host, the placement revision or the start, at
+  `/body/session/body/<field>`).
 
 `custom_messages.wire.frame` checks this when it verifies the reply.
 
@@ -1222,8 +1281,8 @@ Hosts, agents, placements, the team view and the block list are key-value record
 The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), its body schema, for records that end how long after it is written a record may end (`max_lifetime_seconds`, "Trust over time"), and for records that readers judge by age how long one counts as fresh (`fresh_seconds`). The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
 - **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. The reader holds a current revocations record of the writer's installation (`revocations_not_current`), whoever the writer is: only the authority's installation traffic needs none. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
-- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current. A report with a longest lifetime (the block list, 7 days) states its expiry, within that lifetime of being written (`invalid_body` at `/expires_at`).
-- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
+- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 30 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current. A report with a longest lifetime (the block list, 7 days) states its expiry, within that lifetime of being written (`invalid_body` at `/expires_at`).
+- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within 30 seconds, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
 
 A reader refuses a state report with the first failing check, in the registry's order:
 1. `too_large`, `malformed` (the document's form, and a record of another type than the one read: `TrustStore.verify` takes the record type its bucket holds);
@@ -1242,31 +1301,75 @@ What each record says, and what `TrustStore.verify` checks about it:
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 
-**Key-value grants.** Each bucket in `transport.yaml` names its `readers` and, per writer
-role, the keys that role may write, as templates membership code fills like subjects:
-`{self}` is the host's runtime id, `{team}` each team it serves and `{agent}` each agent it
-runs. The generated permissions follow:
-- a reader gets the bucket's stream information, its direct and last-message reads, and
-  what a watch needs: creating its own ephemeral consumer, whose deliveries arrive on the
-  reader's own inbox, reading that consumer's information, and answering its flow control.
-  No reader may delete a bucket's consumers, so no host ends another host's watch; an idle
-  watch's consumer ends by itself;
+**Key-value grants.** These grants take effect where each host has its own NATS credential.
+While the hosts share one NATS login ("Installation traffic"), every process may do what any
+role may, and only the records' signatures protect them. Each bucket in `transport.yaml`
+names its `readers` and, per writer role, the keys that role may write, as templates
+membership code fills like subjects:
+`{self}` is the host's runtime id, `{team}` each team it serves, `{agent}` each agent it
+runs, `{installation}` its own installation and `{peer}` each installation an agreement
+names. The generated permissions follow:
+- a reader gets the bucket's stream information, its direct reads (the bucket serves
+  last-value gets as `$JS.API.DIRECT.GET.<stream>.<subject>`), and what a watch needs:
+  creating an unnamed consumer, whose deliveries arrive on the reader's own inbox, reading
+  that consumer's information, and answering its flow control. A reader may create a
+  consumer only through the request that names none: NATS refuses a durable consumer
+  through it, and a request that names no consumer cannot change an existing one, so no
+  host changes another host's watch. No reader may delete a bucket's consumers;
 - a writer publishes only its own keys: each host its own liveness record (`UA1_HOSTS`,
   key its runtime id) and its own agents' records (`UA1_AGENTS`, `<team>.<agent>`); the team
-  services their team's placements, sessions (`UA1_CERTS`, `session.*.<team>.*`), team view,
-  block list and single-instance lock; the installation authority certificates,
-  revocations and agreements;
-- the topology owner creates every bucket.
+  services their team's placements, sessions of their own installation (`UA1_CERTS`,
+  `session.<installation>.<team>.*`), team view, block list and single-instance lock; the
+  installation authority its own installation's certificates and revocations, and
+  agreements; the edge adapter unchanged copies of peers' certificates, revocations and
+  sessions under each peer's installation id, never its own installation's records;
+- the topology owner creates every bucket, and finds and deletes buckets' consumers when a
+  host left too many behind.
+
+**One bucket per team for people's words.** The team view (an Objective's title is the
+person's own words) and the block list (people's blocks and standing) live in
+`UA1_TEAM_VIEW_<team>` and `UA1_BLOCK_LIST_<team>`. Their grants name the team's own bucket,
+so a host reads no other team's. A reader refuses a record whose team is not its bucket's.
+The other buckets hold liveness, agent state, placements and signed trust records, which
+name agents and hosts but no person's content, and every host of the installation reads them.
+
+**Every bucket's stream settings.** Each bucket is a stream, `KV_<bucket>` with subjects
+`$KV.<bucket>.>`, with the settings of `key_value_stream` in `transport.yaml`: one value per
+key, rollup headers refused, no deletes or purges through the stream API, direct gets
+allowed, and a consumer limit. With rollup headers allowed, a writer of one key would erase
+every key of its bucket with `Nats-Rollup: all`; client libraries' bucket helpers allow them
+(nats-py's `create_key_value` does), so the topology owner creates each bucket as a stream
+with these settings (`custom_messages.wire.buckets.bucket_stream`) and clients bind to it as
+a bucket. A writer removes a record with a delete marker (`KV-Operation: DEL`), which reaches
+only its own key; purging a key, which needs a rollup header, is refused. A host that leaves
+watches behind can fill a bucket's consumer limit, which stops new watches on that bucket
+until the topology owner deletes them or they expire.
 
 The generator checks that every role a record's `writers` names has a key template in its
-bucket, and that templates use only those placeholders. Where a record is stored still
-adds no trust: readers verify each record's signature.
+bucket, that templates use only those placeholders, never start with a wildcard and end with
+`>` if they hold one, and that `key_value_stream` keeps rollup headers and stream-API deletes
+off. Where a record is stored still adds no trust: readers verify each record's signature.
 
-**The team services' lock.** `UA1_LOCKS` holds one key per team, `team_services.<team>`:
-the runtime id of the team services instance that serves the team and when its lease ends.
-An instance takes the lock with compare-and-set and renews it before the lease ends; a
-second instance refuses to serve while another holds an unexpired lease, and logs which
-one holds it. Only the team services read or write this bucket.
+**The team services' lock.** `UA1_LOCKS` holds one key per team, `team_services.<team>`,
+whose value is the JSON object of `schemas/team-services-lock.schema.json`: the holder's
+runtime id, its `instance` (a random id the process chose when it started) and when its
+lease ends. Every team services instance runs as the same runtime, so only the instance id
+tells a restarted process, or a second copy, from the holder:
+- an instance serves a team only once its own create, or compare-and-set update on the key's
+  revision, succeeded; it holds a 30-second lease and renews it every 10 seconds;
+- a renewal whose write reached NATS but whose answer was lost leaves the key naming the
+  holder's instance under a revision the holder does not know: the holder reads the key and,
+  when it names its own instance, renews from that revision. Only another instance's id
+  means the lock is lost;
+- an instance whose renewals keep failing stops serving when its lease runs out, so two
+  instances never serve at once;
+- another instance does not serve while the lease holds: it logs which instance holds the
+  lock and waits, and takes the lock once the lease has ended and the clock tolerance has
+  passed.
+
+The lock is not signed, unlike the state records: only the team services may write the bucket
+(and the stream settings refuse rollups), and only the compare-and-set on the revision
+proves who holds it. Only the team services read or write this bucket.
 
 **Not generated yet.** The object store's grants come with blob owners and retention.
 
@@ -1285,10 +1388,18 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
 - **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes`, which with its headers fits the stream's message limit; for a larger message the notice says `raw.stored: false`.
 - **One stream per team.** Notices and raw copies wait in their team's `UA1_DLQ_<team>`.
   The team services read their team's notices through one consumer (`dead_letters`,
-  `dlq~<team>`), and read a raw copy by the stream sequence its notice names
-  (`dead_letter_custody` in `transport.yaml`); no other role reads the stream, and no grant
-  reaches another team's copies.
-- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference, by their sequence.
+  `dlq~<team>`). They find a notice's raw copy by its subject, the last message for
+  `ua.v1.<team>.<notice sender>.dlq.raw.<copy id>` (the notice's issuer runtime and copy
+  id), check its size and SHA-256 against the notice, and delete it by the stream sequence
+  that read returns (`dead_letter_custody` in `transport.yaml`). The notice's
+  `original.stream_sequence` is where the refused message sat in its own stream, not in
+  this one. The stream keeps one message per subject, so a retried publish replaces its
+  copy and deleting a copy leaves no duplicate. Of the hosts, only the team services read
+  the stream, and no grant reaches another team's copies. The topology owner creates the
+  stream's consumers, as it does every stream's, so it could read the copies too, as it
+  could queued work; it creates only the team services' consumer and an administrator's
+  inspection consumers.
+- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference: they read the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 
 ## Versions
@@ -1328,7 +1439,13 @@ code names its own digest (`custom_messages.wire.kinds.CONTRACT_SHA256`).
   differs from its own with `protocol_mismatch`, naming the digest it runs
   (`accepted_contract_sha256`) and what to install. It still answers a renewal that only gives
   up agents or pools ("Credentials follow placement"), so a host on another contract can hand
-  its agents over. A host upgraded in place renews with a new `renew_id`, since a repeated one
+  its agents over. `verify_frame` returns such a frame with `other_contract` and no body,
+  after checking everything before the body; the authority then reads the body again as this
+  revision shapes it, strictly, and answers it as a give-up only when it fits this contract,
+  names the certificate that signed it at that certificate's membership epoch, rotates no key
+  and keeps its NATS key. Every other join or renewal of another contract gets
+  `protocol_mismatch`, and the authority stores no outcome under the retry key of a frame it
+  did not read. A host upgraded in place renews with a new `renew_id`, since a repeated one
   gets its stored outcome back ("Stored outcomes").
 - **Readers of host records.** A host record that names another digest is authentic, so
   `TrustStore.verify` accepts it without reading the rest of its body and marks it
@@ -1339,7 +1456,9 @@ code names its own digest (`custom_messages.wire.kinds.CONTRACT_SHA256`).
   second holder without a person's override ("Custody windows").
 - **The host on another contract.** A host learns that its digest differs from the team
   services' host record, which it reads when it starts and whenever it changes, or from
-  `protocol_mismatch`. It then stops pulling from worker pool queues and from its agents'
+  `protocol_mismatch`. It reads join and renewal replies strictly, as this revision shapes
+  them, so a reply another revision shaped differently is refused as `invalid_body`; the host
+  record still tells it. It then stops pulling from worker pool queues and from its agents'
   inboxes, keeps reading their control queues, finishes the turns in progress and hands back
   (`task.handback`) every task it has not finished, holding every action outside the team
   meanwhile, and renews only to give up its agents and pools. Messages either side can no
@@ -2390,6 +2509,10 @@ registry entry lists ("Idempotency keys").
   lifetime of an authority token (`authority_token_max_seconds`).
 - **Reads store nothing.** A read is keyed by `/message_id`, so every frame is a new read
   and a retry reads again.
+- **The session operations store nothing either** (`sessions.open`, `sessions.renew`,
+  `sessions.close`): their outcome is the placement and session records in the key-value
+  buckets, which no transaction shares with a stored reply, and each is safe to repeat
+  ("Agent sessions", "Repeating a session operation").
 - **Outcomes that ask for a retry are not stored.** For outcomes in `retry_outcomes` the
   receiver stores nothing, so a retry with the same key is decided again:
   - `not_started`: `tasks.steer` while the request still waits behind other work. Today

@@ -1096,7 +1096,11 @@ class SqliteRuntimeStateRepository(_RelationalRuntimeStateRepository):
 
 
     def _connect(self) -> sqlite3.Connection:
-        return connect_sqlite(self._db_path, logger=self._logger)
+        # An agent's task runtime is written many times per task and acted on
+        # outside the agent only through what it sends, so in an agent process
+        # its commits are flushed before each send (storage.sqlite_connection,
+        # "Flushing before sending").
+        return connect_sqlite(self._db_path, logger=self._logger, defer_flush=True)
 
 
     def _begin_recovery(self, conn: sqlite3.Connection | PostgresConnection) -> None:

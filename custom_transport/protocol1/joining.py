@@ -46,6 +46,7 @@ from custom_transport.protocol1.live import (
 )
 from custom_transport.protocol1.replay import LiveReplayRecord
 from custom_transport.protocol1.trust_state import PersistentTrustStore
+from custom_transport.send_barrier import before_send
 
 # The installation authority's service id, which joins and renewals name as their audience.
 AUTHORITY_SERVICE_ID = "authority"
@@ -168,6 +169,7 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
         frame = sign_join(keys, installation, profile, join_id=join_id, issued=clock(),
                           contract_sha256=trust.store.contract_sha256)
         data, headers = encode(frame)
+        await before_send()
         try:
             message = await nc.request(frame["subject"], data, timeout=30, headers=headers)
         except (NoRespondersError, NatsTimeoutError) as error:
