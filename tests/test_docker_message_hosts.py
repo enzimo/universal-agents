@@ -208,6 +208,22 @@ def test_a_stop_during_the_wait_returns_the_team_services_still_starting(tmp_pat
         stop(process)
 
 
+def test_team_services_whose_serving_file_cannot_be_read_are_stopped(tmp_path: Path, monkeypatch) -> None:
+    """A wait that ends with an error, here a damaged serving file, must not leave the process running
+    unrecorded, holding the team's lock where the launcher cannot stop it."""
+
+    layout = InstanceLayout.at(tmp_path)
+    started = _recording_popen(monkeypatch)
+    script = ("import os, time\n"
+              f"path = {str(layout.team_services_serving_path)!r}\n"
+              "os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+              "open(path, 'w').write('{}')\n"
+              "time.sleep(30)\n")
+    with pytest.raises(ValueError, match="does not name a process"):
+        message_hosts.start_team_services(layout, [sys.executable, "-c", script], {}, cwd=tmp_path, timeout_seconds=10)
+    assert started[0].poll() is not None, "stopped"
+
+
 def test_the_serving_file_names_the_process_and_a_damaged_one_is_an_error(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import logging
 import os
 from pathlib import Path
 import signal
@@ -2278,6 +2279,40 @@ def test_an_interrupted_message_services_start_stops_the_services_already_starte
     with pytest.raises(KeyboardInterrupt):
         lh.main()
     assert stopped == (["external"] if interrupted_at == "authority" else ["installation authority", "external"])
+
+
+def test_a_stop_signal_while_the_message_services_start_stops_them_and_ends_the_launch_cleanly(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """``docker stop`` or Ctrl+C while the launcher waits for the team services (minutes after an unclean stop)
+    stops what started, so the team services release their lock, and ends the launch without an error."""
+
+    import docker.launch_headless as lh
+    from docker import message_hosts
+
+    install_handler = signal.signal
+    _prepare_launch(tmp_path, monkeypatch, team_id="team_test", env={"TEAM_LOCAL_NATS_ENABLED": "false"})
+    monkeypatch.setattr(lh.signal, "signal", install_handler)  # the launch's handlers are the subject here
+    stopped: list[str] = []
+    monkeypatch.setattr(lh, "prepare_message_streams", lambda _path, env: None)
+    authority, team_services = _StandInProcess(), _StandInProcess()
+    monkeypatch.setattr(message_hosts, "start_installation_authority", lambda *_args, **_kwargs: authority)
+
+    def waiting_for_the_team_services(*_args, stop_requested, **_kwargs):
+        os.kill(os.getpid(), signal.SIGINT)  # Ctrl+C, as the launcher waits
+        assert stop_requested(), "the stop reached the wait"
+        return team_services
+
+    monkeypatch.setattr(message_hosts, "start_team_services", waiting_for_the_team_services)
+    monkeypatch.setattr(lh, "terminate_process", lambda process, name: stopped.append(name))
+    monkeypatch.setattr(lh, "stop_external_processes", lambda processes, cleanup: stopped.append("external"))
+    monkeypatch.setattr(lh, "run_supervised", lambda **_kwargs: pytest.fail("no service may start"))
+    previous = signal.getsignal(signal.SIGINT)
+    with caplog.at_level(logging.INFO):
+        assert lh.main() == 0
+    assert stopped == ["team services", "installation authority", "external"]
+    assert "event=message_services_start_stopped" in caplog.text
+    assert signal.getsignal(signal.SIGINT) is previous, "the launcher's own handlers come back"
 
 
 def test_launch_sets_up_the_message_streams_with_the_gateway_environment_just_before_the_services(
