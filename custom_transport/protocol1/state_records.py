@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
 from nats.js.errors import KeyNotFoundError
 
 from custom_messages.wire.encoding import format_timestamp
+from custom_messages.wire.buckets import bucket_name
 from custom_messages.wire.kinds import PROTOCOL, STATE_RECORDS
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import VerifiedRecord, sign_state
@@ -51,6 +52,16 @@ class StateRecords:
         self._trust = trust
         # Reads a writer's certificate this host does not hold yet (``MessageHost.fetch_trust``).
         self._fetch_trust = fetch_trust
+
+    async def _bucket(self, record: str, key: Optional[str] = None, *, team: Optional[str] = None) -> Any:
+        """Bind the contract's bucket; a record key starts with its team for per-team buckets.
+
+        Operations without a record key must name the team explicitly. A host may
+        serve several teams, so its certificate cannot choose one for the caller.
+        """
+
+        name = bucket_name(STATE_RECORDS[record].bucket, team if team is not None else key.split(".", 1)[0] if key else None)
+        return await self._js.key_value(name)
 
     def signed(self, record: str, key: str, body: Mapping[str, Any], *, sequence: int, issued_at: datetime,
                expires_at: Optional[datetime] = None) -> dict[str, Any]:
@@ -82,7 +93,7 @@ class StateRecords:
         ``KeyWrongLastSequenceError``, so a placement writer never overwrites another.
         """
 
-        bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
+        bucket = await self._bucket(record, key)
         data = json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         await before_send()
         if last_revision is None:
@@ -131,21 +142,22 @@ class StateRecords:
             return self._trust.add(entry.value, now=now)
 
     async def _get(self, record: str, key: str) -> Any:
-        bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
+        bucket = await self._bucket(record, key)
         try:
             entry = await bucket.get(key)
         except KeyNotFoundError:
             return None
         return entry if entry.value else None
 
-    async def watch(self, record: str, keys: str = ">") -> AsyncIterator[tuple[str, Optional[bytes]]]:
+    async def watch(self, record: str, keys: str = ">", *,
+                    team: Optional[str] = None) -> AsyncIterator[tuple[str, Optional[bytes]]]:
         """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or expired.
 
         The caller verifies each record it uses, as ``read_report`` does, keeping the
         sequence it holds per key.
         """
 
-        bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
+        bucket = await self._bucket(record, team=team)
         watcher = await bucket.watch(keys)
         try:
             async for entry in watcher:
