@@ -53,6 +53,7 @@ from custom_transport.nats_pull import (
     return_or_end,
 )
 from custom_transport.nats_topology import NatsStreamTopology
+from custom_transport.send_barrier import before_send
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 
@@ -575,6 +576,8 @@ class NatsTransportAdapter:
         opts = options or TransportPublishOptions()
         body = encode_envelope(envelope)
         headers = self._headers_for(envelope, opts)
+        # What the agent recorded before this message is on the disk first.
+        await before_send()
         if (
             self.config.jetstream_enabled
             and self._js is not None
@@ -704,6 +707,7 @@ class NatsTransportAdapter:
             return False
         from nats.js.errors import NotFoundError
 
+        await before_send()
         try:
             return bool(
                 await self._js.delete_msg(self.mapper.work_stream_name(), int(sequence))
@@ -752,6 +756,7 @@ class NatsTransportAdapter:
                 replicas=int(self.config.replicas or 1),
             )
             store = await self._js.create_object_store(bucket=bucket, config=config)
+        await before_send()
         with open(path, "rb") as handle:
             return await store.put(
                 object_name,
@@ -1381,6 +1386,7 @@ class NatsTransportAdapter:
             # Reject locally. An oversized HPUB closes the shared connection
             # before nats-py's body-only size check can protect the receivers.
             raise MaxPayloadError
+        await before_send()
         await self._js.publish(subject, payload, headers=headers)
 
     def _record_stopped_receiver(self, subscription: str, error: Optional[BaseException]) -> None:
@@ -1447,11 +1453,17 @@ class NatsTransportAdapter:
                 waiting_after = int(message.metadata.num_pending or 0)
             except Exception:
                 sequence, waiting_after = 0, 0
+
+            async def ack_after_barrier(message: Any = message) -> None:
+                # The notice the reader stored about it is on the disk first.
+                await before_send()
+                await message.ack()
+
             records.append(
                 DeadLetterRecord.from_headers(
                     dict(getattr(message, "headers", None) or {}),
                     stream_sequence=sequence,
-                    ack=message.ack,
+                    ack=ack_after_barrier,
                     waiting_after=waiting_after,
                 )
             )
@@ -1480,6 +1492,8 @@ class NatsTransportAdapter:
         async def _ack() -> None:
             ack = getattr(msg, "ack", None)
             if ack is not None:
+                # Whatever handling this message recorded is on the disk first.
+                await before_send()
                 try:
                     await ack()
                 except Exception as exc:
@@ -1504,6 +1518,7 @@ class NatsTransportAdapter:
             if term is None:
                 await _ack()
                 return
+            await before_send()
             try:
                 await term(reason=reason)
             except TypeError:
