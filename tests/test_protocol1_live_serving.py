@@ -23,7 +23,7 @@ from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
 from custom_messages.wire.models import Frame
-from custom_messages.wire.refusals import REFUSAL_HEADER
+from custom_messages.wire.refusals import REFUSAL_AT_HEADER, REFUSAL_HEADER
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1 import live
 from custom_transport.protocol1.live import LiveHost, ServiceUnavailable
@@ -234,6 +234,27 @@ async def test_a_check_that_fails_unexpectedly_still_ends_the_requesters_wait(mo
     await callback(close_request(worker()))
     assert [headers[REFUSAL_HEADER] for _, _, headers in receiver_host.nc.published] == ["handler_failed"]
     assert "protocol1_check_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_check_only_the_handler_can_make_refuses_the_request_with_its_own_code(caplog) -> None:
+    """Such as who may present a token (README "Who may present a token"): refused like a frame verify_frame refused,
+    with the code and pointer only, never the handler's detail."""
+
+    receiver_host = services()
+
+    async def handler(verified):
+        raise FrameRefused("bad_authority", "a command token is accepted only from the command's sender",
+                           at="/authority")
+
+    callback = await serving(receiver_host, handler)
+    await callback(close_request(worker()))
+    await receiver_host.drain()
+    (answered, data, headers), = receiver_host.nc.published
+    assert answered == WORKER_INBOX and data == b""
+    assert (headers[REFUSAL_HEADER], headers[REFUSAL_AT_HEADER]) == ("bad_authority", "/authority")
+    assert "command's sender" not in str(headers)
+    assert "event=protocol1_handler_refused" in caplog.text and "code=bad_authority" in caplog.text
 
 
 @pytest.mark.asyncio
