@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import re
 import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -31,13 +33,28 @@ def _server_id(url: str) -> str:
 
 
 def test_two_tests_starting_at_once_each_talk_to_their_own_server(tmp_path: Path) -> None:
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    with own_nats_server(nats_server(), tmp_path / "a") as first, own_nats_server(nats_server(), tmp_path / "b") as second:
-        assert first != second
-        for url, folder in ((first, tmp_path / "a"), (second, tmp_path / "b")):
-            logged = re.search(r"\[INF\]\s+ID:\s+(\S+)", (folder / "nats.log").read_text())
-            assert logged is not None and _server_id(url) == logged.group(1)
+    """Both servers start at the same moment, as two tests' fixtures do in parallel runs."""
+
+    folders = [tmp_path / "a", tmp_path / "b"]
+    for folder in folders:
+        folder.mkdir()
+    together = threading.Barrier(2)
+    found: dict[Path, tuple[str, str]] = {}
+
+    def start(folder: Path) -> None:
+        together.wait()
+        with own_nats_server(nats_server(), folder) as url:
+            found[folder] = (url, _server_id(url))
+            together.wait()  # both servers run at once while each is asked who it is
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for future in [pool.submit(start, folder) for folder in folders]:
+            future.result(timeout=30)
+    (first, first_id), (second, second_id) = found[folders[0]], found[folders[1]]
+    assert first != second and first_id != second_id
+    for folder in folders:
+        logged = re.search(r"\[INF\]\s+ID:\s+(\S+)", (folder / "nats.log").read_text())
+        assert logged is not None and found[folder][1] == logged.group(1)
 
 
 def test_a_server_that_cannot_start_fails_the_test_instead_of_lending_it_another(tmp_path: Path) -> None:
