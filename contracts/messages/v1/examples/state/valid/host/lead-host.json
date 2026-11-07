@@ -11,7 +11,7 @@
   },
   "sequence": 91,
   "issued_at": "2026-10-22T04:30:00.000Z",
-  "expires_at": "2026-10-22T04:31:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
   "body": {
     "runtime": "lead-host-1",
     "certificate": {
@@ -50,5 +50,5 @@
   },
   "algorithm": "ed25519",
   "body_digest": "SJcuEE8gGzfLbGH_a4S09mMMfBj_J-5KMh8ERohbP_o",
-  "signature": "0HvPFuSdu3gnsdrd9INa4VuEM1drb5SS-7gFYuQ1B313ihK2EtRUpV3Qqq9jJ_xO4K4m6PJEuBakFYlEEOJtCA"
+  "signature": "KNtQcA3Go_0ECykU00RTiNSBGoBsSaXPmfYs_cd4Mdqp3dF4NJFF7iTvVcCJR227boTMOxCE1dZVlhaKpsjvDA"
 }
