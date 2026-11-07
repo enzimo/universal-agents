@@ -4535,11 +4535,39 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
   (the authority did not add the type), `agent_type_not_certifiable`,
   `session_already_placed`, `session_runtime_error`. A record holds 16 components, so with
   more such agents the last is `more-agents` (`sessions_refused`). The host writes its record
-  again at once when the list changes.
+  again at once when the list changes. Readers of the team pass on what live hosts of the
+  team list (`custom_transport.protocol1.team_agents.TeamAgents.host_components`), since
+  such an agent has no record of its own.
 - Each opening that got an answer is followed by one with a new request id, and each daily
   renewal has its own (the session and the sequence of the record it renews, as a digest),
   kept only for retries of that one request, since a repeated id gets the first answer back
   (README "Stored outcomes"). A refused renewal opens a new session.
+
+**Agent records and who is live** (step 7a): each agent's host signs the agent's state into
+`UA1_AGENTS` (key `<team>.<agent>`: starting, idle, busy, paused or exiting, whether it
+accepts work, and its name, plan decision 69) when the agent reports a change
+(`custom_agents.agent_host.report_agent_state`, called wherever the agent refreshes its own
+state row and when a worker starts winding down after losing its launch lease). It writes at
+most every 2 seconds, so a burst of busy and idle turns costs one write. "Exiting" is
+written at once as the agent leaves, before its session closes, and the record is then
+removed, since agent ids are new at every start; a host's start also removes the records
+its earlier run left, read verified as its own (one that does not verify is left and
+logged). Readers use `custom_transport.protocol1.team_agents.TeamAgents`, which
+watches `UA1_AGENTS`, `UA1_PLACEMENT` and `UA1_HOSTS`, verifies each record, and counts an
+agent live while its record is not exiting, its placement names the host that signed the
+record, and that host's liveness record has not expired (checked again every 5 seconds,
+since an expired record gives no change), so a stopped host's agents drop out at most 35
+seconds after its last liveness write. Whether an agent is the team lead comes from its
+session's `agent_role`, which the team services signed. The view is replaced as a whole on
+each change, so agents on other threads read it without locks. The team lead's process and
+the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+A host record that names another contract digest is authentic but its body is not read, so
+the host's certificate epoch comes from the record's signer. Its agents stay in the view,
+so control messages about the tasks they hold still reach them, marked with that digest
+(`TeamAgent.other_contract`): they take no new work (`TeamAgent.takes_work`), the host is
+logged once with both digests (`event=team_agents_host_other_contract`), and
+`other_contract_hosts` lists such hosts for the Status page. A draining agent's own record
+says it takes no work too.
 
 **An agent process on another contract drains** (`custom_agents.agent_host`,
 `custom_agents.contract_drain`). When its host learns that the process runs another

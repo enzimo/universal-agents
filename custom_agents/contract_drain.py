@@ -90,6 +90,10 @@ async def drain_agent(agent: Any, reason: str) -> None:
     worker = is_pool_worker(agent)
     state = ContractDrain(reason=reason, started_at=datetime.now(timezone.utc), holds_back_unstarted=worker)
     agent._contract_drain = state
+    # Its record says at once that it takes no work (UniversalAgent._report_record_state, custom_agents.agent_host).
+    report = getattr(agent, "_report_record_state", None)
+    if callable(report):
+        report()
     state.left_queues = await _leave_shared_queues(agent)
     agent._logger.warning(
         "This agent's process runs another message contract than its installation: it takes no new work and "
