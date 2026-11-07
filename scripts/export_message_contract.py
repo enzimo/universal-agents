@@ -1235,6 +1235,11 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
         if not all("{team}" in stream for stream in custody["streams"]):
             raise ContractError(f"transport.yaml: {key} reads and deletes only in per-team streams ({{team}}), so it never "
                                 "reaches another team's messages")
+    for stream in transport["dead_letter_custody"]["streams"]:
+        # A raw copy is found by its subject and deleted by the sequence that read returns; a second
+        # copy under the same subject, from a retried publish, would survive that delete.
+        if transport["streams"][stream].get("max_msgs_per_subject") != 1:
+            raise ContractError(f"transport.yaml: stream {stream} keeps one message per subject (max_msgs_per_subject: 1)")
     check_key_value(registry, transport)
 
 

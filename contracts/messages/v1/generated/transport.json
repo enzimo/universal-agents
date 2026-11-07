@@ -350,6 +350,7 @@
       "max_age_seconds": 2592060,
       "max_consumers": 16,
       "max_message_bytes": 263168,
+      "max_msgs_per_subject": 1,
       "retention": "limits",
       "storage": "file",
       "subjects": [

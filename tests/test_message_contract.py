@@ -1322,6 +1322,7 @@ def test_a_buckets_stream_refuses_rollups_and_serves_direct_reads() -> None:
     (lambda t: t["key_value"]["UA1_HOSTS"]["writers"].update(worker_host=["*"]), "starts with a fixed word"),
     (lambda t: t["key_value"]["UA1_CERTS"]["writers"].update(edge_adapter=["host.>.x"]), "ends with >"),
     (lambda t: t["dead_letter_custody"].update(streams=["UA1_WORK"]), "dead_letter class's streams"),
+    (lambda t: t["streams"]["UA1_DLQ_{team}"].pop("max_msgs_per_subject"), "one message per subject"),
 ])
 def test_the_generator_refuses_buckets_and_custody_it_cannot_grant(change, problem: str) -> None:
     transport = copy.deepcopy(TRANSPORT)
@@ -1341,7 +1342,14 @@ def test_only_the_team_services_read_their_teams_dead_letters() -> None:
             assert set(reads) == {"$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.dlq~{team}",
                                   "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_{team}.dlq~{team}", "$JS.ACK.UA1_DLQ_{team}.dlq~{team}.>",
                                   "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
-        elif role != TRANSPORT["topology_owner"]:
+        elif role == TRANSPORT["topology_owner"]:
+            # It creates the stream and its consumers like every stream's, which is how it could read
+            # the copies (README, "Dead letters"); it reads and deletes no message by sequence.
+            assert set(reads) == {"$JS.API.STREAM.CREATE.UA1_DLQ_{team}", "$JS.API.STREAM.UPDATE.UA1_DLQ_{team}",
+                                  "$JS.API.STREAM.INFO.UA1_DLQ_{team}", "$JS.API.CONSUMER.CREATE.UA1_DLQ_{team}.*",
+                                  "$JS.API.CONSUMER.CREATE.UA1_DLQ_{team}.*.>", "$JS.API.CONSUMER.DURABLE.CREATE.UA1_DLQ_{team}.*",
+                                  "$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.*", "$JS.API.CONSUMER.DELETE.UA1_DLQ_{team}.*"}
+        else:
             assert not reads, (role, reads)
 
 

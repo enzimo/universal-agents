@@ -1333,10 +1333,18 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
 - **Raw copies** have no frame kind: they keep the refused bytes exactly, so a person can inspect what arrived. Generated permissions let each notice sender publish copies under its own runtime id only. A receiver keeps a copy only when it is at most `max_frame_bytes`, which with its headers fits the stream's message limit; for a larger message the notice says `raw.stored: false`.
 - **One stream per team.** Notices and raw copies wait in their team's `UA1_DLQ_<team>`.
   The team services read their team's notices through one consumer (`dead_letters`,
-  `dlq~<team>`), and read a raw copy by the stream sequence its notice names
-  (`dead_letter_custody` in `transport.yaml`); no other role reads the stream, and no grant
-  reaches another team's copies.
-- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference, by their sequence.
+  `dlq~<team>`). They find a notice's raw copy by its subject, the last message for
+  `ua.v1.<team>.<notice sender>.dlq.raw.<copy id>` (the notice's issuer runtime and copy
+  id), check its size and SHA-256 against the notice, and delete it by the stream sequence
+  that read returns (`dead_letter_custody` in `transport.yaml`). The notice's
+  `original.stream_sequence` is where the refused message sat in its own stream, not in
+  this one. The stream keeps one message per subject, so a retried publish replaces its
+  copy and deleting a copy leaves no duplicate. Of the hosts, only the team services read
+  the stream, and no grant reaches another team's copies. The topology owner creates the
+  stream's consumers, as it does every stream's, so it could read the copies too, as it
+  could queued work; it creates only the team services' consumer and an administrator's
+  inspection consumers.
+- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies whose frames name that person, in an authority token or a person reference: they read the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned.
 - **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
 
 ## Versions

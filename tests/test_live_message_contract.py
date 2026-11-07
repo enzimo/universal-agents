@@ -113,6 +113,7 @@ def stream_config(name: str, team: str = TEAM) -> StreamConfig:
         duplicate_window=spec.get("duplicate_window_seconds"),
         max_consumers=spec.get("max_consumers"),
         max_msg_size=spec.get("max_message_bytes"),
+        max_msgs_per_subject=spec.get("max_msgs_per_subject", -1),
     )
 
 
@@ -572,10 +573,15 @@ async def test_installation_requests_reach_the_authority_and_dead_letters_keep_r
         await js.add_stream(config=stream_config("UA1_DLQ_{team}"))
         raw = b"{a refused message stays byte-for-byte identical\x00"
         raw_subject = "ua.v1.team_example.worker-host-1.dlq.raw." + "c" * 64
-        stored_raw = await worker.nc.jetstream().publish(raw_subject, raw)
+        # Another copy first, so the copy's sequence in this stream is not 1; the publish is retried
+        # after a lost acknowledgement, and the stream still keeps one copy under the subject.
+        await worker.nc.jetstream().publish("ua.v1.team_example.worker-host-1.dlq.raw." + "d" * 64, b"another copy")
+        for _attempt in range(2):
+            await worker.nc.jetstream().publish(raw_subject, raw)
         notice = fixtures.example_frame("dlq.notice", "bad-signature")
         await worker.nc.jetstream().publish(notice["subject"], json.dumps(notice).encode(), headers=headers(notice))
         assert (await js.get_last_msg(dead_letters, raw_subject)).data == raw
+        assert (await js.stream_info(dead_letters)).state.messages == 3  # the other copy, one copy of raw, the notice
         stored = await js.get_last_msg(dead_letters, notice["subject"])
         fixtures.verify(stored.data, notice)  # a stored frame is verified without its headers
         other = raw_subject.replace("worker-host-1", "another-host")
@@ -592,8 +598,10 @@ async def test_installation_requests_reach_the_authority_and_dead_letters_keep_r
         [message] = await pulled.fetch(1, timeout=2)
         assert message.subject == notice["subject"]
         await message.ack()
-        assert (await services.nc.jetstream().get_msg(dead_letters, stored_raw.seq)).data == raw
-        await services.nc.jetstream().delete_msg(dead_letters, stored_raw.seq)
+        # The team services find the copy by its subject and delete it by the sequence that read returns.
+        found = await services.nc.jetstream().get_last_msg(dead_letters, raw_subject)
+        assert found.data == raw and found.seq != notice["body"]["original"]["stream_sequence"]
+        await services.nc.jetstream().delete_msg(dead_letters, found.seq)
         with pytest.raises(nats.js.errors.NotFoundError):
             await js.get_last_msg(dead_letters, raw_subject)
         await worker.publish_refused(f"$JS.API.STREAM.MSG.GET.{dead_letters}")

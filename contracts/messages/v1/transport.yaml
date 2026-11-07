@@ -128,13 +128,15 @@ streams:
     max_consumers: 4096         # NATS 2.15 defaults to 1,000 per stream
     max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}
   UA1_DLQ_{team}:
-    # One team's set-aside copies and notices; only its team services read and delete here.
+    # One team's set-aside copies and notices; of the hosts, only its team services read and
+    # delete here (the topology owner, which creates every stream's consumers, could too).
     subjects: ["ua.v1.{team}.*.dlq.>"]
     retention: limits
     storage: file
     max_age_seconds: 2592060    # the dead-letter class's expiry plus a minute
     max_message_bytes: 263168   # as UA1_AGENT_WORK_{team}; a raw copy keeps at most max_frame_bytes of the refused message, and a larger message gets a notice with raw.stored false
-    max_consumers: 16           # the team services' notice consumer, and a few for an administrator's inspection
+    max_consumers: 16           # the team services' notice consumer, and a few the topology owner creates for an administrator's inspection
+    max_msgs_per_subject: 1     # each copy id names one subject: a retried publish replaces its copy, so deleting a copy leaves no duplicate
 
 # Consumer names join ids with ~, which ids cannot contain: with _ (allowed in ids),
 # team "team_example" with agent "researcher-2" and team "team" with agent
@@ -182,7 +184,7 @@ consumers:
     ack_wait_seconds: 60
     max_deliveries: 20
   dead_letters:
-    # The team services read their team's notices; raw copies are read by sequence (dead_letter_custody).
+    # The team services read their team's notices; a raw copy is found by its subject (dead_letter_custody).
     stream: UA1_DLQ_{team}
     name: dlq~{team}
     filter: ua.v1.{team}.*.dlq.notice.*
@@ -201,9 +203,10 @@ topology_owner: installation_authority
 withdrawal:
   role: team_services
   streams: ["UA1_AGENT_WORK_{team}"]
-# The dead-letter custody role reads a raw copy by the sequence its notice names, and deletes the
-# raw copies that name a departed person (README, "Dead letters"); only per-team streams, so the
-# grant reaches no other team's copies.
+# The dead-letter custody role finds a raw copy by its subject (the last message for
+# ua.v1.<team>.<notice sender>.dlq.raw.<copy id>), reads it, and deletes it by the sequence that
+# read returns; it deletes the raw copies that name a departed person the same way (README, "Dead
+# letters"). Only per-team streams, so the grant reaches no other team's copies.
 dead_letter_custody:
   role: team_services
   streams: ["UA1_DLQ_{team}"]
