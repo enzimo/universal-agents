@@ -74,7 +74,8 @@ async def test_gateway_reviews_notes_and_restores_archives_over_nats(
             await gateway.connect(start_services=False)
             created = await request(KnowledgeCommandAction.WRITE, title="Runbook", body="Check the workers.", summary="Worker maintenance.")
             assert created.page.revision == 1 and created.page.last_editor.label == "You"
-            assert created.page.last_editor.person_id == ""
+            # The browser's editor carries a label only, never a person id or reference.
+            assert set(created.page.last_editor.model_dump()) == {"kind", "agent_type", "label"}
             kept = await request(KnowledgeCommandAction.WRITE, page="runbook", base_revision=1, body="Check all workers.")
             assert kept.page.summary == "Worker maintenance."
             cleared = await request(KnowledgeCommandAction.WRITE, page="runbook", base_revision=2, body="Check all workers.", summary="")

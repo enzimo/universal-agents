@@ -20,6 +20,7 @@ from custom_agents.status_findings import agent_status_findings
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.status_v1 import StatusSeverity
 from custom_messages.enums import MessageMetaType
+from custom_messages.wire.reply_size import REPLY_BODY_MAX_BYTES
 from knowledge_base.records import INLINE_TEXT_MAX, LongTextCounts
 from knowledge_base.service import DraftInput, KnowledgeService
 from runtime_settings.knowledge import KnowledgeSettings, KnowledgeWriteLimits
@@ -45,11 +46,11 @@ class _Counts:
 
     def __init__(self, counts: LongTextCounts) -> None:
         self.counts = counts
-        self.calls: list[tuple[str, int]] = []
+        self.calls: list[tuple[str, int, int]] = []
         self.fail = False
 
-    def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts:
-        self.calls.append((team_id, longer_than))
+    def count_long_texts(self, *, team_id: str, longer_than: int, larger_than_bytes: int = 0) -> LongTextCounts:
+        self.calls.append((team_id, longer_than, larger_than_bytes))
         if self.fail:
             raise RuntimeError("database is locked")
         return self.counts
@@ -77,11 +78,11 @@ def test_the_team_lead_reports_long_knowledge_from_the_store(tmp_path: Path) -> 
     assert finding.severity is StatusSeverity.NOTE and finding.source == "TeamArchitect"
     assert finding.title == "Some knowledge is too long to open in Web Chat"
     assert finding.summary == (
-        "Web Chat's Knowledge page shows at most 32,768 characters of text. 1 page, 1 earlier revision of a page and "
-        "1 proposal waiting for review have longer text, so people cannot open, change or decide them in Web Chat: "
-        "such requests are refused and change nothing. Nothing was cut: agents still read and change the whole text "
-        "with their knowledge tools, the knowledge curator can still publish or reject proposals, and a team "
-        "transfer carries all of it."
+        "Web Chat's Knowledge page shows at most 32,768 characters of text, and a page with its open notes, links "
+        "and backlinks of at most about 254 KB. 1 page, 1 earlier revision of a page and 1 proposal waiting for "
+        "review have longer text. People cannot open, change or decide them in Web Chat: such requests are refused "
+        "and change nothing. Nothing was cut: agents still read and change the whole text with their knowledge "
+        "tools, the knowledge curator can still publish or reject proposals, and a team transfer carries all of it."
     )
     assert "agent.knowledge.limits.max_body_chars is 32,768 or less" in finding.action
     # It travels in the agent's status report like the other findings.
@@ -100,7 +101,7 @@ def test_only_the_team_lead_counts_and_nothing_long_reports_nothing() -> None:
     assert store.calls == []
     assert [item for item in agent_status_findings(no_store) if item.finding_id == FINDING_ID] == []
     assert [item for item in agent_status_findings(empty) if item.finding_id == FINDING_ID] == []
-    assert empty._knowledge_repository.calls == [(TEAM, INLINE_TEXT_MAX)]
+    assert empty._knowledge_repository.calls == [(TEAM, INLINE_TEXT_MAX, REPLY_BODY_MAX_BYTES)]
 
 
 def test_the_count_runs_at_most_once_an_interval_and_a_failure_keeps_the_last_count(caplog) -> None:
@@ -131,7 +132,7 @@ def test_a_status_report_never_waits_for_the_count() -> None:
     one_page = LongTextCounts(pages=1, earlier_revisions=0, pending_contributions=0, open_notes=0)
 
     class _SlowStore:
-        def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts:
+        def count_long_texts(self, *, team_id: str, longer_than: int, larger_than_bytes: int = 0) -> LongTextCounts:
             release.wait(timeout=10)
             return one_page
 
@@ -149,9 +150,15 @@ def test_a_status_report_never_waits_for_the_count() -> None:
 @pytest.mark.parametrize(
     ("counts", "listed"),
     [
-        (LongTextCounts(1, 0, 0, 0), "1 page has longer text, so people cannot open, change or decide it"),
-        (LongTextCounts(0, 3, 0, 0), "3 earlier revisions of pages have longer text"),
+        (LongTextCounts(1, 0, 0, 0), "1 page has longer text. People cannot open, change or decide it"),
+        (LongTextCounts(0, 3, 0, 0), "3 earlier revisions of pages have longer text."),
         (LongTextCounts(2, 0, 1, 1200), "2 pages, 1 proposal waiting for review and 1,200 open notes have longer"),
+        (LongTextCounts(0, 0, 0, 0, too_large_pages=1),
+         "about 254 KB. 1 page is probably larger than that with its open notes. People cannot open, change or "
+         "decide it"),
+        (LongTextCounts(1, 0, 0, 0, too_large_pages=2),
+         "1 page has longer text. 2 pages are probably larger than that with their open notes. People cannot open, "
+         "change or decide them"),
     ],
 )
 def test_the_note_lists_only_what_is_long(counts: LongTextCounts, listed: str) -> None:

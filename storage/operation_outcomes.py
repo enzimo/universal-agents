@@ -22,11 +22,14 @@ Why it is shaped this way:
 - **A repeated key with another body** is the sender's defect: the stored reply still
   answers, and both body digests are logged.
 - **Receipts for replies read after the change.** Some replies show what the change
-  produced as readers see it once committed (a knowledge page with its links and notes).
-  Such a command stores a receipt in the change's transaction (``complete=False``: what
-  it changed, by id), and the full reply right after the commit (``complete_outcome``).
-  A retry that finds only the receipt (the process stopped between the two) rebuilds the
-  reply from it; the change itself is never carried out again.
+  produced as readers see it once committed (a knowledge page with its links and notes),
+  which the change's transaction cannot read. Such a command stores a receipt instead
+  (``complete=False``): what it changed, by id, and what the person confirmed, never the
+  text. Its reply is built from the receipt after the commit, on the first try and on
+  every retry alike (``team_services.outcomes``), so a retry gets the same outcome for
+  the same records, shown as they are then; the change itself is never carried out again.
+  No copy of a person's text stays in this table, which a person's departure does not
+  reach.
 """
 
 from __future__ import annotations
@@ -101,7 +104,7 @@ class CommandOutcome:
     now: datetime
     reply_for: Callable[[Any], dict[str, Any]]
     logger: logging.Logger = _LOGGER
-    # False: reply_for gives a receipt, and the full reply follows with complete_outcome.
+    # False: reply_for gives a receipt, from which the reply is built after the commit (module docstring).
     complete: bool = True
 
     def raise_if_stored(self, conn: Any, dialect: SqlDialect) -> None:
@@ -141,17 +144,6 @@ def stored_reply(conn: Any, dialect: SqlDialect, team_id: str,
     return json.loads(row["reply_json"]), str(row["body_digest"]), bool(row["complete"])
 
 
-def complete_outcome(conn: Any, dialect: SqlDialect, outcome: CommandOutcome, reply: dict[str, Any]) -> None:
-    """Replace a stored receipt with the full reply (the caller commits); a full reply already stored is kept."""
-
-    p = dialect.bind
-    conn.execute(
-        f"UPDATE {OUTCOMES_TABLE} SET reply_json = {p}, complete = 1 WHERE team_id = {p} AND retry_key = {p} "
-        f"AND complete = 0",
-        (_json(reply), outcome.team_id, outcome.retry_key),
-    )
-
-
 def save_refusal(conn: Any, dialect: SqlDialect, outcome: CommandOutcome, reply: dict[str, Any]) -> bool:
     """Store a refused command's final reply in its own transaction (the caller commits).
 
@@ -187,8 +179,8 @@ def _insert(conn: Any, dialect: SqlDialect, outcome: CommandOutcome, reply: dict
 class CommandOutcomeWrites:
     """For a store with ``_write()`` (a write transaction under its lock) and ``_dialect``.
 
-    Refusals and completed replies are stored in transactions of their own, after the
-    change's transaction rolled back or committed.
+    Refusals are stored in a transaction of their own, after the change's transaction
+    rolled back.
     """
 
     _dialect: SqlDialect
@@ -208,8 +200,3 @@ class CommandOutcomeWrites:
     def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> None:
         with self._write() as conn:
             save_refusal(conn, self._dialect, command_outcome, reply)
-
-    def complete_command_outcome(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> None:
-        with self._write() as conn:
-            complete_outcome(conn, self._dialect, command_outcome, reply)
-

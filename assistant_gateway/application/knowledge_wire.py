@@ -9,12 +9,16 @@ converts between them, with no I/O:
 - a page version is its revision number as text (``seen_version``);
 - text travels inline, at most ``INLINE_TEXT_MAX`` characters: the contract's object
   store for longer text does not exist yet, so a longer text is refused before sending;
+  an empty note is refused too, as the service would;
+- tags are normalized as the knowledge service stores them (``slugify``: lowercase words
+  joined by hyphens, at most 80 characters, empty ones dropped), as the contract asks of
+  senders;
 - editors arrive as an agent type, a person reference or the system; ``label`` names them.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from custom_messages.contracts.control_v1 import (
     KnowledgeCommandAction,
@@ -29,13 +33,15 @@ from custom_messages.contracts.control_v1 import (
     KnowledgeReviewFlagPayload,
     KnowledgeRevisionPayload,
 )
+from knowledge_base.records import INLINE_TEXT_MAX
+from knowledge_base.text import slugify
 
 # Fixed history texts for changes that need a reason (module docstring).
 ARCHIVE_REASON = "Archived on the Web Chat Knowledge page"
 REVERT_REASON = "Reverted on the Web Chat Knowledge page"
-INLINE_TEXT_MAX = 32768
 HISTORY_SHOWN = 50
 TOO_LONG_TEXT = "The text is {length} characters long; at most {limit} can be sent. Shorten it."
+EMPTY_NOTE_TEXT = "A note needs text. Write the note, then add it."
 
 # The contract's refusal outcomes, as the Knowledge page's codes (website_handlers.knowledge).
 REFUSAL_CODES = {
@@ -55,53 +61,90 @@ _RUNTIME_ERROR = "runtime_error"
 EditorLabel = Callable[[dict[str, Any]], str]
 
 
-class KnowledgeTextTooLong(ValueError):
+class KnowledgeRequestNotSent(ValueError):
+    """A request the gateway refuses before sending it (module docstring); its message says why."""
+
+
+class KnowledgeTextTooLong(KnowledgeRequestNotSent):
     """Text the contract cannot carry inline (module docstring)."""
 
 
 def knowledge_request(payload: KnowledgeCommandPayload) -> tuple[str, dict[str, Any]]:
     """The contract's kind and body (without ``request_id``) for one Knowledge page request."""
 
-    action = payload.action
-    page = {"space": payload.space, "page": payload.page}
-    if action is KnowledgeCommandAction.LIST:
-        body: dict[str, Any] = {"space": payload.space, "status": payload.status, "offset": payload.offset,
-                                "limit": payload.limit}
-        if payload.query:
-            body["query"] = payload.query
-    elif action is KnowledgeCommandAction.READ:
-        body = {**page, **({"revision": payload.revision} if payload.revision else {})}
-    elif action is KnowledgeCommandAction.HISTORY:
-        body = {**page, "offset": 0, "limit": HISTORY_SHOWN}
-    elif action is KnowledgeCommandAction.WRITE:
-        body = {"space": payload.space, "confirm_review": payload.confirm_review, **_draft_fields(payload)}
-        if payload.page:
-            body["page"] = payload.page
-        if payload.base_revision:
-            body["seen_version"] = str(payload.base_revision)
-    elif action is KnowledgeCommandAction.ADD_NOTE:
-        body = {**page, "note": _inline(payload.note), "confirm_review": payload.confirm_review}
-    elif action is KnowledgeCommandAction.ARCHIVE:
-        body = {**page, "seen_version": str(payload.base_revision), "reason": ARCHIVE_REASON}
-    elif action is KnowledgeCommandAction.REVERT:
-        body = {**page, "to_revision": payload.revision, "seen_version": str(payload.base_revision),
-                "reason": REVERT_REASON}
-    elif action is KnowledgeCommandAction.LIST_CONTRIBUTIONS:
-        body = {"offset": payload.offset, "limit": payload.limit}
-    elif action is KnowledgeCommandAction.COUNT_CONTRIBUTIONS:
-        body = {}
-    elif action is KnowledgeCommandAction.PUBLISH_CONTRIBUTION:
-        body = {"contribution_id": payload.contribution_id, "edited": payload.edited}
-        if payload.base_revision:
-            body["seen_version"] = str(payload.base_revision)
-        if payload.edited:
-            # A page proposal publishes the edited fields; a note proposal publishes the text as the note.
-            body.update(_draft_fields(payload))
-            if payload.body:
-                body["note"] = _inline(payload.body)
-    else:
-        body = {"contribution_id": payload.contribution_id}
-    return f"knowledge.{action.value}", body
+    return f"knowledge.{payload.action.value}", _BODIES[payload.action](payload)
+
+
+def _page_of(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    return {"space": payload.space, "page": payload.page}
+
+
+def _list_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    body: dict[str, Any] = {"space": payload.space, "status": payload.status, "offset": payload.offset,
+                            "limit": payload.limit}
+    if payload.query:
+        body["query"] = payload.query
+    return body
+
+
+def _read_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    return {**_page_of(payload), **({"revision": payload.revision} if payload.revision else {})}
+
+
+def _history_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    return {**_page_of(payload), "offset": 0, "limit": HISTORY_SHOWN}
+
+
+def _write_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    body = {"space": payload.space, "confirm_review": payload.confirm_review, **_draft_fields(payload)}
+    if payload.page:
+        body["page"] = payload.page
+    if payload.base_revision:
+        body["seen_version"] = str(payload.base_revision)
+    return body
+
+
+def _add_note_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    if not payload.note.strip():
+        raise KnowledgeRequestNotSent(EMPTY_NOTE_TEXT)
+    return {**_page_of(payload), "note": _inline(payload.note), "confirm_review": payload.confirm_review}
+
+
+def _archive_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    return {**_page_of(payload), "seen_version": str(payload.base_revision), "reason": ARCHIVE_REASON}
+
+
+def _revert_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    return {**_page_of(payload), "to_revision": payload.revision, "seen_version": str(payload.base_revision),
+            "reason": REVERT_REASON}
+
+
+def _publish_body(payload: KnowledgeCommandPayload) -> dict[str, Any]:
+    body: dict[str, Any] = {"contribution_id": payload.contribution_id, "edited": payload.edited}
+    if payload.base_revision:
+        body["seen_version"] = str(payload.base_revision)
+    if payload.edited:
+        # A page proposal publishes the edited fields; a note proposal publishes the text as the note.
+        body.update(_draft_fields(payload))
+        if payload.body:
+            body["note"] = _inline(payload.body)
+    return body
+
+
+_BODIES: dict[KnowledgeCommandAction, Callable[[KnowledgeCommandPayload], dict[str, Any]]] = {
+    KnowledgeCommandAction.LIST: _list_body,
+    KnowledgeCommandAction.READ: _read_body,
+    KnowledgeCommandAction.HISTORY: _history_body,
+    KnowledgeCommandAction.WRITE: _write_body,
+    KnowledgeCommandAction.ADD_NOTE: _add_note_body,
+    KnowledgeCommandAction.ARCHIVE: _archive_body,
+    KnowledgeCommandAction.REVERT: _revert_body,
+    KnowledgeCommandAction.LIST_CONTRIBUTIONS: lambda payload: {"offset": payload.offset, "limit": payload.limit},
+    KnowledgeCommandAction.COUNT_CONTRIBUTIONS: lambda payload: {},
+    KnowledgeCommandAction.READ_CONTRIBUTION: lambda payload: {"contribution_id": payload.contribution_id},
+    KnowledgeCommandAction.PUBLISH_CONTRIBUTION: _publish_body,
+    KnowledgeCommandAction.WITHDRAW_CONTRIBUTION: lambda payload: {"contribution_id": payload.contribution_id},
+}
 
 
 def _draft_fields(payload: KnowledgeCommandPayload) -> dict[str, Any]:
@@ -111,10 +154,16 @@ def _draft_fields(payload: KnowledgeCommandPayload) -> dict[str, Any]:
     if payload.summary is not None:
         fields["summary"] = payload.summary
     if payload.tags is not None:
-        fields["tags"] = list(payload.tags)
+        fields["tags"] = normalized_tags(payload.tags)
     if payload.body:
         fields["content"] = _inline(payload.body)
     return fields
+
+
+def normalized_tags(tags: Iterable[str]) -> list[str]:
+    """Tags as the knowledge service stores them (module docstring), in their first order."""
+
+    return list(dict.fromkeys(tag for tag in (slugify(str(raw)) for raw in tags) if tag))
 
 
 def _inline(text: str) -> dict[str, Any]:

@@ -13,6 +13,13 @@ ownership rule (``access_control.knowledge_access``), not agent operations.
 What a request may do is decided by the team services' knowledge service; a
 refusal comes back with its stable code, plain words, and, for content held
 for review or never stored, where it is (never the text itself).
+
+When the team services give no answer, or refuse the request itself (contract
+README "Refused requests"), the browser gets plain words and the code goes to
+the log: ``handler_failed`` means the handler started and its result is unknown,
+so a change may have been saved; every other refusal came before the handler
+ran, so nothing was changed. A change whose result is unknown asks the person
+to refresh before trying again, because trying again sends a new command.
 """
 
 from __future__ import annotations
@@ -24,16 +31,18 @@ from typing import Any, Mapping
 from aiohttp import web
 from pydantic import ValidationError
 
-from assistant_gateway.application.team_commands import TeamServicesUnavailable
+from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefused
 from assistant_gateway.application.website_application import WebsiteGatewayApplication
 from assistant_gateway.interactive_apps.website_handlers.operations import WebsiteKnowledgeHandlersOperations
 from assistant_gateway.interactive_apps.website_support import WebChatSession
 from custom_messages.contracts.control_v1 import (
+    KNOWLEDGE_READ_ACTIONS,
     KnowledgeCommandAction,
     KnowledgeCommandPayload,
     KnowledgeCommandResultPayload,
 )
+from custom_messages.wire.refusals import HANDLER_FAILED
 
 LOGGER = logging.getLogger(__name__)
 
@@ -69,6 +78,19 @@ NOT_VALID_TEXT = (
 )
 TEAM_SERVICES_SILENT_TEXT = (
     "The team services did not answer, so the result is unknown. Refresh to see whether the change was saved."
+)
+TEAM_SERVICES_SILENT_READ_TEXT = "The team services did not answer. Try again in a moment."
+CHANGE_UNKNOWN_TEXT = (
+    "The team services could not finish this request, so the result is unknown. Refresh to see whether the change "
+    "was saved before you try again."
+)
+READ_FAILED_TEXT = (
+    "The team services could not answer this request. Try again; if it keeps failing, an administrator can find the "
+    "reason in the team services' log."
+)
+REQUEST_REFUSED_TEXT = (
+    "The team services turned this request down before running it, so nothing was changed. Try again in a moment; "
+    "if it keeps happening, an administrator can find the reason in the gateway's log."
 )
 NOT_ALLOWED_TEXT = "You cannot open or change this. Only the person whose pages or proposals these are can."
 
@@ -223,19 +245,29 @@ class WebsiteKnowledgeHandlers:
             )
         except PermissionError:
             return self._refused("authorization_denied", NOT_ALLOWED_TEXT)
-        except TeamServicesUnavailable as exc:
+        except (TeamCommandRefused, TeamServicesUnavailable) as exc:
+            return self._not_decided(str(context.canonical_user_id or ""), payload, exc)
+        return result
+
+    def _not_decided(
+        self, person_id: str, payload: KnowledgeCommandPayload, exc: TeamCommandRefused | TeamServicesUnavailable
+    ) -> web.Response:
+        """The team services refused the request itself or did not answer (module docstring)."""
+
+        reads = payload.action in KNOWLEDGE_READ_ACTIONS
+        if isinstance(exc, TeamServicesUnavailable):
             LOGGER.warning(
                 "The team services did not answer a Knowledge page request. event=web_knowledge_unanswered "
-                "person_id=%s action=%s reason=%s",
-                context.canonical_user_id,
-                payload.action.value,
-                exc,
+                "person_id=%s action=%s reason=%s", person_id, payload.action.value, exc,
             )
-            return self._refused("runtime_error", TEAM_SERVICES_SILENT_TEXT)
-        except RuntimeError as exc:
-            # The team services refused the request itself (team_commands.TeamCommandRefused).
-            return self._refused("runtime_error", str(exc))
-        return result
+            return self._refused("runtime_error", TEAM_SERVICES_SILENT_READ_TEXT if reads else TEAM_SERVICES_SILENT_TEXT)
+        LOGGER.warning(
+            "The team services refused a Knowledge page request itself. event=web_knowledge_request_refused "
+            "person_id=%s action=%s code=%s", person_id, payload.action.value, exc.code,
+        )
+        if exc.code != HANDLER_FAILED:
+            return self._refused("runtime_error", REQUEST_REFUSED_TEXT)
+        return self._refused("runtime_error", READ_FAILED_TEXT if reads else CHANGE_UNKNOWN_TEXT)
 
     def _refused(self, code: str, message: str, **details: Any) -> web.Response:
         return self.operations._permission_json_response(

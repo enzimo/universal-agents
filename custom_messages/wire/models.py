@@ -725,7 +725,7 @@ class KnowledgeEditorAgent(WireModel):
 
 class KnowledgeEditorPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeEditorSystem(WireModel):
@@ -2625,7 +2625,7 @@ class KnowledgeHistoryReplyOkRevisionsItemUpdatedByAgent(WireModel):
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedByPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedBySystem(WireModel):

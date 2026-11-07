@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "793e1b0d95f517e59efb25b2012cabbb99a31df51a5b8ee9701550470bf835df",
+    "contracts/messages/v1/README.md": "79f5d8b98725bae17cc65bc773916b94e42f8204fa9c49dc529e9d981aae0565",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-on-a-denial.json": "dc6d661b86a9e4c4d76d2ea8b71f48eafb6a2fffec7bcbb6730602ea55d32e1e",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-over-seven-days.json": "02a4594fdf7f45a7d7a136c0b1026db1564a191f461ba9d22b518d445bffebab",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-tool-twice.json": "9bdcc6353af021a8cd650ad7aae483282b79cdb2eac3e67346364038f4ce4734",
@@ -715,6 +715,7 @@
     "contracts/messages/v1/examples/valid/knowledge.history.reply/not_allowed.json": "e133cbbc959c60012c8735462b33d7e7bf5a9f06918b76fda4fd5d8dc99cafcd",
     "contracts/messages/v1/examples/valid/knowledge.history.reply/not_found.json": "6e58ec1b4a6a6ec74654dec47ea0df0e94dec6116a51affbb0942240b8df630c",
     "contracts/messages/v1/examples/valid/knowledge.history.reply/ok-agent.json": "82157396ad43515a50561deca95014ace306a06eff986c6d23062459d2dbb753",
+    "contracts/messages/v1/examples/valid/knowledge.history.reply/ok-former-person.json": "cb6320190d4f276a0e497678c39c8a6e36d5152a620ec709c138f19d3c6579e1",
     "contracts/messages/v1/examples/valid/knowledge.history.reply/ok-person.json": "c89a4f591c944e028ee43992de2cfa81722386218b733674288d36a00cd638f3",
     "contracts/messages/v1/examples/valid/knowledge.history.reply/ok-system.json": "aa69befcd49843cd9efab7cb25f3830a08a61e71312d9751141bef057c97417d",
     "contracts/messages/v1/examples/valid/knowledge.history.reply/ok.json": "168b285b73241fc84ea5cf6fb74aa3a3d56f6e129e27b8e2927d3766479f9959",
@@ -1684,7 +1685,7 @@
     "contracts/messages/v1/examples/valid/wait.ended/record-removed.json": "7f039bbb58df8e24840d026a36b1dec0c73b1ada3fa33ff3a9e1c0f590293097",
     "contracts/messages/v1/examples/valid/wait.ended/request-ended.json": "cba05f66ef085d11e1c660b63d143848fa61edb4eeed44a93ec6885ed499bf86",
     "contracts/messages/v1/generated/asyncapi.json": "f121de176097a04613dae25f3adae79d84737a7ffa277c6c90c117d408e44255",
-    "contracts/messages/v1/generated/compatibility.json": "c5ffb9771ebe58ac8db51adfcbcb0b68b74a4ed1e23c94e0cac7553461ee5c82",
+    "contracts/messages/v1/generated/compatibility.json": "6f417264d8ccdc44d84cc204ba3d3484f0266509fe262275014ecbf91046f634",
     "contracts/messages/v1/generated/permissions/edge_adapter.json": "ab8df72b4d04ed96570f7f67aec5285a88a53ecb9ad67767de4e8d4c62553515",
     "contracts/messages/v1/generated/permissions/gateway.json": "f6e4bcb8a07da4fea6a9068779ffc47370da3476a0c5164e630804b3023bfa3a",
     "contracts/messages/v1/generated/permissions/installation_authority.json": "53657bba52491ce10cb62f0ba14b3d5bee03e5635a74015a76d1ab9b722aa0c9",
@@ -1748,7 +1749,7 @@
     "contracts/messages/v1/schemas/bodies/knowledge.count_contributions.schema.json": "4e2ba684a3104f4b4eba0a5a9515a45d6c86b246ef3b3cd55b24aa08f156b6a7",
     "contracts/messages/v1/schemas/bodies/knowledge.freeze.reply.schema.json": "f7714b8261c0eef08bba6353eab38e13c94f2dd85493059862d23db667b62512",
     "contracts/messages/v1/schemas/bodies/knowledge.freeze.schema.json": "897d510a64607e7fe9059ccb86c0256d87687ad5bbbee8090f74b2651a16ae56",
-    "contracts/messages/v1/schemas/bodies/knowledge.history.reply.schema.json": "e165f04bb38c2cb058cc07ef71c66cca38819c5772f6592f0637660c0c10c805",
+    "contracts/messages/v1/schemas/bodies/knowledge.history.reply.schema.json": "6882a4d721038eb21621b5dc9cf12d798a8dc0a2d1a01580a811ad75c1422cab",
     "contracts/messages/v1/schemas/bodies/knowledge.history.schema.json": "cf23b126cd3c6971503cb0e41e34be5b03ac5e25f7ddd1c88eaa6960b2b9330b",
     "contracts/messages/v1/schemas/bodies/knowledge.list.reply.schema.json": "56203623f117f3d5ad482354c590731fc58c5e8609b28542c3d8d2202c304df4",
     "contracts/messages/v1/schemas/bodies/knowledge.list.schema.json": "fec1fd7d1b1f1f5190028a436c9cfcd1cafbdb81ba6d807ac843ac639a9d4edf",
@@ -1931,7 +1932,7 @@
     "contracts/messages/v1/schemas/bodies/topics.tag_thread.schema.json": "eedec9ec477fc4ec13f215e0c5132f237dcdd2e32ce2047a9d11fa5ba1b830ab",
     "contracts/messages/v1/schemas/bodies/wait.ended.schema.json": "37d745e49d639c9f114ce66a90997c599680124dbc5bda3e80ddae21690ede75",
     "contracts/messages/v1/schemas/certificate-document.schema.json": "781c4dc1362ce2374d03323a34651e1c4802ca5320f5ffdc3f68bb8f333fa373",
-    "contracts/messages/v1/schemas/common.schema.json": "5727e4c836749f9ce0e75edc1f35a063bb2e00bf6a31271f0f452533662b9e17",
+    "contracts/messages/v1/schemas/common.schema.json": "3b8f28ed6ca2d7693271c0f54f35efbf7b153bd0993a4bbd3a046dae36bf6ec4",
     "contracts/messages/v1/schemas/frame.schema.json": "e8ac556a22000c6fd19af9249c0e963a7417ed078bc8c6edb177a0bcb611a738",
     "contracts/messages/v1/schemas/session-document.schema.json": "de834e3861c914d751bb327c09a2f4a33d6d4f969351a8739b60c8acd99a6892",
     "contracts/messages/v1/schemas/state.schema.json": "df559f58427f25aa9439dc47b6d0bebef72e4db2fe4a8e76490c6b6d18d1fbb9",
@@ -1949,8 +1950,8 @@
     "contracts/messages/v1/signing-vectors/vectors.json": "1ee6fc4de9190372d57ad9acc4afc259f8bcfc5b794d488b6ac0e935c4d882dd",
     "contracts/messages/v1/team-topologies.yaml": "2f68045d80744c8b47a1c328269da5dc41fcd883f8ff731cdcfccfffdb401b36",
     "contracts/messages/v1/transport.yaml": "d4171d40038c5a22be5d193a8a3940fccda3d50758fd768e782b2f8bd3b29150",
-    "custom_messages/wire/kinds.py": "f9caec7cb98c620be8b4df5639d2c4e9fbfdeb9b2f3aa202596c1ce45001ff57",
-    "custom_messages/wire/models.py": "edd6d738e6806176e9c71461739b725e5c96e8f3c873902cfbb40fe4e78c9275"
+    "custom_messages/wire/kinds.py": "6e327597205e64f322cba6ab1e1f2d0bcaccc63d61e3776eac7cc584b0b0e045",
+    "custom_messages/wire/models.py": "77861e801a58ccdb8f66188aea1969b80bc88e6bc5f6d99596b6bc251380c110"
   },
   "protocol": "1.0-pre"
 }
