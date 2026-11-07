@@ -60,6 +60,7 @@ _FIELD_NAMES = {
     "memory_id": "The memory number",
     "seen_version": "The memory version",
 }
+_ITEM_NAMES = {"tags": "A tag"}
 
 
 class RuntimePinnedMemoryCodec:
@@ -155,8 +156,11 @@ def _plain_refusal(error: ValidationError) -> str:
     """The first problem the contract's model found, in words a person knows."""
 
     problem = error.errors()[0]
-    field = str(problem["loc"][0]) if problem["loc"] else ""
-    name = _FIELD_NAMES.get(field, f"The field {field}")
+    location = problem["loc"]
+    field = str(location[0]) if location else ""
+    # One item of a list (a tag) is named on its own: "A tag is too long".
+    name = _ITEM_NAMES.get(field) if len(location) > 1 and isinstance(location[1], int) else None
+    name = name or _FIELD_NAMES.get(field, f"The field {field}")
     limit = (problem.get("ctx") or {}).get("max_length")
     kind = problem["type"]
     if kind == "string_too_short":
@@ -164,7 +168,7 @@ def _plain_refusal(error: ValidationError) -> str:
     if kind == "string_too_long" and limit is not None:
         return f"{name} is too long: at most {limit:,} characters."
     if kind == "too_long" and limit is not None:
-        return f"{name}: at most {limit:,} are allowed."
+        return f"There are too many {field.replace('_', ' ')}: at most {limit:,} are allowed."
     return f"{name} is not something Web Chat can send ({problem['msg']})."
 
 
