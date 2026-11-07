@@ -113,10 +113,12 @@ class _StandInHost:
         self.profile, self.nc = profile, nc
         self.join_cancelled = False
         self.kept_up_until_stop = False
+        self.records: list[str] = []
         self.live = object()
         _StandInHost.started.append(self)
 
-    async def start(self) -> None:
+    async def start(self, *, report: bool = True) -> None:
+        assert report is False  # the gateway writes the first record itself, once it counts as joined
         step = _StandInHost.joins.pop(0) if _StandInHost.joins else None
         if step == "hang":
             try:
@@ -127,9 +129,13 @@ class _StandInHost:
         if isinstance(step, BaseException):
             raise step
 
+    async def publish_liveness(self, state: str = "accepting") -> None:
+        self.records.append(state)
+
     async def keep_up(self, stop: asyncio.Event) -> None:
         await stop.wait()
         self.kept_up_until_stop = True
+        self.records.append("drained")
         if _StandInHost.on_stop == "hang":
             await asyncio.Event().wait()
         if isinstance(_StandInHost.on_stop, BaseException):
@@ -159,6 +165,8 @@ async def test_closing_a_host_that_is_still_joining_cancels_the_join_at_once(sta
     await asyncio.sleep(0.01)
     await asyncio.wait_for(gateway.close(), timeout=1)
     assert stand_in.started[0].join_cancelled is True
+    # Stopped before it counted as joined: it wrote no record saying it accepts work.
+    assert stand_in.started[0].records == []
     with pytest.raises(GatewayHostUnavailable, match="stopped"):
         await gateway.ready(timeout=1)
 
@@ -170,6 +178,19 @@ async def test_a_joined_host_writes_its_last_record_when_closed(stand_in, tmp_pa
     assert await gateway.ready(timeout=1) is stand_in.started[0]
     await asyncio.wait_for(gateway.close(), timeout=1)
     assert stand_in.started[0].kept_up_until_stop is True
+    assert stand_in.started[0].records == ["accepting", "drained"]
+
+
+@pytest.mark.asyncio
+async def test_a_command_waiting_for_the_join_hears_at_once_that_the_host_stopped(stand_in, tmp_path: Path) -> None:
+    stand_in.joins = ["hang"]
+    gateway = _gateway(tmp_path)
+    gateway.start(nc="connection")
+    waiting = asyncio.create_task(gateway.command("memory.list", LIST_BODY, person_ref=REFERENCE, timeout=30))
+    await asyncio.sleep(0.01)
+    await gateway.close()
+    with pytest.raises(GatewayHostUnavailable, match="stopped"):
+        await asyncio.wait_for(waiting, timeout=1)
 
 
 @pytest.mark.asyncio
@@ -245,12 +266,16 @@ async def test_a_host_closed_and_started_again_joins_anew(stand_in, tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_a_command_with_no_command_id_fails_before_waiting_for_the_host(stand_in, tmp_path: Path) -> None:
+async def test_a_command_with_no_command_id_or_a_persons_id_fails_before_waiting_for_the_host(
+    stand_in, tmp_path: Path
+) -> None:
     stand_in.joins = ["hang"]
     gateway = _gateway(tmp_path)
     gateway.start(nc="connection")
     with pytest.raises(ValueError, match="does not carry"):
         await asyncio.wait_for(gateway.command("memory.list", {"bank": "usermem"}, person_ref=REFERENCE), 1)
+    with pytest.raises(ValueError, match="opaque reference"):
+        await asyncio.wait_for(gateway.command("memory.list", LIST_BODY, person_ref="Olive Smith"), 1)
     await gateway.close()
 
 

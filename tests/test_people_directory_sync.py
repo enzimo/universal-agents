@@ -327,10 +327,43 @@ def test_a_copy_read_before_another_write_keeps_the_reference_stored_first(tmp_p
     assert access.team_person(TEAM, "Olive Smith").person_ref == reference
     assert "event=access_person_ref_kept" in caplog.text
 
+    # A full copy whose records were read before the gateway added someone neither drops them nor,
+    # through that, gives them a new reference later.
+    store_before_mia = access.team_people(TEAM)
+    late_copy = PeopleDirectorySync(identity=_StaleTeamList(store.identity_repository), open_store=lambda: access,
+                                    team_id=TEAM, clock=_Clock())
+    _seed(store, {"Mia": ("member", "active")})
+    assert gateway.record("Mia") is True
+    mia = access.team_person(TEAM, "Mia").person_ref
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="storage.access_repository"):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(AccessRepository, "team_people", lambda self, team_id: store_before_mia)
+            assert late_copy.sync_all() is not None
+    assert access.team_person(TEAM, "Mia").person_ref == mia
+    assert "event=access_person_kept_unread" in caplog.text
+    # A full copy that read the store first keeps her too, now from its own records.
+    assert gateway.sync_all() is not None and access.team_person(TEAM, "Mia").person_ref == mia
+
     # One person's write keeps it the same way.
     stale = access.team_person(TEAM, "Olive Smith").model_copy(update={"person_ref": new_person_ref()})
     assert access.record_person(stale).person_ref == reference
     assert access.team_person(TEAM, "Olive Smith").person_ref == reference
+
+
+class _StaleTeamList:
+    """The gateway's records as a command-line run read them before someone was added."""
+
+    def __init__(self, identity: object) -> None:
+        self._identity = identity
+        self._team = list(identity.list_team_people(TEAM))  # type: ignore[attr-defined]
+
+    def list_team_people(self, team_id: str) -> list:
+        assert team_id == TEAM
+        return self._team
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._identity, name)
 
 
 def test_a_person_record_needs_its_reference_and_only_earlier_records_get_one_made() -> None:
