@@ -273,6 +273,7 @@ class LiveHost:
 
         frame = self.sign(kind, body, audience, team=team, agent=agent)
         data, headers = self.encode(frame)
+        await before_send()
         await self.nc.publish(frame["subject"], data, headers=headers)
 
     # -- serving --------------------------------------------------------------------------------
