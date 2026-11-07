@@ -27,6 +27,7 @@ from custom_messages.wire.kinds import PROTOCOL, STATE_RECORDS
 from custom_messages.wire.trust import VerifiedRecord, sign_state
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.trust_state import PersistentTrustStore
+from custom_transport.send_barrier import before_send
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class StateRecords:
 
         bucket = await self._js.key_value(STATE_RECORDS[record].bucket)
         data = json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        await before_send()
         if last_revision is None:
             return int(await bucket.put(key, data))
         if last_revision == 0:

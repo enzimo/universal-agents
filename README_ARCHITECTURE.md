@@ -4268,6 +4268,13 @@ signed against records that chain to the installation's authority keys.
 - **Signed records** (`state_records`): records in the key-value buckets, signed by
   their writer, with compare-and-set for placements, and verified on every read.
 
+Protocol 1 requests, replies, refusals and key-value writes await
+`custom_transport.send_barrier.before_send()` before sending. They use the same
+flush barrier as the NATS adapter, so a power loss cannot undo an agent's local
+records after another process has acted on its message. A failed flush prevents
+the send. Hosts outside an agent process install no barrier and keep flushing
+each commit.
+
 The kernel runs nowhere yet; the installation authority and team services processes
 use it first.
 
