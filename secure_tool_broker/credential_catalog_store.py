@@ -14,6 +14,8 @@ from storage import sqlite_connection
 
 
 _SCOPE_KINDS = {"user", "team", "system"}
+# How long a catalog statement waits for another writer's lock.
+_LOCK_WAIT_MS = 10_000
 
 
 @dataclass(frozen=True)
@@ -78,14 +80,15 @@ class CredentialCatalogStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10)
+        # Opened here rather than with connect_sqlite, which opens files read-only
+        # during a transfer's dry run: this store keeps its own 10 s lock wait and
+        # its behavior there.
+        conn = sqlite3.connect(self.path, timeout=_LOCK_WAIT_MS / 1000)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        # Commit as every other store does (storage.sqlite_connection.SQLITE_SYNCHRONOUS):
-        # a saved credential is on the disk before the broker reports it stored. Set
-        # here because this store opens SQLite itself, and SQLite's own default depends
-        # on how it was built.
-        conn.execute(f"PRAGMA synchronous={sqlite_connection.SQLITE_SYNCHRONOUS}")
+        # The setup every store gets (WAL, FULL commits, macOS's full flush), so
+        # a saved credential is on the disk before the broker reports it stored
+        # and this store cannot drift from the others (storage.sqlite_connection).
+        sqlite_connection.configure_sqlite_connection(conn, db_path=str(self.path), busy_timeout_ms=_LOCK_WAIT_MS)
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 

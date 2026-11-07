@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import sys
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -290,3 +292,116 @@ async def test_universal_agent_receives_nats_task_and_replies(tmp_path) -> None:
                     agent.set_exit_flag()
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(agent_task, timeout=10)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads the flushed file's name from /proc")
+async def test_an_agent_flushes_its_records_before_it_replies(tmp_path, monkeypatch) -> None:
+    """Decision 78: an agent's task records skip the per-commit flush and are on disk before its reply leaves.
+
+    A real agent, its real stores and a real NATS server, in a process that defers flushes as an
+    agent process does (``custom_agents.commit_flushes``). Between receiving the task and
+    publishing the reply the agent commits its task records many times without a flush, and the
+    reply's publish waits for a flush of the task database's write-ahead log.
+    """
+
+    from nats.js.client import JetStreamContext
+
+    from custom_agents import commit_flushes
+    from custom_agents.strands_agent import UniversalAgent
+    from custom_transport import send_barrier
+    from storage import sqlite_connection
+
+    database = os.path.realpath(str(tmp_path / "nats-agent.db"))
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", True)
+    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", set())
+    monkeypatch.setattr(sqlite_connection, "_FOLDER_FLUSHED", set())
+    note = sqlite_connection._note_unflushed_commit
+    monkeypatch.setattr(
+        sqlite_connection, "_note_unflushed_commit", lambda path: (events.append(("note", path)), note(path))
+    )
+    flush_descriptor = sqlite_connection._flush_descriptor
+
+    def recording_flush(fd: int) -> None:
+        flush_descriptor(fd)
+        events.append(("flush", os.readlink(f"/proc/self/fd/{fd}")))
+
+    monkeypatch.setattr(sqlite_connection, "_flush_descriptor", recording_flush)
+
+    async def barrier() -> None:
+        events.append(("barrier", ""))
+        await commit_flushes._flush_before_send()
+
+    monkeypatch.setattr(send_barrier, "_BEFORE_SEND", barrier)
+    publish = JetStreamContext.publish
+
+    async def recording_publish(self, subject, *args, **kwargs):
+        events.append(("publish", subject))
+        return await publish(self, subject, *args, **kwargs)
+
+    monkeypatch.setattr(JetStreamContext, "publish", recording_publish)
+
+    team_id = new_id("nats_flush")
+    response_route = f"{team_id}_gateway_user_{new_id_suffix()}_response"
+    fake_model = FakeStrandsAgent(_response("flushed reply"))
+    agent_task = None
+    transport = resolve_live_transport_settings()
+    async with LiveNatsClient(team_id, transport=transport) as client:
+        response_queue = await client.subscribe_route(response_route)
+        with patch("custom_agents.strands_agent.Agent", return_value=fake_model), patch(
+            "custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock(),
+        ):
+            agent = UniversalAgent(
+                **_project_transport(transport_cfg=transport.model_dump()),
+                role="NATS integration agent",
+                tools=[],
+                team_id=team_id,
+                named_agent_type="TeamArchitect",
+                is_team_lead=True,
+                skills_enabled=False,
+                task_manager=TaskManager(db_path=database),
+            )
+            try:
+                agent_task = asyncio.create_task(agent.connect())
+                deadline = asyncio.get_running_loop().time() + 10
+                while not getattr(agent, "_operational_exchange_name", None):
+                    if asyncio.get_running_loop().time() > deadline:
+                        raise AssertionError("Agent did not finish NATS setup.")
+                    await asyncio.sleep(0.05)
+                envelope = MessageEnvelope(
+                    msg_content=Task(
+                        task_id=new_id("task"), task_type=MessageMetaType.REQUEST, problem_statement="Reply."
+                    ),
+                    msg_meta=MessageMeta(
+                        from_agent_name="live-nats-test",
+                        requester_type=RequesterType.USER_REQUESTER,
+                        is_response_requested=True,
+                        msg_correlation_id=new_id("corr"),
+                    ),
+                    msg_header=MessageHeader(
+                        from_agent_id="live-nats-test",
+                        to_routing_path=agent.id,
+                        response_routing_key=response_route,
+                        agent_signature="",
+                    ),
+                )
+                await client.publish(agent.id, envelope, durable=True)
+                response = await response_queue.get(timeout=20)
+                assert response.msg_content.answer == "flushed reply"
+            finally:
+                if agent_task is not None:
+                    agent.set_exit_flag()
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(agent_task, timeout=10)
+
+    kinds = [(kind, value) for kind, value in events]
+    received = next(i for i, (kind, value) in enumerate(kinds) if kind == "publish" and value.endswith(".work"))
+    replied = next(i for i, (kind, value) in enumerate(kinds) if kind == "publish" and "response" in value)
+    handling = kinds[received:replied]
+    # The task records were committed many times, each without a flush of its own ...
+    assert sum(1 for kind, value in handling if kind == "note" and value == database) >= 10
+    # ... and the reply's own barrier flushed the task database's log before the reply left.
+    reply_barrier = max(i for i, (kind, _value) in enumerate(kinds[:replied]) if kind == "barrier")
+    assert ("flush", f"{database}-wal") in kinds[reply_barrier:replied]
+    # A handful of flushes for the whole task instead of one or two per commit.
+    assert sum(1 for kind, _value in handling if kind == "flush") <= 8

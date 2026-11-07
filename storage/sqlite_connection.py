@@ -48,18 +48,52 @@ behaviors made that pattern block callers for seconds:
   it is published and admit work before its delivery is acknowledged, so a
   commit that a power loss could undo would lose work that NATS already
   treated as stored or delivered. ``NORMAL`` in WAL mode can lose the last
-  commits on power loss. The setting is per connection, and the task history
-  path is a setting, so it applies to every database this module opens rather
-  than to one file name. The broker's credential catalog opens SQLite itself
-  and applies the same setting. Measured on a local disk, about 2.7 ms more per
-  commit (a few per model turn); on a network share, about 0.1 ms.
+  commits on power loss (a crashed process loses none). The setting is per
+  connection, and the task history path is a setting, so it applies to every
+  database this module opens rather than to one file name; the broker's
+  credential catalog opens its file itself and applies the same setup
+  (``configure_sqlite_connection``). On macOS a plain
+  flush can stay in the drive's cache, so connections there also set
+  ``fullfsync`` and ``checkpoint_fullfsync``.
+- Flushing before sending (decision 82, refining 75). A trivial agent task made
+  31 commits between receiving its task and publishing its reply (task
+  snapshots and history, the outbox's steps, conversation, agent status), and
+  a per-call connection's first flush also flushes the folder: about 62 disk
+  flushes, 0.3 s per task on a local container disk, and "database is locked"
+  for other writers on a disk that takes 0.6 s per flush. Only the moment
+  something leaves the process needs those records on the disk. So an agent
+  process (``defer_flushes_until_sent``, called by ``strands_main``) lets the
+  stores that opt in (``connect_sqlite(defer_flush=True)``: the agent's task
+  runtime, conversation, agent status and storage usage records) commit with
+  ``NORMAL`` and note their file; its transport calls
+  ``flush_unflushed_commits`` before every NATS publish and every
+  acknowledgement or ending of a message (``custom_transport.send_barrier``),
+  and the agent flushes once more when it exits. Flushing a database's WAL file
+  makes every commit written to it so far durable, whichever connection or
+  process wrote it, so a power loss leaves the state the agent had when it last
+  sent something: the state a crash at that moment leaves, which recovery
+  already handles. Every other process, and every other store, keeps ``FULL``.
+  Work outside NATS (a tool's web call during a turn) is not ordered after the
+  flush; a crash re-runs an interrupted turn in either mode.
+- Schema setup (``CREATE ... IF NOT EXISTS``, ``ALTER TABLE ... ADD COLUMN``)
+  run outside a transaction commits without a flush, in every process. Each
+  such statement is its own commit, stores run several when they first open,
+  and they re-run at every start: with ``FULL`` an agent's first task flushed
+  the disk about ten times for tables other stores created on first use, and
+  services starting together on a slow disk waited on each other's flushes.
+  A later flushed commit to the file makes them durable as well.
+- A commit or flush slower than ``SLOW_SQLITE_OPERATION_SECONDS`` is logged
+  (``sqlite_commit_slow``, ``sqlite_flush_slow``): with ``FULL`` the disk
+  flush happens inside the commit while the file's write lock is held, so a
+  slow disk shows here before writers start failing with "database is locked".
 - While several processes create their tables at once, a statement can fail
   with "database schema has changed": SQLite retries only once when the schema
   changes while a statement is prepared. Such a statement has not run, so it
   runs again, a bounded number of times (``_execute_with_schema_retry``).
 
-An open or statement that takes longer than ``SLOW_SQLITE_OPERATION_SECONDS``
-is logged as a warning (``sqlite_open_slow``, ``sqlite_statement_slow``) with
+An open, statement, commit or flush that takes longer than
+``SLOW_SQLITE_OPERATION_SECONDS`` is logged as a warning (``sqlite_open_slow``,
+``sqlite_statement_slow``, ``sqlite_commit_slow``, ``sqlite_flush_slow``) with
 the database, the thread, the process and the statement's first words, never
 its values. A gateway froze for over 20 seconds inside a connection open with
 no lock timeout and no NFS timeout to explain it; these lines name the slow
@@ -91,6 +125,22 @@ DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 2500
 # How every connection commits once the file is in WAL mode (module docstring):
 # a commit is on the disk before it returns.
 SQLITE_SYNCHRONOUS = "FULL"
+# How a connection that defers its flush commits ("Flushing before sending" in
+# the module docstring): written to the WAL file, flushed before the process
+# next sends to NATS.
+DEFERRED_FLUSH_SYNCHRONOUS = "NORMAL"
+# Set once by an agent process (defer_flushes_until_sent); never in the gateway,
+# the broker or any other process, whose stores keep SQLITE_SYNCHRONOUS.
+_FLUSHES_DEFERRED = False
+# Database files (real paths) with commits not yet flushed, and the files whose
+# folder this process already flushed (a new WAL file's entry in its folder).
+_UNFLUSHED: set[str] = set()
+_UNFLUSHED_LOCK = threading.Lock()
+_FOLDER_FLUSHED: set[str] = set()
+# A statement's first word that writes nothing (module helper _writes).
+_NON_WRITING_STATEMENTS = frozenset(
+    {"SELECT", "EXPLAIN", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"}
+)
 DEFAULT_SQLITE_WAL_INIT_MAX_ATTEMPTS = 5
 DEFAULT_SQLITE_WAL_INIT_RETRY_DELAY_SECONDS = 0.05
 # Size the WAL file is cut back to after a checkpoint lets SQLite reuse it from
@@ -134,11 +184,23 @@ def _owned_connection_type(connection_type: type) -> type:
 
         def execute(self, sql: str, parameters: Any = (), /) -> Any:
             started = time.perf_counter()
+            if _writes(sql):
+                # Noted before running: a statement that fails part way is
+                # flushed for nothing, never left out (_note_unflushed).
+                self.wrote = True
+            level = getattr(self, "synchronous_level", "")
+            unflushed_setup = bool(level) and not self.in_transaction and _is_schema_setup(sql)
             try:
+                if unflushed_setup:
+                    # Schema setup re-runs at every start, so it needs no flush
+                    # (module docstring); the next flushed commit covers it.
+                    super().execute(f"PRAGMA synchronous={DEFERRED_FLUSH_SYNCHRONOUS}")
                 return _execute_with_schema_retry(
                     super().execute, sql, parameters, db_path=getattr(self, "slow_log_path", "")
                 )
             finally:
+                if unflushed_setup:
+                    super().execute(f"PRAGMA synchronous={level}")
                 _log_if_slow(
                     getattr(self, "slow_log_path", ""),
                     "statement",
@@ -146,10 +208,39 @@ def _owned_connection_type(connection_type: type) -> type:
                     statement=str(sql),
                 )
 
-        def __exit__(self, exc_type, exc, traceback):
+        def commit(self) -> None:
+            started = time.perf_counter()
             try:
+                super().commit()
+            finally:
+                _log_if_slow(getattr(self, "slow_log_path", ""), "commit", time.perf_counter() - started)
+            self._note_unflushed()
+
+        def close(self) -> None:
+            # Autocommitted statements (a CREATE TABLE outside a transaction)
+            # never pass through commit(), so closing notes them too, once:
+            # a closed connection cannot report its changes.
+            if not getattr(self, "closed_by_owner", False):
+                self.closed_by_owner = True
+                self._note_unflushed()
+            super().close()
+
+        def _note_unflushed(self) -> None:
+            path = getattr(self, "unflushed_path", "")
+            if path and (getattr(self, "wrote", False) or self.total_changes):
+                _note_unflushed_commit(path)
+
+        def __exit__(self, exc_type, exc, traceback):
+            started = time.perf_counter()
+            try:
+                # Commits (or rolls back) the transaction the block left open.
                 return super().__exit__(exc_type, exc, traceback)
             finally:
+                _log_if_slow(
+                    getattr(self, "slow_log_path", ""),
+                    "commit" if exc_type is None else "rollback",
+                    time.perf_counter() - started,
+                )
                 self.close()
 
         def iterate(self, query, params=(), *, batch_size=256):
@@ -171,11 +262,18 @@ def connect_sqlite(
     row_factory: Any | None = None,
     sqlite_module: Any = sqlite3,
     busy_timeout_ms: int = DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+    defer_flush: bool = False,
 ) -> sqlite3.Connection:
     """Open a connection closed by its transaction context or explicit owner.
 
     Reusing a connection after leaving ``with`` is intentionally unsupported.
     Borrowed connections inside a larger unit of work must not enter this scope.
+
+    ``defer_flush`` asks for "Flushing before sending" (module docstring): in
+    an agent process its commits are flushed before the process next sends to
+    NATS rather than inside each commit. Elsewhere it changes nothing. Only a
+    store whose writes nothing outside the process relies on until the agent
+    sends a message may ask for it.
     """
 
     normalized_timeout_ms = _normalize_busy_timeout_ms(busy_timeout_ms)
@@ -211,8 +309,15 @@ def connect_sqlite(
         raise
     finally:
         _log_if_slow(db_path, "open", time.perf_counter() - started, logger=logger)
-    # Set after configuring, so the open's own statements count once, as the open.
+    conn.synchronous_level = SQLITE_SYNCHRONOUS
+    if defer_flush and _FLUSHES_DEFERRED and _should_enable_wal(db_path):
+        conn.execute(f"PRAGMA synchronous={DEFERRED_FLUSH_SYNCHRONOUS}")
+        conn.synchronous_level = DEFERRED_FLUSH_SYNCHRONOUS
+        conn.unflushed_path = os.path.realpath(db_path)
+    # Set after configuring, so the open's own statements count once, as the
+    # open, and its PRAGMAs do not count as writes.
     conn.slow_log_path = db_path
+    conn.wrote = False
     if _should_enable_wal(db_path):
         _hold_open(db_path, sqlite_module=sqlite_module, logger=logger, busy_timeout_ms=normalized_timeout_ms)
     return conn
@@ -352,6 +457,140 @@ def _log_if_slow(
     )
 
 
+def _writes(sql: Any) -> bool:
+    """Whether a statement may change the database; anything unrecognized counts as a write."""
+
+    text = str(sql).lstrip()
+    if not text:
+        return False
+    first = text.split(None, 1)[0].upper().rstrip(";")
+    if first == "PRAGMA":
+        return "=" in text
+    return first not in _NON_WRITING_STATEMENTS
+
+
+def _is_schema_setup(sql: Any) -> bool:
+    """A repeatable schema statement: ``CREATE ... IF NOT EXISTS`` or ``ALTER TABLE ... ADD COLUMN``."""
+
+    words = str(sql).upper().split(None, 8)
+    if words[:1] == ["CREATE"]:
+        return "IF NOT EXISTS" in " ".join(words)
+    return words[:2] == ["ALTER", "TABLE"] and "ADD" in words[3:5]
+
+
+def defer_flushes_until_sent() -> None:
+    """Let this process's opted-in stores flush before it sends, not in each commit.
+
+    Only an agent process calls this (``strands_main``), after its transport
+    can call ``flush_unflushed_commits`` before every send and acknowledgement
+    (``custom_agents.commit_flushes.flush_commits_before_sending`` does both).
+    """
+
+    global _FLUSHES_DEFERRED
+    _FLUSHES_DEFERRED = True
+    _LOGGER.info(
+        "Agent records' SQLite commits are flushed to disk before each NATS send or acknowledgement. "
+        "event=sqlite_flush_before_send pid=%s",
+        os.getpid(),
+    )
+
+
+def flushes_deferred() -> bool:
+    """Whether this process defers opted-in stores' flushes (``defer_flushes_until_sent``)."""
+
+    return _FLUSHES_DEFERRED
+
+
+def _note_unflushed_commit(path: str) -> None:
+    with _UNFLUSHED_LOCK:
+        _UNFLUSHED.add(path)
+
+
+def has_unflushed_commits() -> bool:
+    """Whether any commit of this process waits for ``flush_unflushed_commits``."""
+
+    return bool(_UNFLUSHED)
+
+
+def flush_unflushed_commits(*, logger: logging.Logger | None = None) -> None:
+    """Put every deferred commit of this process on the disk before the caller sends.
+
+    Flushes each noted database's WAL file, and its folder the first time, so
+    a new WAL file's entry survives too. A file that could not be flushed is
+    noted again and the error is raised: the caller must not send, so its
+    message stays unacknowledged or its outbox retries.
+    """
+
+    with _UNFLUSHED_LOCK:
+        paths = sorted(_UNFLUSHED)
+        _UNFLUSHED.clear()
+    if not paths:
+        return
+    started = time.perf_counter()
+    remaining = list(paths)
+    try:
+        while remaining:
+            path = remaining[0]
+            _flush_file(f"{path}-wal")
+            if path not in _FOLDER_FLUSHED:
+                _flush_folder(os.path.dirname(path))
+                _FOLDER_FLUSHED.add(path)
+            remaining.pop(0)
+    except BaseException as error:
+        with _UNFLUSHED_LOCK:
+            _UNFLUSHED.update(remaining)
+        (logger or _LOGGER).error(
+            "Could not flush SQLite commits to disk; nothing is sent until they are. "
+            "event=sqlite_flush_failed database=%s error_type=%s error=%s",
+            remaining[0],
+            type(error).__name__,
+            error,
+            extra={"component": "sqlite_connection", "storage_target": remaining[0]},
+        )
+        raise
+    finally:
+        _log_if_slow(paths[0], "flush", time.perf_counter() - started, statement=" ".join(paths), logger=logger)
+
+
+def _on_macos() -> bool:
+    # macOS's fsync can leave data in the drive's cache; F_FULLFSYNC (and
+    # SQLite's fullfsync) flushes it.
+    return sys.platform == "darwin"
+
+
+def _flush_descriptor(fd: int) -> None:
+    if _on_macos():
+        import fcntl
+
+        # Named only on macOS, so looked up there rather than spelled out.
+        fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC"))
+    else:
+        os.fsync(fd)
+
+
+def _flush_file(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        # No WAL file: a checkpoint already moved the commits into the
+        # database file and flushed it.
+        return
+    try:
+        _flush_descriptor(fd)
+    finally:
+        os.close(fd)
+
+
+def _flush_folder(path: str) -> None:
+    if os.name == "nt":
+        return  # Windows cannot open a folder to flush it; its file flush covers the entry.
+    fd = os.open(path or ".", os.O_RDONLY)
+    try:
+        _flush_descriptor(fd)
+    finally:
+        os.close(fd)
+
+
 # A subcommand such as ``run-secure-tool-broker``. Other arguments are left
 # out of log lines, because they can carry values.
 _SUBCOMMAND_PATTERN = re.compile(r"[a-z][a-z0-9-]*")
@@ -463,6 +702,10 @@ def configure_sqlite_connection(
             )
             raise RuntimeError(message)
     conn.execute(f"PRAGMA synchronous={SQLITE_SYNCHRONOUS}")
+    if _on_macos():
+        # macOS's fsync can leave a commit in the drive's cache (module docstring).
+        conn.execute("PRAGMA fullfsync=ON")
+        conn.execute("PRAGMA checkpoint_fullfsync=ON")
 
 
 def prepare_sqlite_database(db_path: str, *, logger: logging.Logger | None = None) -> bool:
