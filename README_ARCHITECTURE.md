@@ -4063,6 +4063,17 @@ the desktop app never offers an older version.
   statements do, so an instance kept in its own schema works. The default
   keeps older rows correct, as the change ledger's `*` does (see "Upgrading in
   place from 0.9" above).
+- **Gateway commands queued at the upgrade.** A durable gateway command whose
+  handler a release removed can still wait in the team lead's control queue when
+  the new release starts. Its class stays readable as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`, one list of retired classes), and the
+  lead tells the person in their chat that it was not carried out and should be
+  sent again (`custom_agents.retired_gateway_commands`; "people's memory
+  commands" under "Message hosts and their trust"), instead of setting it aside
+  as a dead letter that nobody answers. A response of the old type would not
+  reach anyone, because the gateway that waited for it restarted with the
+  upgrade. The model, its handler and the list go with the other upgrade steps
+  from 0.9.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
@@ -4538,6 +4549,23 @@ They serve the team's address (`svc.team`) and answer, so far:
   is refused, and an undo that restores it answers without it. Only a command's own
   mistakes are `invalid_request` (`PinnedMemoryInputError`); any other failure is logged
   and answered `runtime_error`.
+  A memory command a 0.9 gateway queued in the team lead's control queue just before an
+  in-place upgrade is still read by the 0.10 lead, as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`), so it is no longer set aside as a dead letter
+  with no answer to the person (plan 13B.10). The lead never carries it out
+  (`custom_agents.retired_gateway_commands`). It sends the person the gateway signed for
+  a chat message in the chat the command came from: "Your memory command was sent before
+  the team was upgraded, so nothing was changed. Please send it again." It does not send
+  the old reply, because the restarted gateway drops a manager control reply nobody waits
+  for. A command without a valid gateway signature, one that names someone other than
+  the signed person, or one with no chat to answer in tells nobody
+  (`event=retired_gateway_command_unanswered`, with the reason, the command's class and
+  id); each answer is logged as `event=retired_gateway_command_answered`. A 0.9 lead's
+  reply that was still waiting on the gateway's reply route is read the same way and
+  dropped like any reply nobody waits for
+  (`event=gateway_unmatched_manager_control_response_dropped`), rather than set aside. The
+  retired classes are one list in the contract; a family that moves to the team services
+  later adds its old class name there.
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.
