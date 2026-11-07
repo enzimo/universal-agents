@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from access_control.ownership import (
     PRIVATE_DELETE,
-    PRIVATE_READ,
     PRIVATE_UPDATE,
     RESOURCE_OBJECTIVE,
-    RESOURCE_SCHEDULE,
     RESOURCE_TASK,
     private_access,
 )
@@ -16,7 +14,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional
 
-from access_control.entities import PersonPrincipal
 from access_control.identity import ISSUER_GATEWAY, IdentityRejected
 from custom_agents.task_context_runtime import context_verifier
 from custom_agents.control_runtime import stop_task_execution
@@ -33,16 +30,11 @@ from custom_agents.objective_lifecycle import (
     apply_objective_lifecycle,
 )
 from custom_agents.schedule_management import (
-    ScheduleMutationPermit,
     ScheduleMutationAuthorityMode,
     ScheduleMutationOperation,
-    SystemScheduleMutationDenied,
     build_schedule_mutation_permit,
-    is_system_managed_schedule,
 )
 from custom_agents.schedule_store import (
-    ScheduleStore,
-    ScheduleWriteConflict,
     owner_canonical_user_id_for_schedule,
 )
 from custom_agents.task_manager_objectives import ObjectiveSaveFailed
@@ -76,14 +68,6 @@ from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
-)
-from custom_messages.contracts.schedule_v1 import (
-    SCHEDULE_CHANGED_SINCE_LISTED,
-    SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED,
-    SYSTEM_SCHEDULE_CHANGE_REFUSED,
-    ManagerScheduleCommand,
-    ScheduledMessage,
-    ScheduleWorkerAssignmentV1,
 )
 from custom_messages.contracts.task_v1 import TaskProgressChild, TaskProgressStatus
 from custom_messages.enums import (
@@ -160,35 +144,6 @@ def verified_command_person(
     )
 
 
-def _may_change_system_schedules(agent: Any, person: CommandPerson) -> bool:
-    """Whether the person may change schedules the runtime manages.
-
-    The same decision the gateway's ``PersonChangeCheck`` makes for its own
-    controls (people who could approve a ``system_schedule`` change), made here
-    with the verified person and roles instead of trusting a flag in the command.
-    With authorization off, any active team member may.
-    """
-
-    from access_control.inbox import StoredAccessInbox
-    from access_control.requests import AccessRequests
-    from custom_agents.access_runtime import runtime_access
-    from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-    from custom_messages.contracts.schedule_v1 import SYSTEM_SCHEDULE_CHANGE_KIND
-
-    access = runtime_access(agent)
-    if access.service is None:
-        return True
-    requests = AccessRequests(
-        service=access.service,
-        inbox=StoredAccessInbox(access.service.store),
-        lead_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
-    )
-    return requests.may_change_directly(
-        PersonPrincipal(person.canonical_user_id, person.team_id, person.roles),
-        SYSTEM_SCHEDULE_CHANGE_KIND,
-    )
-
-
 async def _send_durable_response(
     agent: Any,
     *,
@@ -224,271 +179,6 @@ async def _send_durable_response(
         ),
     )
     await agent.team_comms.send_message(message=envelope, routing_key=response_key)
-
-
-def _schedule_owned_by(
-    scheduled_message: Any,
-    *,
-    canonical_user_id: str,
-    action: str,
-) -> bool:
-    if scheduled_message is None:
-        return False
-    owner = owner_canonical_user_id_for_schedule(scheduled_message)
-    return private_access(
-        person_id=canonical_user_id,
-        owner_id=owner,
-        resource_type=RESOURCE_SCHEDULE,
-        resource_id=scheduled_message.schedule_id,
-        action=action,
-    ).allowed
-
-
-def _authenticated_gateway_schedule_permit(
-    scheduled_message: Any,
-    *,
-    principal: CommandPerson,
-    operation: ScheduleMutationOperation,
-    candidate: Any = None,
-) -> Optional[ScheduleMutationPermit]:
-    return build_schedule_mutation_permit(
-        schedule=scheduled_message,
-        operation=operation,
-        authority_mode=ScheduleMutationAuthorityMode.AUTHENTICATED_GATEWAY_USER,
-        actor_principal_id=principal.canonical_user_id,
-        owner_canonical_user_id=principal.canonical_user_id,
-        team_id=principal.team_id,
-        candidate=candidate,
-    )
-
-
-def _schedule_worker_assignment(
-    store: ScheduleStore, schedule: ScheduledMessage, owner: str
-) -> ScheduleWorkerAssignmentV1:
-    """Project a schedule already authorized for this owner, in its saved team.
-
-    Owner-wide inventory can include another team in shared storage. The viewing
-    manager's team must not replace the schedule's persisted binding identity.
-    """
-    from datetime import datetime, timezone
-
-    from custom_agents.local_schedule_policy import local_system_timer_spec
-    from custom_agents.schedule_repair_guidance import person_explanation
-    from custom_agents.stuck_schedules import not_running
-
-    # A system timer an on-demand worker runs names its agent type (memory review: MemReviewAgent).
-    system_timer = local_system_timer_spec(schedule)
-    stuck = not_running(store, schedule, now=datetime.now(timezone.utc))
-    binding = (
-        store.worker_records.get_binding(
-            schedule.schedule_id, team_id=schedule.claim_team_id, owner_id=owner,
-        )
-        if schedule.claim_team_id else None
-    )
-    return ScheduleWorkerAssignmentV1(
-        agent_type=schedule.claim_named_agent_type,
-        agent_id=schedule.claim_agent_id,
-        review_agent_type=system_timer.agent_type if system_timer else None,
-        upgrade_required=system_timer is not None and schedule.claim_named_agent_type != system_timer.agent_type,
-        automatic_creation=(
-            "not_configured" if binding is None
-            else "disabled" if not binding.policy.enabled
-            else "default_policy" if binding.authority_mode == "runtime_default"
-            else "enabled"
-        ),
-        desired_agent_type=binding.target_agent_type if binding else None,
-        reassignment_pending=bool(binding and (
-            schedule.claim_agent_id
-            or schedule.claim_named_agent_type != binding.target_agent_type
-        )),
-        not_running_since=stuck[0] if stuck else None,
-        not_running_explanation=person_explanation(stuck[1]) if stuck else None,
-    )
-
-
-async def _apply_gateway_schedule_change(
-    agent: Any,
-    store: Any,
-    command: ManagerScheduleCommand,
-    scheduled_message: Any,
-    person: CommandPerson,
-) -> tuple[bool, str]:
-    """Pause, resume, turn off or remove one schedule for the verified person: (applied, message)."""
-
-    schedule_id = command.schedule_id or ""
-    expected = command.expected_record_digest or None
-    run = agent.task_manager.operations_runtime.run
-    if command.action == "pause":
-        candidate = scheduled_message.model_copy(deep=True)
-        candidate.paused_until = command.paused_until
-        permit = _authenticated_gateway_schedule_permit(
-            scheduled_message, principal=person, operation=ScheduleMutationOperation.PAUSE, candidate=candidate
-        )
-        applied = await run(
-            store.set_paused_until,
-            schedule_id,
-            command.paused_until,
-            operation=ScheduleMutationOperation.PAUSE,
-            system_mutation_permit=permit,
-            expected_record_digest=expected,
-        )
-        return applied, "schedule_paused" if applied else "schedule_not_found"
-    if command.action == "resume":
-        candidate = scheduled_message.model_copy(deep=True)
-        candidate.paused_until = None
-        candidate.enabled = True
-        permit = _authenticated_gateway_schedule_permit(
-            scheduled_message, principal=person, operation=ScheduleMutationOperation.RESUME, candidate=candidate
-        )
-        applied = await run(store.resume, schedule_id, system_mutation_permit=permit, expected_record_digest=expected)
-        return applied, "schedule_resumed" if applied else "schedule_not_found"
-    if command.action == "disable":
-        candidate = scheduled_message.model_copy(deep=True)
-        candidate.enabled = False
-        permit = _authenticated_gateway_schedule_permit(
-            scheduled_message, principal=person, operation=ScheduleMutationOperation.DISABLE, candidate=candidate
-        )
-        applied = await run(
-            store.set_enabled,
-            schedule_id,
-            False,
-            operation=ScheduleMutationOperation.DISABLE,
-            system_mutation_permit=permit,
-            expected_record_digest=expected,
-        )
-        return applied, "schedule_disabled" if applied else "schedule_not_found"
-    permit = _authenticated_gateway_schedule_permit(
-        scheduled_message, principal=person, operation=ScheduleMutationOperation.DELETE
-    )
-    applied = await run(store.remove, schedule_id, system_mutation_permit=permit, expected_record_digest=expected)
-    return applied, "schedule_removed" if applied else "schedule_not_found"
-
-
-async def handle_manager_schedule_command(
-    agent: Any,
-    *,
-    command: ManagerScheduleCommand,
-    msg_header: MessageHeader,
-    msg_meta: MessageMeta,
-) -> None:
-    if command.command_type == MessageMetaType.RESPONSE:
-        return
-    response = command.model_copy(deep=True)
-    response.command_type = MessageMetaType.RESPONSE
-    response.schedules = []
-    response.worker_assignments = {}
-    if not getattr(agent, "is_team_lead", False):
-        response.success = False
-        response.message = "manager_required"
-        await _send_durable_response(
-            agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
-        )
-        return
-    person, refusal = verified_command_person(agent, msg_meta)
-    if person is None:
-        response.success = False
-        response.message = refusal or "unsigned_sender"
-        await _send_durable_response(
-            agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
-        )
-        return
-
-    store = agent._ensure_schedule_store()
-    owner = person.canonical_user_id
-    if command.action == "list":
-        for row in await agent.task_manager.operations_runtime.run(store.get_all):
-            schedule_id = str(row.get("schedule_id") or "").strip()
-            scheduled_message = (
-                await agent.task_manager.operations_runtime.run(
-                    store.get_scheduled_message, schedule_id
-                )
-                if schedule_id
-                else None
-            )
-            if scheduled_message is None or not _schedule_owned_by(
-                scheduled_message,
-                canonical_user_id=owner,
-                action=PRIVATE_READ,
-            ):
-                continue
-            gateway_context = getattr(
-                getattr(scheduled_message, "payload_meta", None),
-                "gateway_context",
-                None,
-            )
-            if (
-                command.session_key
-                and getattr(gateway_context, "session_key", None) != command.session_key
-            ):
-                continue
-            response.schedules.append(scheduled_message)
-            response.worker_assignments[schedule_id] = await agent.task_manager.operations_runtime.run(
-                _schedule_worker_assignment, store, scheduled_message, owner,
-            )
-        response.success = True
-        response.message = "schedule_listed"
-    else:
-        scheduled_message = await agent.task_manager.operations_runtime.run(
-            store.get_scheduled_message, command.schedule_id or ""
-        )
-        auth_action = (
-            PRIVATE_DELETE
-            if command.action == "remove"
-            else PRIVATE_UPDATE
-        )
-        if not _schedule_owned_by(
-            scheduled_message,
-            canonical_user_id=owner,
-            action=auth_action,
-        ):
-            response.success = False
-            response.message = "schedule_not_found"
-        elif (
-            is_system_managed_schedule(scheduled_message)
-            # Storage and Cedar may wait. Bind the live service owner so the
-            # bounded operation lane copies only the verified person, keeping
-            # the manager loop responsive and the decision before mutation.
-            and not await agent.task_manager.operations_runtime.run(
-                partial(_may_change_system_schedules, agent), person
-            )
-        ):
-            # Only people who could approve a system_schedule change may make
-            # one here, decided with the verified person and roles.
-            agent._logger.warning(
-                "[%s] Refused a gateway change to a system schedule. "
-                "event=gateway_system_schedule_change_refused schedule_id=%s action=%s person_id=%s",
-                agent.id,
-                command.schedule_id,
-                command.action,
-                owner,
-            )
-            response.success = False
-            response.message = SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED
-        else:
-            # The listed schedule the person acted on (expected_record_digest)
-            # and the permit are checked in the store's write transaction.
-            try:
-                response.success, response.message = await _apply_gateway_schedule_change(
-                    agent, store, command, scheduled_message, person
-                )
-            except (ScheduleWriteConflict, SystemScheduleMutationDenied) as exc:
-                changed = isinstance(exc, ScheduleWriteConflict)
-                agent._logger.warning(
-                    "[%s] A gateway schedule change was refused. event=gateway_schedule_change_refused "
-                    "schedule_id=%s action=%s person_id=%s reason=%s",
-                    agent.id,
-                    command.schedule_id,
-                    command.action,
-                    owner,
-                    exc.reason_code,
-                )
-                response.success = False
-                response.message = SCHEDULE_CHANGED_SINCE_LISTED if changed else SYSTEM_SCHEDULE_CHANGE_REFUSED
-        if response.success and getattr(agent, "_scheduler_wake", None) is not None:
-            agent._scheduler_wake.set()
-    await _send_durable_response(
-        agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
-    )
 
 
 def _task_owner_matches(task_info: Any, request: TaskProgressStatus) -> bool:

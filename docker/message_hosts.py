@@ -40,6 +40,7 @@ from typing import Callable, Mapping, Optional
 
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
 from custom_transport.protocol1.bootstrap import BootstrapBundle, BootstrapError, read_bundle, write_bundle
+from custom_transport.protocol1.delivery_refs import ensure_delivery_ref_key
 from custom_transport.protocol1.host_keys import AUTHORITY_KEY_FILENAME, ensure_authority_keys, ensure_host_keys, load_authority_keys
 from custom_transport.protocol1.joining import HostProfile
 from installation_authority.expected_hosts import ExpectedHost, write_expected_hosts
@@ -85,6 +86,9 @@ def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, Expec
         LOGGER.info("Created the installation authority's key. event=installation_authority_key_created installation=%s",
                     installation)
     ensure_host_keys(layout, AUTHORITY_RUNTIME)
+    # The key of people's opaque delivery references, which the gateway and the team services share.
+    if ensure_delivery_ref_key(layout):
+        LOGGER.info("Created the delivery reference key. event=delivery_ref_key_created")
     write_expected_hosts(layout.trust_expected_hosts_path, dict(hosts or {}))
     keys = ((authority.key_id, authority.public_key_text),)
     try:

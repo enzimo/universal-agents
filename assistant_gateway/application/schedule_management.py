@@ -1,16 +1,22 @@
-"""Gateway-owned user schedule creation and manager-backed control."""
+"""Gateway-owned user schedule creation, and schedule lists and controls through the team services.
+
+Creating a schedule still publishes a durable ``ScheduledMessage`` to the team lead (queued
+work moves in phase 3). Listing, pausing, resuming, turning off and removing go to the team
+services as ``schedules.*`` commands for the signed-in person (``team_services.schedules``),
+which decide whose schedules they are and who may change system schedules. A chat's own
+list names the chat by its opaque delivery reference (``GatewayDeliveryRefs``). A change
+names the listed version (``seen_version``); a chat command that names only a schedule id
+looks the current version up first, so it acts on the schedule as named, as before.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Any, Protocol
 
 from assistant_gateway.application.delivery_service import GatewayDeliveryService
 from assistant_gateway.application.manager_client import GatewayManagerClient
-from assistant_gateway.application.manager_commands import (
-    GatewayManagerCommandRequest,
-    GatewayManagerCommandService,
-)
 from assistant_gateway.application.ports import GatewayIdGenerator, GatewayPersonChangeCheck
 from assistant_gateway.application.request_context import (
     GatewayRequestContextService,
@@ -23,13 +29,13 @@ from assistant_gateway.application.session_service import (
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from custom_messages.contracts.schedule_v1 import (
     SYSTEM_SCHEDULE_CHANGE_KIND,
-    ManagerScheduleCommand,
     ScheduledMessage,
     ScheduleTaskMemory,
-    schedule_listing_digest,
 )
+from custom_messages.wire.encoding import format_timestamp
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
     MessageMetaType,
@@ -63,17 +69,53 @@ class GatewayScheduleCreateRequest:
     route: GatewayRequestRoute = GatewayRequestRoute()
 
 
-@dataclass(frozen=True)
-class GatewayScheduleCommandRequest:
-    """One manager-backed schedule query or mutation."""
+class GatewayDeliveryRefs(Protocol):
+    """Opaque delivery references of the gateway's sessions (``custom_transport.protocol1.delivery_refs``)."""
 
-    action: Literal["list", "pause", "resume", "disable", "remove"]
-    schedule_id: str | None = None
-    paused_until: str | None = None
+    def ref(self, session_key: str) -> str: ...
+
+
+@dataclass(frozen=True)
+class GatewayScheduleView:
+    """A schedule as the team services list it (the contract's ``schedules.list`` row)."""
+
+    schedule_id: str
+    schedule_name: str | None
+    management_class: ScheduleManagementClass
+    system_schedule_kind: str | None
+    objective_id: str | None
+    enabled: bool
+    paused_until: str | None
+    next_fire_at: str | None
+    instruction_preview: str
+    seen_version: str
+    worker: dict[str, Any]
+    # The chat the list was asked for; None for a person's list across chats.
     session_key: str | None = None
-    route: GatewayRequestRoute = GatewayRequestRoute()
-    expected_record_digest: str | None = None
-    owner_wide: bool = False
+
+    @classmethod
+    def from_wire(cls, row: dict[str, Any], *, session_key: str | None = None) -> "GatewayScheduleView":
+        return cls(
+            schedule_id=row["schedule_id"], schedule_name=row.get("name"),
+            management_class=ScheduleManagementClass(row["management_class"]),
+            system_schedule_kind=row.get("system_schedule_kind"), objective_id=row.get("objective_id"),
+            enabled=bool(row["enabled"]), paused_until=row.get("paused_until"), next_fire_at=row.get("next_fire_at"),
+            instruction_preview=str(row.get("instruction_preview") or ""), seen_version=row["seen_version"],
+            worker=dict(row["worker"]), session_key=session_key,
+        )
+
+
+@dataclass(frozen=True)
+class GatewayScheduleListing:
+    """The team services' answer to a schedule list."""
+
+    success: bool
+    message: str = ""
+    schedules: tuple[GatewayScheduleView, ...] = ()
+
+
+# The contract's page size for schedule lists; longer lists are read page by page.
+SCHEDULE_PAGE_SIZE = 50
 
 
 class GatewayScheduleApplication:
@@ -87,16 +129,19 @@ class GatewayScheduleApplication:
         request_context: GatewayRequestContextService,
         delivery: GatewayDeliveryService,
         manager: GatewayManagerClient,
-        manager_commands: GatewayManagerCommandService,
+        team_commands: GatewayTeamCommandService,
         id_generator: GatewayIdGenerator,
         person_changes: GatewayPersonChangeCheck | None = None,
+        delivery_refs: GatewayDeliveryRefs | None = None,
     ) -> None:
         self._settings = settings
         self._sessions = sessions
         self._request_context = request_context
         self._delivery = delivery
         self._manager = manager
-        self._manager_commands = manager_commands
+        # Lists and controls go to the team services (module docstring).
+        self._team_commands = team_commands
+        self._delivery_refs = delivery_refs
         self._id_generator = id_generator
         # Decides who may change schedules the runtime manages; without it
         # nobody may (the manager refuses those changes).
@@ -107,7 +152,7 @@ class GatewayScheduleApplication:
 
         return self._may_change_system_schedules(self._request_context.canonical_user_id(route))
 
-    def may_change_schedule(self, schedule: ScheduledMessage, route: GatewayRequestRoute = GatewayRequestRoute()) -> bool:
+    def may_change_schedule(self, schedule: GatewayScheduleView, route: GatewayRequestRoute = GatewayRequestRoute()) -> bool:
         """Whether the signed-in person may change this listed schedule of theirs.
 
         A person's own schedule, yes; a schedule the runtime manages only when
@@ -119,14 +164,14 @@ class GatewayScheduleApplication:
         return self.may_change_system_schedules(route)
 
     @staticmethod
-    def listing_digest(schedule: ScheduledMessage) -> str:
-        """The digest a control on this listed schedule binds to (``schedule_listing_digest``).
+    def listing_digest(schedule: GatewayScheduleView) -> str:
+        """The digest a control on this listed schedule binds to (the list's ``seen_version``).
 
         The Schedules page and the chat and CLI commands send it as
-        ``expected_record_digest``; the manager's store checks the same digest.
+        ``expected_record_digest``; the team services' store checks the same digest.
         """
 
-        return schedule_listing_digest(schedule)
+        return schedule.seen_version
 
     def _may_change_system_schedules(self, person_id: str | None) -> bool:
         if self._person_changes is None or not person_id:
@@ -217,7 +262,7 @@ class GatewayScheduleApplication:
         session_key: str | None = None,
         route: GatewayRequestRoute = GatewayRequestRoute(),
         owner_wide: bool = False,
-    ) -> list[ScheduledMessage]:
+    ) -> list[GatewayScheduleView]:
         response = await self.list_with_worker_assignments(
             session_key=session_key, route=route, owner_wide=owner_wide,
         )
@@ -229,16 +274,31 @@ class GatewayScheduleApplication:
         session_key: str | None = None,
         route: GatewayRequestRoute = GatewayRequestRoute(),
         owner_wide: bool = False,
-    ) -> ManagerScheduleCommand:
-        """Read schedules and their owner-filtered policy projection from the manager."""
-        return await self._execute(
-            GatewayScheduleCommandRequest(
-                action="list",
-                session_key=session_key,
-                route=route,
-                owner_wide=owner_wide,
+    ) -> GatewayScheduleListing:
+        """The person's schedules, with their workers, from the team services; one chat's unless ``owner_wide``."""
+
+        session = self._resolve_session(session_key, route)
+        person = self._person(route, session)
+        body: dict[str, Any] = {}
+        if not owner_wide:
+            if self._delivery_refs is None:
+                return GatewayScheduleListing(False, "This gateway cannot name its chats to the team services.")
+            body["delivery_ref"] = self._delivery_refs.ref(session.session_key)
+        listed: list[GatewayScheduleView] = []
+        offset = 0
+        while True:
+            reply = await self._team_commands.request(
+                "schedules.list", {**body, "offset": offset, "limit": SCHEDULE_PAGE_SIZE}, person_id=person
             )
-        )
+            if reply.get("outcome") != "ok":
+                return GatewayScheduleListing(False, str(reply.get("message") or reply.get("outcome")))
+            listed.extend(
+                GatewayScheduleView.from_wire(row, session_key=None if owner_wide else session.session_key)
+                for row in reply["schedules"]
+            )
+            if "next_offset" not in reply:
+                return GatewayScheduleListing(True, "schedule_listed", tuple(listed))
+            offset = int(reply["next_offset"])
 
     async def pause(
         self,
@@ -248,16 +308,9 @@ class GatewayScheduleApplication:
         session_key: str | None = None,
         expected_record_digest: str | None = None,
     ) -> bool:
-        response = await self._execute(
-            GatewayScheduleCommandRequest(
-                action="pause",
-                schedule_id=schedule_id,
-                paused_until=paused_until,
-                session_key=session_key,
-                expected_record_digest=expected_record_digest,
-            )
-        )
-        return bool(response.success)
+        return await self._change("pause", schedule_id, session_key=session_key,
+                                  expected_record_digest=expected_record_digest,
+                                  paused_until=format_timestamp(_moment(paused_until)))
 
     async def resume(
         self,
@@ -266,15 +319,8 @@ class GatewayScheduleApplication:
         session_key: str | None = None,
         expected_record_digest: str | None = None,
     ) -> bool:
-        response = await self._execute(
-            GatewayScheduleCommandRequest(
-                action="resume",
-                schedule_id=schedule_id,
-                session_key=session_key,
-                expected_record_digest=expected_record_digest,
-            )
-        )
-        return bool(response.success)
+        return await self._change("resume", schedule_id, session_key=session_key,
+                                  expected_record_digest=expected_record_digest)
 
     async def disable(
         self,
@@ -283,15 +329,8 @@ class GatewayScheduleApplication:
         session_key: str | None = None,
         expected_record_digest: str | None = None,
     ) -> bool:
-        response = await self._execute(
-            GatewayScheduleCommandRequest(
-                action="disable",
-                schedule_id=schedule_id,
-                session_key=session_key,
-                expected_record_digest=expected_record_digest,
-            )
-        )
-        return bool(response.success)
+        return await self._change("disable", schedule_id, session_key=session_key,
+                                  expected_record_digest=expected_record_digest)
 
     async def remove(
         self,
@@ -300,51 +339,43 @@ class GatewayScheduleApplication:
         session_key: str | None = None,
         expected_record_digest: str | None = None,
     ) -> bool:
-        response = await self._execute(
-            GatewayScheduleCommandRequest(
-                action="remove",
-                schedule_id=schedule_id,
-                session_key=session_key,
-                expected_record_digest=expected_record_digest,
-            )
-        )
-        if response.success:
+        removed = await self._change("remove", schedule_id, session_key=session_key,
+                                     expected_record_digest=expected_record_digest)
+        if removed:
             self._delivery.remove_scheduled_target(schedule_id)
-        return bool(response.success)
+        return removed
 
-    async def _execute(
+    async def _change(
         self,
-        request: GatewayScheduleCommandRequest,
-    ) -> ManagerScheduleCommand:
-        session = self._resolve_session(request.session_key, request.route)
-        resolved_route = self._resolved_route(request.route, session)
-        # The signed-in person must be an active team member; the manager
-        # reads the person only from the command's signed context and decides
-        # changes to system-managed schedules itself.
-        person = self._request_context.manager_principal(resolved_route)
-        command = ManagerScheduleCommand(
-            action=request.action,
-            schedule_id=request.schedule_id,
-            session_key=(
-                None
-                if request.owner_wide
-                else session.session_key
-                if request.action == "list"
-                else None
-            ),
-            paused_until=request.paused_until,
-            expected_record_digest=request.expected_record_digest,
-        )
-        response = await self._manager_commands.request(
-            GatewayManagerCommandRequest(
-                command=command,
-                session=session,
-                person=person,
-                route=resolved_route,
-            )
-        )
-        assert isinstance(response, ManagerScheduleCommand)
-        return response
+        action: str,
+        schedule_id: str,
+        *,
+        session_key: str | None,
+        expected_record_digest: str | None,
+        paused_until: str | None = None,
+    ) -> bool:
+        """One change at the team services for the signed-in person; False when refused or gone."""
+
+        route = GatewayRequestRoute()
+        session = self._resolve_session(session_key, route)
+        person = self._person(route, session)
+        seen = expected_record_digest
+        if seen is None:
+            # A chat command names the schedule only: act on it as it is now (module docstring).
+            listing = await self.list_with_worker_assignments(session_key=session_key, route=route, owner_wide=True)
+            seen = next((item.seen_version for item in listing.schedules if item.schedule_id == schedule_id), None)
+            if seen is None:
+                return False
+        body: dict[str, Any] = {"schedule_id": schedule_id, "seen_version": seen}
+        if paused_until is not None:
+            body["paused_until"] = paused_until
+        reply = await self._team_commands.request(f"schedules.{action}", body, person_id=person)
+        return reply.get("outcome") == "ok"
+
+    def _person(self, route: GatewayRequestRoute, session: SessionRecord) -> str:
+        """The signed-in person; an unregistered route is refused (``PermissionError``)."""
+
+        return self._request_context.manager_principal(self._resolved_route(route, session)).canonical_user_id
 
     def _resolve_session(
         self,
@@ -399,3 +430,9 @@ class GatewayScheduleApplication:
         if manager_id is None:
             raise RuntimeError(self._settings.manager_unavailable_text)
         return manager_id
+
+
+def _moment(value: str) -> datetime:
+    moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
