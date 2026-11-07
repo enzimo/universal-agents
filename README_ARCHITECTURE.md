@@ -4441,7 +4441,11 @@ They serve the team's address (`svc.team`) and answer, so far:
   reply could not show its result, is refused the same way before anything is stored.
   The gateway refuses longer typed text before sending, and the editor keeps it. The team
   lead counts the stored pages, earlier revisions, pending proposals and open notes over
-  the limit and reports them as a note on the Status page (`custom_agents.long_knowledge`).
+  the limit and reports them as a note on the Status page (`custom_agents.long_knowledge`);
+- the chat's topic commands, `topics.list_tags`, `.find_threads` and `.tag_thread`
+  (`team_services.topics`, the durable `ManagerTopicCommand` until phase 2), on the same
+  conversation store. Tagging can be done again with the same effect, so its outcome is
+  stored right after the change by `storage.operation_outcomes.OperationOutcomeStore`.
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.

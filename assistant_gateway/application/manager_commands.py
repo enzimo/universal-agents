@@ -28,7 +28,6 @@ from assistant_gateway.application.request_context import (
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.control_v1 import (
     ManagerRuntimeWorkCommand,
-    ManagerTopicCommand,
     PersonStandingCommandV1,
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -40,7 +39,6 @@ from custom_messages.enums import RequesterType
 GatewayManagerCommand = (
     ManagerScheduleCommand
     | ManagerRuntimeWorkCommand
-    | ManagerTopicCommand
 )
 # PersonStandingCommandV1 is not tied to a chat session; its gateway context
 # carries only the acting administrator's signed context.
@@ -293,19 +291,7 @@ class GatewayManagerCommandService:
                     else PRIVATE_ACTION_UPDATE
                 ),
             )
-        return _PrivateResourceTarget(
-            resource_type=RESOURCE_CONVERSATION,
-            resource_id=(
-                command.conversation_id
-                or session.conversation_id
-                or f"session:{session.session_key}"
-            ),
-            action=(
-                PRIVATE_ACTION_UPDATE
-                if command.action == "tag_thread"
-                else PRIVATE_ACTION_READ
-            ),
-        )
+        raise TypeError(f"No private-resource rule for {type(command).__name__}.")
 
     def _build_envelope(
         self,

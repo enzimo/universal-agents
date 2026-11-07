@@ -610,27 +610,6 @@ class PinnedMemoryCommandPayload(BaseModel):
     )
 
 
-class ManagerTopicCommand(BaseModel):
-    """Durable gateway-to-manager conversation-topic command."""
-
-    message_class: Literal["ManagerTopicCommand"] = "ManagerTopicCommand"
-    command_id: str = Field(default_factory=lambda: new_id("manager_topic"))
-    command_type: MessageMetaType = MessageMetaType.REQUEST
-    action: Literal["list_tags", "find_threads", "tag_thread"]
-    conversation_id: Optional[str] = None
-    tag: Optional[str] = None
-    tags: List[str] = Field(default_factory=list)
-    private: bool = False
-    success: Optional[bool] = None
-    known_tags: List[Dict[str, Any]] = Field(default_factory=list)
-    thread_matches: List[Dict[str, Any]] = Field(default_factory=list)
-    applied_tags: List[str] = Field(default_factory=list)
-    message: str = ""
-
-    def get_id(self) -> str:
-        return self.command_id
-
-
 class KnowledgeCommandAction(StrEnum):
     """What a person does on the Web Chat Knowledge page (a ``knowledge.*`` command to the team services)."""
 
