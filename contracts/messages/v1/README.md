@@ -1301,8 +1301,11 @@ What each record says, and what `TrustStore.verify` checks about it:
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 
-**Key-value grants.** Each bucket in `transport.yaml` names its `readers` and, per writer
-role, the keys that role may write, as templates membership code fills like subjects:
+**Key-value grants.** These grants take effect where each host has its own NATS credential.
+While the hosts share one NATS login ("Installation traffic"), every process may do what any
+role may, and only the records' signatures protect them. Each bucket in `transport.yaml`
+names its `readers` and, per writer role, the keys that role may write, as templates
+membership code fills like subjects:
 `{self}` is the host's runtime id, `{team}` each team it serves, `{agent}` each agent it
 runs, `{installation}` its own installation and `{peer}` each installation an agreement
 names. The generated permissions follow:
@@ -1436,7 +1439,13 @@ code names its own digest (`custom_messages.wire.kinds.CONTRACT_SHA256`).
   differs from its own with `protocol_mismatch`, naming the digest it runs
   (`accepted_contract_sha256`) and what to install. It still answers a renewal that only gives
   up agents or pools ("Credentials follow placement"), so a host on another contract can hand
-  its agents over. A host upgraded in place renews with a new `renew_id`, since a repeated one
+  its agents over. `verify_frame` returns such a frame with `other_contract` and no body,
+  after checking everything before the body; the authority then reads the body again as this
+  revision shapes it, strictly, and answers it as a give-up only when it fits this contract,
+  names the certificate that signed it at that certificate's membership epoch, rotates no key
+  and keeps its NATS key. Every other join or renewal of another contract gets
+  `protocol_mismatch`, and the authority stores no outcome under the retry key of a frame it
+  did not read. A host upgraded in place renews with a new `renew_id`, since a repeated one
   gets its stored outcome back ("Stored outcomes").
 - **Readers of host records.** A host record that names another digest is authentic, so
   `TrustStore.verify` accepts it without reading the rest of its body and marks it
@@ -1447,7 +1456,9 @@ code names its own digest (`custom_messages.wire.kinds.CONTRACT_SHA256`).
   second holder without a person's override ("Custody windows").
 - **The host on another contract.** A host learns that its digest differs from the team
   services' host record, which it reads when it starts and whenever it changes, or from
-  `protocol_mismatch`. It then stops pulling from worker pool queues and from its agents'
+  `protocol_mismatch`. It reads join and renewal replies strictly, as this revision shapes
+  them, so a reply another revision shaped differently is refused as `invalid_body`; the host
+  record still tells it. It then stops pulling from worker pool queues and from its agents'
   inboxes, keeps reading their control queues, finishes the turns in progress and hands back
   (`task.handback`) every task it has not finished, holding every action outside the team
   meanwhile, and renews only to give up its agents and pools. Messages either side can no
