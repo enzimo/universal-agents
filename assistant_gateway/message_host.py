@@ -7,7 +7,8 @@ starts in the background when the gateway's NATS runtime connects, so the gatewa
 other work never waits for the installation authority; a command waits until the host
 has joined (``ready``).
 
-Only the gateway service runs the host (``NatsGatewayManagerRuntime.for_gateway_service``).
+Only the gateway service runs the host (``NatsGatewayManagerRuntime.for_gateway_service``:
+``run-gateway``, or ``run-app``, which runs it with one interactive app in its place).
 Command-line runs (``ask``, ``chat``, ``cron``, ``heartbeat``) open a gateway of their own,
 but a second process joining as host ``gateway`` would load the gateway's key and, when
 it ends, mark the running gateway's host record ``drained``; so they run none.
@@ -27,8 +28,10 @@ another key, team or connection for the gateway). A join that still waits for ap
 first failure is logged with its traceback, later ones in one line.
 
 Stopping (``close``) cancels a host that is still joining, since a join can wait two
-minutes for the authority and holds nothing yet; a joined host stops its upkeep and
-writes its last record (``drained``). A failure on the way out is logged, never raised,
+minutes for the authority and holds nothing yet; a host that has joined writes its first
+record (``accepting``) only once it counts as joined, so stopping then lets it stop its
+upkeep and write its last one (``drained``). A command still waiting for the join is
+told at once that the host stopped. A failure on the way out is logged, never raised,
 so the gateway still closes its NATS connection; a caller that is itself cancelled stays
 cancelled.
 """
@@ -43,7 +46,7 @@ from typing import Any, Optional
 
 from custom_messages.wire.frame import VerifiedFrame
 from custom_messages.wire.kinds import CONTRACT_SHA256
-from custom_transport.protocol1.authority_tokens import command_binding_id, command_token
+from custom_transport.protocol1.authority_tokens import command_binding_id, command_token, require_person_ref
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile, JoinRefused
 from release_version import release_version
@@ -132,7 +135,8 @@ class GatewayMessageHost:
             if self._stop.is_set():
                 return
             try:
-                await self.host.start()
+                # Its first record is written below, once it counts as joined (module docstring).
+                await self.host.start(report=False)
                 break
             except JoinRefused as refused:
                 if refused.outcome != _JOIN_PENDING:
@@ -147,7 +151,11 @@ class GatewayMessageHost:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.join_retry_seconds)
         self._joined = True
         self._ready.set()
-        # Also when close() came during the join: keep_up then writes the last record at once.
+        try:
+            await self.host.publish_liveness("accepting")
+        except Exception:
+            self.logger.exception("The gateway's first host record could not be written; the upkeep writes it again. "
+                                  "event=gateway_host_first_record_failed")
         await self.host.keep_up(self._stop)
 
     def _refuse(self, refused: JoinRefused) -> None:
@@ -176,6 +184,8 @@ class GatewayMessageHost:
             raise GatewayHostUnavailable("The gateway has not joined the installation yet.") from error
         if self._refusal is not None:
             raise GatewayHostUnavailable(self._refusal)
+        if not self._joined:  # woken by close()
+            raise GatewayHostUnavailable("The gateway's host has stopped.")
         return self.host
 
     async def command(self, kind: str, body: dict[str, Any], *, person_ref: str,
@@ -186,7 +196,9 @@ class GatewayMessageHost:
         (``command_binding_id``: ``request_id`` for most, ``steer_id`` for ``tasks.steer``).
         """
 
+        # Before waiting for the join: either mistake is the caller's, and nothing is signed.
         command_id = command_binding_id(kind, body)
+        require_person_ref(person_ref)
         host = await self.ready(timeout)
         assert host.live is not None
         token = command_token(host.identity, team=self.team, person_ref=person_ref, command_id=command_id,
@@ -199,6 +211,7 @@ class GatewayMessageHost:
         """Stop the host (module docstring): raises only when the caller itself is cancelled."""
 
         self._stop.set()
+        self._ready.set()  # a command still waiting for the join hears that the host stopped
         task, self._task = self._task, None
         if task is None:
             return

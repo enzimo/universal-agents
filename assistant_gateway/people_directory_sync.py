@@ -48,6 +48,9 @@ for them, or a new one the first time; the access store keeps the reference
 it already holds, read inside its write transaction, so a person recorded by
 another writer in between (the running gateway and a command-line run both
 copy people) keeps the one stored first (``AccessRepository.record_person``).
+A full copy reads the store before the gateway's records and drops only people
+it found there (``replace_people(read_before=...)``), so someone the running
+gateway adds while it runs is neither dropped nor given a new reference later.
 """
 
 from __future__ import annotations
@@ -179,7 +182,9 @@ class PeopleDirectorySync:
             if standing is None:
                 continue
             people.append(self._copy(row.canonical_user_id, standing, row.role, previous.get(row.canonical_user_id)))
-        store.replace_people(self._team_id, people, at=self._clock.now_utc())
+        # Read the store before the gateway's records: whoever another writer stores after
+        # this read and the records lack is someone just added, not someone gone.
+        store.replace_people(self._team_id, people, at=self._clock.now_utc(), read_before=previous.keys())
         return Counter(person.standing for person in people)
 
     def _copy(

@@ -1008,7 +1008,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run_app = subparsers.add_parser(
-        "run-app", help="Run one configured interactive app against the live gateway"
+        "run-app",
+        help="Run the gateway service with only one configured interactive app, in place of run-gateway",
     )
     run_app.add_argument(
         "--config", required=False, default=None, help="Path to instance_config.yaml"

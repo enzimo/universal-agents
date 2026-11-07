@@ -49,13 +49,19 @@ def command_binding_id(kind: str, body: Mapping[str, Any]) -> str:
     return value
 
 
-def command_token(identity: HostIdentity, *, team: str, person_ref: str, command_id: str, issued: datetime,
-                  lifetime_seconds: int = COMMAND_TOKEN_MAX_SECONDS) -> dict[str, Any]:
-    """A token for one person's command, bound to ``command_id``, signed by this gateway or scheduler host."""
+def require_person_ref(person_ref: str) -> None:
+    """Refuse anything but an opaque person reference, before a command token is signed or waited for."""
 
     if not is_person_ref(person_ref):
         # Not echoed: what was passed may be the person's name or chat handle.
         raise ValueError("A command token names a person only by their opaque reference (\"p-\" and 22 characters).")
+
+
+def command_token(identity: HostIdentity, *, team: str, person_ref: str, command_id: str, issued: datetime,
+                  lifetime_seconds: int = COMMAND_TOKEN_MAX_SECONDS) -> dict[str, Any]:
+    """A token for one person's command, bound to ``command_id``, signed by this gateway or scheduler host."""
+
+    require_person_ref(person_ref)
     certificate = identity.certificate
     unsigned = {
         "token_id": new_message_id(int(issued.timestamp() * 1000)),

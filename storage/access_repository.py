@@ -85,7 +85,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1055,21 +1055,39 @@ class AccessRepository:
             conn.commit()
         return stored
 
-    def replace_people(self, team_id: str, people: Iterable[TeamPersonV1], *, at: datetime) -> list[TeamPersonV1]:
+    def replace_people(self, team_id: str, people: Iterable[TeamPersonV1], *, at: datetime,
+                       read_before: Collection[str] | None = None) -> list[TeamPersonV1]:
         """Store everyone the gateway knows in the team, drop anyone it no longer knows, and mark the team synced.
 
         One transaction, so a reader never sees half a sync. Everyone still in the team
         keeps their stored reference (``_keeping_references``); returns what was stored.
+
+        ``read_before`` names the people the writer found in this store before it read the
+        gateway's records it copies; only they can be dropped. Someone stored since and
+        missing from ``people`` was recorded by another writer after that read (the running
+        gateway adding a person while a command-line run copies everyone), so they stay,
+        with their reference, and that is logged; the next full copy drops them if they are
+        gone. ``None`` drops everyone missing from ``people``, for a writer whose list is current.
         """
 
         p = self.dialect.bind
         people = list(people)
         if any(person.team_id != team_id for person in people):
             raise ValueError("Every person must belong to the team being synced.")
+        listed = {person.person_id for person in people}
         with self._connect() as conn:
             conn.begin_write()
             people = self._keeping_references(conn, team_id, people)
-            conn.execute(f"DELETE FROM access_people WHERE team_id={p}", (team_id,))
+            stored = [str(row[0]) for row in conn.execute(
+                f"SELECT person_id FROM access_people WHERE team_id={p}", (team_id,)).fetchall()]
+            for person_id in stored:
+                if person_id in listed:
+                    continue  # written again below
+                if read_before is None or person_id in read_before:
+                    conn.execute(f"DELETE FROM access_people WHERE team_id={p} AND person_id={p}", (team_id, person_id))
+                else:
+                    logger.info("Kept a person another write stored after this copy read the store. "
+                                "event=access_person_kept_unread team_id=%s person_id=%s", team_id, person_id)
             for person in people:
                 self._upsert_person(conn, person)
             conn.execute(

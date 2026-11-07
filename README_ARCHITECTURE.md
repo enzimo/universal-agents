@@ -4640,8 +4640,10 @@ can be names or chat handles, so they never travel in frames. The reference is s
 with the person in the access store's people table (`access_people.person_ref`, unique
 per team), and created for existing people when an older store is opened. The store
 keeps the reference it holds whenever the people copy is written again, checked inside
-its write transaction, so a writer that read the copy before another stored someone (the
-running gateway and a command-line run both copy people) cannot give them a second one.
+its write transaction, and a full copy drops only people it found in the store before it
+read the gateway's records, so a writer that read the copy before another stored someone
+(the running gateway and a command-line run both copy people) neither drops them nor
+gives them a second reference.
 `AccessRepository.team_person_by_ref` turns a reference back into the person, whatever
 their standing: a receiver checks that the person is active and holds the roles the
 operation needs before it acts for them. The team transfer does not carry the people
