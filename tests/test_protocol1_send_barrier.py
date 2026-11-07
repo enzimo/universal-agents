@@ -30,7 +30,7 @@ RECEIVER = Receiver("install_example", TEAM, "team_services", TEAM, "team-servic
 
 def live_host(connection, runtime, key, epoch):
     return LiveHost(connection, example_identity(runtime, key, epoch),
-                    PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"), {}, {}),
+                    PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent")),
                     clock=lambda: fixtures.NOW)
 
 
@@ -39,7 +39,7 @@ def live_host(connection, runtime, key, epoch):
     "request", "reply", "unsupported", "handler_failed", "bad_reply", "invalid_frame",
     "put", "create", "update", "join",
 ])
-async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeypatch, operation):
+async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeypatch, caplog, operation):
     entered, release = asyncio.Event(), asyncio.Event()
     fail = False
 
@@ -50,13 +50,19 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
             raise OSError("disk flush failed")
 
     monkeypatch.setattr(send_barrier, "_BEFORE_SEND", barrier)
-    connection = SimpleNamespace(request=AsyncMock(side_effect=NoRespondersError), publish=AsyncMock())
+    callbacks = {}
+
+    async def subscribe(subject, cb):
+        callbacks[subject] = cb
+
+    connection = SimpleNamespace(request=AsyncMock(side_effect=NoRespondersError), publish=AsyncMock(),
+                                 new_inbox=lambda: "_INBOX.worker-host-1.inbox1", subscribe=subscribe)
     worker = live_host(connection, "worker-host-1", "test-worker-key-1", 3)
     services = live_host(connection, "team-services-1", "test-services-key-1", 2)
     bucket = SimpleNamespace(put=AsyncMock(return_value=1), create=AsyncMock(return_value=1),
                              update=AsyncMock(return_value=2))
     js = SimpleNamespace(key_value=AsyncMock(return_value=bucket))
-    records = StateRecords(js, services.identity, services.trust)
+    records = StateRecords(js, lambda: services.identity, services.trust)
     body = {"request_id": "close_1", "session": "s-researcher-2-1", "reason": "exited"}
     frame = worker.sign("sessions.close", body, AUDIENCE, team=TEAM)
     data, headers = worker.encode(frame)
@@ -83,7 +89,11 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
             with pytest.raises(ServiceUnavailable):
                 await worker.request("sessions.close", body, AUDIENCE, team=TEAM)
         else:
-            await services._answer(message, RECEIVER, handler, None)
+            if not callbacks:
+                await services.serve("svc.team", RECEIVER, handler)
+            (answer,) = callbacks.values()
+            await answer(message)
+            await services.drain()
 
     writes = [connection.request, connection.publish, bucket.put, bucket.create, bucket.update]
     pending = asyncio.create_task(send())
@@ -97,8 +107,15 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
     assert sum(write.await_count for write in writes) == 1
 
     fail = True
-    with pytest.raises(OSError, match="disk flush failed"):
+    if operation in {"put", "create", "update", "request", "join"}:
+        with pytest.raises(OSError, match="disk flush failed"):
+            await send()
+    else:
+        # A served address logs the failed answer; the subscription keeps serving.
+        message.data = message.data if operation == "invalid_frame" else worker.encode(
+            worker.sign("sessions.close", {**body, "request_id": "close_2"}, AUDIENCE, team=TEAM))[0]
         await send()
+        assert "protocol1_answer_failed" in caplog.text
     assert sum(write.await_count for write in writes) == 1
 
 
@@ -106,7 +123,7 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
 async def test_team_bucket_bindings_follow_the_record_key_and_require_a_team_for_watches():
     js = SimpleNamespace(key_value=AsyncMock(return_value=SimpleNamespace()))
     worker = live_host(None, "worker-host-1", "test-worker-key-1", 3)
-    records = StateRecords(js, worker.identity, worker.trust)
+    records = StateRecords(js, lambda: worker.identity, worker.trust)
 
     for record, key, name in [
         ("team_view", "team_one.task.task1", "UA1_TEAM_VIEW_team_one"),

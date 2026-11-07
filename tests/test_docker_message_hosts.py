@@ -208,6 +208,22 @@ def test_a_stop_during_the_wait_returns_the_team_services_still_starting(tmp_pat
         stop(process)
 
 
+def test_team_services_whose_serving_file_cannot_be_read_are_stopped(tmp_path: Path, monkeypatch) -> None:
+    """A wait that ends with an error, here a damaged serving file, must not leave the process running
+    unrecorded, holding the team's lock where the launcher cannot stop it."""
+
+    layout = InstanceLayout.at(tmp_path)
+    started = _recording_popen(monkeypatch)
+    script = ("import os, time\n"
+              f"path = {str(layout.team_services_serving_path)!r}\n"
+              "os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+              "open(path, 'w').write('{}')\n"
+              "time.sleep(30)\n")
+    with pytest.raises(ValueError, match="does not name a process"):
+        message_hosts.start_team_services(layout, [sys.executable, "-c", script], {}, cwd=tmp_path, timeout_seconds=10)
+    assert started[0].poll() is not None, "stopped"
+
+
 def test_the_serving_file_names_the_process_and_a_damaged_one_is_an_error(tmp_path: Path) -> None:
     from datetime import datetime, timezone
 
@@ -288,3 +304,57 @@ def test_a_stop_while_the_authority_starts_does_not_start_the_team_services(tmp_
     services = message_hosts.MessageServices(layout, dict, ["authority"], {}, ["team-services"], {}, cwd=tmp_path)
     assert services.start(stop_requested=lambda: True) is False
     assert [name for name, _ in services.processes()] == ["installation authority"], "stopped with the others"
+
+
+def test_a_lost_authority_key_starts_a_new_installation(tmp_path: Path, caplog) -> None:
+    """A new key could check nothing the old one signed, so the bundle's id is not reused: every host joins anew."""
+
+    layout = InstanceLayout.at(tmp_path)
+    old = message_hosts.prepare_message_host_trust(layout)
+    write_bundle(layout.trust_bootstrap_path, read_bundle(layout.trust_bootstrap_path).with_records(
+        [{"record": "revocations", "sequence": 7}]))
+    (layout.trust_authority_dir / "authority-key.json").unlink()
+    new = message_hosts.prepare_message_host_trust(layout)
+    assert new != old and new.startswith("ua-")
+    assert load_authority_keys(layout).installation == new
+    bundle = read_bundle(layout.trust_bootstrap_path)
+    assert bundle.installation == new and bundle.records == ()
+    assert "event=installation_authority_key_missing" in caplog.text
+
+
+def _recording_popen(monkeypatch) -> list[subprocess.Popen[bytes]]:
+    started: list[subprocess.Popen[bytes]] = []
+    real = subprocess.Popen
+
+    def popen(*args, **kwargs):
+        process = real(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(message_hosts.subprocess, "Popen", popen)
+    return started
+
+
+def test_an_authority_that_is_not_ready_in_time_is_stopped(tmp_path: Path, monkeypatch) -> None:
+    layout = InstanceLayout.at(tmp_path)
+    message_hosts.prepare_message_host_trust(layout)
+    started = _recording_popen(monkeypatch)
+    with pytest.raises(RuntimeError, match="did not get ready within"):
+        message_hosts.start_installation_authority(layout, [sys.executable, "-c", "import time; time.sleep(30)"], {},
+                                                   cwd=tmp_path, timeout_seconds=0.5)
+    assert started[0].poll() is not None
+
+
+def test_an_interrupted_wait_stops_the_authority(tmp_path: Path, monkeypatch) -> None:
+    layout = InstanceLayout.at(tmp_path)
+    message_hosts.prepare_message_host_trust(layout)
+    started = _recording_popen(monkeypatch)
+
+    def interrupt(*_args) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(message_hosts, "_ready", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        message_hosts.start_installation_authority(layout, [sys.executable, "-c", "import time; time.sleep(30)"], {},
+                                                   cwd=tmp_path, timeout_seconds=10)
+    assert started[0].poll() is not None
