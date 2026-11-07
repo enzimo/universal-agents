@@ -482,3 +482,94 @@ async def test_the_launcher_starts_the_real_authority_and_a_listed_host_joins(br
     finally:
         process.terminate()
         assert process.wait(timeout=10) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_lead_host_asks_for_the_catalogs_agent_types_and_a_new_type_gets_a_new_certificate(
+    broker: str, tmp_path: Path,
+) -> None:
+    """The team lead's host is listed with agent_types_from_catalog: the authority reads the catalog at each join."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    prepare(layout)
+    lead_keys, _ = host_keys.ensure_host_keys(layout, "lead")
+    write_expected_hosts(layout.trust_expected_hosts_path, {"lead": ExpectedHost(
+        "lead", lead_keys.key_id, lead_keys.public_key_text, frozenset({"lead_host", "worker_host"}), frozenset({TEAM}),
+        frozenset(), 8, agent_types_from_catalog=True)})
+    catalog = {"TeamArchitect", "Researcher"}
+    async with AsyncExitStack() as stack:
+        authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
+                                          host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          catalog_agent_types=lambda: frozenset(catalog))
+        await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
+        lead_nc = await connect(stack, broker, "lead")
+
+        def lead(*types: str) -> HostProfile:
+            return HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), tuple(types), 8)
+
+        first = await join(lead_nc, lead_keys, host_trust(layout, "lead"), lead("Researcher", "TeamArchitect"))
+        assert first.agent_types == frozenset({"Researcher", "TeamArchitect"})
+        with pytest.raises(JoinRefused):
+            await join(lead_nc, lead_keys, host_trust(layout, "lead"), lead("Researcher", "Invented"))
+        # A specialist created while the team runs joins the catalog; asking for it gives a new certificate.
+        catalog.add("Analyst")
+        second = await join(lead_nc, lead_keys, host_trust(layout, "lead"), lead("Analyst", "Researcher", "TeamArchitect"))
+        assert second.membership_epoch == first.membership_epoch + 1
+        assert "Analyst" in second.agent_types
+        # Asking for exactly the same again hands that certificate back.
+        assert (await join(lead_nc, lead_keys, host_trust(layout, "lead"),
+                           lead("Analyst", "Researcher", "TeamArchitect"))).membership_epoch == second.membership_epoch
+
+
+@pytest.mark.asyncio
+async def test_a_type_removed_from_the_catalog_does_not_stop_the_lead_host_joining_again_for_a_new_one(
+    broker: str, tmp_path: Path,
+) -> None:
+    """A specialist type removed from the catalog leaves its running worker running, so the lead's certificate keeps it.
+
+    The lead's host asks again for every type its certificate grants plus the new one, and the authority grants a
+    join whole or not at all. Before, a type deleted from the catalog made every later join for a new type refused,
+    so a specialist created afterwards never got a session until a restart. A join with the key of the host's
+    current certificate keeps that certificate's types, as a renewal does; a new type must still be listed or in
+    the catalog.
+    """
+
+    from custom_transport.protocol1.host_runtime import MessageHost
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    prepare(layout)
+    lead_keys, _ = host_keys.ensure_host_keys(layout, "lead")
+    write_expected_hosts(layout.trust_expected_hosts_path, {"lead": ExpectedHost(
+        "lead", lead_keys.key_id, lead_keys.public_key_text, frozenset({"lead_host", "worker_host"}), frozenset({TEAM}),
+        frozenset(), 8, agent_types_from_catalog=True)})
+    catalog = {"TeamArchitect", "Researcher", "Writer"}
+    async with AsyncExitStack() as stack:
+        authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
+                                          host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                                          catalog_agent_types=lambda: frozenset(catalog))
+        await authority.start(await connect(stack, broker, AUTHORITY_RUNTIME), teams=[TEAM])
+        profile = HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), ("Researcher", "TeamArchitect", "Writer"), 8)
+        lead = MessageHost(layout, profile, await connect(stack, broker, "lead"))
+        await lead.start()
+        assert lead.identity.certificate.agent_types == frozenset({"Researcher", "TeamArchitect", "Writer"})
+
+        # Writer's specialist is removed (its running worker keeps running) and Analyst is created.
+        catalog.discard("Writer")
+        catalog.add("Analyst")
+        rejoined = await lead.rejoin(["Analyst"])
+        assert rejoined.refusal is None and rejoined.granted == frozenset({"Analyst"})
+        assert rejoined.certificate.membership_epoch == 2
+        assert rejoined.certificate.agent_types == frozenset({"Analyst", "Researcher", "TeamArchitect", "Writer"})
+        assert lead.identity.certificate.membership_epoch == 2
+
+        # A type nobody listed, the catalog lacks and the certificate does not grant is still refused.
+        refused = await lead.rejoin(["Invented"])
+        assert refused.refused == frozenset({"Invented"}) and refused.refusal is not None
+        assert refused.certificate.membership_epoch == 2
+        # A join with another key never gets the certificate's types: the launcher listed this key only.
+        other_key = Ed25519PrivateKey.generate()
+        other_keys = host_keys.HostKeys(runtime="lead", key_id=host_keys.key_id_for("lead", other_key.public_key()),
+                                        application_key=other_key, nats_seed=lead_keys.nats_seed)
+        with pytest.raises(JoinRefused):
+            await join(await connect(stack, broker, "lead"), other_keys, host_trust(layout, "lead"),
+                       HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), ("Writer",), 8))

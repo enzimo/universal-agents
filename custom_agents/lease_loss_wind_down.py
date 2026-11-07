@@ -22,6 +22,13 @@ refused to start a replacement for the live worker. The wind-down instead:
 
 The worker keeps publishing presence while it winds down so a starting worker
 of the same type does not adopt tasks this worker is still finishing.
+
+A pool worker whose process runs another message contract than its installation
+winds down the same way once its running turns ended (``custom_agents.contract_drain``,
+cause ``other_message_contract``). It lost no lease and nothing failed, so its log
+lines, the reason a subtask is stopped and the failure a requester is told name
+that cause, and the lead counts none of its handbacks toward the interruption
+limit (``custom_agents.worker_interruption_escalation``).
 """
 
 from __future__ import annotations
@@ -52,6 +59,9 @@ from custom_messages.contracts.worker_handback_v1 import (
     MAX_HANDBACK_ERROR_ENTRIES,
     MAX_HANDBACK_TEXT,
     HandedBackTaskV1,
+    WIND_DOWN_LEASE_LOST,
+    WIND_DOWN_OTHER_CONTRACT,
+    WindDownCause,
     WorkerLeaseLossEvidenceV1,
     WorkerTaskHandbackV1,
     handback_identity,
@@ -74,6 +84,13 @@ _FINAL_ANSWER_SENT_PHASE = "post_publish_finalize"
 _FINAL_ANSWER_ACTION = TaskResponseAction.model_fields["action_type"].default
 # Fields a worker adds while running a task; a returned request omits them.
 _REQUEST_FIELDS = {"message_class", "task_id", "parent_task_id", "task_type", "problem_statement", "attachments"}
+# What happened to the worker, by why it winds down (module docstring), for log lines and the texts people see.
+_WHAT_HAPPENED: dict[str, str] = {
+    WIND_DOWN_LEASE_LOST: "lost its launch lease",
+    WIND_DOWN_OTHER_CONTRACT: (
+        "stopped taking work because its process runs another message contract than its installation"
+    ),
+}
 
 
 @dataclass
@@ -105,9 +122,14 @@ def start_lease_loss_wind_down(
     agent: Any,
     *,
     reason: str,
+    cause: WindDownCause = WIND_DOWN_LEASE_LOST,
     recent_scheduler_errors: Sequence[str] = (),
 ) -> Optional[LeaseLossWindDown]:
-    """Begin winding down once; the returned state owns the background task."""
+    """Begin winding down once; the returned state owns the background task.
+
+    ``cause`` says why (module docstring): a lost launch lease, or a process that runs
+    another message contract than its installation.
+    """
 
     existing: Optional[LeaseLossWindDown] = getattr(agent, "_lease_loss_wind_down", None)
     if existing is not None:
@@ -123,6 +145,7 @@ def start_lease_loss_wind_down(
         recent_scheduler_errors=tuple(
             _bounded(item) for item in list(recent_scheduler_errors)[-MAX_HANDBACK_ERROR_ENTRIES:]
         ),
+        cause=cause,
     )
     state = LeaseLossWindDown(
         evidence=evidence,
@@ -130,11 +153,13 @@ def start_lease_loss_wind_down(
     )
     agent._lease_loss_wind_down = state
     agent._logger.warning(
-        "Worker lost its launch lease and is winding down. "
-        "event=worker_wind_down_started agent_id=%s launch_id=%s reason=%s "
+        "Worker %s and is winding down. "
+        "event=worker_wind_down_started agent_id=%s launch_id=%s cause=%s reason=%s "
         "wait_deadline=%s",
+        _WHAT_HAPPENED[cause],
         agent.id,
         evidence.launch_id,
+        cause,
         evidence.reason,
         state.deadline.isoformat(),
     )
@@ -147,15 +172,25 @@ def start_lease_loss_wind_down(
 
 
 async def may_start_next_task(agent: Any) -> bool:
-    """While winding down, only a started task that is resuming may run here."""
+    """While winding down, only a started task that is resuming may run here.
+
+    So too for a pool worker whose process runs another message contract, until its
+    running turns end and it winds down (``custom_agents.contract_drain``).
+    """
 
     state: Optional[LeaseLossWindDown] = getattr(agent, "_lease_loss_wind_down", None)
-    if state is None:
+    draining = getattr(agent, "_contract_drain", None)
+    if state is None and not getattr(draining, "holds_back_unstarted", False):
         return True
     next_task_id = await agent.task_manager.operations_runtime.run(
         partial(_peek_next_task_id, agent.task_manager)
     )
-    return next_task_id is None or next_task_id in state.resumable_task_ids
+    if next_task_id is None:
+        return True
+    if state is not None:
+        return next_task_id in state.resumable_task_ids
+    info = await agent.task_manager.operations_runtime.run(agent.task_manager.get_task_info, next_task_id)
+    return info is not None and _has_started(agent.task_manager, info)
 
 
 async def hand_back_new_request(
@@ -391,7 +426,7 @@ async def _hand_back_running_task(
     await _stop_pending_subtasks(
         agent,
         task_id,
-        reason="The delegating worker lost its launch lease; the parent task is being rerun.",
+        reason=f"The delegating worker {_WHAT_HAPPENED[state.evidence.cause]}; the parent task is being rerun.",
     )
     handed_back = _handed_back(
         task_info.task,
@@ -489,7 +524,7 @@ async def _fail_waiting_task(
     )
     message = (
         f"This task was waiting for a reply from a person or a delegated subtask "
-        f"when its worker lost its launch lease. No reply arrived within "
+        f"when its worker {_WHAT_HAPPENED[state.evidence.cause]}. No reply arrived within "
         f"{waited_minutes} minutes, so the task ended without a result."
     )
     await _stop_pending_subtasks(agent, task_id, reason=message)

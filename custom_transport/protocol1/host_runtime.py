@@ -194,7 +194,21 @@ class MessageHost:
         if isinstance(session, str):
             taken = await self.records.take_trust_record("agent_session", f"session.{installation}.{team}.{session}",
                                                          now=now) or taken
-        return taken
+        return await self._fetch_token_issuer(document, now) or taken
+
+    async def _fetch_token_issuer(self, document: Any, now: datetime) -> bool:
+        """The certificate of the host that signed a frame's authority token (a relayed command's gateway)."""
+
+        assert self.records is not None
+        try:
+            token_issuer = document["authority"]["issuer"]
+            installation, runtime = str(token_issuer["installation"]), str(token_issuer["runtime"])
+            epoch = int(token_issuer["membership_epoch"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if installation != self.identity.installation:
+            return False
+        return await self.records.take_trust_record("certificate", f"host.{installation}.{runtime}.{epoch}", now=now)
 
     async def refresh_trust(self) -> None:
         """Take the authority's newest revocations record; log, never stop, when it cannot be read."""
@@ -385,8 +399,10 @@ class MessageHost:
         team created while it runs, whose ``sessions.open`` was refused ``not_allowed``.
         The join asks for the types the host's certificate and profile already name plus
         the requested ones, never fewer, so no running agent loses its type. The authority
-        grants a join only whole: when the launcher's list or the catalog lacks any type
-        asked for, it refuses it and the host keeps its certificate. A granted join gets a
+        keeps the types the host's certificate grants, as a renewal does, also one since
+        removed from the catalog; it grants a join only whole: when the launcher's list and
+        the catalog both lack a new type asked for, it refuses the join and the host keeps
+        its certificate. A granted join gets a
         certificate at the next membership epoch that replaces the old one; frames and
         records are signed with it from then on, and later renewals and joins ask for the
         same types. Requested types the certificate already names need no join. Names no

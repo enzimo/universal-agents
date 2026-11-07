@@ -1626,7 +1626,7 @@
     "contracts/messages/v1/examples/valid/tasks.list.reply/blocker-reference.json": "55d53f3859bbc9744554f7ad46c6e7fae17696c09a696dcf92ecec1774db18cd",
     "contracts/messages/v1/examples/valid/tasks.list.reply/from-the-holder.json": "30672d18db04ce48833965bbdd18fc8baef364466e6c4be7a56b26d92dac2b8a",
     "contracts/messages/v1/examples/valid/tasks.list.reply/not_allowed.json": "5cb321355c75be3162886650bd32c1ecf46a7dd8b93a45c57f2a1b72066b2c29",
-    "contracts/messages/v1/examples/valid/tasks.list.reply/ok.json": "4c317c59b110e9352a3866908b1ea4e3567c1ef696157370929d967bc54debd3",
+    "contracts/messages/v1/examples/valid/tasks.list.reply/ok.json": "b97bcbe2b60d188e88d579580cb17a671c3015ac1e8b451f7909c5428ae265d7",
     "contracts/messages/v1/examples/valid/tasks.list.reply/runtime_error.json": "148dc2ddaa36f86da01fc81ec6363ae136bf77a30005cf769db1cacefd06399c",
     "contracts/messages/v1/examples/valid/tasks.list/full.json": "6418a97a8d5f64b385c3ba939a95a5c90aca7dbd9ff987b822467be75340bdf4",
     "contracts/messages/v1/examples/valid/tasks.list/relayed-to-the-holder.json": "e26e6e654ff8aae218d89f2785521b339665fa65bca7cfd2f586bcd36bacabb3",
@@ -1684,7 +1684,7 @@
     "contracts/messages/v1/examples/valid/wait.ended/record-removed.json": "7f039bbb58df8e24840d026a36b1dec0c73b1ada3fa33ff3a9e1c0f590293097",
     "contracts/messages/v1/examples/valid/wait.ended/request-ended.json": "cba05f66ef085d11e1c660b63d143848fa61edb4eeed44a93ec6885ed499bf86",
     "contracts/messages/v1/generated/asyncapi.json": "f121de176097a04613dae25f3adae79d84737a7ffa277c6c90c117d408e44255",
-    "contracts/messages/v1/generated/compatibility.json": "c5ffb9771ebe58ac8db51adfcbcb0b68b74a4ed1e23c94e0cac7553461ee5c82",
+    "contracts/messages/v1/generated/compatibility.json": "9809b2a56461c31d50fa5a9d4856fd63d837e1f4073754fbe96e36b7b6ff1f9c",
     "contracts/messages/v1/generated/permissions/edge_adapter.json": "ab8df72b4d04ed96570f7f67aec5285a88a53ecb9ad67767de4e8d4c62553515",
     "contracts/messages/v1/generated/permissions/gateway.json": "f6e4bcb8a07da4fea6a9068779ffc47370da3476a0c5164e630804b3023bfa3a",
     "contracts/messages/v1/generated/permissions/installation_authority.json": "53657bba52491ce10cb62f0ba14b3d5bee03e5635a74015a76d1ab9b722aa0c9",
@@ -1907,7 +1907,7 @@
     "contracts/messages/v1/schemas/bodies/tasks.cancel.schema.json": "373d2bbcffbaee50eb844520cab112675342ae4a088da9341a30251f4764ac25",
     "contracts/messages/v1/schemas/bodies/tasks.inventory.reply.schema.json": "a8bdf0858c47c5ec714d6abdd01f058384f8e0bd1a4b077420a9d14358823b4e",
     "contracts/messages/v1/schemas/bodies/tasks.inventory.schema.json": "f6ceb954e1e0f56d89d216a956f192d09993b2398958e892a12321d6524e9cef",
-    "contracts/messages/v1/schemas/bodies/tasks.list.reply.schema.json": "121f0ab3ad871ccb3685dd70710c114bf359079a0a8bbddadb6f5339de5d007b",
+    "contracts/messages/v1/schemas/bodies/tasks.list.reply.schema.json": "b7be022beae3f01b881f55937682d7b2210f1a4c43f9ba956766dea6fe19bd9f",
     "contracts/messages/v1/schemas/bodies/tasks.list.schema.json": "06c2f4ec1b781c19ea639ec2bfc2cb95e9130b38fb4f39fbf1127f74254df4b8",
     "contracts/messages/v1/schemas/bodies/tasks.list_finished.reply.schema.json": "f213dc01494cb6a61936e317ba32f279f3decf13288db60ab28ade56a11617ef",
     "contracts/messages/v1/schemas/bodies/tasks.list_finished.schema.json": "493b2235d6e75824ecef2b9e0a888c72b4cee3f348918f69e526733484c09572",
@@ -1949,8 +1949,8 @@
     "contracts/messages/v1/signing-vectors/vectors.json": "1ee6fc4de9190372d57ad9acc4afc259f8bcfc5b794d488b6ac0e935c4d882dd",
     "contracts/messages/v1/team-topologies.yaml": "2f68045d80744c8b47a1c328269da5dc41fcd883f8ff731cdcfccfffdb401b36",
     "contracts/messages/v1/transport.yaml": "d4171d40038c5a22be5d193a8a3940fccda3d50758fd768e782b2f8bd3b29150",
-    "custom_messages/wire/kinds.py": "f9caec7cb98c620be8b4df5639d2c4e9fbfdeb9b2f3aa202596c1ce45001ff57",
-    "custom_messages/wire/models.py": "edd6d738e6806176e9c71461739b725e5c96e8f3c873902cfbb40fe4e78c9275"
+    "custom_messages/wire/kinds.py": "888d1aa6d388dbb09bcf7293642bc85e0527b29bc19e75da4004e3f766a3551e",
+    "custom_messages/wire/models.py": "96929dd4bd849b720af7b9a5e4d5c0282c9ec466dddc4834bbf32f7d25bef105"
   },
   "protocol": "1.0-pre"
 }

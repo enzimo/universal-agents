@@ -72,22 +72,46 @@ def final_replies(agent) -> list[str]:
 
 
 async def command(agent, action="list_tasks", **kwargs):
-    request = ManagerRuntimeWorkCommand(
-        action=action,
-        scope="user",
-        **kwargs,
+    """The agent's task controls for the owner, as a relayed command runs them (custom_agents.relayed_task_controls)."""
+
+    from functools import partial
+
+    from custom_agents.manager_control_runtime import (
+        _cancel_runtime_work_roots,
+        _runtime_work_root_summary,
+        _runtime_work_roots,
     )
+    from custom_agents.runtime_task_controls import apply_task_control, finished_task_inventory
+
+    request = ManagerRuntimeWorkCommand(action=action, scope="user", **kwargs)
+    response = request.model_copy(deep=True)
+    response.roots, response.cancellation_receipts = [], []
+    person = CommandPerson(canonical_user_id="owner", team_id="team", roles=("member",))
+    if action == "list_finished_tasks":
+        response.finished_tasks, response.task_total = await agent.task_manager.operations_runtime.run(
+            partial(finished_task_inventory, agent, person=person), request)
+        response.success = True
+        return response
+    await apply_task_control(agent, request, response, person=person, list_roots=_runtime_work_roots,
+                             summarize_root=_runtime_work_root_summary, cancel_roots=_cancel_runtime_work_roots)
+    return response
+
+
+@pytest.mark.asyncio
+async def test_task_list_actions_on_the_old_queued_path_are_refused(agent):
+    """People's task lists and removals come relayed by the team services; the queued message is refused."""
+
+    request = ManagerRuntimeWorkCommand(action="list_tasks", scope="user")
     await handle_manager_runtime_work_command(
         agent,
         command=request,
-        msg_header=MessageHeader(
-            from_agent_id="gateway", response_routing_key="gateway"
-        ),
+        msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
         msg_meta=MessageMeta(
             gateway_context=_signed(GatewayContext(canonical_user_id="owner"), team_id="team", roles=["member"])
         ),
     )
-    return agent.team_comms.messages[-1].msg_content
+    response = agent.team_comms.messages[-1].msg_content
+    assert (response.success, response.message) == (False, "relayed_by_team_services")
 
 
 @pytest.mark.asyncio
@@ -244,89 +268,3 @@ async def test_cancelled_task_cannot_start_between_queue_selection_and_terminali
         "selected", ProgressState.IN_PROGRESS, "2026-09-20T12:00:00+00:00",
     )
     assert agent.task_manager.current_task_id is None
-
-
-@pytest.mark.live
-@pytest.mark.integration
-@pytest.mark.nats
-@pytest.mark.asyncio
-async def test_live_task_inventory_and_purge_round_trip(agent):
-    import asyncio
-    from custom_messages.contracts.envelope_v1 import MessageEnvelope
-    from custom_tools.comms_tools import TeamComms
-    from custom_transport.subjects import NatsSubjectMapper
-    from test_live_nats_replacement_semantics import _adapter, _subscribe_queue, _team
-
-    team = _team("tasks_controls")
-    agent.team_id = team
-    agent.task_manager.set_owner_identity("lead", "Lead", team, "TeamArchitect")
-    route, reply = f"{team}_TeamArchitect", f"{team}_gateway_response"
-    adapter = _adapter(
-        team,
-        mapper=NatsSubjectMapper(
-            team_id=team, named_agent_type_queue_map={"TeamArchitect": route}
-        ),
-    )
-    try:
-        await adapter.connect(reconcile_topology=True)
-        requests = await _subscribe_queue(
-            adapter,
-            name="task-controls-lead",
-            subject=adapter.mapper.agent_control_subject(route),
-            durable=False,
-        )
-        responses = await _subscribe_queue(
-            adapter,
-            name="task-controls-response",
-            routing_key=reply,
-            durable_name=adapter.mapper.durable_name("tasks_response"),
-        )
-        agent.team_comms = TeamComms(team_id=team, nats_adapter=adapter)
-        add(agent, "current", state=ProgressState.IN_PROGRESS)
-        add(agent, "queued")
-
-        async def exchange(action, **kwargs):
-            request = ManagerRuntimeWorkCommand(
-                action=action,
-                scope="user",
-                **kwargs,
-            )
-            envelope = MessageEnvelope(
-                msg_content=request,
-                msg_header=MessageHeader(
-                    from_agent_id="gateway",
-                    to_routing_path=route,
-                    response_routing_key=reply,
-                ),
-                msg_meta=MessageMeta(
-                    gateway_context=_signed(
-                        GatewayContext(canonical_user_id="owner"), team_id=team, roles=["member"]
-                    )
-                ),
-            )
-            await agent.team_comms.send_message(message=envelope, routing_key=route)
-            delivery = await asyncio.wait_for(requests.get(), timeout=5)
-            incoming = delivery.envelope
-            await handle_manager_runtime_work_command(
-                agent,
-                command=incoming.msg_content,
-                msg_header=incoming.msg_header,
-                msg_meta=incoming.msg_meta,
-            )
-            await delivery.ack()
-            response = await asyncio.wait_for(responses.get(), timeout=5)
-            await response.ack()
-            return response.envelope.msg_content
-
-        listed = await exchange("list_tasks")
-        assert listed.task_total == 2
-        result = await exchange("purge_tasks", inventory_digest=listed.inventory_digest)
-        assert result.success
-        assert result.task_total == 1
-        assert result.roots[0].root_task_id == "current"
-        assert agent.task_manager.is_execution_cancelled("queued")
-        archived = await exchange("list_finished_tasks", task_limit=10)
-        assert archived.success
-        assert [(row.task_id, row.state) for row in archived.finished_tasks] == [("queued", "cancelled")]
-    finally:
-        await adapter.close()

@@ -39,6 +39,7 @@ async def test_memory_pages_show_latest_updates_before_pagination(tmp_path, monk
     app = WebsiteOperationsApplication(
         team=None, mcp=None, event_output=None, operational_controls=None, schedules=None,
         memory_operations=SimpleNamespace(execute_pinned_memory_operation=execute), workspace_browser=None,
+        team_commands=None,
     )
     request = WebMemoryListRequestV1(
         context=GatewayRouteContextV1(session_key="session", canonical_user_id=context.canonical_user_id),

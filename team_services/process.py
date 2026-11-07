@@ -42,6 +42,7 @@ from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
+from team_services.relays import Relays
 from team_services.topics import TopicOperations
 from team_services.service import Handler, TeamServices
 from team_services.serving import mark_serving
@@ -150,7 +151,8 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     await adapter.connect()
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
-        await serve_team(host, team, stop, team_operations(config, host.clock))
+        relays = Relays(host, team, config.manager.named_agent_type, _LOGGER)
+        await serve_team(host, team, stop, [*team_operations(config, host.clock), relays.handlers()])
     finally:
         with contextlib.suppress(Exception):
             await adapter.close()

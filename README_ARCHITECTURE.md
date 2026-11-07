@@ -295,7 +295,10 @@ each. They run in parallel on as many workers as the team allows:
 - **Lost workers.** A task whose worker died is taken over by a replacement, or
   handed back to the queue after a lost lease; each move to another worker is
   counted from claims, and after `max_retries_after_worker_loss` (3) moves the
-  task fails as `worker_lost`.
+  task fails as `worker_lost`. A move after a worker whose process runs another
+  message contract handed the task back is recorded but not counted: nothing
+  failed, and the requester reads that hand-back's cause, which the lead saved in
+  the team's database before it sent the task out again.
 - **When the requester wakes.** Its model runs again when every delegated task
   ended, at once when one failed with a typed reason, or when a
   `check_back_after_minutes` set on the delegation passed
@@ -4449,6 +4452,104 @@ They serve the team's address (`svc.team`) and answer, so far:
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.
+
+- people's task lists and removals, `tasks.list`, `.list_finished`, `.remove` and `.purge`,
+  and the team lead's context dump setting, `debug.dump` (`team_services.relays`): the agent
+  itself answers these, so the team services find its host in its placement and pass the
+  same body to its address (`ctl.agent.<agent>`) with the gateway's command token unchanged,
+  then answer with the agent's reply. `debug.dump` without an agent goes to the team lead.
+  An agent that runs nowhere is answered with a plain refusal. They use a placement only when
+  it verifies, as for sessions, so a forged or stale one never sends a command to another
+  agent, and one unreadable placement never hides the lead's.
+
+**Agent processes as hosts** (`custom_agents.agent_host`): the launcher starts the team
+lead's process as host `lead` (roles `lead_host` and `worker_host`) and each startup agent's
+process as host `agent-<label>` (role `worker_host`), lists them for the authority, and tells
+each process its host id (`strands_main.py --host-runtime`). Every agent in the team lead's
+process has its own NATS connection and event loop, so the host joins once, on the first
+agent's connection, and each agent opens its own session when it connects
+(`sessions.open`, with its definition digest) and closes it as it leaves. Attaching never
+waits: joining and opening sessions retry in the background, and the agent's work on today's
+queues does not depend on them. A request to an agent runs on that agent's own loop and is
+answered signed as the agent (`custom_agents.relayed_task_controls`: the task controls run for
+the person the gateway's token names, read back from the people copy). Agent ids are new at
+every start, so a host first closes the sessions its earlier run left behind
+(`event=agent_host_stale_session_closed`); it reads those placements verified, like every
+record, so a malformed or forged one, or one removed meanwhile, is skipped with a log line
+(`event=agent_host_record_refused`) and never keeps the agents from their sessions. The team
+lead's host may run any agent type in the instance's catalog, including specialists created
+while it runs: the launcher lists it with `agent_types_from_catalog`, the authority reads the
+catalog at each join, and a join asking for different grants gets a new certificate (a join
+asking for exactly the same gets its certificate back). A join with the key of the host's
+current certificate keeps the types that certificate grants, as a renewal does: removing a
+specialist from the catalog leaves its running worker running, and the lead's host asks for
+every type it holds again whenever it joins for a new one, so a removed type no longer gets
+every later join for a new specialist refused. The type leaves the certificate when the
+process restarts and asks for the catalog's types afresh. A host that meets a relayed frame
+whose token another host signed reads that host's certificate from `UA1_CERTS` too.
+
+Every running agent holds a session (plan 13B.5, decided 2026-11-06). Without one an agent
+has no address, so nothing can ask it anything and its exit goes unseen. So:
+
+- A refused session is asked for again, 5 seconds after the refusal and twice as long after
+  each further one, up to every 5 minutes, for as long as the agent runs, one opening at a
+  time: `limit_reached` (a worker leaving makes room; raising the worker limit takes a
+  restart of "all", which lists the lead's new limit), `already_placed` and `runtime_error`
+  alike. Each change of refusal is logged once (`event=agent_host_session_refused`), and so
+  is the opening that finally succeeds (`event=agent_host_session_opened`, with how many
+  refusals came before). Waiting for the first answer at start is not a refusal.
+- `not_allowed` for a type the host's certificate lacks, such as a specialist the team
+  created while the process runs: the host reads the team's agent catalog again, and when
+  the type is there it joins again for it (`MessageHost.rejoin`) and opens the session at
+  once. A type whose name no certificate can carry (over 24 characters, or characters other
+  than letters, digits, `-` and `_`) is never asked for.
+- While an agent has no session, its host's record lists it as an unhealthy component named
+  `<agent type>-<agent id>` (the type cut to 24 characters, other characters as `_`), with
+  why as its code: `session_limit_reached`, `session_not_allowed`, `session_type_not_granted`
+  (the authority did not add the type), `agent_type_not_certifiable`,
+  `session_already_placed`, `session_runtime_error`. A record holds 16 components, so with
+  more such agents the last is `more-agents` (`sessions_refused`). The host writes its record
+  again at once when the list changes.
+- Each opening that got an answer is followed by one with a new request id, and each daily
+  renewal has its own (the session and the sequence of the record it renews, as a digest),
+  kept only for retries of that one request, since a repeated id gets the first answer back
+  (README "Stored outcomes"). A refused renewal opens a new session.
+
+**An agent process on another contract drains** (`custom_agents.agent_host`,
+`custom_agents.contract_drain`). When its host learns that the process runs another
+contract than the installation (from the team services' host record, which it follows from
+its join on, or from `protocol_mismatch`), it opens no session and asks for no refused one
+again; a join refused that way is not asked for again either. It drains every agent on the
+agent's own loop. Queued task work still runs on today's queues in this phase, so draining
+an agent means: it leaves the queues every agent of its type shares (its type's queue and,
+for the team lead, the team's), whose messages stay there for another agent of the type,
+which the lead's worker pools start when tasks wait, or for the next team lead; no agent
+starts in the process: every start goes through `AgentInstantiationService.launch`, which
+refuses while the process drains (`process_runs_another_message_contract`, logged once per
+request; the model's `instantiate_agent` is told plainly that the process takes no new work),
+and the controllers and the lead's takeover of dead agents' work do not ask while it drains;
+no draining agent claims a due schedule, whose
+run would be a task of its own, so the schedule stays due and the next team lead, on the
+installation's contract, fires it once at its first scheduler pass (a run missed meanwhile
+is not made up, and a final run late beyond `missed_one_time_after_seconds` is turned off
+with a notice, as for any missed run); the turns in progress finish; a pool worker
+starts no task it has not started and, once its running turns ended, winds down as after a
+lost launch lease, returning those tasks to the team lead, which sends them out again on
+the type's queue, then exits (its handbacks carry the cause `other_message_contract`, so its
+log lines and the failure a requester is told name the other contract rather than a lost
+lease, and the lead counts none of them toward the interruption limit, since nothing
+failed); pool workers run in the team lead's process, so the lead
+drains with them, and what they return waits in the lead's queue for a team lead on the
+installation's contract. The team lead and startup agents have no way to hand a task
+back yet (that comes with `task.handback` and the queued work of protocol 1), so they
+finish what they already admitted. The host's record says `draining` meanwhile; its
+agents' sessions are still renewed, so requests about the tasks they hold still reach them.
+Once no agent holds an unfinished task or a waiting request, the host closes their sessions
+(`handed_over`), its record says `drained` and it renews only to give its agents up
+(`event=agent_host_drained`). A process that never joined drains its agents the same way,
+with no record to write. Under one launcher this happens only when a process, such as the
+team lead's after a restart of `manager`, starts on code that changed under the running
+installation.
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is

@@ -751,6 +751,23 @@ def _agent_definition_from_raw(
     return prompt_source_path, catalog_path, AgentDefinition.model_validate(rendered)
 
 
+def instance_agent_catalog(instance_root: str, agent_definition_paths: Iterable[str]) -> "HydratedAgentCatalog":
+    """The catalog of an instance as its processes see it: the release's definitions, the team's own
+    (``control/``) and the configured ``agent.agent_definition_paths``.
+
+    Reads only the given instance, never the process-wide configuration, so processes that do not
+    run agents (the gateway, the installation authority) get the same catalog the agents load.
+    """
+
+    return load_agent_catalog(
+        [
+            *default_team_agent_definition_paths(instance_root=instance_root),
+            *resolve_agent_definition_paths(agent_definition_paths, instance_root=instance_root),
+        ],
+        include_configured=False,
+    )
+
+
 def load_agent_catalog(
     additional_paths: Iterable[str | Path] | None = None,
     *,

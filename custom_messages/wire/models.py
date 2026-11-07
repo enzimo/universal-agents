@@ -8507,6 +8507,7 @@ class TasksListReplyOkTasksItem(WireModel):
     state: ProgressState
     problem_statement: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     is_current: bool
+    is_parallel: Union[bool, MISSING] = Field(default=MISSING)
     queue_position: Union[Count, MISSING] = Field(default=MISSING)
     last_updated_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     blocker: Union[TextContent, MISSING] = Field(default=MISSING)

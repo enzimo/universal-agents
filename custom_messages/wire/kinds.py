@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = 'ce747c94ff1efa51852042f4deaf141c93a4340141d3be18c9a5f7846e458de7'
+CONTRACT_SHA256 = 'ca43b9f60d6d299a16378e6f1fc60deeb05c4b5a34fa27caaed8da7368056df1'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -3487,7 +3487,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'agent': None, 'offset': None, 'limit': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'tasks': {'items': {'properties': {'task_id': None, 'state': None, 'problem_statement': None, 'is_current': None, 'queue_position': None, 'last_updated_at': None, 'blocker': {'one_of': 'type', 'variants': {'inline': {'properties': {'type': None, 'text': None}}, 'blob': {'properties': {'type': None, 'ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}}}, 'latest_activity': None}}}, 'total': None, 'queued_count': None, 'current_count': None, 'queue_digest': None, 'next_offset': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'tasks': {'items': {'properties': {'task_id': None, 'state': None, 'problem_statement': None, 'is_current': None, 'is_parallel': None, 'queue_position': None, 'last_updated_at': None, 'blocker': {'one_of': 'type', 'variants': {'inline': {'properties': {'type': None, 'text': None}}, 'blob': {'properties': {'type': None, 'ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}}}, 'latest_activity': None}}}, 'total': None, 'queued_count': None, 'current_count': None, 'queue_digest': None, 'next_offset': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'tasks.list_finished': KindSpec(

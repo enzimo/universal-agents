@@ -7,7 +7,11 @@ and the registry's write rules for ``certificate`` and ``revocations``:
   that asks again with the key its certificate holds, for the same grants, gets that
   certificate back while more than a third of its life is left; otherwise, when it asks
   for other grants, and on a renewal, it gets a new one with the next membership epoch
-  that ``replaces`` the old one. A host whose key is revoked gets none. A renewal whose
+  that ``replaces`` the old one. A join with the key of the host's current certificate may
+  ask again for the agent types that certificate grants, as a renewal keeps them; any other
+  type must be one the launcher listed for it or, for the team lead's host, one the agent
+  catalog has now. Removing a type from the catalog leaves its running agents running, so
+  the lead's host still asks for it when it joins again for a new type. A host whose key is revoked gets none. A renewal whose
   profile gives up every agent (``HostProfile.giving_up``) gets a certificate that grants
   no agent types and no sessions.
 - **Another contract** (README "Versions"). While the label is a pre-release, a join or
@@ -115,6 +119,7 @@ class InstallationAuthority:
 
     def __init__(self, layout: InstanceLayout, authority: AuthorityKeys, host_keys: HostKeys, *,
                  clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER,
+                 catalog_agent_types: Callable[[], frozenset[str]] = frozenset,
                  contract_sha256: str = CONTRACT_SHA256) -> None:
         """``contract_sha256`` is the contract this authority runs: its code's, unless a test gives another."""
 
@@ -126,6 +131,8 @@ class InstallationAuthority:
         self.host_keys = host_keys
         self.clock = clock
         self.logger = logger
+        # The instance's agent types, read at each join of a host listed with agent_types_from_catalog.
+        self.catalog_agent_types = catalog_agent_types
         self.live: Optional[LiveHost] = None
         self._js: Any = None
         self._own: dict[str, Any] = {}
@@ -505,15 +512,16 @@ class InstallationAuthority:
         body = verified.raw["body"]
         runtime, key = str(body["runtime"]), body["application_key"]
         expected = read_expected_hosts(self.layout.trust_expected_hosts_path).get(runtime)
-        denial = _denial(expected, body)
+        # verify_frame already refused a join presenting a revoked key (README "Joining").
+        now = self.clock()
+        stored = await self._latest_certificate(runtime)
+        allowed = self._allowed_agent_types(expected) | _held_agent_types(stored, key, now)
+        denial = _denial(expected, body, allowed)
         if denial is not None:
             self.logger.warning("A join was refused. event=host_join_denied runtime=%s reason=%s key_id=%s",
                                 runtime, denial, key["key_id"])
             return {"outcome": "denied", "reason": denial,
                     "message": "This installation takes only the hosts its launcher starts."}
-        # verify_frame already refused a join presenting a revoked key (README "Joining").
-        now = self.clock()
-        stored = await self._latest_certificate(runtime)
         if self._reusable(stored, key["key_id"], key["public_key"], now) and stored is not None \
                 and _grants_exactly(stored["body"], body):
             return {"outcome": "ok", "certificate": stored}
@@ -524,6 +532,20 @@ class InstallationAuthority:
                                      profile_sha256=str(body["profile_sha256"]), deployment=str(body["deployment"]))
         record = await self._issue(request, stored, int(self._revocations["body"]["revocation_epoch"]), now)
         return {"outcome": "ok", "certificate": record}
+
+    def _allowed_agent_types(self, expected: Any) -> frozenset[str]:
+        """The agent types a listed host may ask for: its own, and the catalog's when it is listed that way."""
+
+        if expected is None:
+            return frozenset()
+        if not expected.agent_types_from_catalog:
+            return expected.agent_types
+        try:
+            return expected.agent_types | self.catalog_agent_types()
+        except Exception:
+            self.logger.exception("The agent catalog could not be read; only the listed agent types are allowed. "
+                                  "event=authority_catalog_unreadable runtime=%s", expected.runtime)
+            return expected.agent_types
 
     async def answer_renew(self, verified: VerifiedFrame) -> dict[str, Any]:
         certificate = verified.certificate
@@ -571,8 +593,31 @@ def _public_text(certificate: HostCertificate) -> str:
     return b64url(certificate.public_key.public_bytes(Encoding.Raw, PublicFormat.Raw))
 
 
-def _denial(expected: Any, body: Mapping[str, Any]) -> Optional[str]:
-    """Why a join is refused, as the reply's reason, or ``None`` when the launcher listed exactly this host."""
+def _held_agent_types(stored: Optional[Mapping[str, Any]], key: Mapping[str, Any], now: datetime) -> frozenset[str]:
+    """The agent types the host's current certificate grants, when the join presents that certificate's key.
+
+    A join from the host that holds them keeps them, as a renewal does (module docstring): a
+    type removed from the catalog leaves its running agents running, and the host asks for its
+    certificate's types again with every new one, so a removed type would otherwise make every
+    later join of that host refused.
+    """
+
+    if stored is None:
+        return frozenset()
+    body = stored["body"]
+    if (body["application_key"]["key_id"], body["application_key"]["public_key"]) != (key["key_id"], key["public_key"]):
+        return frozenset()
+    if parse_timestamp(body["expires_at"]) <= now:
+        return frozenset()
+    return frozenset(body["agent_types"])
+
+
+def _denial(expected: Any, body: Mapping[str, Any], agent_types: frozenset[str]) -> Optional[str]:
+    """Why a join is refused, as the reply's reason, or ``None`` when the launcher listed exactly this host.
+
+    ``agent_types`` are the types the host may ask for: those it is listed for or the catalog has
+    (``_allowed_agent_types``), and those its current certificate grants (``_held_agent_types``).
+    """
 
     if expected is None:
         return "not_approved"
@@ -581,7 +626,7 @@ def _denial(expected: Any, body: Mapping[str, Any]) -> Optional[str]:
         return "key_mismatch"
     if not set(body["teams"]) <= expected.teams:
         return "team_not_allowed"
-    if not set(body["roles"]) <= expected.roles or not set(body["agent_types"]) <= expected.agent_types:
+    if not set(body["roles"]) <= expected.roles or not set(body["agent_types"]) <= agent_types:
         return "role_not_allowed"
     if int(body["session_limit"]) > expected.session_limit:
         return "over_limit"
