@@ -520,7 +520,7 @@ holder, and the custody window says when.
 follows the `connection_class` in the certificate of the holder's host:
 - A `connected` host (the installation's main machine, a server) gets
   `{renewed_by: host_record, seconds}`: standard 300, at least 60 and at most 3,600. The host
-  record that the host writes every 10 seconds renews it.
+  record that the host writes every 10 seconds, each lasting at most 30 seconds, renews it.
 - An `intermittent` host (an edge device, a laptop) gets `{renewed_by: reconnection, ends_at}`:
   standard 5 days after the confirmation, and never more than 7 days after the frame that
   carries it was issued (body rule `ends_within`, refused as `invalid_body` at
@@ -631,7 +631,7 @@ signed lists:
 2. **The task's access list** (`task_access_list`): what this task may use there, which the
    team services work out with the same access decision for every tool on the host's list.
 3. **The team's block list** (state record `block_list`), which the team services sign into
-   `UA1_BLOCK_LIST`.
+   their team's `UA1_BLOCK_LIST_<team>`.
 
 A call runs only when its tool is on the host's list, the task's access list gives it the
 level the call needs (or holds a one-time approval for that exact action), and no block in
@@ -861,13 +861,19 @@ each role's templates for the host (`custom_messages.wire.permissions.host_permi
   the host runs and each edge it serves, with `{team}` set to that agent's, pool's or
   edge's own team. A host that serves two teams and runs team A's `researcher` therefore
   gets no grant on team B's `researcher`;
-- any other subject with `{team}` is repeated for each team the host serves.
+- any other subject with `{team}` is repeated for each team the host serves;
+- `{installation}` becomes the host's own installation, and a subject that names `{peer}` is
+  repeated for each installation the installation's agreements name ("Key-value grants").
 
 These placeholders never become wildcards. Clients use `_INBOX.<runtime>` as their inbox
-prefix. Hosts cannot reach another host's, another team's or another role's consumers, and
-cannot read streams directly, except the team services, which read their own team's agent
-stream to withdraw work. Only the two roles below create, change or delete JetStream
-objects or messages. The live conformance tests prove both allowed and refused operations.
+prefix. Hosts cannot reach another host's, another team's or another role's queue
+consumers. Hosts read no queue stream directly, except the team services, which read their
+own team's agent stream to withdraw work and their own team's dead letters ("Dead
+letters"); bucket readers read their buckets' streams through direct gets and watches
+("Key-value grants"). Only the topology owner and the team services (withdrawing work, and
+keeping dead letters) create, change or delete JetStream objects or stored messages; bucket
+readers create only their own unnamed watch consumers, and writers change only their own
+keys. The live conformance tests prove both allowed and refused operations.
 
 **Who sets up the streams.** The topology owner (`topology_owner` in `transport.yaml`) is
 the installation authority. It already decides which hosts serve which teams, agents and
@@ -1238,8 +1244,8 @@ Hosts, agents, placements, the team view and the block list are key-value record
 The registry's `state_records` section names each record's bucket, key form, signer, the roles whose certificates may sign it (`signer_roles`), the roles that may store it (`writers`), its body schema, for records that end how long after it is written a record may end (`max_lifetime_seconds`, "Trust over time"), and for records that readers judge by age how long one counts as fresh (`fresh_seconds`). The trust records of "Who sent it" use the same format and are kept by the trust store (`TrustStore.add`). The records here report state, are used as soon as they are read, like requests, and are verified on every read (`TrustStore.verify(data, record=..., now=..., held=...)`):
 - **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. The reader holds a current revocations record of the writer's installation (`revocations_not_current`), whoever the writer is: only the authority's installation traffic needs none. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
-- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 60 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current. A report with a longest lifetime (the block list, 7 days) states its expiry, within that lifetime of being written (`invalid_body` at `/expires_at`).
-- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within a minute, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
+- **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 30 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current. A report with a longest lifetime (the block list, 7 days) states its expiry, within that lifetime of being written (`invalid_body` at `/expires_at`).
+- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within 30 seconds, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
 
 A reader refuses a state report with the first failing check, in the registry's order:
 1. `too_large`, `malformed` (the document's form, and a record of another type than the one read: `TrustStore.verify` takes the record type its bucket holds);
@@ -1260,23 +1266,49 @@ What each record says, and what `TrustStore.verify` checks about it:
 
 **Key-value grants.** Each bucket in `transport.yaml` names its `readers` and, per writer
 role, the keys that role may write, as templates membership code fills like subjects:
-`{self}` is the host's runtime id, `{team}` each team it serves and `{agent}` each agent it
-runs. The generated permissions follow:
-- a reader gets the bucket's stream information, its direct and last-message reads, and
-  what a watch needs: creating its own ephemeral consumer, whose deliveries arrive on the
-  reader's own inbox, reading that consumer's information, and answering its flow control.
-  No reader may delete a bucket's consumers, so no host ends another host's watch; an idle
-  watch's consumer ends by itself;
+`{self}` is the host's runtime id, `{team}` each team it serves, `{agent}` each agent it
+runs, `{installation}` its own installation and `{peer}` each installation an agreement
+names. The generated permissions follow:
+- a reader gets the bucket's stream information, its direct reads (the bucket serves
+  last-value gets as `$JS.API.DIRECT.GET.<stream>.<subject>`), and what a watch needs:
+  creating an unnamed consumer, whose deliveries arrive on the reader's own inbox, reading
+  that consumer's information, and answering its flow control. A reader may create a
+  consumer only through the request that names none: NATS refuses a durable consumer
+  through it, and a request that names no consumer cannot change an existing one, so no
+  host changes another host's watch. No reader may delete a bucket's consumers;
 - a writer publishes only its own keys: each host its own liveness record (`UA1_HOSTS`,
   key its runtime id) and its own agents' records (`UA1_AGENTS`, `<team>.<agent>`); the team
-  services their team's placements, sessions (`UA1_CERTS`, `session.*.<team>.*`), team view,
-  block list and single-instance lock; the installation authority certificates,
-  revocations and agreements;
-- the topology owner creates every bucket.
+  services their team's placements, sessions of their own installation (`UA1_CERTS`,
+  `session.<installation>.<team>.*`), team view, block list and single-instance lock; the
+  installation authority its own installation's certificates and revocations, and
+  agreements; the edge adapter unchanged copies of peers' certificates, revocations and
+  sessions under each peer's installation id, never its own installation's records;
+- the topology owner creates every bucket, and finds and deletes buckets' consumers when a
+  host left too many behind.
+
+**One bucket per team for people's words.** The team view (an Objective's title is the
+person's own words) and the block list (people's blocks and standing) live in
+`UA1_TEAM_VIEW_<team>` and `UA1_BLOCK_LIST_<team>`. Their grants name the team's own bucket,
+so a host reads no other team's. A reader refuses a record whose team is not its bucket's.
+The other buckets hold liveness, agent state, placements and signed trust records, which
+name agents and hosts but no person's content, and every host of the installation reads them.
+
+**Every bucket's stream settings.** Each bucket is a stream, `KV_<bucket>` with subjects
+`$KV.<bucket>.>`, with the settings of `key_value_stream` in `transport.yaml`: one value per
+key, rollup headers refused, no deletes or purges through the stream API, direct gets
+allowed, and a consumer limit. With rollup headers allowed, a writer of one key would erase
+every key of its bucket with `Nats-Rollup: all`; client libraries' bucket helpers allow them
+(nats-py's `create_key_value` does), so the topology owner creates each bucket as a stream
+with these settings (`custom_messages.wire.buckets.bucket_stream`) and clients bind to it as
+a bucket. A writer removes a record with a delete marker (`KV-Operation: DEL`), which reaches
+only its own key; purging a key, which needs a rollup header, is refused. A host that leaves
+watches behind can fill a bucket's consumer limit, which stops new watches on that bucket
+until the topology owner deletes them or they expire.
 
 The generator checks that every role a record's `writers` names has a key template in its
-bucket, and that templates use only those placeholders. Where a record is stored still
-adds no trust: readers verify each record's signature.
+bucket, that templates use only those placeholders, never start with a wildcard and end with
+`>` if they hold one, and that `key_value_stream` keeps rollup headers and stream-API deletes
+off. Where a record is stored still adds no trust: readers verify each record's signature.
 
 **The team services' lock.** `UA1_LOCKS` holds one key per team, `team_services.<team>`:
 the runtime id of the team services instance that serves the team and when its lease ends.

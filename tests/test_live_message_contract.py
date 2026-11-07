@@ -34,6 +34,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType,
 from nats.js.errors import NotFoundError
 
 from custom_messages.wire import frame as wire_frame
+from custom_messages.wire.buckets import bucket_stream
 from custom_messages.wire.kinds import KINDS
 from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
@@ -53,14 +54,21 @@ HOSTS = {
     # The same host after researcher-3 moved to it: a new credential naming both agents.
     "worker_moved": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2", "researcher-3"],
                      "pools": ["researcher"], "edges": []},
-    "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": []},
+    # The topology owner's {team} is every team of the installation (README, "Who sets up the streams").
+    "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": [],
+                  "teams": ["team_example", "team_other"]},
     "services": {"role": "team_services", "runtime": "team-services-1", "agents": [], "pools": [], "edges": []},
     "scheduler": {"role": "scheduler", "runtime": "scheduler-1", "agents": [], "pools": [], "edges": []},
     "gateway": {"role": "gateway", "runtime": "gateway-1", "agents": [], "pools": [], "edges": ["web"]},
     "edge": {"role": "edge_adapter", "runtime": "edge-adapter-1", "agents": [], "pools": [], "edges": ["a2a_partner"]},
     # A host that has not joined yet: the bootstrap bundle's pre-join permissions only.
     "joining": {"role": "joining_host", "runtime": "new-host-1", "agents": [], "pools": [], "edges": []},
+    # A worker host of another team of the same installation.
+    "other_worker": {"role": "worker_host", "runtime": "worker-host-9", "agents": ["writer-1"], "pools": [], "edges": [],
+                     "team": "team_other"},
 }
+# The installation these hosts belong to, and the installation an agreement names (the edge adapter keeps its records).
+INSTALLATION, PEER = "install_example", "install_peer"
 # What a new host's bootstrap bundle carries besides the authority keys (README, "Installation traffic").
 BOOTSTRAP_RECORDS = {"certificates/authority-1.json", "revocations/install_example.json"}
 
@@ -69,9 +77,11 @@ def permissions(user: str) -> dict:
     """The host's generated permissions filled as membership code fills them (README, "Filling the templates")."""
 
     host = HOSTS[user]
+    team = host.get("team", TEAM)
     document = json.loads((CONTRACT / "generated/permissions" / f"{host['role']}.json").read_text())
-    placement = HostPlacement(host["runtime"], (TEAM,), agents={TEAM: tuple(host["agents"])},
-                              pools={TEAM: tuple(host["pools"])}, edges={TEAM: tuple(host["edges"])})
+    placement = HostPlacement(host["runtime"], tuple(host.get("teams", [team])), agents={team: tuple(host["agents"])},
+                              pools={team: tuple(host["pools"])}, edges={team: tuple(host["edges"])},
+                              installation=INSTALLATION, peers=(PEER,))
     return host_permissions(document, placement)
 
 
@@ -647,16 +657,27 @@ async def test_a_receiver_answers_only_the_requesters_inbox(isolated_broker) -> 
         assert services.errors.empty() and worker.errors.empty()
 
 
+async def create_buckets(owner: Client, teams: Iterable[str] = (TEAM, "team_other")) -> None:
+    """What the topology owner does: every bucket as a stream with transport.yaml's settings, a bucket per team for each team."""
+
+    js = owner.nc.jetstream()
+    for bucket in TRANSPORT["key_value"]:
+        for team in (teams if "{team}" in bucket else (None,)):
+            settings = bucket_stream(TRANSPORT, bucket, team)
+            info = await js.add_stream(config=StreamConfig(**{**settings, "storage": STORAGE[settings["storage"]]}))
+            assert (info.config.allow_rollup_hdrs, info.config.deny_purge, info.config.allow_direct) == (False, True, True)
+
+
 @pytest.mark.asyncio
 async def test_hosts_write_only_their_own_records_and_read_every_bucket(isolated_broker) -> None:
     """README, "Key-value grants": the topology owner creates the buckets, each writer reaches only its own keys."""
 
     async with AsyncExitStack() as stack:
         authority = await connect(stack, isolated_broker, "authority")
+        lead = await connect(stack, isolated_broker, "lead")
         worker = await connect(stack, isolated_broker, "worker")
         services = await connect(stack, isolated_broker, "services")
-        for bucket, spec in TRANSPORT["key_value"].items():
-            await authority.nc.jetstream().create_key_value(bucket=bucket, ttl=spec["per_key_ttl_seconds"] or None)
+        await create_buckets(authority)
         hosts = await worker.nc.jetstream().key_value("UA1_HOSTS")
         watch = await hosts.watch("worker-host-1")
         await hosts.put("worker-host-1", b"liveness")
@@ -670,7 +691,7 @@ async def test_hosts_write_only_their_own_records_and_read_every_bucket(isolated
         await agents.put(f"{TEAM}.researcher-2", b"idle")
         # Another host's liveness, an agent it does not run, a placement and the lock are refused.
         for subject in ("$KV.UA1_HOSTS.lead-host-1", f"$KV.UA1_AGENTS.{TEAM}.lead", f"$KV.UA1_PLACEMENT.{TEAM}.researcher-2",
-                        f"$KV.UA1_LOCKS.team_services.{TEAM}", f"$KV.UA1_CERTS.session.install_example.{TEAM}.s-1"):
+                        f"$KV.UA1_LOCKS.team_services.{TEAM}", f"$KV.UA1_CERTS.session.{INSTALLATION}.{TEAM}.s-1"):
             await worker.publish_refused(subject)
         placement = await services.nc.jetstream().key_value("UA1_PLACEMENT")
         revision = await placement.create(f"{TEAM}.researcher-2", b"placed")
@@ -681,7 +702,85 @@ async def test_hosts_write_only_their_own_records_and_read_every_bucket(isolated
             await locks.create(f"team_services.{TEAM}", b"team-services-2")
         await services.publish_refused("$KV.UA1_PLACEMENT.another_team.researcher-2")
         assert (await (await worker.nc.jetstream().key_value("UA1_PLACEMENT")).get(f"{TEAM}.researcher-2")).value == b"moved"
-        assert authority.errors.empty()
+
+        # README, "Every bucket's stream settings": a writer of one key cannot erase the others.
+        await (await lead.nc.jetstream().key_value("UA1_HOSTS")).put("lead-host-1", b"lead liveness")
+        with pytest.raises(nats.js.errors.APIError, match="rollup"):
+            await worker.nc.jetstream().publish("$KV.UA1_HOSTS.worker-host-1", b"x", headers={"Nats-Rollup": "all"})
+        with pytest.raises(nats.js.errors.APIError, match="rollup"):
+            await hosts.purge("worker-host-1")
+        with pytest.raises(nats.js.errors.APIError, match="rollup"):
+            await services.nc.jetstream().publish(f"$KV.UA1_LOCKS.team_services.{TEAM}", b"x", headers={"Nats-Rollup": "all"})
+        assert (await hosts.get("lead-host-1")).value == b"lead liveness"
+        assert (await locks.get(f"team_services.{TEAM}")).value == b"team-services-1"
+        # A delete marker removes the writer's own record only.
+        await hosts.delete("worker-host-1")
+        with pytest.raises(nats.js.errors.KeyNotFoundError):
+            await hosts.get("worker-host-1")
+        assert (await hosts.get("lead-host-1")).value == b"lead liveness"
+        assert authority.errors.empty() and worker.errors.empty() and services.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_bucket_readers_watch_through_unnamed_consumers_and_read_only_their_teams_words(isolated_broker) -> None:
+    """README, "Key-value grants" and "One bucket per team for people's words"."""
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        authority = await connect(stack, isolated_broker, "authority")
+        lead = await connect(stack, isolated_broker, "lead")
+        worker = await connect(stack, isolated_broker, "worker")
+        other = await connect(stack, isolated_broker, "other_worker")
+        services = await connect(stack, isolated_broker, "services")
+        edge = await connect(stack, isolated_broker, "edge")
+        await create_buckets(authority)
+        lead_hosts = await lead.nc.jetstream().key_value("UA1_HOSTS")
+        watch = await lead_hosts.watch("worker-host-1")
+        stack.push_async_callback(watch.stop)
+        # A reader may not name a consumer: no durable consumer, and no way to change the lead's watch.
+        for subject in ("$JS.API.CONSUMER.CREATE.KV_UA1_HOSTS.stay", "$JS.API.CONSUMER.CREATE.KV_UA1_HOSTS.stay.$KV.UA1_HOSTS.x",
+                        "$JS.API.CONSUMER.DURABLE.CREATE.KV_UA1_HOSTS.stay", "$JS.API.CONSUMER.DELETE.KV_UA1_HOSTS.stay",
+                        "$JS.API.STREAM.MSG.GET.KV_UA1_HOSTS"):
+            await worker.publish_refused(subject)
+        durable = {"stream_name": "KV_UA1_HOSTS", "config": {"durable_name": "stay", "ack_policy": "none"}}
+        answer = json.loads((await worker.nc.request("$JS.API.CONSUMER.CREATE.KV_UA1_HOSTS", json.dumps(durable).encode(),
+                                                     timeout=2)).data)
+        assert "error" in answer, answer
+        await (await worker.nc.jetstream().key_value("UA1_HOSTS")).put("worker-host-1", b"liveness")
+        entry = await watch.updates(timeout=2)
+        while entry is None or not entry.value:
+            entry = await watch.updates(timeout=2)
+        assert entry.value == b"liveness"
+
+        # Each team's team view and block list are its own bucket; another team's host has no grant on them.
+        view = await services.nc.jetstream().key_value(f"UA1_TEAM_VIEW_{TEAM}")
+        await view.put(f"{TEAM}.objective.o1", b"a person's own words")
+        await (await services.nc.jetstream().key_value(f"UA1_BLOCK_LIST_{TEAM}")).put(TEAM, b"blocks")
+        assert (await (await worker.nc.jetstream().key_value(f"UA1_TEAM_VIEW_{TEAM}")).get(f"{TEAM}.objective.o1")).value \
+            == b"a person's own words"
+        for bucket in (f"UA1_TEAM_VIEW_{TEAM}", f"UA1_BLOCK_LIST_{TEAM}"):
+            for subject in (f"$JS.API.DIRECT.GET.KV_{bucket}", f"$JS.API.DIRECT.GET.KV_{bucket}.$KV.{bucket}.{TEAM}",
+                            f"$JS.API.CONSUMER.CREATE.KV_{bucket}", f"$JS.API.STREAM.INFO.KV_{bucket}"):
+                await other.publish_refused(subject)
+        # It reads its own team's bucket.
+        with pytest.raises(nats.js.errors.KeyNotFoundError):
+            await (await other.nc.jetstream().key_value("UA1_TEAM_VIEW_team_other")).get("team_other.objective.o9")
+
+        # The edge adapter keeps peers' copies only; the team services sign sessions of their own installation only.
+        for subject in (f"$KV.UA1_CERTS.revocations.{INSTALLATION}", f"$KV.UA1_CERTS.host.{INSTALLATION}.lead-host-1.1",
+                        f"$KV.UA1_CERTS.session.{INSTALLATION}.{TEAM}.s-1"):
+            await edge.publish_refused(subject)
+        await edge.nc.jetstream().publish(f"$KV.UA1_CERTS.revocations.{PEER}", b"a peer's revocations")
+        await services.publish_refused(f"$KV.UA1_CERTS.session.{PEER}.{TEAM}.s-1")
+
+        # The topology owner finds and deletes a consumer a host left behind.
+        js = authority.nc.jetstream()
+        names = [info.name for info in await js.consumers_info("KV_UA1_HOSTS")]
+        assert names
+        for name in names:
+            assert await js.delete_consumer("KV_UA1_HOSTS", name)
+        assert admin.errors.empty() and authority.errors.empty() and edge.errors.empty() and services.errors.empty()
+        assert worker.errors.empty() and other.errors.empty() and lead.errors.empty()
 
 
 @pytest.mark.asyncio

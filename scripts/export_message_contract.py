@@ -1238,8 +1238,16 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
     check_key_value(registry, transport)
 
 
-# What a key template may name: the host itself, each team it serves, and each agent it runs.
-KEY_PLACEHOLDERS = {"self", "team", "agent"}
+# What a key template may name: the host itself, each team it serves, each agent it runs, its own
+# installation and each installation an agreement names.
+KEY_PLACEHOLDERS = {"self", "team", "agent", "installation", "peer"}
+# What a bucket name may name: a bucket per team holds that team's records only.
+BUCKET_PLACEHOLDERS = {"team"}
+# The stream settings every bucket has (transport.yaml key_value_stream): only the consumer
+# limit and the storage are a choice. Rollup headers would let a writer of one key purge every
+# key; no role purges or deletes messages through the stream API; readers use direct gets.
+KEY_VALUE_STREAM = {"history": 1, "allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": True,
+                    "allow_direct": True}
 
 
 def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None:
@@ -1251,8 +1259,13 @@ def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None
     """
 
     roles = set(registry["host_roles"])
+    check_key_value_stream(transport.get("key_value_stream"))
     for bucket, spec in transport["key_value"].items():
         where = f"transport.yaml key_value.{bucket}"
+        if set(re.findall(r"\{([a-z_]+)\}", bucket)) - BUCKET_PLACEHOLDERS \
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", re.sub(r"\{[a-z_]+\}", "x", bucket)):
+            raise ContractError(f"{where}: a bucket name holds letters, digits, _ and -, and only {{team}} as a "
+                                "placeholder")
         if set(spec) != {"description", "per_key_ttl_seconds", "readers", "writers"}:
             raise ContractError(f"{where}: fields are description, per_key_ttl_seconds, readers and writers")
         if not spec["readers"] or not set(spec["readers"]) <= roles or len(set(spec["readers"])) != len(spec["readers"]):
@@ -1263,14 +1276,42 @@ def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None
             if not isinstance(keys, list) or not keys or not all(isinstance(key, str) and key for key in keys):
                 raise ContractError(f"{where}: writer {role} lists the key templates it may write")
             for key in keys:
-                if set(re.findall(r"\{([a-z_]+)\}", key)) - KEY_PLACEHOLDERS or re.search(r"[\s/\\]", key):
-                    raise ContractError(f"{where}: key template {key!r} uses only {sorted(KEY_PLACEHOLDERS)} and subject "
-                                        "characters")
+                check_key_template(where, key)
     for name, entry in registry["state_records"].items():
         writers = set(transport["key_value"][entry["bucket"]]["writers"])
         if not set(entry["writers"]) <= writers:
             raise ContractError(f"registry.yaml state_records.{name}: its writers {sorted(set(entry['writers']) - writers)} "
                                 f"have no key template in transport.yaml key_value.{entry['bucket']}")
+
+
+def check_key_value_stream(settings: Any) -> None:
+    """Every bucket's stream refuses rollup headers and stream-API deletes and serves direct reads (README, "Key-value grants")."""
+
+    where = "transport.yaml key_value_stream"
+    if not isinstance(settings, dict) or set(settings) != {*KEY_VALUE_STREAM, "storage", "max_consumers"}:
+        raise ContractError(f"{where}: fields are {sorted({*KEY_VALUE_STREAM, 'storage', 'max_consumers'})}")
+    for field_name, value in KEY_VALUE_STREAM.items():
+        if type(settings[field_name]) is not type(value) or settings[field_name] != value:
+            raise ContractError(f"{where}: {field_name} is {value} (README, \"Every bucket's stream settings\")")
+    if settings["storage"] not in {"file", "memory"}:
+        raise ContractError(f"{where}: storage is file or memory")
+    if type(settings["max_consumers"]) is not int or settings["max_consumers"] < 1:
+        raise ContractError(f"{where}: max_consumers is a positive whole number")
+
+
+def check_key_template(where: str, key: str) -> None:
+    """A key template names only known placeholders and subject characters, and never starts with a wildcard.
+
+    A template that starts with ``*`` or ``>`` would reach every key of the bucket, every
+    other host's or agent's record included; ``>`` may only end a template, as in NATS.
+    """
+
+    if set(re.findall(r"\{([a-z_]+)\}", key)) - KEY_PLACEHOLDERS or re.search(r"[\s/\\]", key):
+        raise ContractError(f"{where}: key template {key!r} uses only {sorted(KEY_PLACEHOLDERS)} and subject characters")
+    tokens = key.split(".")
+    if tokens[0] in {"*", ">"} or ">" in tokens[:-1] or "" in tokens:
+        raise ContractError(f"{where}: key template {key!r} starts with a fixed word or a placeholder, has no empty "
+                            "token, and ends with > if it holds one")
 
 
 def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
@@ -1446,12 +1487,18 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     """
 
     owner: set[str] = set()
-    for stream in [*transport["streams"], *(bucket_stream(bucket) for bucket in transport["key_value"])]:
+    buckets = [bucket_stream(bucket) for bucket in transport["key_value"]]
+    for stream in [*transport["streams"], *buckets]:
         owner |= {f"$JS.API.STREAM.{action}.{stream}" for action in ("CREATE", "UPDATE", "INFO")}
     for stream in {consumer["stream"] for consumer in transport["consumers"].values()}:
         owner |= {f"$JS.API.CONSUMER.CREATE.{stream}.*", f"$JS.API.CONSUMER.CREATE.{stream}.*.>",
                   f"$JS.API.CONSUMER.DURABLE.CREATE.{stream}.*", f"$JS.API.CONSUMER.INFO.{stream}.*",
                   f"$JS.API.CONSUMER.DELETE.{stream}.*"}
+    # Readers create the buckets' watch consumers; the owner finds and deletes them when a
+    # host left too many behind and filled a bucket's consumer limit.
+    for stream in buckets:
+        owner |= {f"$JS.API.CONSUMER.NAMES.{stream}", f"$JS.API.CONSUMER.LIST.{stream}",
+                  f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.API.CONSUMER.DELETE.{stream}.*"}
     grants = {transport["topology_owner"]: owner}
     # Withdrawal and dead-letter custody read a message by its sequence and delete it there.
     for key in ("withdrawal", "dead_letter_custody"):
@@ -1470,23 +1517,22 @@ def bucket_stream(bucket: str) -> str:
 def key_value_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     """Per role: the subjects that read and write the key-value buckets (README, "Key-value grants").
 
-    A reader gets the bucket's stream information, its direct and last-message reads,
-    and what a watch needs: creating its own ephemeral consumer, whose deliveries arrive
-    on the reader's own inbox (every role already subscribes to it), reading that
-    consumer's information (the server names it, so the grant covers any name; it only
-    reads), and answering its flow control. No reader may delete a consumer, so no host
-    ends another host's watch; an idle ephemeral consumer ends by itself. A writer publishes
-    the keys its templates name; membership code fills them like subjects, so a host
-    writes only its own records and its own agents'.
+    A reader gets the bucket's stream information, its direct reads, and what a watch
+    needs: creating an unnamed consumer, whose deliveries arrive on the reader's own inbox
+    (every role already subscribes to it), reading that consumer's information (the server
+    names it, so the grant covers any name; it only reads), and answering its flow control.
+    Only the unnamed create: NATS refuses a durable consumer through it, and a request that
+    names no consumer cannot change an existing one, so no host changes another host's
+    watch; no reader may delete a consumer either. A writer publishes the keys its templates
+    name; membership code fills them like subjects, so a host writes only its own records and
+    its own agents'. A bucket per team is filled per team, so its grants reach no other team.
     """
 
     grants: dict[str, set[str]] = {}
     for bucket, spec in transport["key_value"].items():
         stream = bucket_stream(bucket)
-        reads = {f"$JS.API.STREAM.INFO.{stream}", f"$JS.API.STREAM.MSG.GET.{stream}",
-                 f"$JS.API.DIRECT.GET.{stream}", f"$JS.API.DIRECT.GET.{stream}.>",
-                 f"$JS.API.CONSUMER.CREATE.{stream}", f"$JS.API.CONSUMER.CREATE.{stream}.>",
-                 f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.FC.{stream}.>"}
+        reads = {f"$JS.API.STREAM.INFO.{stream}", f"$JS.API.DIRECT.GET.{stream}", f"$JS.API.DIRECT.GET.{stream}.>",
+                 f"$JS.API.CONSUMER.CREATE.{stream}", f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.FC.{stream}.>"}
         for role in spec["readers"]:
             grants.setdefault(role, set()).update(reads)
         for role, keys in spec["writers"].items():

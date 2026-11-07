@@ -208,25 +208,41 @@ dead_letter_custody:
   role: team_services
   streams: ["UA1_DLQ_{team}"]
 
-# Key-value buckets. readers are the roles that read a bucket (generated grants: direct and
-# last-message reads, watches through their own inbox, and the bucket's stream information);
-# writers name, per role, the keys it may write, as templates that membership code fills like
-# subjects ({self} its runtime id, {team} each team it serves, {agent} each agent it runs; README,
-# "Key-value grants"). A record's writers in registry state_records are among its bucket's writers.
-# The topology owner creates every bucket. Where a record is stored adds no trust: readers verify
-# each record's signature.
+# Every bucket's stream (KV_<bucket>, subjects $KV.<bucket>.>) has these settings; the
+# topology owner creates it as a stream with them (README, "Key-value grants"). Client
+# libraries' bucket helpers allow rollup headers, and with them a writer of one key erases
+# every key of the bucket with Nats-Rollup: all, so they are off: a writer removes a record
+# with a delete marker (KV-Operation: DEL), which reaches only its own key.
+key_value_stream:
+  history: 1                  # one value per key (the stream's max_msgs_per_subject)
+  allow_rollup_hdrs: false
+  deny_delete: true           # no message deletes through the stream API
+  deny_purge: true            # no purges through the stream API
+  allow_direct: true          # readers' last-value gets, $JS.API.DIRECT.GET.<stream>.<subject>
+  storage: file
+  max_consumers: 4096         # readers' watches; NATS 2.15 defaults to 1,000 per stream
+
+# Key-value buckets. readers are the roles that read a bucket (generated grants: direct
+# reads, watches through their own inbox, and the bucket's stream information); writers name,
+# per role, the keys it may write, as templates that membership code fills like subjects
+# ({self} its runtime id, {team} each team it serves, {agent} each agent it runs,
+# {installation} its own installation, {peer} each installation an agreement names; README,
+# "Key-value grants"). A record's writers in registry state_records are among its bucket's
+# writers. A bucket whose name holds {team} exists once per team, so its grants reach no other
+# team's records: the buckets that hold people's words or standing. The topology owner creates
+# every bucket. Where a record is stored adds no trust: readers verify each record's signature.
 key_value:
   UA1_CERTS:
     description: host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket
     per_key_ttl_seconds: 0
     readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers:
-      installation_authority: ["host.>", "revocations.*", "agreement.*"]
-      team_services: ["session.*.{team}.*"]
-      edge_adapter: ["host.>", "revocations.*", "session.>"]   # unchanged copies of a peer's records under the peer's installation id
+      installation_authority: ["host.{installation}.>", "revocations.{installation}", "agreement.*"]
+      team_services: ["session.{installation}.{team}.*"]
+      edge_adapter: ["host.{peer}.>", "revocations.{peer}", "session.{peer}.>"]   # unchanged copies of a peer's records under the peer's installation id
   UA1_HOSTS:
-    description: one record per runtime host; written every 10 s, expires after at most 60 s (each record also states its expiry)
-    per_key_ttl_seconds: 60
+    description: one record per runtime host; written every 10 s, expires after at most 30 s (each record also states its expiry)
+    per_key_ttl_seconds: 30
     readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers:
       gateway: ["{self}"]
@@ -249,14 +265,14 @@ key_value:
     readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers:
       team_services: ["{team}.*"]
-  UA1_TEAM_VIEW:
-    description: the team's shared view of open work
+  UA1_TEAM_VIEW_{team}:
+    description: one team's shared view of open work; one bucket per team, since an Objective's title is a person's own words
     per_key_ttl_seconds: 0
     readers: [gateway, lead_host, worker_host, team_services]
     writers:
       team_services: ["{team}.>"]
-  UA1_BLOCK_LIST:
-    description: one block list per team, written by the team services and read by every host of the team; each record states its own expiry
+  UA1_BLOCK_LIST_{team}:
+    description: one team's block list, written by its team services and read by its hosts; one bucket per team, since it names people's blocks and standing; each record states its own expiry
     per_key_ttl_seconds: 0
     readers: [lead_host, worker_host, team_services]
     writers:
