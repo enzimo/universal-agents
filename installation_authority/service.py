@@ -50,7 +50,9 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
-from nats.js.errors import BucketNotFoundError, KeyNotFoundError, NoKeysError, NotFoundError
+from nats.js.errors import KeyNotFoundError, NoKeysError, NotFoundError
+
+from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
 from pydantic import ValidationError
 
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -218,13 +220,10 @@ class InstallationAuthority:
         """Create what the contract's topology owner owns in phase 2: the buckets and each team's dead letters."""
 
         spec = transport()
-        for bucket, settings in spec["key_value"].items():
-            try:
-                await self._js.key_value(bucket)
-            except BucketNotFoundError:
-                await self._js.create_key_value(bucket=bucket, ttl=settings["per_key_ttl_seconds"] or None,
-                                                storage=StorageType.FILE, history=1)
-                self.logger.info("Created a key-value bucket. event=protocol1_bucket_created bucket=%s", bucket)
+        teams = tuple(teams)
+        for bucket in spec["key_value"]:
+            for team in teams if TEAM_PLACEHOLDER in bucket else (None,):
+                await self._ensure_bucket(spec, bucket, team)
         dead_letters = spec["streams"]["UA1_DLQ_{team}"]
         consumer = spec["consumers"]["dead_letters"]
         for team in teams:
@@ -232,7 +231,8 @@ class InstallationAuthority:
             config = StreamConfig(name=name, subjects=[subject.format(team=team) for subject in dead_letters["subjects"]],
                                   retention=_RETENTION[dead_letters["retention"]], storage=_STORAGE[dead_letters["storage"]],
                                   max_age=dead_letters["max_age_seconds"], max_msg_size=dead_letters["max_message_bytes"],
-                                  max_consumers=dead_letters["max_consumers"])
+                                  max_consumers=dead_letters["max_consumers"],
+                                  max_msgs_per_subject=dead_letters["max_msgs_per_subject"])
             try:
                 await self._js.stream_info(name)
                 await self._js.update_stream(config=config)
@@ -242,6 +242,26 @@ class InstallationAuthority:
             await self._js.add_consumer(name, config=ConsumerConfig(
                 durable_name=consumer["name"].format(team=team), filter_subject=consumer["filter"].format(team=team),
                 ack_policy=AckPolicy.EXPLICIT, ack_wait=consumer["ack_wait_seconds"], max_deliver=consumer["max_deliveries"]))
+
+    async def _ensure_bucket(self, spec: Mapping[str, Any], bucket: str, team: Optional[str]) -> None:
+        """Create or reconcile the contract's stream, without bucket-wide rollup or deletion.
+
+        The client's bucket-creation helper enables rollup headers, which would
+        let a writer of one key erase other keys. Bind it as a bucket only after
+        creating its stream with the contract's restrictions.
+        """
+
+        settings = bucket_stream(spec, bucket, team)
+        settings["storage"] = _STORAGE[settings["storage"]]
+        config = StreamConfig(**settings)
+        try:
+            await self._js.stream_info(config.name)
+        except NotFoundError:
+            await self._js.add_stream(config=config)
+            self.logger.info("Created a key-value bucket. event=protocol1_bucket_created bucket=%s",
+                             bucket_name(bucket, team))
+        else:
+            await self._js.update_stream(config=config)
 
     async def _records(self) -> Any:
         return await self._js.key_value(CERTIFICATES_BUCKET)
