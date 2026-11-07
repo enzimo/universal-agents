@@ -1353,6 +1353,18 @@ def test_only_the_team_services_read_their_teams_dead_letters() -> None:
             assert not reads, (role, reads)
 
 
+def test_the_team_services_lock_names_its_holders_process() -> None:
+    """README, "The team services' lock": the runtime alone cannot tell two processes of one runtime apart."""
+
+    lock = validator("team-services-lock.schema.json")
+    held = {"runtime": "team-services-1", "instance": "3f9c0a7d5e21b846", "lease_ends_at": "2026-10-22T04:30:30.000Z"}
+    assert not list(lock.iter_errors(held))
+    for broken in ({key: value for key, value in held.items() if key != "instance"}, {**held, "instance": "short"},
+                   {**held, "instance": "3F9C0A7D5E21B846"}, {**held, "holder": "team-services-1"}):
+        assert list(lock.iter_errors(broken)), broken
+    assert "team-services-lock.schema.json" in TRANSPORT["key_value"]["UA1_LOCKS"]["description"]
+
+
 def test_a_session_from_a_reply_is_kept_and_lets_its_host_sign_for_the_agent() -> None:
     """README, "Agent sessions": the host keeps the session it was given, then signs frames for the agent."""
 
@@ -2469,7 +2481,7 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
 # writer and what it places; README, "Agent sessions").
 RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/connection/expires_at"
                               r"|/body/application_key_rotation/(key/key_id|key/public_key|proof)"
-                              r"|/body/session/(signature|writer|body/[a-z_]+)")
+                              r"|/body/session/(signature|writer(/runtime)?|body/[a-z_]+)")
 ROTATION_PROOF_AT = "/body/application_key_rotation/proof"
 
 

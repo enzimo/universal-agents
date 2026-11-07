@@ -102,9 +102,9 @@ replier needs nothing beyond the request (`custom_messages.wire.frame.reply_audi
 
 The audience runtime is always the requester's runtime, whose inbox the reply goes to; a
 receiver answers no request whose reply subject is not that inbox ("Answering only the
-requester's inbox"). A reply that names anything else is refused as `wrong_audience`. Only replies name the `host`
-target; a request addressed to a host is refused (`subject_mismatch`), and so is a host
-reply whose id is not its runtime.
+requester's inbox"). A reply that names anything else is refused as `wrong_audience`, a host
+reply whose id is not its runtime among them. Only replies name the `host` target; a request
+addressed to a host is refused (`subject_mismatch`).
 
 ## Who may talk to whom
 
@@ -843,9 +843,10 @@ its control queue's consumers, its control address, and the key of its agent rec
 which a NATS user JWT's base64url encoding turns into about 1,215 bytes. Each worker pool adds
 three subjects, 349 bytes with a 24-character agent type. `tests/test_message_contract.py`
 recomputes these figures from the generated templates. A credential is at most
-`max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt` field's limit, so the
-authority places no more agents and pools on one host than its credential can name: with
-the longest ids, about 45 agents beside 10 worker pools. The id caps exist for this; with
+`max_credential_bytes` (65,536 bytes, `transport.yaml`), the `jwt` field's limit, so no more
+agents and pools are placed on one host than its credential can name: the team services
+refuse an open beyond it (`limit_reached`, "Agent sessions"). With the longest ids, that is
+about 45 agents beside 10 worker pools. The id caps exist for this; with
 64-character ids a host held about 25. A host writes only its own agents' records, rather
 than any agent record of its team: readers would refuse another host's record, but agent
 records are written only when they change, so an overwritten one would stay missing until
@@ -1208,28 +1209,64 @@ A host signs frames for an agent only while a session places that agent on it ("
 it"). It gets each session from its team's services, which place the agent and sign the
 session record:
 - **`sessions.open`** names the agent, its type and the digest of the definition the host
-  will run. The team services check the roster (only the team's designated lead gets the
-  lead role), the host's certificate (its agent types and session limit) and the id limits,
-  write the placement with compare-and-set, store the signed session in `UA1_CERTS` and
-  return it. An agent that runs on another host is refused with `already_placed`, naming
-  that host: agents stay on their host and move only by a handover ("Custody windows").
-  A host that already runs as many agents as its certificate allows gets `limit_reached`.
-- **`sessions.renew`** re-signs one of the host's sessions while the host is connected,
-  with a higher sequence; a session lasts at most 7 days.
+  will run. The team services check the host's certificate (its agent types and session
+  limit) and the id limits, write the placement with compare-and-set, store the signed
+  session in `UA1_CERTS` and return it. They give the lead role only to the team lead's agent
+  type on a host whose certificate holds the `lead_host` role; until a team has a roster,
+  nothing else limits it to one lead. An agent that runs on another host is refused with
+  `already_placed`, naming that host: agents stay on their host and move only by a handover
+  ("Custody windows"). A host that already runs as many agents as its certificate allows, or
+  as its NATS credential can name ("Credential size"), gets `limit_reached`. An open for an
+  agent already placed on the asking host places it there again, with the placement's next
+  sequence, and signs a new session; the earlier session names the earlier placement, so it
+  can no longer be renewed and ends with its end time.
+- **`sessions.renew`** re-signs one of the host's sessions while the host is connected: the
+  next sequence and a new end, at most 7 days away, and every other field as it was. It is
+  refused with `not_allowed` when the session has ended (closed, or past its end) or names an
+  earlier placement of its agent than the current one, so a closed session never comes back,
+  not even when its agent was placed on the same host again. The host then stops signing
+  under that session and opens a new one if it still runs the agent.
 - **`sessions.close`** records a session's actual end when its agent exits, fails or is
-  handed over.
+  handed over: the team services sign the session again with that end, so it covers nothing
+  dated after it, and remove the placement unless the agent was handed over (the new host's
+  open replaces it). Closing a session that has already ended answers `ok` with its recorded
+  end and changes nothing.
 
-The host asks for itself, so these requests name no agent and carry no token; their
-replies go to the host ("Replies"). Before it keeps a returned session (`TrustStore.add`),
-the host checks it like a join reply's certificate, and refuses the reply as
-`invalid_body` at `/body/session/...` when the session:
+Renew and close answer `not_found` for a session that does not place its agent on the asking
+host, so no host renews or ends another host's sessions. Where hosts have their own NATS
+credentials, an open that adds an agent is followed by a certificate renewal whose credential
+names the agent's subjects ("Credentials follow placement"); until then the host cannot read
+the agent's queues or write its agent record.
+
+**Restarts.** A host that starts again first closes the sessions an earlier run of it left
+open (it finds them in `UA1_CERTS` under its runtime id), then opens sessions for the agents
+it now runs. A session it cannot close ends with its end time.
+
+**Repeating a session operation.** The session operations keep no stored outcome ("Stored
+outcomes"): their outcome is the records in `UA1_PLACEMENT` and `UA1_CERTS`, and no
+transaction holds both those records and an outcome stored in the team services' database.
+Each one is safe to repeat instead:
+- a host that lost an open's reply asks again and gets a new session for the same agent on
+  itself (above);
+- the team services write the placement before the session, so a failure between the two
+  leaves the agent placed on the asking host without a session, which the host's next open
+  completes;
+- a repeated renewal signs the session again; a repeated close changes nothing.
+
+The host asks for itself, so these requests name no agent (one signed as an agent is refused
+as `wrong_issuer` at `/issuer/agent`) and carry no token; their replies go to the host
+("Replies"). Before it keeps a returned session (`TrustStore.add`), the host checks it like a
+join reply's certificate, and refuses the reply as `invalid_body` at `/body/session/...` when
+the session:
 - does not verify against the certificate of the team services host that replied, or that
   host signed no session (`/body/session/writer`);
 - is for another team than the one asked (`/body/session/body/team`);
 - places the agent on another host (`/body/session/body/runtime`);
 - for an open, names another agent or type than asked (`/body/session/body/agent`,
   `agent_type`); for a renewal, another session than the one it named
-  (`/body/session/body/session`).
+  (`/body/session/body/session`), or, when the host holds that session, changes anything but
+  its end (the agent, its type and role, the host, the placement revision or the start, at
+  `/body/session/body/<field>`).
 
 `custom_messages.wire.frame` checks this when it verifies the reply.
 
@@ -1310,11 +1347,26 @@ bucket, that templates use only those placeholders, never start with a wildcard 
 `>` if they hold one, and that `key_value_stream` keeps rollup headers and stream-API deletes
 off. Where a record is stored still adds no trust: readers verify each record's signature.
 
-**The team services' lock.** `UA1_LOCKS` holds one key per team, `team_services.<team>`:
-the runtime id of the team services instance that serves the team and when its lease ends.
-An instance takes the lock with compare-and-set and renews it before the lease ends; a
-second instance refuses to serve while another holds an unexpired lease, and logs which
-one holds it. Only the team services read or write this bucket.
+**The team services' lock.** `UA1_LOCKS` holds one key per team, `team_services.<team>`,
+whose value is the JSON object of `schemas/team-services-lock.schema.json`: the holder's
+runtime id, its `instance` (a random id the process chose when it started) and when its
+lease ends. Every team services instance runs as the same runtime, so only the instance id
+tells a restarted process, or a second copy, from the holder:
+- an instance serves a team only once its own create, or compare-and-set update on the key's
+  revision, succeeded; it holds a 30-second lease and renews it every 10 seconds;
+- a renewal whose write reached NATS but whose answer was lost leaves the key naming the
+  holder's instance under a revision the holder does not know: the holder reads the key and,
+  when it names its own instance, renews from that revision. Only another instance's id
+  means the lock is lost;
+- an instance whose renewals keep failing stops serving when its lease runs out, so two
+  instances never serve at once;
+- another instance does not serve while the lease holds: it logs which instance holds the
+  lock and waits, and takes the lock once the lease has ended and the clock tolerance has
+  passed.
+
+The lock is not signed, unlike the state records: only the team services may write the bucket
+(and the stream settings refuse rollups), and only the compare-and-set on the revision
+proves who holds it. Only the team services read or write this bucket.
 
 **Not generated yet.** The object store's grants come with blob owners and retention.
 
@@ -2446,6 +2498,10 @@ registry entry lists ("Idempotency keys").
   lifetime of an authority token (`authority_token_max_seconds`).
 - **Reads store nothing.** A read is keyed by `/message_id`, so every frame is a new read
   and a retry reads again.
+- **The session operations store nothing either** (`sessions.open`, `sessions.renew`,
+  `sessions.close`): their outcome is the placement and session records in the key-value
+  buckets, which no transaction shares with a stored reply, and each is safe to repeat
+  ("Agent sessions", "Repeating a session operation").
 - **Outcomes that ask for a retry are not stored.** For outcomes in `retry_outcomes` the
   receiver stores nothing, so a retry with the same key is decided again:
   - `not_started`: `tasks.steer` while the request still waits behind other work. Today

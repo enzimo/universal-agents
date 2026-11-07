@@ -112,6 +112,11 @@ ISSUED_CERTIFICATE_AT = "/body/certificate"
 # Where a sessions.open or sessions.renew reply carries the session the team services signed.
 ISSUED_SESSION_AT = "/body/session"
 _SESSIONS_OPEN, _SESSIONS_RENEW = "sessions.open", "sessions.renew"
+# A host asks for its agents' sessions for itself, never as one of its agents: the reply goes to
+# the host (README, "Agent sessions").
+_HOST_OWN_KINDS = frozenset({_SESSIONS_OPEN, _SESSIONS_RENEW, "sessions.close"})
+# What a renewal keeps of the session it renews: everything but its end and its sequence.
+_RENEWAL_KEEPS = ("agent", "agent_type", "agent_role", "runtime", "placement_revision", "started_at")
 
 
 def idempotency_key(kind: str, *parts: str | int | None) -> str:
@@ -487,6 +492,8 @@ def _verify_issuer(frame: Frame, spec: Optional[KindSpec], certificate: HostCert
             raise FrameRefused("wrong_issuer", "an installation operation speaks for its host, not an agent", at="/issuer/agent")
     elif issuer.team not in certificate.teams:
         raise FrameRefused("wrong_issuer", "the certificate does not serve the issuer's team", at="/issuer/team")
+    if spec is not None and spec.name in _HOST_OWN_KINDS and (issuer.agent is not MISSING or issuer.session is not MISSING):
+        raise FrameRefused("wrong_issuer", "a host asks for its agents' sessions for itself, not as an agent", at="/issuer/agent")
     if (issuer.agent is MISSING) != (issuer.session is MISSING):
         raise FrameRefused("wrong_issuer", "a frame names an agent and its session together", at="/issuer/session")
     if issuer.agent is not MISSING:
@@ -688,8 +695,6 @@ def _verify_subject(raw: Mapping[str, Any], frame: Frame, spec: Optional[KindSpe
         inbox = REPLY_INBOX_PREFIX.format(runtime=audience.runtime) + "."
         if audience.runtime is MISSING or frame.causation_id is MISSING or not frame.subject.startswith(inbox):
             raise FrameRefused("subject_mismatch", "a reply names its request and the audience runtime's inbox", at="/subject")
-        if audience.target == HOST_TARGET and audience.id != audience.runtime:
-            raise FrameRefused("subject_mismatch", "a reply to a host names that host as its audience id", at="/audience/id")
     else:
         local = issuer.installation == audience.installation
         slot = issuer.runtime if local else PEER_SENDER_SLOT.format(installation=issuer.installation)
@@ -1072,8 +1077,13 @@ def _verify_issued_session(raw: Mapping[str, Any], frame: Frame, answering: Fram
             raise refuse("agent", "the session is for another agent than the one asked for")
         if issued.agent_type != asked.get("agent_type"):
             raise refuse("agent_type", "the session names another agent type than the one asked for")
-    elif issued.session != asked.get("session"):
-        raise refuse("session", "the renewal returned another session than the one it named")
+    else:
+        if issued.session != asked.get("session"):
+            raise refuse("session", "the renewal returned another session than the one it named")
+        held = trust.agent_session(issued.installation, issued.team, issued.session)
+        for field_name in _RENEWAL_KEEPS if held is not None else ():
+            if getattr(issued, field_name) != getattr(held, field_name):
+                raise refuse(field_name, "a renewal keeps every field of the session but its end")
 
 
 def _verify_joined_certificate(issued: HostCertificate, asked: Mapping[str, Any],

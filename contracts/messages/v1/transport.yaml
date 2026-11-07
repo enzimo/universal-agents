@@ -281,7 +281,7 @@ key_value:
     writers:
       team_services: ["{team}"]
   UA1_LOCKS:
-    description: "the team services' single-instance lock, one key per team (team_services.<team>): the holder's runtime id and the lease's end, written with compare-and-set and renewed before the lease ends; a second instance refuses to serve while the lease holds"
+    description: "the team services' single-instance lock, one key per team (team_services.<team>), its value schemas/team-services-lock.schema.json: the holder's runtime id, its process instance and its lease's end, a 30-second lease taken and renewed every 10 seconds with compare-and-set; another instance does not serve while the lease holds"
     per_key_ttl_seconds: 0
     readers: [team_services]
     writers:
