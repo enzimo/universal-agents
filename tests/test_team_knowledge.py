@@ -38,7 +38,7 @@ from custom_messages.contracts.control_v1 import (
     KnowledgeCommandResultPayload,
     KnowledgeReviewFlagPayload,
 )
-from custom_messages.wire.reply_size import REPLY_BODY_MAX_BYTES
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES
 from knowledge_base.records import INLINE_TEXT_MAX
 from knowledge_base.service import DraftInput, knowledge_service_for
 from knowledge_base.vocabulary import ContributionStatus
@@ -46,8 +46,10 @@ from runtime_settings.knowledge import knowledge_settings
 from storage.config import StorageSettings, resolve_storage_settings
 from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES, create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
+from storage.operation_outcomes import is_receipt
 from team_services.outcomes import AnswerUnknown
 from team_services.knowledge import (
+    KNOWLEDGE_KINDS,
     NOTE_TEXT,
     PAGE_TEXT,
     PROPOSAL_TEXT,
@@ -86,11 +88,6 @@ class Answer:
                            "flags": [flag.model_dump() for flag in self.review_flags]})
 
 
-class _Ids:
-    def new_correlation_id(self) -> str:
-        return f"cmd-{uuid4().hex}"
-
-
 class _InProcess:
     """The team services' port, answering with the knowledge handlers in process."""
 
@@ -126,7 +123,7 @@ class Team:
         references = AccessStorePersonReferences(access.settings, TEAM)
         self.pages = GatewayKnowledgePages(
             team_commands=GatewayTeamCommandService(team_services=_InProcess(self.operations), references=references,
-                                                    id_generator=_Ids()),
+                                                    request_ids=lambda: f"cmd-{uuid4().hex}"),
             references=references, display_name=lambda person_id: f"Name of {person_id}", enabled=enabled,
         )
 
@@ -591,15 +588,77 @@ def _stored_outcomes(team: Team) -> list[dict[str, Any]]:
     """Every stored outcome, as the table keeps it (storage.operation_outcomes)."""
 
     with team.repository._connect() as conn:
-        rows = conn.execute("SELECT kind, reply_json, complete FROM protocol1_operation_outcomes").fetchall()
-    return [{"kind": row["kind"], "reply": json.loads(row["reply_json"]), "complete": bool(row["complete"])}
-            for row in rows]
+        rows = conn.execute("SELECT kind, reply_json, person_id FROM protocol1_operation_outcomes").fetchall()
+    return [{"kind": row["kind"], "reply": json.loads(row["reply_json"]), "person": row["person_id"]} for row in rows]
 
 
 def _frame(payload: KnowledgeCommandPayload, *, person: str = "alice", request_id: str) -> Any:
     kind, body = knowledge_request(payload)
     return stand_in_frame(TEAM, kind, {"request_id": request_id, **body}, person_ref=reference_of(person),
                           request_id=request_id)
+
+
+@pytest.mark.asyncio
+async def test_another_persons_command_under_a_reused_key_is_refused_and_shown_nothing(team: Team) -> None:
+    await team.write("alice", "personal", title="Diary", body="Private thoughts.")
+    await team.write("bob", title="Runbook", body="Check the workers.")
+    first = _answer(team, KnowledgeCommandPayload(action=A.ADD_NOTE, space="personal", page="diary",
+                                                  note="A private note."), request_id="cmd-shared")
+    # bob's own note, sent (by a defect) under the same request id: the same kind and retry key.
+    taken = _answer(team, KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="Bob's note."),
+                    person="bob", request_id="cmd-shared")
+
+    assert first["outcome"] == "ok"
+    assert taken["outcome"] == "invalid_request" and "already used" in taken["message"]
+    assert "private" not in json.dumps(taken).lower()
+    assert (await team.send("bob", action=A.READ, page="runbook")).result.page.open_notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_of_a_person_who_may_not_act_is_stored(team: Team) -> None:
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    now = datetime.now(timezone.utc)
+
+    def standing(state: PersonStanding) -> None:
+        roles = ("member",) if state is PersonStanding.ACTIVE else ()
+        team.access.record_person(TeamPersonV1(team_id=TEAM, person_id="carol", person_ref=reference_of("carol"),
+                                               standing=state, roles=roles, changed_at_utc=now))
+
+    note = KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="Carol's note.")
+    standing(PersonStanding.DISABLED)
+    refused = _answer(team, note, person="carol", request_id="cmd-carol")
+    standing(PersonStanding.ACTIVE)
+    # The repeat (the gateway's second try under the same id) gets the same answer, not a carried-out note.
+    again = _answer(team, note, person="carol", request_id="cmd-carol")
+
+    assert refused["outcome"] == "not_allowed" and again == refused
+    assert (await team.send("alice", action=A.READ, page="runbook")).result.page.open_notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_that_cannot_be_stored_asks_for_a_retry(team: Team, monkeypatch) -> None:
+    def broken(*_args: Any) -> None:
+        raise ConnectionError("the database went away")
+
+    monkeypatch.setattr(team.repository, "save_command_refusal", broken)
+    edit = KnowledgeCommandPayload(action=A.WRITE, page="runbook", base_revision=1, body="Check all workers.")
+
+    reply = _answer(team, edit, request_id="cmd-edit")
+
+    assert reply["outcome"] == "runtime_error" and "Nothing was changed" in reply["message"]
+
+
+@pytest.mark.asyncio
+async def test_old_stored_outcomes_are_purged_by_the_knowledge_upkeep(team: Team) -> None:
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    family = team.operations.family()
+    with team.repository._connect() as conn:
+        conn.execute("UPDATE protocol1_operation_outcomes SET stored_at_utc = ?", ("2026-01-01T00:00:00+00:00",))
+        conn.commit()
+
+    await family.upkeep()
+
+    assert _stored_outcomes(team) == [] and set(family.handlers) == set(KNOWLEDGE_KINDS)
 
 
 @pytest.mark.asyncio
@@ -647,7 +706,7 @@ async def test_a_change_stores_only_its_receipt_never_the_text(team: Team) -> No
     assert kinds == sorted(["knowledge.write"] * 3 + ["knowledge.add_note", "knowledge.archive", "knowledge.revert",
                                                        "knowledge.publish_contribution",
                                                        "knowledge.withdraw_contribution"])
-    assert all(not outcome["complete"] and set(outcome["reply"]) == {"receipt"} for outcome in outcomes)
+    assert all(is_receipt(outcome["reply"]) and outcome["person"] == "alice" for outcome in outcomes)
     stored = json.dumps(outcomes)
     for text in ("Private thoughts", "A private note", "Check the workers", "ops@example.com", "proposed note"):
         assert text not in stored
@@ -958,7 +1017,7 @@ def test_web_chat_and_the_team_services_use_the_contracts_inline_text_limit() ->
 # -- replies larger than one frame carries (team_services.knowledge) ---------------------
 #
 # Texts within 32,768 characters can still make one reply larger than a frame carries
-# (custom_messages.wire.reply_size): a page with long open notes, in a script of three bytes
+# (custom_messages.wire.sizes): a page with long open notes, in a script of three bytes
 # per character, or lists where a team raised the title, summary and tag limits. Lists
 # come in parts that the gateway joins; a page that does not fit is refused plainly and a
 # change that would not fit is rolled back. On SQLite and PostgreSQL.

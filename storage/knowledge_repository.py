@@ -107,7 +107,14 @@ from storage.change_ledger import (
     work_writer,
 )
 from storage.read_only import repositories_are_read_only
-from storage.operation_outcomes import CommandOutcome, CommandOutcomeWrites, ensure_outcome_table
+from storage.operation_outcomes import (
+    CommandOutcome,
+    StoredOutcome,
+    ensure_outcome_table,
+    purge_expired,
+    save_refusal,
+    stored_outcome,
+)
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
@@ -279,7 +286,7 @@ class KnowledgeRepository(Protocol):
     def import_rows(self, table: str, rows: list[dict[str, Any]]) -> int: ...
 
 
-class _RelationalKnowledgeRepository(CommandOutcomeWrites):
+class _RelationalKnowledgeRepository:
     """SQL shared by both databases; subclasses supply connections and search."""
 
     _dialect: SqlDialect
@@ -502,6 +509,26 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
             self._take_write_lock(conn)
             yield conn
             conn.commit()
+
+    # -- stored outcomes of people's commands (storage.operation_outcomes) ------------------
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        """Store a refused command's reply in a transaction of its own; what is stored under its key now."""
+
+        with self._write() as conn:
+            return save_refusal(conn, self._dialect, command_outcome, reply)
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        """The reply or receipt already stored for this command's retry key, read without the write lock."""
+
+        with self._connect() as conn:
+            return stored_outcome(conn, self._dialect, command_outcome.team_id, command_outcome.retry_key)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        """Delete stored outcomes past their retention; how many were deleted."""
+
+        with self._write() as conn:
+            return purge_expired(conn, self._dialect, now)
 
     # -- reads -----------------------------------------------------------------------------
 

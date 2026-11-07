@@ -14,6 +14,7 @@ from custom_messages.records.objectives import ObjectiveSuccessCriterion
 from enum import StrEnum
 from id_generation import new_id
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 from typing import Any
 from typing import Dict
@@ -585,6 +586,16 @@ class PinnedMemoryCommandResultPayload(BaseModel):
 
 
 PINNED_MEMORY_SORT_NEWEST = "newest"
+# The memory service's sort names, as the message contract's memory.list names them
+# (the team services and the gateway convert with it, in each direction).
+PINNED_MEMORY_WIRE_SORTS = {
+    "memory_id": "memory_id",
+    PINNED_MEMORY_SORT_NEWEST: "newest",
+    "valid_from_utc": "valid_from",
+    "invalid_after_utc": "expires",
+}
+# What a person writes as an expiry to clear it; the memory service takes it as "no expiry".
+PINNED_MEMORY_CLEAR_EXPIRY = "never"
 
 
 class PinnedMemoryCommandPayload(BaseModel):
@@ -626,6 +637,43 @@ class ManagerTopicCommand(BaseModel):
     thread_matches: List[Dict[str, Any]] = Field(default_factory=list)
     applied_tags: List[str] = Field(default_factory=list)
     message: str = ""
+
+    def get_id(self) -> str:
+        return self.command_id
+
+
+# The one list of retired gateway commands: durable commands a 0.9 gateway put in the
+# team lead's control queue whose handling phase 2 moved to protocol 1 request/reply at
+# the team services (plan 13B.10). A command queued just before an in-place upgrade may
+# still be waiting when 0.10 starts; without a model for it the lead could not read it,
+# so it was redelivered, set aside as a dead letter and the person never heard back.
+# A family that moves the same way adds its old class name to the ``Literal`` and what
+# people call the command to the mapping below it, in the same change.
+RetiredGatewayCommandClass = Literal["ManagerMemoryCommand", "ManagerKnowledgeCommand"]
+# What people called each retired command, for the refusal they are sent.
+RETIRED_GATEWAY_COMMAND_NAMES: Dict[str, str] = {
+    "ManagerMemoryCommand": "memory command",
+    "ManagerKnowledgeCommand": "Knowledge page request",
+}
+
+
+class RetiredGatewayCommand(BaseModel):
+    """A gateway command from before the upgrade whose handler is gone (``RetiredGatewayCommandClass``).
+
+    The team lead reads it only to tell the person it was not carried out
+    (``custom_agents.retired_gateway_commands``); it never carries it out, so the
+    old fields (the memory or knowledge command, its result) are accepted and ignored. Nothing
+    sends one: ``message_class`` has no default, and only the contract and the
+    lead's handler may name this model (tests/test_runtime_architecture_boundaries.py).
+    Remove it, with its handler, when the upgrade steps from 0.9 are removed once
+    0.11 ships (README_ARCHITECTURE.md, "Upgrading an instance in place").
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    message_class: RetiredGatewayCommandClass
+    command_id: str
+    command_type: MessageMetaType = MessageMetaType.REQUEST
 
     def get_id(self) -> str:
         return self.command_id

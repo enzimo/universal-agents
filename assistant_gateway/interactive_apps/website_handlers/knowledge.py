@@ -14,12 +14,15 @@ What a request may do is decided by the team services' knowledge service; a
 refusal comes back with its stable code, plain words, and, for content held
 for review or never stored, where it is (never the text itself).
 
-When the team services give no answer, or refuse the request itself (contract
-README "Refused requests"), the browser gets plain words and the code goes to
-the log: ``handler_failed`` means the handler started and its result is unknown,
-so a change may have been saved; every other refusal came before the handler
-ran, so nothing was changed. A change whose result is unknown asks the person
-to refresh before trying again, because trying again sends a new command.
+When a request was not sent (the person is not in the team, their copy could
+not be made current), the browser gets the gateway's plain reason. When the team
+services give no answer, even to the gateway's second try under the same id, or
+refuse the request itself (contract README "Refused requests"), the browser gets
+plain words and the code goes to the log: ``handler_failed`` means the handler
+started and its result is unknown, so a change may have been saved; every other
+refusal came before the handler ran, so nothing was changed. A change whose
+result is unknown asks the person to refresh before trying again, because trying
+again sends a new command.
 """
 
 from __future__ import annotations
@@ -31,7 +34,11 @@ from typing import Any, Mapping
 from aiohttp import web
 from pydantic import ValidationError
 
-from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
+from assistant_gateway.application.team_commands import (
+    TeamCommandRefused,
+    TeamServicesNoAnswer,
+    TeamServicesUnavailable,
+)
 from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefused
 from assistant_gateway.application.website_application import WebsiteGatewayApplication
 from assistant_gateway.interactive_apps.website_handlers.operations import WebsiteKnowledgeHandlersOperations
@@ -255,12 +262,19 @@ class WebsiteKnowledgeHandlers:
         """The team services refused the request itself or did not answer (module docstring)."""
 
         reads = payload.action in KNOWLEDGE_READ_ACTIONS
-        if isinstance(exc, TeamServicesUnavailable):
+        if isinstance(exc, TeamServicesNoAnswer):
             LOGGER.warning(
                 "The team services did not answer a Knowledge page request. event=web_knowledge_unanswered "
                 "person_id=%s action=%s reason=%s", person_id, payload.action.value, exc,
             )
             return self._refused("runtime_error", TEAM_SERVICES_SILENT_READ_TEXT if reads else TEAM_SERVICES_SILENT_TEXT)
+        if isinstance(exc, TeamServicesUnavailable):
+            # Not sent: the gateway's own words say why and that nothing changed.
+            LOGGER.warning(
+                "A Knowledge page request was not sent to the team services. event=web_knowledge_not_sent "
+                "person_id=%s action=%s reason=%s", person_id, payload.action.value, exc,
+            )
+            return self._refused("runtime_error", str(exc))
         LOGGER.warning(
             "The team services refused a Knowledge page request itself. event=web_knowledge_request_refused "
             "person_id=%s action=%s code=%s", person_id, payload.action.value, exc.code,

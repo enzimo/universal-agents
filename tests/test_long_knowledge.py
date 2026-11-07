@@ -20,7 +20,7 @@ from custom_agents.status_findings import agent_status_findings
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.status_v1 import StatusSeverity
 from custom_messages.enums import MessageMetaType
-from custom_messages.wire.reply_size import REPLY_BODY_MAX_BYTES
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES
 from knowledge_base.records import INLINE_TEXT_MAX, LongTextCounts
 from knowledge_base.service import DraftInput, KnowledgeService
 from runtime_settings.knowledge import KnowledgeSettings, KnowledgeWriteLimits

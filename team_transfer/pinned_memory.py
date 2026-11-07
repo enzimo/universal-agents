@@ -65,19 +65,11 @@ def _fact_key(fact: "ExportedFactV1") -> str:
 
 
 def memory_config(config: "GatewayInstanceConfig") -> dict[str, Any]:
-    """The memory limits of the team lead, which owns the pinned memory store (as ``open_memory_instance``)."""
+    """The memory limits of the team lead, which owns the pinned memory store (``lead_memory_config``)."""
 
-    from assistant_gateway.runtime_config import (
-        build_runtime_config_from_instance_config,
-    )
-    from config_loader import resolve_agent_type_settings
-    from custom_agents.memory_plugins.config import normalize_memory_config
+    from assistant_gateway.runtime_config import lead_memory_config
 
-    runtime = resolve_agent_type_settings(
-        build_runtime_config_from_instance_config(config),
-        config.gateway.named_agent_type,
-    )
-    return normalize_memory_config(runtime.get("memory_config"))
+    return lead_memory_config(config)
 
 
 def _removed_people(source: ExportSource) -> list[str]:

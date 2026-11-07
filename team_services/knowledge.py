@@ -52,7 +52,7 @@ Knowledge page meets them, and no knowledge may be lost or cut because of the li
   (``assistant_gateway.application.knowledge_wire``), and the editor keeps the text.
 
 A reply is also limited in bytes: one frame carries at most 262,144
-(``custom_messages.wire.reply_size``). Texts within the character limit can still make a
+(``custom_messages.wire.sizes``). Texts within the character limit can still make a
 page's reply larger, with its open notes, links and backlinks, in non-Latin script or
 where a team raised the note, title, summary or tag limits. So, by the same rules:
 
@@ -82,7 +82,7 @@ from custom_messages.contracts.control_v1 import KnowledgeCommandAction, Knowled
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
 from custom_messages.wire.kinds import KINDS
-from custom_messages.wire.reply_size import REPLY_BODY_MAX_BYTES, body_bytes
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES, encoded_size
 from knowledge_base.records import (
     CODE_DISABLED,
     CODE_INVALID,
@@ -101,9 +101,10 @@ from knowledge_base.sensitive_content import REVIEW_KIND_LABELS, SensitiveConten
 from knowledge_base.service import PERSONAL_OVERLAP_KIND, DraftInput, KnowledgeService, PageView, knowledge_service_for
 from knowledge_base.vocabulary import ActorKind, ContributionKind, KnowledgeSpace, PageStatus
 from runtime_settings.knowledge import KnowledgeSettings
-from storage.operation_outcomes import CommandOutcome
-from team_services.outcomes import AnswerUnknown, carried_out_once
-from team_services.people import CommandPerson, command_person
+from storage.operation_outcomes import RECEIPT_KEY, CommandOutcome
+from team_services.outcomes import AnswerUnknown, CommandOnce
+from team_services.people import PersonCheck, command_person
+from team_services.service import OperationFamily
 
 KNOWLEDGE_ACTIONS = (
     "list", "read", "history", "write", "add_note", "archive", "revert", "list_contributions",
@@ -184,7 +185,7 @@ class PageTooLong(NotShownInWebChat):
 
 
 class ReplyTooLarge(NotShownInWebChat):
-    """A reply larger than one frame carries (``custom_messages.wire.reply_size``)."""
+    """A reply larger than one frame carries (``custom_messages.wire.sizes``)."""
 
     event = "team_knowledge_too_large"
 
@@ -265,7 +266,7 @@ class _Change:
             raise TypeError(f"A knowledge change returned {type(result).__name__}.")
         if confirmed:
             receipt["review_kinds"] = list(confirmed)
-        self.stored = {"receipt": receipt}
+        self.stored = {RECEIPT_KEY: receipt}
         return self.stored
 
     def _require_fits(self, result: Any, confirmed: tuple[str, ...]) -> None:
@@ -283,7 +284,7 @@ class _Change:
             reply = {"outcome": "ok", "page": self._detail(result, None)}
         if request.action in {"write", "add_note"}:
             reply["review_flags"] = _review_flags(confirmed)
-        size = body_bytes(reply)
+        size = encoded_size(reply)
         if size > REPLY_BODY_MAX_BYTES:
             raise ReplyTooLarge(CHANGED_PAGE_LARGE, size)
 
@@ -321,22 +322,89 @@ class KnowledgeOperations:
         self._long_agent_types: set[str] = set()
         self._unrecorded_people: set[str] = set()
 
-    def handlers(self) -> dict[str, Callable[[VerifiedFrame], Any]]:
-        return {kind: self.handle for kind in KNOWLEDGE_KINDS}
+    def family(self) -> OperationFamily:
+        """Its handlers at the team's address and its upkeep; they run in order (module docstring)."""
+
+        return OperationFamily({kind: self.handle for kind in KNOWLEDGE_KINDS}, upkeep=self.purge_outcomes)
 
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
         return await asyncio.to_thread(self.answer, verified)
 
+    async def purge_outcomes(self) -> None:
+        """Delete stored outcomes past their retention, also when no new command stores one."""
+
+        if self._repository is None:
+            return
+        purged = await asyncio.to_thread(self._repository.purge_command_outcomes, self._clock())
+        if purged:
+            self._logger.info("Deleted old stored outcomes. event=team_knowledge_outcomes_purged count=%s", purged)
+
     def answer(self, verified: VerifiedFrame) -> dict[str, Any]:
-        """The reply to one Knowledge page command (blocking: the store is synchronous)."""
+        """The reply to one Knowledge page command (blocking: the store is synchronous).
+
+        As for memory commands (``team_services.outcomes``): a repeated change is answered
+        from its stored outcome first, and every final refusal of a change is stored.
+        """
 
         action = verified.frame.kind.removeprefix("knowledge.")
         body = verified.raw["body"]
-        person, reason = command_person(verified, self._people, self._logger)
-        if person is None:
-            return _message_reply("not_allowed", reason)
         if self._service is None:
+            # No store is open, so nothing can be stored: the setting is read when the team services start.
             return _message_reply("feature_off", KNOWLEDGE_OFF_TEXT)
+        check = command_person(verified, self._people, self._logger)
+        if check.person_id is None:
+            return _message_reply("not_allowed", check.reason)
+        request = _Request(self._service, self._repository, _person_actor(check.person_id, self._people.team_id),
+                           action, body, self._editor)
+        change = _Change(request, person_editor=request.person_editor()) if action in _CHANGES else None
+        once = self._once(verified, request, change) if change is not None else None
+        if once is not None:
+            stored = once.stored_reply()
+            if stored is not None:
+                return stored
+        refused = self._refused_person(check, action, body)
+        if refused is not None:
+            return refused if once is None else once.final(refused)
+        if change is None or once is None:
+            try:
+                return _fitted(request, _READS[action](request))
+            except Exception as error:  # noqa: BLE001 - every failure is answered and logged in _refusal
+                return self._refusal(request, error)
+
+        def attempt() -> dict[str, Any]:
+            _CHANGERS[action](change, once.outcome)
+            self._logger.info("A person changed the knowledge base from Web Chat. event=team_knowledge_changed "
+                              "person=%s action=%s space=%s page=%s contribution_id=%s", check.person_id, action,
+                              body.get("space"), body.get("page"), body.get("contribution_id"))
+            if change.stored is None:
+                # Every change path stores its receipt with the change (tests/test_team_knowledge.py checks each).
+                raise AnswerUnknown(f"knowledge.{action} changed the knowledge base without storing its receipt.")
+            return self._reply_from_receipt(request, change.stored)
+
+        return once.run(attempt, refusal_for=lambda error: self._refusal(request, error))
+
+    def _once(self, verified: VerifiedFrame, request: _Request, change: _Change) -> CommandOnce:
+        kind = verified.frame.kind
+        outcome = CommandOutcome(
+            team_id=self._people.team_id, retry_key=str(verified.raw["idempotency_key"]),
+            person_id=request.actor.actor_id, kind=kind, body_digest=str(verified.raw["body_digest"]),
+            now=self._clock(), reply_for=change.receipt, logger=self._logger,
+        )
+        return CommandOnce(
+            self._repository, outcome,
+            reply_from_receipt=lambda stored: self._reply_from_receipt(request, stored),
+            key_taken=lambda taken: _message_reply(
+                "invalid_request" if "invalid_request" in KINDS[kind].reply_errors else "runtime_error", str(taken)),
+            not_stored=_message_reply("runtime_error", RUNTIME_ERROR_TEXT),
+            logger=self._logger,
+        )
+
+    def _refused_person(self, check: PersonCheck, action: str, body: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """The refusal for a person who may not act, or may not touch these pages or proposals; None when they may."""
+
+        person = check.person
+        if person is None:
+            return _message_reply("not_allowed", check.reason)
         for space in _access_spaces(body):
             decision = knowledge_command_access(access_payload(action, {**body, "space": space}),
                                                 person_id=person.person_id, team_id=person.team_id,
@@ -346,43 +414,17 @@ class KnowledgeOperations:
                                      "person=%s action=%s space=%s reason=%s", person.person_id, action, space,
                                      decision.reason)
                 return _message_reply("not_allowed", NOT_YOURS_TEXT)
-        request = _Request(self._service, self._repository, _person_actor(person), action, body, self._editor)
-        if action not in _CHANGES:
-            try:
-                return _fitted(request, _READS[action](request))
-            except Exception as error:  # noqa: BLE001 - every failure is answered and logged in _refusal
-                return self._refusal(request, person, error)
-        change = _Change(request, person_editor=request.person_editor())
-        outcome = CommandOutcome(
-            team_id=person.team_id, retry_key=str(verified.raw["idempotency_key"]), kind=verified.frame.kind,
-            body_digest=str(verified.raw["body_digest"]), now=self._clock(), reply_for=change.receipt,
-            logger=self._logger, complete=False,
-        )
+        return None
 
-        def attempt() -> dict[str, Any]:
-            _CHANGERS[action](change, outcome)
-            self._logger.info("A person changed the knowledge base from Web Chat. event=team_knowledge_changed "
-                              "person=%s action=%s space=%s page=%s contribution_id=%s", person.person_id, action,
-                              body.get("space"), body.get("page"), body.get("contribution_id"))
-            if change.stored is None:
-                # Every change path stores its receipt with the change (tests/test_team_knowledge.py checks each).
-                raise AnswerUnknown(f"knowledge.{action} changed the knowledge base without storing its receipt.")
-            return self._reply_from_receipt(request, person, change.stored)
-
-        return carried_out_once(self._repository, outcome, attempt,
-                                refusal_for=lambda error: self._refusal(request, person, error),
-                                reply_from_receipt=lambda stored: self._reply_from_receipt(request, person, stored),
-                                logger=self._logger)
-
-    def _reply_from_receipt(self, request: _Request, person: CommandPerson, stored: dict[str, Any]) -> dict[str, Any]:
+    def _reply_from_receipt(self, request: _Request, stored: dict[str, Any]) -> dict[str, Any]:
         """A committed change's reply, read as the change left it; ``AnswerUnknown`` when that fails."""
 
         try:
-            return _reply_from_receipt(request, stored["receipt"])
+            return _reply_from_receipt(request, stored[RECEIPT_KEY])
         except Exception as error:
             self._logger.error("A person's knowledge change was made, but its reply could not be built; the request "
                                "is answered as unknown. event=team_knowledge_reply_after_change_failed person=%s "
-                               "action=%s error_type=%s detail=%s", person.person_id, request.action,
+                               "action=%s error_type=%s detail=%s", request.actor.actor_id, request.action,
                                type(error).__name__, error, exc_info=error)
             raise AnswerUnknown(f"knowledge.{request.action} was carried out, but its reply could not be built.") \
                 from error
@@ -419,12 +461,12 @@ class KnowledgeOperations:
                                  "agent_type=%s", AGENT_FALLBACK_TYPE, agent_type)
         return {"kind": "agent", "agent_type": AGENT_FALLBACK_TYPE}
 
-    def _refusal(self, request: _Request, person: CommandPerson, error: Exception) -> dict[str, Any]:
+    def _refusal(self, request: _Request, error: Exception) -> dict[str, Any]:
         kind = f"knowledge.{request.action}"
         allowed = set(KINDS[kind].reply_errors)
         if isinstance(error, NotShownInWebChat):
             self._logger.info("A Knowledge page request met knowledge Web Chat cannot show; nothing was changed. "
-                              "event=%s person=%s action=%s size=%s limit=%s", error.event, person.person_id,
+                              "event=%s person=%s action=%s size=%s limit=%s", error.event, request.actor.actor_id,
                               request.action, error.size, error.limit)
             return _message_reply("runtime_error", str(error))
         if isinstance(error, KnowledgeError):
@@ -433,10 +475,10 @@ class KnowledgeOperations:
                 outcome = "not_found"
             if outcome in allowed:
                 self._logger.info("A Knowledge page request was refused. event=team_knowledge_refused person=%s "
-                                  "action=%s code=%s", person.person_id, request.action, error.code)
+                                  "action=%s code=%s", request.actor.actor_id, request.action, error.code)
                 return self._refusal_reply(request, outcome, error)
         self._logger.error("A Knowledge page request failed. event=team_knowledge_command_failed person=%s action=%s "
-                           "error_type=%s", person.person_id, request.action, type(error).__name__, exc_info=error)
+                           "error_type=%s", request.actor.actor_id, request.action, type(error).__name__, exc_info=error)
         return _message_reply("runtime_error", RUNTIME_ERROR_TEXT)
 
     def _refusal_reply(self, request: _Request, outcome: str, error: KnowledgeError) -> dict[str, Any]:
@@ -500,11 +542,10 @@ def _access_spaces(body: dict[str, Any]) -> tuple[str, ...]:
     return (KnowledgeSpace.TEAM.value, KnowledgeSpace.PERSONAL.value) if space == "all" else (space,)
 
 
-def _person_actor(person: CommandPerson) -> KnowledgeActor:
+def _person_actor(person_id: str, team_id: str) -> KnowledgeActor:
     """The person as the knowledge actor: their edits, their own personal space."""
 
-    return KnowledgeActor(kind=ActorKind.PERSON, actor_id=person.person_id, team_id=person.team_id,
-                          work_person_id=person.person_id)
+    return KnowledgeActor(kind=ActorKind.PERSON, actor_id=person_id, team_id=team_id, work_person_id=person_id)
 
 
 def _text(content: Optional[dict[str, Any]]) -> str:
@@ -598,7 +639,7 @@ def _fitted(request: _Request, reply: dict[str, Any]) -> dict[str, Any]:
     key = _LIST_ROWS.get(request.action)
     if key is not None:
         return _fit_rows(request, reply, key)
-    size = body_bytes(reply)
+    size = encoded_size(reply)
     if size > REPLY_BODY_MAX_BYTES:
         raise ReplyTooLarge(PROPOSAL_LARGE if request.action == "read_contribution" else PAGE_LARGE, size)
     return reply
@@ -608,21 +649,21 @@ def _fit_rows(request: _Request, reply: dict[str, Any], key: str) -> dict[str, A
     """The rows that fit, from the first; ``next_offset`` then names the first row left out (contract "Reply size")."""
 
     rows = list(reply[key])
-    if body_bytes(reply) <= REPLY_BODY_MAX_BYTES:
+    if encoded_size(reply) <= REPLY_BODY_MAX_BYTES:
         return reply
     offset = int(request.body["offset"])
     # Measured with the most a continuation adds: next_offset, as large as it can be.
-    base = body_bytes({**reply, key: [], "next_offset": offset + len(rows)})
+    base = encoded_size({**reply, key: [], "next_offset": offset + len(rows)})
     used, kept = base, 0
     for row in rows:
-        added = body_bytes(row) + (1 if kept else 0)
+        added = encoded_size(row) + (1 if kept else 0)
         if used + added > REPLY_BODY_MAX_BYTES:
             break
         used += added
         kept += 1
     if kept == 0:
         # Not even one row fits: a history whose page is too large, or one list entry that is.
-        raise ReplyTooLarge(PAGE_LARGE if key == "revisions" else LIST_ROW_LARGE, body_bytes({**reply, key: rows[:1]}))
+        raise ReplyTooLarge(PAGE_LARGE if key == "revisions" else LIST_ROW_LARGE, encoded_size({**reply, key: rows[:1]}))
     fitted = {name: value for name, value in reply.items() if name != "next_offset"}
     fitted[key] = rows[:kept]
     return _paged(fitted, key, offset, int(reply["total"]))
@@ -757,7 +798,7 @@ def _reply_from_receipt(request: _Request, receipt: dict[str, Any]) -> dict[str,
         if note is None:
             raise KnowledgeError(CODE_NOT_FOUND, "The added note no longer exists.")
         reply["note"] = _note(request, note)
-    size = body_bytes(reply)
+    size = encoded_size(reply)
     if size > REPLY_BODY_MAX_BYTES:
         raise ReplyTooLarge(PAGE_LARGE, size)
     return reply

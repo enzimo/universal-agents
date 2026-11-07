@@ -12,6 +12,7 @@ log, once the server says it is ready, so a test only ever talks to its own serv
 from __future__ import annotations
 
 import re
+import signal
 import subprocess
 import time
 from contextlib import contextmanager
@@ -27,6 +28,15 @@ _READY = "Server is ready"
 @contextmanager
 def own_nats_server(executable: str, folder: Path, *arguments: str) -> Iterator[str]:
     """Run nats-server with JetStream in ``folder`` until the block ends; yields its URL."""
+
+    with own_nats_server_process(executable, folder, *arguments) as (url, _process):
+        yield url
+
+
+@contextmanager
+def own_nats_server_process(executable: str, folder: Path,
+                            *arguments: str) -> Iterator[tuple[str, subprocess.Popen[bytes]]]:
+    """``own_nats_server``, yielding the server's process too, for a test that pauses it (an outage)."""
 
     log_path = folder / "nats.log"
     with log_path.open("w") as log:
@@ -44,7 +54,9 @@ def own_nats_server(executable: str, folder: Path, *arguments: str) -> Iterator[
                 if time.monotonic() >= deadline:
                     pytest.fail("NATS did not start within five seconds")
                 time.sleep(0.02)
-            yield f"nats://127.0.0.1:{listening.group(1)}"
+            yield f"nats://127.0.0.1:{listening.group(1)}", process
         finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGCONT)  # a test may have paused it
             process.terminate()
             process.wait(timeout=5)

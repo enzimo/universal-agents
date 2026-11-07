@@ -21,6 +21,7 @@ from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefuse
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
+from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.message_host import gateway_profile
 from assistant_gateway.store import GatewayStateStore
 from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
@@ -52,8 +53,8 @@ async def test_gateway_reviews_notes_and_restores_archives_over_nats(
     config.transport.nats_servers = [broker]
     person = config.user.canonical_user_id
     AccessRepository(config.manager_storage_settings).record_person(TeamPersonV1(
-        team_id=TEAM, person_id=person, standing=PersonStanding.ACTIVE, roles=("owner",),
-        changed_at_utc=datetime.now(timezone.utc)))
+        team_id=TEAM, person_id=person, person_ref="p-OwnerOwnerOwnerOwnerOw", standing=PersonStanding.ACTIVE,
+        roles=("owner",), changed_at_utc=datetime.now(timezone.utc)))
     repository = create_knowledge_repository(config.manager_storage_settings)
     service = KnowledgeService(repository, settings=KnowledgeSettings())
     worker = replace(worker_actor("review_worker", person=person), team_id=TEAM)
@@ -63,7 +64,9 @@ async def test_gateway_reviews_notes_and_restores_archives_over_nats(
         await installation(stack, broker, config.layout, team_services_profile(TEAM), gateway_profile(TEAM))
         host = MessageHost(config.layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(host, TEAM, stop, team_operations(config, host.clock)))
-        gateway = UserGateway(config, output_sink=None, state_store=GatewayStateStore(str(gateway_db)))
+        # The gateway service's runtime: the one process that runs the gateway's protocol 1 host.
+        gateway = UserGateway(config, output_sink=None, state_store=GatewayStateStore(str(gateway_db)),
+                              manager_runtime=NatsGatewayManagerRuntime.for_gateway_service(config))
         session = gateway.application.resolve_session(session_key=config.user.default_session_key)
         context = GatewayRouteContextV1(session_key=session.session_key, canonical_user_id=person)
 

@@ -103,8 +103,14 @@ receiver asks for its next message when it can act on it, and NATS never picks a
 receiver and pushes (decision of 2026-10-04). Workers of one type share one
 queue and ask for a task only while they are free. The transport adapter
 refuses a push listener on the work stream, and an architecture test fails when
-production code creates a deliver group or subscribes to NATS outside the
-adapter (`tests/test_runtime_architecture_boundaries.py`). Presence records let late
+production code creates a deliver group, subscribes to NATS outside the adapter
+and the protocol 1 kernel, or uses a raw NATS handle (publishing, requests,
+key-value and object-store buckets, streams, consumers) outside the modules it
+lists (`NATS_CLIENT_MODULES` in `tests/test_runtime_architecture_boundaries.py`).
+Protocol 1's request/reply and key-value calls live in `custom_transport.protocol1`
+rather than in the adapter: they sign and verify frames and records, which the
+adapter knows nothing about, and the list keeps them, the adapter and the topology
+code the only places that reach NATS directly (plan 13B.6). Presence records let late
 joiners and the gateway discover live agents without turning presence into
 proof of identity or authority. Agent status requests and snapshots bypass the
 short broadcast age limit: a restarted manager must receive retained presence
@@ -1077,8 +1083,9 @@ knowledge base), plus task history:
   validity, tags, metadata, the importer key trusted imports use, timestamps,
   revision digest). The reserved `metadata.imported_from` record also stays in
   storage; tool and review views and context hydration keep ordinary skill
-  metadata, including onboarding progress. The Settings
-  memory controls get the same view without metadata (`pinned_memory_reply`).
+  metadata, including onboarding progress. People's memory commands and the
+  Settings memory controls get the same view without metadata
+  (`team_services.memory.wire_fact`).
   A Signal chat id is a phone number, so it never reaches a model or a reply.
   Several requests can change the same memory, and a model's change can arrive
   long after it read the fact (`storage/pinned_memory_repository.py`):
@@ -4059,6 +4066,17 @@ the desktop app never offers an older version.
   statements do, so an instance kept in its own schema works. The default
   keeps older rows correct, as the change ledger's `*` does (see "Upgrading in
   place from 0.9" above).
+- **Gateway commands queued at the upgrade.** A durable gateway command whose
+  handler a release removed can still wait in the team lead's control queue when
+  the new release starts. Its class stays readable as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`, one list of retired classes), and the
+  lead tells the person in their chat that it was not carried out and should be
+  sent again (`custom_agents.retired_gateway_commands`; "people's memory
+  commands" under "Message hosts and their trust"), instead of setting it aside
+  as a dead letter that nobody answers. A response of the old type would not
+  reach anyone, because the gateway that waited for it restarted with the
+  upgrade. The model, its handler and the list go with the other upgrade steps
+  from 0.9.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
@@ -4258,18 +4276,40 @@ signed against records that chain to the installation's authority keys.
   path, not by permission: a broken-into process could read another host's key file.
   Remote hosts keep their keys on their own machines.
 - **The bootstrap bundle** (`bootstrap`): the authority public keys and the records a
-  new host needs before it has a certificate. Readers verify every record, so the file
-  grants nothing by itself.
-- **Kept trust records** (`trust_state`): the newest revocations record and the
-  highest block-list sequence survive a restart, as the contract requires, so a host
-  restarted from an older bundle never trusts a revoked key again.
+  new host needs before it has a certificate. The authority keys are the root of
+  trust, so only the launcher and the installation authority write the file, in the
+  owner-only trust folder; the records in it are verified like any other copy.
+- **Kept trust records** (`trust_state`): the revocations record the host holds, plus
+  any older one that still lists an entry the newer one left out early, and the
+  highest block-list sequence of each team survive a restart, as the contract
+  requires, so a host restarted from an older bundle never trusts a revoked key again.
+  Kept records are added before the bundle's and verified again; one that cannot be
+  checked yet (another installation's, before its agreement) stays kept and comes
+  first once it can. Saves are merged under a file lock, so two copies of one host
+  never drop each other's records; a failed save is retried at the next change. A
+  file that cannot be read is moved aside with an error and the host continues from
+  the bundle, since it reads the current record from the buckets when it starts.
 - **Live messages** (`live`): signed requests and replies over NATS with the host's
-  own reply inbox (`NatsTransportConfig.reply_inbox_runtime`), every received frame
-  checked by `custom_messages.wire.frame.verify_frame` before a handler sees it, a
-  replay record for live frames, and refused requests answered at once with only the
-  refusal's code and known pointer.
-- **Signed records** (`state_records`): records in the key-value buckets, signed by
-  their writer, with compare-and-set for placements, and verified on every read.
+  own reply inbox (`NatsTransportConfig.reply_inbox_runtime`; `request` refuses a
+  connection with another), every received frame checked by
+  `custom_messages.wire.frame.verify_frame` before a handler sees it, and refused
+  requests answered at once with only the refusal's code and known pointer. A served
+  address answers only on the requester's own inbox (`answer_subject`): NATS lets a
+  receiver answer once past its own grants, so an answer on a subject the requester
+  named, such as a JetStream API subject, would act with the receiver's rights. Each
+  request is handled in a task of its own: kinds run one at a time in arrival order
+  unless the caller lets them run side by side (handlers that only wait on another
+  host), an address holds at most 64 requests, and one that waited past its expiry is
+  not handled. The replay record keeps each frame only until it can no longer be
+  accepted, and lives in memory: only a frame's signer could reuse its id after a
+  restart.
+- **Signed records** (`state_records`): records in the key-value buckets, signed with
+  the identity the host has when it signs (a renewal switches frames and records
+  together), with compare-and-set for placements, and verified on every read; a record
+  stored under another key than its own is refused.
+- **Private files** (`private_files`): keys, the bundle and kept records are written
+  whole (a temporary file, flushed, then published and the folder flushed), 0600, in
+  folders that are 0700 at every level.
 
 Protocol 1 requests, replies, refusals and key-value writes await
 `custom_transport.send_barrier.before_send()` before sending. They use the same
@@ -4281,34 +4321,67 @@ each commit.
 **The installation authority** (`installation_authority`, `assistant_cli
 run-installation-authority`) vouches for the hosts. It runs no model. The launcher
 prepares the trust folder first (`docker.message_hosts`): it keeps the installation's
-id, creates any missing key, writes the hosts it starts with their public keys
-(`expected-hosts.json`) and the bundle's authority keys. It then starts the authority
-right after NATS and waits until the bundle carries the authority's certificate and a
-freshly signed revocations record. The authority:
+id, which the authority's key file holds (a missing key file gives a new id, since a new
+key could check nothing the old one signed), creates any missing key, writes the hosts it
+starts with their public keys (`expected-hosts.json`; empty until the launcher starts
+message hosts) and the bundle's authority keys. It starts the authority once NATS and the
+team's message streams are ready and waits until the bundle carries the authority's
+certificate and a freshly signed revocations record; a host that joins before the authority
+serves waits for it (`joining.join`). A failed or interrupted start stops the authority and the services already
+started. The authority gets only the NATS login (`env_secrets`, renamed secrets included).
+The authority:
 
-- creates the key-value buckets and each team's dead-letter stream and consumer (it is
-  the contract's topology owner; queued work streams come with queued work);
-- creates per-team buckets using `custom_messages.wire.buckets.bucket_name` and
-  every bucket's stream using `bucket_stream`. The contract disables rollup,
-  stream deletion and purge, so writing one key cannot erase the bucket. Repeated
-  setup reconciles those settings without discarding records;
-- signs its own certificate, and the revocations record every six hours (it lasts a
-  day, with an ever higher sequence, so a restored authority never writes a lower one);
+- creates the key-value buckets, with the operator's `transport.replicas`. It is the
+  contract's topology owner: queued work streams come with queued work, and each team's
+  dead-letter stream with phase 3's dead letters (plan decision 71). Per-team buckets use
+  `custom_messages.wire.buckets.bucket_name` and every bucket's stream `bucket_stream`.
+  The contract disables rollup, stream deletion and purge, so writing one key cannot
+  erase the bucket. Repeated setup reconciles those settings without discarding records;
+- keeps its records current by the wall clock, checking every minute (`keep_current`), so
+  a laptop or a paused virtual machine that slept wakes to a current record within a
+  minute: it signs the revocations record again once it is six hours old (it lasts a day,
+  with an ever higher sequence, so a restored authority never writes a lower one), renews
+  its own certificate at two thirds of its life and signs with the new one from then on,
+  and once a day forgets old trust records and deletes from `UA1_CERTS` the certificates
+  receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). A failed
+  step is tried again a minute later. Hosts read the authority's renewed certificate from
+  `UA1_CERTS` when a reply names it, joining hosts too (`joining.join(fetch_trust=...)`,
+  the same lookup as `MessageHost.fetch_trust`): a host on another machine holds its own
+  copy of the bundle, made when it was set up, which never learns of the new certificate.
+  The contract's pre-join permissions (`joining_host.json`) do not let a host that has not
+  joined read `UA1_CERTS`; with one NATS login shared by every process in this phase the
+  lookup works for every host here, and per-host credentials need a decision on how a first
+  join gets the renewed certificate. When its NATS connection closes for good the
+  authority exits, so the launcher's supervisor sees it;
+- keeps in its own trust folder (`installation_authority.ledger`,
+  `trust/hosts/authority/issued.json`) the highest membership epoch it issued per host,
+  each renewal's answer for 7 days and the newest revocations record it signed. Each
+  record is checked by its own trust store, kept there, and only then written to the
+  bucket. So a lost or rewritten `UA1_CERTS` never makes one epoch name two certificates,
+  and a record the authority would refuse itself is never published;
 - uses a record it reads from `UA1_CERTS` (the revocations record it signs again, a
   certificate it hands back) only when it verifies against the authority's own key:
-  every process shares one NATS login and can write there. It signs the next
-  revocations record from the newest one it verified, in the bucket, the bundle or its
-  memory, and writes over a record that does not verify. When the bucket holds a record
-  that does not verify and it has verified none, it does not start, since an empty list
-  would accept every revoked host again; its log says to restore the trust folder from
-  a backup, or to delete that record to start an empty list;
+  every process shares one NATS login and can write there. A key whose record does not
+  verify counts for nothing, at any epoch. It signs the next revocations record from the
+  newest one it verified: in the bucket, the bundle, its kept copy, the ones its trust
+  store keeps (`trust-state.json`) or its memory. It writes
+  over a record that does not verify. When the bucket holds a record that does not verify
+  and it has verified none, it does not start, since an empty list would accept every
+  revoked host again; its log (`event=installation_authority_start_refused`) says to
+  restore the trust folder from the backup taken with the NATS data, or to delete that
+  record to start an empty list. A record dated ahead of the machine's clock is reported
+  as a clock to correct instead;
 - answers `host.join` and `host.renew`. A join from a host the launcher listed, with
-  that key, asking for no more than listed, gets a 30-day certificate; any other join
-  is denied, so a local installation never takes in a host nobody approved. A host
-  asking again with its key for the same grants gets its certificate back while over a
+  that key, asking for no more than listed, in the listed connection class and
+  deployment, gets a 30-day certificate; any other join is denied, so a local
+  installation never takes in a host nobody approved. A host asking again with the keys
+  of its newest certificate, for the same grants, gets that certificate back while over a
   third of its life is left; otherwise, or when it asks for other grants (an agent type
   the launcher now lists, say), it gets a new one with the next membership epoch that
-  replaces it. While
+  replaces it. A renewal is checked against the list too (`not_allowed` when the list no
+  longer covers its certificate) and gets a certificate that replaces the one signing it;
+  its answer is stored under its renewal id, so a host retrying after a lost reply gets
+  the same certificate. Every certificate states the profile it grants. While
   the contract is a pre-release, a host running another contract digest gets
   `protocol_mismatch`, naming the digest the authority runs. The digest is read before
   the rest of a join or renewal (`verify_frame` marks such a frame `other_contract`), so
@@ -4322,7 +4395,9 @@ freshly signed revocations record. The authority:
 
 Hosts join with `custom_transport.protocol1.joining`, which waits for an authority that
 is still starting and checks the returned certificate against the bundle's authority
-keys. The hosts still share one NATS login, so a join returns no NATS credential.
+keys. The hosts still share one NATS login, so a join returns no NATS credential. An
+external NATS server's login must therefore be allowed to create streams and key-value
+buckets (user docs, "Docker", external NATS).
 
 **Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
 reads the authority's newest revocations record at start and every half hour, renews its
@@ -4331,10 +4406,18 @@ the release and the contract digest, so retries keep it and a host upgraded in p
 gets an earlier renewal's stored answer back), and writes its own liveness record
 (`UA1_HOSTS`) every 10 seconds, each lasting 30 seconds, so a stopped host shows as gone
 within 30 seconds of its last write, as the presence heartbeat did, while one or two lost
-writes do not make a running host look gone; nothing moves because of it. The record lists
-the parts of the host that are not healthy (`components`, at most 16, each with a code saying
-why), such as an agent whose session was refused, and then says the host is `degraded`,
-since it still serves the rest; when they change, the host writes its record again at once.
+writes do not make a running host look gone; nothing moves because of it. Liveness has a
+loop of its own: the trust and certificate upkeep (the revocations record every half hour,
+forgetting trust records nothing can still need every six hours, `TrustStore.forget`,
+renewal when due) runs beside it, so a renewal that waits 30 seconds for the authority, one
+the authority keeps refusing, or a join for more agent types that holds the certificate's
+lock never delays or skips a write; once the host stops, no write goes out and a renewal
+still waiting is cut off (it is asked again with the same id). The record lists the parts of
+the host that are not healthy (`components`, at most 16, each with a code saying why), such
+as an agent whose session was refused, and then says the host is `degraded`, since it still
+serves the rest; a component the contract cannot carry is left out and logged
+(`protocol1_host_components_invalid`), so it never stops the record. When they change, the
+host writes its record again at once.
 It signs its frames and its records (its host record, and the placements, sessions and agent records it
 writes) with one identity, so a renewal switches all of them at once: a record still signed
 with the old certificate would name another certificate than its signer, or be refused once
@@ -4346,21 +4429,26 @@ that the host signs everything with from then on. A type whose name no certifica
 carry is not asked for, and the caller is told. When a frame or
 record names a certificate or an agent session this host does not hold yet, it reads it
 from `UA1_CERTS`, where the authority and the team services publish them, verifies it, and
-checks the frame again, once.
+checks the frame again, once; a join reply too (`joining.join(fetch_trust=...)`). A lookup
+that fails is logged (`protocol1_trust_lookup_failed`) and the frame is refused as it was,
+at once.
 
 **A host on another contract.** While the contract's label is a pre-release, hosts of one
 installation refuse a peer whose contract digest differs (`kinds.CONTRACT_SHA256`, the one
 reading of it; joins, renewals and host records carry it). A host learns that it runs
 another contract than the installation from the team services' host record, which it reads
-when it starts and whenever it changes (`MessageHost.follow_contract`), or from a
+when it starts and whenever it changes (`MessageHost.follow_contract`; only a record the team
+services signed counts, and the watch starts again after a NATS failure), or from a
 `protocol_mismatch` answer to its join or renewal. It logs both digests once
 (`protocol1_host_other_contract`) and tells its listeners, which drain its work; its record
 then says `draining` and, once it holds nothing, `drained`. From then on it renews only to
 give up its agents: a renewal for more is turned away, so it asks for none while it drains,
 and the renewal once drained gets a certificate that grants no agents. Readers cannot read
 the rest of such a host's record, only that it names another digest, and that it is
-authentic. Under one launcher every process starts from the same release, so this happens
-only when a process is restarted on its own after the code under it changed.
+authentic, and that its key and runtime name the host that signed it: a host writes only its
+own liveness record, so no host can say another runs another contract
+(`TrustStore._checked`). Under one launcher every process starts from the same release, so
+this happens only when a process is restarted on its own after the code under it changed.
 
 **The team services** (`team_services`, `assistant_cli run-team-services`) run as host
 `team-services` with the `team_services` role (plan decision 44; scheduled runs are still
@@ -4375,19 +4463,35 @@ it takes the key `team_services.<team>` in `UA1_LOCKS` with compare-and-set, hol
 30-second lease renewed every 10 seconds. The lock names the process instance, not only
 the runtime, so a second copy of the same host, or a restart while the old process still
 runs, waits as a standby, logs which instance serves, and takes over when the lease runs
-out or the first releases it on a clean stop. A stop releases the lock even when
+out or the first releases it on a clean stop. The lease is kept from the moment an instance
+takes the lock, also while it prepares to serve, and an instance that loses it before it
+serves serves nothing. A lock value no instance can have written (an empty one, or a lease
+ending later than a whole lease from now plus the clock tolerance: another process on the
+shared login, or a holder whose clock ran ahead) is taken over once the key's revision stayed
+unchanged for a lease (`team_services_lock_invalid`), since a live holder renews every 10
+seconds. A stop first stops taking requests and waits, at most 30 seconds, for the ones
+being handled to finish and be answered, so no change commits after the lock is released.
+It releases the lock even when
 unsubscribing or writing the last host record failed, after that record, so the next
 instance does not wait out the lease. Every instance runs as one host with one
 certificate, so an instance that takes the lock first signs with the host's newest
 certificate in `UA1_CERTS`, which the serving instance may have renewed while this one
 waited (a replaced certificate signs nothing new five minutes after its replacement, and
-readers and the authority then refuse it), and renews it at once when it is due. An
+readers and the authority then refuse it), renews it at once when it is due, and reads the
+current revocations record, since a standby may have waited longer than the one it read at
+start lasts. An
 instance that finds another holding the lock stops at once. A renewal that fails for another reason (NATS not answering in time, a
 short outage) is tried again every 2 seconds while the lease lasts, each failure logged
 (`team_services_lock_renew_failed`), and the instance keeps serving: its lease still keeps
 others out, and stopping would stop the whole team, because the launcher stops every
-service when one exits. Only when the lease runs out unrenewed does it stop
-(`team_services_lock_lease_ended`), since a standby may take over from then on. A renewal
+service when one exits. When the lease runs out unrenewed it tries one last
+compare-and-set at the revision it wrote, cut off well before a standby may take over: it
+succeeds only when no other instance wrote the lock since, so nobody else served, and the
+instance keeps serving (`team_services_lock_lease_resumed`). That is what a laptop's sleep
+or a paused virtual machine looks like, since the event loop's timers stop with the machine
+while the wall clock runs on. Otherwise it stops (`team_services_lock_lease_ended`), since a
+standby may take over from then on. A NATS connection that closed for good stops it at once
+(`team_services_nats_closed`), and every lost lock ends the process with exit code 1. A renewal
 whose write reached NATS but whose answer was lost is recognised by the lock still naming
 this instance, not taken as a lost lock. Taking the lock follows the same rule: when NATS
 or the connection to it fails while a standby checks the lock, or while a first instance
@@ -4403,13 +4507,22 @@ They serve the team's address (`svc.team`) and answer, so far:
 
 - `sessions.open`: the host's certificate must allow the agent's type and have room under
   its session limit, and the agent must not run on another host (agents stay on their
-  host; `already_placed` names it). The placement is written with compare-and-set; the
-  session, naming the placement's revision, is signed into `UA1_CERTS`. Only the team
-  lead's type on a lead host gets the `lead` role;
-- `sessions.renew` and `sessions.close`, for sessions on the asking host; a close removes
-  the placement unless the agent is handed over. A renewal is refused (`not_allowed`) for a
-  session that has ended or whose placement is no longer the agent's current one, so a
-  session closed earlier never comes back when its agent is placed on the same host again.
+  host; `already_placed` names it). The placement is written with compare-and-set, under a
+  sequence that never goes back, also after a close deleted the key (its signed sequence is
+  the placement's fencing token); the session, naming the placement's revision, is signed
+  into `UA1_CERTS`, and its start is the placement's `placed_at`, which each new placement
+  of an agent moves later. Only the team lead's type on a lead host gets the `lead` role;
+- `sessions.renew` and `sessions.close`, for sessions on the asking host. A renewal is
+  refused (`not_allowed`) for a session that has ended or whose placement is no longer the
+  one it was opened for (its host and `placed_at`), so a session closed earlier never comes
+  back when its agent is placed on the same host again. A close removes the session's own
+  placement unless the agent is handed over, never a newer placement of the agent; a session
+  that has already ended is not signed again (the answer is its recorded end), so a
+  repeated or late close changes nothing, while a retry still finishes a close whose
+  removal failed. A handover to another host comes with phase 3's custody windows: until
+  then a placement a `handed_over` close kept still names the old host, and only that host
+  may place the agent again. Every refusal is logged (`agent_session_refused`, with the
+  outcome, agent and host).
   A host whose record names another contract digest gets no new placement (`sessions.open`
   answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
   its sessions are still renewed and closed, so it keeps receiving control messages for the
@@ -4417,20 +4530,52 @@ They serve the team's address (`svc.team`) and answer, so far:
 - people's memory commands, `memory.list`, `.show`, `.create`, `.replace`, `.delete` and
   `.undo` (`team_services.memory`), which the gateway sent the team lead's process as a
   durable `ManagerMemoryCommand` until phase 2. They run the same memory service on the
-  same database, in a worker thread so the lock and upkeep keep running. The person comes
-  only from the command's authority token: its person reference is read back from the
-  gateway's copy of the team's people (`team_services.people`,
-  `PeopleDirectory.person_by_ref`), and a person who is unknown, disabled or removed, or a
-  sender that is not a gateway, is answered `not_allowed`. Agents' own memory operations
-  (root task tokens) are not answered here yet; agents still use their tools in their own
-  process. The same ownership rule decides as before (`access_control.ownership`). A
-  person's command no longer records the chat it came from with the fact's events;
+  same database, with the team lead's memory settings (its agent type's overrides
+  included, `assistant_gateway.runtime_config.lead_memory_config`), in a worker thread so
+  the lock and upkeep keep running. Memory commands run side by side (at most 16 at once,
+  `LiveHost.serve`): the store's write lock and the stored outcomes order them, and a slow
+  database must not hold up the session renewals queued behind them. The person comes
+  only from the command's authority token: a token presented by another host than the one
+  that signed it is refused `bad_authority` (contract "Who may present a token"); its
+  person reference is read back from the gateway's copy of the team's people
+  (`team_services.people`, `PeopleDirectory.person_by_ref`), and a person who is unknown,
+  disabled or removed, or a sender that is not a gateway, is answered `not_allowed`.
+  Agents' own memory operations (root task tokens) are not answered here yet; agents
+  still use their tools in their own process. The same ownership rule decides as before
+  (`access_control.ownership`). A person's command no longer records the chat it came
+  from with the fact's events. Replies fit the contract's limits (README "Reply size"): a
+  list returns as many facts as fit in one frame and says where to continue. Fact text
+  travels inline, at most 32,768 characters, until phase 3's blob references; a longer
+  fact (only agents and imports write one) is never cut or skipped, as plan decision 77
+  has it for knowledge: showing it explains why it cannot be shown, a list page ends just
+  before it (or explains it and where to continue), a change whose reply would carry it
+  is refused, and an undo that restores it answers without it. Only a command's own
+  mistakes are `invalid_request` (`PinnedMemoryInputError`); any other failure is logged
+  and answered `runtime_error`.
+  A memory command a 0.9 gateway queued in the team lead's control queue just before an
+  in-place upgrade is still read by the 0.10 lead, as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`), so it is no longer set aside as a dead letter
+  with no answer to the person (plan 13B.10). The lead never carries it out
+  (`custom_agents.retired_gateway_commands`). It sends the person the gateway signed for
+  a chat message in the chat the command came from: "Your memory command was sent before
+  the team was upgraded, so nothing was changed. Please send it again." It does not send
+  the old reply, because the restarted gateway drops a manager control reply nobody waits
+  for. A command without a valid gateway signature, one that names someone other than
+  the signed person, or one with no chat to answer in tells nobody
+  (`event=retired_gateway_command_unanswered`, with the reason, the command's class and
+  id); each answer is logged as `event=retired_gateway_command_answered`. A 0.9 lead's
+  reply that was still waiting on the gateway's reply route is read the same way and
+  dropped like any reply nobody waits for
+  (`event=gateway_unmatched_manager_control_response_dropped`), rather than set aside. The
+  retired classes are one list in the contract; a family that moves to the team services
+  later adds its old class name there.
 - the Web Chat Knowledge page's commands, `knowledge.list`, `.read`, `.history`, `.write`,
   `.add_note`, `.archive`, `.revert`, `.list_contributions`, `.count_contributions`,
   `.read_contribution`, `.publish_contribution` and `.withdraw_contribution`
   (`team_services.knowledge`), the durable `ManagerKnowledgeCommand` until phase 2, on the
   same knowledge service (`knowledge_base.service.knowledge_service_for`, shared with the
-  agents' tools). Replies name a person editor by reference, and an agent by its type; a
+  agents' tools), with the team's knowledge settings (`agent.knowledge`; agent types
+  cannot override them), which also decide whether the gateway shows the Knowledge page. Replies name a person editor by reference, and an agent by its type; a
   type longer than the contract's 24 characters (the runtime allows 64 until phase 3,
   plan decision 56) is shown as "Agent" and logged once. Page text travels inline, at
   most 32,768 characters (`knowledge_base.records.INLINE_TEXT_MAX`), until the contract's
@@ -4441,7 +4586,7 @@ They serve the team's address (`svc.team`) and answer, so far:
   `runtime_error` with a plain message saying nothing was changed or cut, and a change
   that would replace, hide, revert or decide text the person could not open is refused
   the same way before anything is stored. A reply is also limited in bytes, one frame of
-  262,144 (`custom_messages.wire.reply_size`): a list returns the rows that fit with
+  262,144 (`custom_messages.wire.sizes`): a list returns the rows that fit with
   `next_offset`, and the gateway asks again until it has the browser's page of 20; a page
   too large to show with its open notes, links and backlinks is refused plainly; and a
   change measures its reply inside its own transaction, on the page as it leaves it, and
@@ -4452,6 +4597,9 @@ They serve the team's address (`svc.team`) and answer, so far:
   stored pages, earlier revisions, pending proposals and open notes over the limit, and
   the pages probably too large for one reply, and reports them as a note on the Status
   page (`custom_agents.long_knowledge`).
+  A Knowledge page command a 0.9 gateway queued before the upgrade
+  (`ManagerKnowledgeCommand`) is a retired command like the memory one above: the lead
+  tells the person it was not carried out.
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.
@@ -4461,29 +4609,47 @@ in the manager database): a change command is carried out once however often it 
 retried. The store that makes the change checks for a stored reply under its write
 lock, before changing anything, and stores the reply under the team and the command's
 retry key (the frame's idempotency key) in the same transaction as the change
-(`CommandOutcome`, passed to the memory and knowledge stores' writes). A refusal rolls the
-change back and is stored in a transaction of its own, except outcomes that ask for a retry
-(`runtime_error`, `record_busy` and others). The team services also look the outcome up
-before a command runs, and again after a refusal (`team_services.outcomes`), because a
-service checks a command before it reaches the store (a page's revision, whether a proposal
-still waits), and after the first try those checks would refuse a retry as stale; the
-second look finds a change whose commit's acknowledgement was lost. A reply that shows the
-result as readers see it after the commit (a knowledge page with its links in and notes)
-cannot be built in the change's transaction, so the change stores a receipt instead: what
-it changed, by id, and the review kinds the person confirmed, never page text, so no copy
-of a person's text outlives their departure here. The reply is built from the receipt
-after the commit, on the first try and every retry alike; a retry gets the same outcome
-for the same records, shown as they are then. When the reply cannot be built, the change
-is already made, so the request is answered `handler_failed` (result unknown), never as
-refused (`team_services.outcomes.AnswerUnknown`). Outcomes are kept seven days, the
-longest life of an authority token; a repeated key with another body gets the stored
-outcome, and both body digests are logged. The table is created when a store that uses it opens, so
-an older database gets it at its first start on this version.
+(`CommandOutcome`, passed to the memory and knowledge stores' writes). A repeat is looked
+up first, so it gets its stored reply even if its body would no longer pass the checks;
+the knowledge commands look again after a failure (`team_services.outcomes`), which
+finds a change whose commit's acknowledgement was lost. Every final
+refusal is stored too, in a transaction of its own (a refused person, refused access, a
+wrong command, a change the store refused), except outcomes that ask for a retry
+(`runtime_error`, `record_busy` and others); a refusal that cannot be stored is answered
+`runtime_error` instead, so the command is decided again rather than answered
+differently later. Each reply records the person the command acted for: the retry key
+comes from the sender's request id alone, so another person's command under a reused id
+is refused and never shown that reply, and removing a person deletes the replies of
+their commands with their task records (`storage.person_departure_repository`), since a
+reply can quote their memory. Replies are kept seven days, the longest life of an
+authority token, and deleted when a new one is stored and by the team services' upkeep;
+a repeated key with another body gets the stored reply, and both body digests are
+logged. A reply that shows the result as readers see it after the commit (a knowledge
+page with its links in and notes) cannot be built in the change's transaction, so the
+change stores a receipt instead (a stored reply whose only key is `receipt`): what it
+changed, by id, and the review kinds the person confirmed, never page text. The reply is
+built from the receipt after the commit, on the first try and every retry alike; a retry
+gets the same outcome for the same records, shown as they are then. When the reply
+cannot be built, the change is already made, so the request is answered
+`handler_failed` (result unknown), never as refused
+(`team_services.outcomes.AnswerUnknown`). The table is created when a store that uses it opens, so an older database gets
+it at its first start on this version.
 
 **People's commands from the gateway** (`assistant_gateway.application.team_commands`):
-the gateway reads the person's reference from the access store, gives each command a
-fresh `request_id`, and sends it through its host (`assistant_gateway.team_services_client`);
-it no longer checks memory access itself, since the team services decide. For memory,
+the gateway reads the person's reference from the access store, after writing the
+team's copy of the person when it differs from its own records (a failed copy write is
+otherwise retried only at the person's next change or the gateway's next start, so a
+demoted administrator could still change team memory, and a person added meanwhile
+could not act at all); when that write fails, the command is not sent and the person is
+told why (`PeopleDirectorySync.person_ref`). It gives each command a
+fresh `request_id` (a UUIDv7, the contract's "Fresh ids"), and sends it through its host
+(`assistant_gateway.team_services_client`); it no longer checks memory access itself,
+since the team services decide. When no answer comes in time, it sends the same command
+once more under the same request id, so a slow change is answered from its stored reply
+and never carried out twice; after that the person is told the change may still be made.
+Refusals, unavailable team services and gateway errors reach people as plain sentences,
+and a body the contract would refuse (an empty or over-long fact, a replace that changes
+nothing, too many tags) is refused before it is sent. For memory,
 `assistant_gateway.pinned_memory_commands.RuntimePinnedMemoryCodec` keeps the chat
 grammar and rendering: times a person writes are read in their own time zone before
 sending (the contract carries UTC times), `never` clears an expiry, a list asks for at
@@ -4491,22 +4657,51 @@ most 100 facts, and the typed reply becomes the view the Settings page and the c
 renderer use. A gateway started without the launcher runs no host, so its memory
 commands say the team services cannot be reached.
 
+They also look after their own records every half hour (`SessionService.maintain`): after
+they renew, they write each placement an earlier certificate of theirs signed again under
+the current one, the same placement (body and `placed_at` unchanged) under the next
+sequence, since a reader that forgot the old certificate refuses what it signed (contract
+"State reports outlive certificates"); and they delete from `UA1_CERTS` the sessions
+receivers have forgotten (`custom_messages.wire.trust.kept_for`). Signing a placement again
+gives it a new revision, which is why a session's placement is recognised by its host and
+`placed_at`, not by the revision it names.
+
 **The gateway as a host** (`assistant_gateway.message_host.GatewayMessageHost`): the
 launcher lists the gateway (host `gateway`, role `gateway`) beside the team services, and
-the gateway joins in the background when its NATS runtime connects, so nothing else in the
-gateway waits for the authority. It sends a person's operation to the team services with a
-command token (`custom_transport.protocol1.authority_tokens.command_token`): signed with the
-gateway's own key, bound to that one command, lasting at most five minutes, and naming the
-person only by their **person reference** (`TeamPersonV1.person_ref`, `p-` and 22 random
-URL-safe characters, plan decision 64). People's canonical ids can be names or chat
-handles, so they never travel in frames. The reference is stored with the person in the
-access store's people table (`access_people.person_ref`, unique per team), kept when the
-gateway copies the people again, and created for existing people when an older store is
-opened; `AccessRepository.team_person_by_ref` turns it back into the person. The team
-transfer does not carry the people copy, so a moved team's people get new references;
-nothing outside the instance keeps them. A gateway
-started without the launcher has no bootstrap bundle, so it runs no host and its commands
-say so (`event=gateway_host_not_prepared`).
+the gateway service joins in the background when its NATS runtime connects, so nothing
+else in the gateway waits for the authority. Only the gateway service runs this host
+(`NatsGatewayManagerRuntime.for_gateway_service`): command-line runs (`ask`, `chat`,
+`cron`, `heartbeat`) open a gateway of their own, and a second process joining as host
+`gateway` would load the gateway's key and mark the running gateway's host record
+`drained` when it ended, so they run none. The gateway sends a person's operation to the
+team services with a command token
+(`custom_transport.protocol1.authority_tokens.command_token`): signed with the gateway's
+own key, bound to that one command (the body field the contract names for the kind,
+`request_id` for most), lasting at most five minutes, and naming the person only by their
+**person reference** (`TeamPersonV1.person_ref`, `p-` and 22 random URL-safe characters,
+plan decision 64); anything else is refused before it is signed. People's canonical ids
+can be names or chat handles, so they never travel in frames. The reference is stored
+with the person in the access store's people table (`access_people.person_ref`, unique
+per team), and created for existing people when an older store is opened. The store
+keeps the reference it holds whenever the people copy is written again, checked inside
+its write transaction, and a full copy drops only people it found in the store before it
+read the gateway's records, so a writer that read the copy before another stored someone
+(the running gateway and a command-line run both copy people) neither drops them nor
+gives them a second reference.
+`AccessRepository.team_person_by_ref` turns a reference back into the person, whatever
+their standing: a receiver checks that the person is active and holds the roles the
+operation needs before it acts for them. The team transfer does not carry the people
+copy, so a moved team's people get new references; nothing outside the instance keeps
+them. After this upgrade an instance cannot go back to 0.9 in place: 0.9 refuses people
+records that carry a reference. A gateway service on an instance whose launcher never
+prepared the message hosts has no bootstrap bundle, so it runs no host and logs
+`event=gateway_host_not_prepared`; one started by hand on an instance the launcher
+prepared joins like any other. Answers to the join that cannot change while the process
+runs (`denied`: the launcher listed another key, team or connection; `protocol_mismatch`)
+end the joining, and a person's command then says why; a join that waits for approval or
+an authority that does not answer is asked again every 10 seconds. Stopping cancels a
+join still under way (it can wait two minutes for the authority), and a joined host
+writes its last record (`drained`) before the gateway closes its connection.
 
 **Starting and restarting the authority and the team services** (`docker.message_hosts.MessageServices`).
 The launcher starts the team lead, the startup agents and the gateway only once the team
@@ -4518,6 +4713,10 @@ started. A cleanly stopped instance releases the lock, so the next one serves at
 After an unclean stop the new instance waits until the stopped one's lease runs out (up to
 38 seconds), and the launcher waits with it, for at most 98 seconds, saying every 10
 seconds what it waits for (`message_service_waiting`); then the launch is refused. A
+process that is not ready in time, or whose wait ends any other way, is stopped, so nothing
+a failed start began keeps running, and a stop signal during the wait (`docker stop`,
+Ctrl+C) stops what started, the team services releasing their lock, and ends the launch
+cleanly (`message_services_start_stopped`). A
 restart of everything (the configuration editor's, or an approved `all` restart) stops the
 other processes, then the team services and the authority. It then writes
 `expected-hosts.json` again from the saved configuration, and starts the authority, the

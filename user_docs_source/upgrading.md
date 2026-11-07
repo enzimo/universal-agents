@@ -54,6 +54,10 @@ one created and logs each addition (`event=storage_column_added`). If your
 to upgrade it or names the `assistant_cli.py migrate-config` command. If
 something from the old version cannot carry over, startup says what to do.
 
+A memory change sent from 0.9 just before the upgrade (`/coremem`, `/usermem`
+or the Settings memory page) that was still waiting when the new version
+started is not carried out. You get a chat message that says so; send it again.
+
 ## Moving to another machine
 
 To move a team to another machine, or to a fresh instance, use the

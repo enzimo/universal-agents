@@ -4,7 +4,7 @@ Web Chat's Knowledge page carries text inline, at most
 ``knowledge_base.records.INLINE_TEXT_MAX`` (32,768) characters, while agents
 read and write whole pages up to ``agent.knowledge.limits.max_body_chars``
 (at most 500,000); and one page, with its open notes, links and backlinks, must
-fit in one reply (``custom_messages.wire.reply_size``). The team services refuse
+fit in one reply (``custom_messages.wire.sizes``). The team services refuse
 what Web Chat cannot show and change nothing (``team_services.knowledge``), so no
 text is lost or cut; this note tells administrators how much stored knowledge
 people cannot open in Web Chat: pages, earlier revisions, proposals waiting for
@@ -37,7 +37,7 @@ import time
 from typing import Any, Callable, Optional
 
 from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
-from custom_messages.wire.reply_size import REPLY_BODY_MAX_BYTES
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES
 from knowledge_base.records import INLINE_TEXT_MAX, LongTextCounts
 from runtime_settings.knowledge import KnowledgeWriteLimits
 

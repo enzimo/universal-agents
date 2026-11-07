@@ -26,7 +26,9 @@ from assistant_gateway.application.knowledge_pages import (
 from assistant_gateway.application.knowledge_wire import INLINE_TEXT_MAX
 from assistant_gateway.application.team_commands import (
     GatewayTeamCommandService,
+    PersonCopyNotCurrent,
     TeamCommandRefused,
+    TeamServicesNoAnswer,
     TeamServicesUnavailable,
 )
 from assistant_gateway.interactive_apps.website_handlers.knowledge import (
@@ -78,11 +80,6 @@ class _References:
         return next((person for person, reference in REFERENCES.items() if reference == person_ref), None)
 
 
-class _Ids:
-    def new_correlation_id(self) -> str:
-        return "cmd-1"
-
-
 def _page(editor: dict) -> dict:
     return {
         "type": "inline", "space": "team", "page": "deploys", "title": "Deploys", "page_type": "how-to",
@@ -107,7 +104,7 @@ def site(tmp_path: Path):
     names = {"user_beta": "Beatrix", "user_gamma": "user_gamma"}
     references = _References()
     gateway.knowledge = GatewayKnowledgePages(
-        team_commands=GatewayTeamCommandService(team_services=team, references=references, id_generator=_Ids()),
+        team_commands=GatewayTeamCommandService(team_services=team, references=references, request_ids=lambda: "cmd-1"),
         references=references, display_name=lambda pid: names.get(pid, pid), enabled=True,
     )
     app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
@@ -233,11 +230,14 @@ async def test_refusals_keep_their_code_words_and_review_flags(site) -> None:
         (TeamCommandRefused("knowledge.add_note", "handler_failed"), True, CHANGE_UNKNOWN_TEXT),
         (TeamCommandRefused("knowledge.list", "handler_failed"), False, READ_FAILED_TEXT),
         (TeamCommandRefused("knowledge.add_note", "revocations_not_current"), True, REQUEST_REFUSED_TEXT),
-        (TeamServicesUnavailable("The team services did not answer: timeout"), True, TEAM_SERVICES_SILENT_TEXT),
-        (TeamServicesUnavailable("The team services did not answer: timeout"), False,
-         TEAM_SERVICES_SILENT_READ_TEXT),
+        (TeamServicesNoAnswer("The team services did not answer in time."), True, TEAM_SERVICES_SILENT_TEXT),
+        (TeamServicesNoAnswer("The team services did not answer in time."), False, TEAM_SERVICES_SILENT_READ_TEXT),
+        (PersonCopyNotCurrent(), True, str(PersonCopyNotCurrent())),
+        (TeamServicesUnavailable("You are not a member of this team, so the command was not sent."), True,
+         "You are not a member of this team, so the command was not sent."),
     ],
-    ids=["change-handler-failed", "read-handler-failed", "change-refused", "change-unanswered", "read-unanswered"],
+    ids=["change-handler-failed", "read-handler-failed", "change-refused", "change-unanswered", "read-unanswered",
+         "copy-not-current", "not-a-member"],
 )
 async def test_a_refused_or_unanswered_request_is_explained_in_plain_words(site, caplog, error, change, message) -> None:
     """``handler_failed`` leaves a change's result unknown; other refusals came before anything ran."""
