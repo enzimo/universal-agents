@@ -1,0 +1,32 @@
+{
+  "description": "The session in a reply is for the team the host asked, even when the team services host that signs it serves another team too.",
+  "refusal": "invalid_body",
+  "at": "/body/session/body/team",
+  "base": "sessions.open.reply/ok.json",
+  "changes": [
+    {
+      "set": "/issuer/membership_epoch",
+      "to": 3
+    },
+    {
+      "set": "/body/session/writer/membership_epoch",
+      "to": 3
+    },
+    {
+      "set": "/body/session/body/team",
+      "to": "team_other"
+    },
+    {
+      "set": "/body/session/key",
+      "to": "session.install_example.team_other.s-researcher-3-1"
+    }
+  ],
+  "context": {
+    "trust": {
+      "add": [
+        "extra/team-services-1-two-teams.json"
+      ]
+    }
+  },
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"sessions.open.reply\", \"message_id\": \"01928f3a-7b2c-7d02-8000-000000000d02\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"host\", \"id\": \"worker-host-1\", \"runtime\": \"worker-host-1\"}, \"subject\": \"_INBOX.worker-host-1.01928f3a-7b2c-7d01-8000-000000000d01\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"session\": {\"record\": \"agent_session\", \"protocol\": \"1.0-pre\", \"key\": \"session.install_example.team_other.s-researcher-3-1\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 3, \"key_id\": \"test-services-key-1\"}, \"sequence\": 1, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"session\": \"s-researcher-3-1\", \"installation\": \"install_example\", \"team\": \"team_other\", \"agent\": \"researcher-3\", \"agent_type\": \"researcher\", \"agent_role\": \"worker\", \"runtime\": \"worker-host-1\", \"placement_revision\": 13, \"started_at\": \"2026-10-22T04:30:00.000Z\", \"ends_at\": \"2026-10-29T04:00:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"y-u5eudWy5KR9JkKLoAWGeuU4qJD8GHNp_JV1Ro2ljw\", \"signature\": \"zTRYsdtIBCXXoeEa5VlD_4ITOvKvepTLXTdLJgFMpTC-WuGnyQ9w-QRJVg3R_DTyIa-YxwrCV8ii_GPqqn-4BA\"}}, \"causation_id\": \"01928f3a-7b2c-7d01-8000-000000000d01\", \"idempotency_key\": \"sessions.open.reply:qmtAD6PHu3tQl7GC5BTqgfjITseV0dTWp-i3NnOdKLo\", \"body_digest\": \"k4ASKqxfuuMCUIsa-hqIzK-NmXyT1xPhXdZ6nSZR15Y\", \"signature\": \"tT6mNj4ml8f55Ftl7H9DsnaMqL8OHwr1HEX9b_62dOfC4p1oNoMeYOJAwH-xQ0BYlx9XWbyVrkC-puc-uapaBA\"}"
+}

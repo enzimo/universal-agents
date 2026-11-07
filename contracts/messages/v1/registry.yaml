@@ -224,8 +224,8 @@ state_records:
     signer_roles: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     body: state/host.schema.json
-    ttl_seconds: 60
-    write_rule: written by the host itself every 10 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
+    ttl_seconds: 30
+    write_rule: written by the host itself every 10 seconds, expiring within ttl_seconds (30 seconds), so a host that stops is reported unavailable within about 30 seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
   agent:
     description: An agent's state, written by the host it is placed on when the state changes.
     bucket: UA1_AGENTS
@@ -246,7 +246,7 @@ state_records:
     write_rule: compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer
   team_view:
     description: One entry of a team's shared view of its members, requests, tasks and Objectives.
-    bucket: UA1_TEAM_VIEW
+    bucket: UA1_TEAM_VIEW_{team}
     key: "<team>.<entry>.<id>"
     signer: host
     signer_roles: [team_services]
@@ -255,7 +255,7 @@ state_records:
     write_rule: deleted when the item closes or the person it names departs; each entry at most 4 KiB
   block_list:
     description: A team's blocks on tools and its people's standing, read by the team's hosts that decide tool calls from signed lists.
-    bucket: UA1_BLOCK_LIST
+    bucket: UA1_BLOCK_LIST_{team}
     key: "<team>"
     signer: host
     signer_roles: [team_services]
