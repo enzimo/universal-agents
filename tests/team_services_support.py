@@ -23,6 +23,9 @@ from custom_transport.protocol1.ids import new_message_id
 from team_services.process import team_operations
 
 
+INSTALLATION = "install_example"
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -33,7 +36,7 @@ class InProcessTeamServices:
         self.team = config.manager.team_id
         self.handlers: dict[str, Any] = {}
         for family in team_operations(config, clock):
-            self.handlers.update(family)
+            self.handlers.update(family.handlers)
         self.sender_roles = sender_roles
         self.sent: list[tuple[str, dict[str, Any], str]] = []
         self.replies: list[dict[str, Any]] = []
@@ -49,8 +52,11 @@ class InProcessTeamServices:
 
 def stand_in_frame(team: str, kind: str, body: dict[str, Any], *, person_ref: str | None, request_id: str,
                    sender_roles: frozenset[str] = frozenset({"gateway"}), message_id: str | None = None,
-                   binding: str = "command") -> SimpleNamespace:
-    """What a handler reads from a verified frame (module docstring); the body is checked first."""
+                   binding: str = "command", token_signer: str = "gateway") -> SimpleNamespace:
+    """What a handler reads from a verified frame (module docstring); the body is checked first.
+
+    The sender is host ``gateway``; ``token_signer`` names the host that signed the command token.
+    """
 
     body_model(kind)[0].validate_python(body)
     raw = {"message_id": message_id or new_message_id(), "body": body,
@@ -60,9 +66,10 @@ def stand_in_frame(team: str, kind: str, body: dict[str, Any], *, person_ref: st
     return SimpleNamespace(
         frame=SimpleNamespace(kind=kind, issuer=SimpleNamespace(runtime="gateway", team=team)),
         raw=raw,
-        certificate=SimpleNamespace(roles=sender_roles),
-        authority=SimpleNamespace(token=SimpleNamespace(
-            person=person_ref, bound_to=SimpleNamespace(type=binding, id=request_id))),
+        certificate=SimpleNamespace(roles=sender_roles, installation=INSTALLATION, runtime="gateway"),
+        authority=SimpleNamespace(
+            token=SimpleNamespace(person=person_ref, bound_to=SimpleNamespace(type=binding, id=request_id)),
+            certificate=SimpleNamespace(roles=frozenset({"gateway"}), installation=INSTALLATION, runtime=token_signer)),
     )
 
 

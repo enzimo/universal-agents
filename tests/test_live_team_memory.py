@@ -49,7 +49,7 @@ async def started_team(stack: AsyncExitStack, url: str, tmp_path: Path, stop: as
         resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}}))
     host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, url, TEAM_SERVICES_RUNTIME))
     memory = MemoryOperations(repository, PeopleDirectory(access, TEAM), {}, host.clock, logging.getLogger("test"))
-    serving = asyncio.create_task(serve_team(host, TEAM, stop, [memory.handlers()]))
+    serving = asyncio.create_task(serve_team(host, TEAM, stop, [memory.family()]))
     stack.push_async_callback(lambda: serving)
     stack.callback(stop.set)
     gateway = GatewayMessageHost(layout, TEAM)

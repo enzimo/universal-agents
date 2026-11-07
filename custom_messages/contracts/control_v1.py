@@ -585,6 +585,16 @@ class PinnedMemoryCommandResultPayload(BaseModel):
 
 
 PINNED_MEMORY_SORT_NEWEST = "newest"
+# The memory service's sort names, as the message contract's memory.list names them
+# (the team services and the gateway convert with it, in each direction).
+PINNED_MEMORY_WIRE_SORTS = {
+    "memory_id": "memory_id",
+    PINNED_MEMORY_SORT_NEWEST: "newest",
+    "valid_from_utc": "valid_from",
+    "invalid_after_utc": "expires",
+}
+# What a person writes as an expiry to clear it; the memory service takes it as "no expiry".
+PINNED_MEMORY_CLEAR_EXPIRY = "never"
 
 
 class PinnedMemoryCommandPayload(BaseModel):

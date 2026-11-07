@@ -11,7 +11,9 @@ renewal), its own records' upkeep (``SessionService.maintain``: placements signe
 under the current certificate, forgotten sessions deleted) and the lock's lease until it
 is stopped.
 
-Stopping releases the lock even when unsubscribing or writing the last host record
+Stopping first stops taking requests and lets the ones being handled finish and be
+answered (at most ``DRAIN_SECONDS``), so a change is never committed after the lock is
+released. It releases the lock even when unsubscribing or writing the last host record
 failed, so the next instance does not wait out the lease. Losing the lock (another
 instance holds it, or its lease ran out without a successful renewal), also while it
 prepares to serve, stops the process with exit code 1, so the launcher stops the team
@@ -29,7 +31,7 @@ import contextlib
 import logging
 import signal
 from datetime import datetime
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from access_control.people_directory import PeopleDirectory
 from assistant_gateway.config import GatewayInstanceConfig
@@ -44,13 +46,17 @@ from storage.access_repository import AccessRepository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.memory import MemoryOperations
-from team_services.service import Handler, TeamServices
+from assistant_gateway.runtime_config import lead_memory_config
+from team_services.service import OperationFamily, TeamServices, Upkeep
 from team_services.serving import mark_serving
 from team_services.sessions import SessionService
 
 TEAM_SERVICES_ROLES = ("team_services",)
-# How often the team services look after their own records (SessionService.maintain).
+# How often the team services look after their own records (SessionService.maintain) and each family's.
 MAINTENANCE_INTERVAL = TRUST_REFRESH_INTERVAL
+# How long stopping waits for the requests being handled: the longest a team operation's request lasts
+# (the registry's expiry_seconds for memory commands); a handler still running then is logged.
+DRAIN_SECONDS = 30.0
 _LOGGER = logging.getLogger("team_services")
 
 
@@ -69,7 +75,7 @@ def transport_config(config: GatewayInstanceConfig) -> NatsTransportConfig:
 
 
 async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
-                     families: Sequence[Mapping[str, Handler]] = ()) -> None:
+                     families: Sequence[OperationFamily] = ()) -> None:
     """Hold the lock, serve the team's address and keep the host and the lock up until ``stop``.
 
     ``families`` are the handlers of people's commands (``team_operations``).
@@ -105,7 +111,7 @@ async def _prepare(host: MessageHost) -> None:
 
 async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock,
                               keeper: asyncio.Task[None], team: str, stop: asyncio.Event,
-                              families: Sequence[Mapping[str, Handler]]) -> None:
+                              families: Sequence[OperationFamily]) -> None:
     preparing = asyncio.create_task(_prepare(host))
     await asyncio.wait({preparing, keeper}, return_when=asyncio.FIRST_COMPLETED)
     if keeper.done():
@@ -119,7 +125,8 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
     sessions = SessionService(host.records, live.trust, live.identity.installation, host.clock, host.logger)
     services = TeamServices(sessions, families)
     subscription = await live.serve("svc.team", Receiver(live.identity.installation, team, "team_services", team,
-                                                         TEAM_SERVICES_RUNTIME), services.handle)
+                                                         TEAM_SERVICES_RUNTIME), services.handle,
+                                    side_by_side_kinds=services.side_by_side)
     await host.nc.flush()
     lost = False
     upkeep: Optional[asyncio.Task[None]] = None
@@ -131,7 +138,7 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
         # The launcher waits for this (team_services.serving): it comes with the host record, once they serve.
         mark_serving(host.layout, lock.instance, host.clock())
         upkeep = asyncio.create_task(host.keep_up(stop, drained=lambda: not lost))
-        maintenance = asyncio.create_task(_maintain(sessions, team, stop, host.logger))
+        maintenance = asyncio.create_task(_maintain(sessions, services.upkeep, team, stop, host.logger))
         await keeper
     except LockLost:
         lost = True  # another instance may serve now and write the record; this one writes no more
@@ -139,6 +146,9 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
     finally:
         try:
             await subscription.unsubscribe()
+            # Requests already being handled finish and are answered before the lock is released: a change the
+            # store commits after that could otherwise race the next instance, and its requester would see no answer.
+            await _drain(live, host.logger)
         finally:
             # The upkeep ends and writes its last record (drained) even when unsubscribing failed, and before
             # the caller releases the lock, so it never overwrites the record of the instance that takes over.
@@ -150,27 +160,40 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
                 await upkeep
 
 
-async def _maintain(sessions: SessionService, team: str, stop: asyncio.Event, logger: logging.Logger) -> None:
-    """``SessionService.maintain`` now and every ``MAINTENANCE_INTERVAL`` until ``stop``; a failed pass is logged."""
+async def _drain(live: LiveHost, logger: logging.Logger) -> None:
+    """Wait for the requests being handled, at most ``DRAIN_SECONDS``; what is still running then is logged."""
+
+    try:
+        await asyncio.wait_for(live.drain(), timeout=DRAIN_SECONDS)
+    except asyncio.TimeoutError:
+        logger.error("Requests were still being handled when the team services stopped serving. "
+                     "event=team_services_drain_timed_out seconds=%s", DRAIN_SECONDS)
+
+
+async def _maintain(sessions: SessionService, upkeep: Sequence[Upkeep], team: str, stop: asyncio.Event,
+                    logger: logging.Logger) -> None:
+    """``SessionService.maintain`` and each family's upkeep now and every ``MAINTENANCE_INTERVAL`` until ``stop``;
+    a failed pass is logged."""
 
     while not stop.is_set():
-        try:
-            await sessions.maintain(team)
-        except Exception:
-            logger.exception("The team services could not look after their records; trying again later. "
-                             "event=team_services_maintenance_failed team=%s", team)
+        for step in (lambda: sessions.maintain(team), *upkeep):
+            try:
+                await step()
+            except Exception:
+                logger.exception("The team services could not look after their records; trying again later. "
+                                 "event=team_services_maintenance_failed team=%s", team)
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=MAINTENANCE_INTERVAL.total_seconds())
 
 
-def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]) -> list[Mapping[str, Handler]]:
+def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]) -> list[OperationFamily]:
     """The families of people's commands this process answers, on the team's database."""
 
     storage = config.manager_storage_settings
     people = PeopleDirectory(AccessRepository(storage), config.manager.team_id)
     memory = MemoryOperations(create_pinned_memory_repository(storage, logger=_LOGGER), people,
-                              dict(config.agent.memory), clock, _LOGGER)
-    return [memory.handlers()]
+                              lead_memory_config(config), clock, _LOGGER)
+    return [memory.family()]
 
 
 async def run_team_services(config: GatewayInstanceConfig) -> None:
