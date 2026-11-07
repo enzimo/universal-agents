@@ -39,3 +39,17 @@ def test_an_older_or_unreadable_server_version_is_reported(output: str, reported
     with caplog.at_level(logging.ERROR, logger="test_nats_service_config"):
         nats_service.report_server_below_contract(output, logging.getLogger("test_nats_service_config"))
     assert ("nats_server_below_contract_minimum" in caplog.text) is reported
+
+
+def test_the_operator_docs_state_the_contracts_numbers():
+    """The guides repeat the contract's server values for external servers; they follow the contract."""
+
+    root = Path(__file__).resolve().parents[1]
+    jetstream, control_line, minimum = nats_service.contract_server_settings()
+    configuration = (root / "user_docs_source" / "configuration.md").read_text(encoding="utf-8")
+    docker = (root / "user_docs_source" / "docker.md").read_text(encoding="utf-8")
+    assert f"{control_line:,} bytes" in configuration and f"{control_line:,} bytes" in docker
+    assert f"{TRANSPORT['limits']['max_credential_bytes']:,} bytes" in configuration
+    assert f"{nats_service.CONNECT_LINE_ROOM_BYTES:,} bytes" in configuration
+    assert f"version {minimum} or" in configuration and f"NATS Server {minimum} or newer" in configuration
+    assert f"sync_interval: {jetstream['sync_interval']}" in configuration

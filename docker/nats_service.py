@@ -239,7 +239,8 @@ def _version_tuple(text: str) -> tuple[int, ...] | None:
 def report_server_below_contract(version_output: str, logger: logging.Logger) -> None:
     """Log an error when the bundled server is older than the contract's minimum, or its version is unreadable.
 
-    The images pin a newer server; this names a hand-installed one that is not.
+    The images and install.sh pin a server that meets it; this names an older
+    hand-installed one.
     """
 
     _jetstream, _control_line, minimum = contract_server_settings()
