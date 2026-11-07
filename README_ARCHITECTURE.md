@@ -3210,10 +3210,9 @@ Older request rows are not inferred into the new running state, so leaving
 their tasks active would bypass the new busy-thread protection.
 
 Delivery receipts use the durable team-lead route, so they can wait for a
-replacement lead before discovery completes. Repeated publication of one
-receipt uses the same idempotency key. Presence replay follows the presence
-stream's retention period; its age still determines whether an agent is live.
-Queued model turns broadcast when work starts and finishes.
+replacement lead before the gateway sees it in the team's records. Repeated
+publication of one receipt uses the same idempotency key. An agent's record
+changes when its work starts and finishes, so the activity mesh follows it.
 
 Credential-form watches keep broker session and task identifiers in gateway
 storage and recover after restart. These local wait records contain no
@@ -3266,7 +3265,8 @@ controls for MCP connections and hosted servers
 (`assistant_gateway/installed_procedures.py`, listed, added or rejected in
 Settings → Team) then check with `PersonChangeCheck` what that person may
 change, from their current team roles. `assistant_gateway/team_presence.py`
-keeps the live team presence in memory. Every live Web Chat page (the
+keeps the live team presence in memory, filled from the team's agent records
+("The gateway follows its team"). Every live Web Chat page (the
 two-second event stream, `website_handlers/conversation.py`) carries it as
 `team_activity` for registered people, and one browser store
 (`assets/team_activity.mjs`) hands that copy to the sidebar activity mesh,
@@ -4668,6 +4668,38 @@ Restart approvals name other agents' running work by task: the team lead asks ea
 agent for its full status while it captures an `all` restart's state, and shows an agent
 that does not answer as not answering (see the restart approvals under "Authorization and
 credentials").
+
+**The gateway follows its team** (step 7c, `assistant_gateway.team_view`): the gateway's
+host reads the team's live agents once it has joined, and hands the team lead's arrival,
+changes and leaving, in order, to the manager client's `apply_manager_status`, so the
+"available" and "unavailable" transitions (notices, maintenance schedules, failing waiting
+replies, pausing Telegram polling) run as before. The lead saying it leaves makes it
+unavailable at once; a lead whose host stopped reporting is unavailable at most 35 seconds
+after the host's last liveness write (its record's 30 seconds plus the reader's 5-second
+check), about the 30 seconds after which the presence heartbeat counted it gone. Every
+member's state
+goes to the Team page's records as it changes; skills, Status page findings and whether a
+busy agent could start more, which records do not carry, are asked with `agent.status`
+(basic) from each live agent every 20 seconds and merged in. An agent whose session was
+refused has no record and no address, so it cannot report findings; the Status page shows
+what the team's live host records list instead (`GatewayTeamView.host_findings`): one
+problem per process and reason, naming the agents (`<agent type>-<agent id>`), saying why
+in plain words (the worker limit reached, a type the process may not run, a type name no
+certificate can carry, ...) and what to do, such as raising the worker limit and making a
+team-wide restart. It goes once the session opens or the agent stops; starting up, before
+the first answer, is no finding. A host whose record names another contract digest than
+the gateway's keeps its agents on the Team page, not accepting work, so people's commands
+about the tasks they hold still reach them; a team lead on such a host counts as
+unavailable, since a chat is new work, and the Status page shows one problem per such host
+naming both digests and saying to install one release everywhere and restart the whole
+team. At start the gateway waits up
+to 15 seconds to read the records, and marks a saved route unavailable when no live lead
+is in them. Before this the gateway asked for the lead on the operational subject at start
+("discovery"), followed presence, and polled the lead's consumer and heartbeat every 5
+seconds; all three are removed, with the transport adapter's consumer probe. A gateway
+started without the launcher runs no host, keeps its saved route to the lead, and says so
+once (`event=gateway_team_view_unavailable`). Agent status messages that still arrive on
+the gateway's routes are ignored, never shown.
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is
