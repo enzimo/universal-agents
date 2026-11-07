@@ -133,8 +133,8 @@ def exercise_memory_graph_sqlite_vec(report: dict[str, Any], *, config_path: Pat
 
     if journal_mode != "wal":
         raise AssertionError(f"Expected SQLite journal_mode=wal, got {journal_mode!r}.")
-    if synchronous != 1:
-        raise AssertionError(f"Expected SQLite synchronous=NORMAL (1), got {synchronous!r}.")
+    if synchronous != 2:
+        raise AssertionError(f"Expected SQLite synchronous=FULL (2), got {synchronous!r}.")
     if busy_timeout != DEFAULT_SQLITE_BUSY_TIMEOUT_MS:
         raise AssertionError(
             f"Expected SQLite busy_timeout={DEFAULT_SQLITE_BUSY_TIMEOUT_MS}, got {busy_timeout!r}."

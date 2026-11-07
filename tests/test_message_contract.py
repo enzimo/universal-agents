@@ -527,7 +527,8 @@ def expanded(role: str, placement: HostPlacement | None = None, **ids: list[str]
     document = json.loads((CONTRACT / "generated" / "permissions" / f"{role}.json").read_text(encoding="utf-8"))
     if placement is None:
         placement = HostPlacement(f"{role}-1", ("team_example",),
-                                  **{f"{name}s": {"team_example": tuple(values)} for name, values in ids.items()})
+                                  **{f"{name}s": {"team_example": tuple(values)} for name, values in ids.items()},
+                                  installation="install_example", peers=("install_peer",))
     filled = host_permissions(document, placement)
     return set(filled["publish"]) | set(filled["subscribe"])
 
@@ -567,7 +568,8 @@ def test_a_host_serving_two_teams_gets_grants_only_on_each_agents_own_team() -> 
 @pytest.mark.parametrize("role", sorted(path.stem for path in (CONTRACT / "generated" / "permissions").glob("*.json")))
 def test_every_roles_templates_fill_to_exact_ids(role: str) -> None:
     placement = HostPlacement(f"{role}-1", ("team_a", "team_b"), agents={"team_a": ("lead",), "team_b": ("lead",)},
-                              pools={"team_a": ("researcher",)}, edges={"team_b": ("web",)})
+                              pools={"team_a": ("researcher",)}, edges={"team_b": ("web",)},
+                              installation="install_example", peers=("install_peer", "install_other"))
     subjects = expanded(role, placement)
     assert subjects and not {subject for subject in subjects if "{" in subject}
 
@@ -588,7 +590,14 @@ def test_a_placement_names_only_teams_its_host_serves() -> None:
     with pytest.raises(ValueError, match="teams the host does not serve"):
         HostPlacement("worker-host-1", ("team_a",), agents={"team_b": ("researcher",)})
     with pytest.raises(ValueError, match="cannot fill"):
-        host_subjects("ua.v1.{team}.{installation}.x", HostPlacement("worker-host-1", ("team_a",)))
+        host_subjects("ua.v1.{team}.{person}.x", HostPlacement("worker-host-1", ("team_a",)))
+    # {installation} needs the host's installation; a peer is never the host's own installation.
+    with pytest.raises(ValueError, match="names no installation"):
+        host_subjects("$KV.UA1_CERTS.revocations.{installation}", HostPlacement("worker-host-1", ("team_a",)))
+    with pytest.raises(ValueError, match="is not a peer"):
+        HostPlacement("edge-adapter-1", ("team_a",), installation="install_example", peers=("install_example",))
+    with pytest.raises(ValueError, match="cannot fill"):
+        host_subjects("$KV.X.{peer}.{team}", HostPlacement("edge-adapter-1", ("team_a",), peers=("install_peer",)))
 
 
 def longest_id(definition: str) -> int:
@@ -959,7 +968,7 @@ def notice_reader(registry: dict, _transport: dict, _schemas: dict) -> None:
     (add_temporary_notice_reason, "names no temporary refusal"),
     (temporary_flag(False), "optionally temporary: true"),
     (host_ttl(None), "ttl_seconds is its bucket's"),
-    (host_ttl(30), "ttl_seconds is its bucket's"),
+    (host_ttl(60), "ttl_seconds is its bucket's"),
     (proof_of_possession_on("agent.pause"), "proves possession"),
     (overlap(0), "certificate_overlap_seconds"),
     (overlap(86400), "certificate_overlap_seconds"),
@@ -1166,6 +1175,58 @@ def test_a_refused_request_is_answered_with_its_code_and_known_pointer_only() ->
     assert f"`{REFUSAL_HEADER}`, the refusal code" in readme and f"`{REFUSAL_AT_HEADER}`, the refusal's pointer" in readme
 
 
+@pytest.mark.parametrize(("request_subject", "reply_subject"), [
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.abc"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.abc.7"),
+    ("ua.v1.team_example.gateway-1.ctl.agent.lead", "_INBOX.gateway-1.Zq9-x_1"),
+    ("ua.v1._install.new-host-1.svc", "_INBOX.new-host-1.join"),
+])
+def test_a_receiver_answers_on_the_requesters_own_inbox(request_subject: str, reply_subject: str) -> None:
+    """README, "Answering only the requester's inbox": the sender slot of the request's subject owns the inbox."""
+
+    assert wire_frame.answer_subject(request_subject, reply_subject) == reply_subject
+
+
+@pytest.mark.parametrize(("request_subject", "reply_subject"), [
+    # Where the answer would be written with the receiver's rights.
+    ("ua.v1.team_example.worker-host-1.svc.team", "$JS.API.STREAM.DELETE.KV_UA1_CERTS"),
+    ("ua.v1._install.new-host-1.svc", "$JS.API.STREAM.DELETE.UA1_WORK"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "$KV.UA1_LOCKS.team_services.team_example"),
+    ("ua.v1.team_example.gateway-1.ctl.agent.lead", "ua.v1.team_example.gateway-1.work.agent.lead"),
+    # Another runtime's inbox, or an inbox prefix that only starts like the requester's.
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.lead-host-1.abc"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-10.abc"),
+    # The inbox itself without a token, wildcards and empty tokens.
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.*"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.>"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1..abc"),
+    ("ua.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.a b"),
+    # No reply subject, a subject outside protocol 1, and a peer installation's slot.
+    ("ua.v1.team_example.worker-host-1.svc.team", None),
+    ("ua.v1.team_example.worker-host-1.svc.team", ""),
+    ("other.v1.team_example.worker-host-1.svc.team", "_INBOX.worker-host-1.abc"),
+    ("ua.v1.team_example.worker-host-1", "_INBOX.worker-host-1.abc"),
+    ("ua.v1.team_example.x-install_peer.svc.team", "_INBOX.x-install_peer.abc"),
+])
+def test_a_receiver_answers_no_other_reply_subject(request_subject: str, reply_subject: str | None) -> None:
+    """README, "Answering only the requester's inbox": anything else is dropped unanswered."""
+
+    assert wire_frame.answer_subject(request_subject, reply_subject) is None
+
+
+def test_every_request_address_puts_the_sender_slot_where_answer_subject_reads_it() -> None:
+    """Each request/reply address, filled for a sender, gives a subject whose own inbox answer_subject accepts."""
+
+    addresses = TRANSPORT["classes"]["request_reply"]
+    for address in [*addresses["addresses"], *addresses["installation_addresses"]]:
+        filled = address.format(agent="lead", sender="worker-host-1")
+        subject = (f"ua.v1.{filled}" if address.startswith(TRANSPORT["installation_scope"] + ".")
+                   else f"ua.v1.team_example.worker-host-1.{filled}")
+        assert wire_frame.answer_subject(subject, "_INBOX.worker-host-1.x") == "_INBOX.worker-host-1.x", address
+        assert wire_frame.answer_subject(subject, "_INBOX.another-host.x") is None, address
+
+
 def test_key_value_grants_let_a_host_write_only_its_own_records() -> None:
     """README, "Key-value grants": each writer's keys are filled for one host, never as a wildcard of an id."""
 
@@ -1175,8 +1236,19 @@ def test_key_value_grants_let_a_host_write_only_its_own_records() -> None:
     assert not {subject for subject in worker if subject.startswith("$KV.")} - {
         "$KV.UA1_HOSTS.worker_host-1", "$KV.UA1_AGENTS.team_example.researcher-2"}
     services = expanded("team_services")
-    assert {"$KV.UA1_PLACEMENT.team_example.*", "$KV.UA1_CERTS.session.*.team_example.*",
-            "$KV.UA1_LOCKS.team_services.team_example", "$KV.UA1_BLOCK_LIST.team_example"} <= services
+    assert {"$KV.UA1_PLACEMENT.team_example.*", "$KV.UA1_CERTS.session.install_example.team_example.*",
+            "$KV.UA1_LOCKS.team_services.team_example", "$KV.UA1_BLOCK_LIST_team_example.team_example",
+            "$KV.UA1_TEAM_VIEW_team_example.team_example.>"} <= services
+    assert not {subject for subject in services if subject.startswith("$KV.UA1_CERTS.") and "install_peer" in subject}
+    # The authority writes its own installation's trust records; the edge adapter only peers' copies.
+    authority = {subject for subject in expanded("installation_authority") if subject.startswith("$KV.UA1_CERTS.")}
+    assert authority == {"$KV.UA1_CERTS.host.install_example.>", "$KV.UA1_CERTS.revocations.install_example",
+                         "$KV.UA1_CERTS.agreement.*"}
+    edge = {subject for subject in expanded("edge_adapter") if subject.startswith("$KV.UA1_CERTS.")}
+    assert edge == {"$KV.UA1_CERTS.host.install_peer.>", "$KV.UA1_CERTS.revocations.install_peer",
+                    "$KV.UA1_CERTS.session.install_peer.>"}
+    alone = HostPlacement("edge-adapter-1", ("team_example",), installation="install_example")
+    assert not {subject for subject in expanded("edge_adapter", alone) if subject.startswith("$KV.UA1_CERTS.")}
     # Only the team services take the single-instance lock, and only they place agents.
     for role in REGISTRY["host_roles"]:
         publish = role_permissions(role)["publish"]
@@ -1187,14 +1259,52 @@ def test_key_value_grants_let_a_host_write_only_its_own_records() -> None:
         assert set(record["writers"]) <= set(TRANSPORT["key_value"][record["bucket"]]["writers"]), name
 
 
-def test_no_bucket_reader_deletes_another_hosts_watch() -> None:
-    """A watch creates its own consumer and reads its information; no reader deletes a bucket's consumers."""
+def test_no_bucket_reader_changes_or_deletes_another_hosts_watch() -> None:
+    """README, "Key-value grants": a reader creates only unnamed consumers and deletes none; the owner cleans up."""
 
     for role in REGISTRY["host_roles"]:
-        if role == TRANSPORT["topology_owner"]:
-            continue
-        deletes = [subject for subject in role_permissions(role)["publish"] if subject.startswith("$JS.API.CONSUMER.DELETE.KV_")]
-        assert not deletes, (role, deletes)
+        publish = role_permissions(role)["publish"]
+        creates = {subject for subject in publish if subject.startswith(("$JS.API.CONSUMER.CREATE.KV_",
+                                                                         "$JS.API.CONSUMER.DURABLE.CREATE.KV_"))}
+        # The unnamed create: no consumer name in the subject, so no durable and no existing consumer.
+        assert creates == {f"$JS.API.CONSUMER.CREATE.KV_{bucket}" for bucket, spec in TRANSPORT["key_value"].items()
+                           if role in spec["readers"]}, role
+        deletes = {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.DELETE.KV_")}
+        assert deletes == ({f"$JS.API.CONSUMER.DELETE.KV_{bucket}.*" for bucket in TRANSPORT["key_value"]}
+                           if role == TRANSPORT["topology_owner"] else set()), role
+        # Readers read through direct gets; no reader reads a bucket's stream by sequence.
+        assert not {subject for subject in publish if subject.startswith("$JS.API.STREAM.MSG.GET.KV_")}, role
+
+
+def test_a_host_reads_only_its_own_teams_bucket_of_peoples_words() -> None:
+    """README, "One bucket per team for people's words": a host of team_a gets no grant on team_b's team view or block list."""
+
+    per_team = [bucket for bucket in TRANSPORT["key_value"] if "{team}" in bucket]
+    assert sorted(per_team) == ["UA1_BLOCK_LIST_{team}", "UA1_TEAM_VIEW_{team}"]
+    for role in ("gateway", "lead_host", "worker_host", "team_services"):
+        subjects = expanded(role, HostPlacement(f"{role}-1", ("team_a",), installation="install_example"))
+        assert {subject for subject in subjects if "KV_UA1_TEAM_VIEW_team_a" in subject}, role
+        assert not {subject for subject in subjects if "team_b" in subject}, role
+    for name in ("team_view", "block_list"):
+        spec = kinds.STATE_RECORDS[name]
+        assert spec.bucket_for("team_a") == spec.bucket.replace("{team}", "team_a") != spec.bucket
+    assert kinds.STATE_RECORDS["host"].bucket_for("team_a") == "UA1_HOSTS"
+
+
+def test_a_buckets_stream_refuses_rollups_and_serves_direct_reads() -> None:
+    """README, "Every bucket's stream settings": the topology owner creates each bucket as a stream with these settings."""
+
+    from custom_messages.wire.buckets import bucket_stream
+
+    hosts = bucket_stream(TRANSPORT, "UA1_HOSTS")
+    assert hosts == {"name": "KV_UA1_HOSTS", "subjects": ["$KV.UA1_HOSTS.>"], "max_msgs_per_subject": 1,
+                     "allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": True, "allow_direct": True,
+                     "storage": "file", "max_consumers": TRANSPORT["key_value_stream"]["max_consumers"],
+                     "max_age": TRANSPORT["key_value"]["UA1_HOSTS"]["per_key_ttl_seconds"]}
+    view = bucket_stream(TRANSPORT, "UA1_TEAM_VIEW_{team}", "team_a")
+    assert (view["name"], view["subjects"], "max_age" in view) == ("KV_UA1_TEAM_VIEW_team_a", ["$KV.UA1_TEAM_VIEW_team_a.>"], False)
+    with pytest.raises(ValueError, match="once per team"):
+        bucket_stream(TRANSPORT, "UA1_TEAM_VIEW_{team}")
 
 
 @pytest.mark.parametrize(("change", "problem"), [
@@ -1202,7 +1312,17 @@ def test_no_bucket_reader_deletes_another_hosts_watch() -> None:
     (lambda t: t["key_value"]["UA1_HOSTS"]["writers"].update(worker_host=["{pool}"]), "uses only"),
     (lambda t: t["key_value"]["UA1_HOSTS"]["readers"].append("nobody"), "readers are distinct host roles"),
     (lambda t: t["key_value"]["UA1_LOCKS"].pop("readers"), "fields are"),
+    (lambda t: t["key_value_stream"].update(allow_rollup_hdrs=True), "allow_rollup_hdrs is False"),
+    (lambda t: t["key_value_stream"].update(deny_purge=False), "deny_purge is True"),
+    (lambda t: t["key_value_stream"].update(history=5), "history is 1"),
+    (lambda t: t["key_value_stream"].update(max_consumers=0), "max_consumers is a positive"),
+    (lambda t: t["key_value_stream"].pop("allow_direct"), "fields are"),
+    (lambda t: t["key_value"].update({"UA1_X_{agent}": t["key_value"].pop("UA1_LOCKS")}), "only {team}"),
+    (lambda t: t["key_value"]["UA1_AGENTS"]["writers"].update(worker_host=[">"]), "starts with a fixed word"),
+    (lambda t: t["key_value"]["UA1_HOSTS"]["writers"].update(worker_host=["*"]), "starts with a fixed word"),
+    (lambda t: t["key_value"]["UA1_CERTS"]["writers"].update(edge_adapter=["host.>.x"]), "ends with >"),
     (lambda t: t["dead_letter_custody"].update(streams=["UA1_WORK"]), "dead_letter class's streams"),
+    (lambda t: t["streams"]["UA1_DLQ_{team}"].pop("max_msgs_per_subject"), "one message per subject"),
 ])
 def test_the_generator_refuses_buckets_and_custody_it_cannot_grant(change, problem: str) -> None:
     transport = copy.deepcopy(TRANSPORT)
@@ -1222,8 +1342,27 @@ def test_only_the_team_services_read_their_teams_dead_letters() -> None:
             assert set(reads) == {"$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.dlq~{team}",
                                   "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_{team}.dlq~{team}", "$JS.ACK.UA1_DLQ_{team}.dlq~{team}.>",
                                   "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
-        elif role != TRANSPORT["topology_owner"]:
+        elif role == TRANSPORT["topology_owner"]:
+            # It creates the stream and its consumers like every stream's, which is how it could read
+            # the copies (README, "Dead letters"); it reads and deletes no message by sequence.
+            assert set(reads) == {"$JS.API.STREAM.CREATE.UA1_DLQ_{team}", "$JS.API.STREAM.UPDATE.UA1_DLQ_{team}",
+                                  "$JS.API.STREAM.INFO.UA1_DLQ_{team}", "$JS.API.CONSUMER.CREATE.UA1_DLQ_{team}.*",
+                                  "$JS.API.CONSUMER.CREATE.UA1_DLQ_{team}.*.>", "$JS.API.CONSUMER.DURABLE.CREATE.UA1_DLQ_{team}.*",
+                                  "$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.*", "$JS.API.CONSUMER.DELETE.UA1_DLQ_{team}.*"}
+        else:
             assert not reads, (role, reads)
+
+
+def test_the_team_services_lock_names_its_holders_process() -> None:
+    """README, "The team services' lock": the runtime alone cannot tell two processes of one runtime apart."""
+
+    lock = validator("team-services-lock.schema.json")
+    held = {"runtime": "team-services-1", "instance": "3f9c0a7d5e21b846", "lease_ends_at": "2026-10-22T04:30:30.000Z"}
+    assert not list(lock.iter_errors(held))
+    for broken in ({key: value for key, value in held.items() if key != "instance"}, {**held, "instance": "short"},
+                   {**held, "instance": "3F9C0A7D5E21B846"}, {**held, "holder": "team-services-1"}):
+        assert list(lock.iter_errors(broken)), broken
+    assert "team-services-lock.schema.json" in TRANSPORT["key_value"]["UA1_LOCKS"]["description"]
 
 
 def test_a_session_from_a_reply_is_kept_and_lets_its_host_sign_for_the_agent() -> None:
@@ -2342,7 +2481,7 @@ def test_neighbouring_checks_each_have_a_two_defect_example() -> None:
 # writer and what it places; README, "Agent sessions").
 RECEIVER_CHECKED = re.compile(r"/body/certificate/(signature|expires_at|body/[a-z_]+)|/body/connection/expires_at"
                               r"|/body/application_key_rotation/(key/key_id|key/public_key|proof)"
-                              r"|/body/session/(signature|writer|body/[a-z_]+)")
+                              r"|/body/session/(signature|writer(/runtime)?|body/[a-z_]+)")
 ROTATION_PROOF_AT = "/body/application_key_rotation/proof"
 
 

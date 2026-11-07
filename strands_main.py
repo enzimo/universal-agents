@@ -1154,6 +1154,12 @@ def run_with_args(args: argparse.Namespace) -> None:
     logger.info(f'  Model ID: {model_id}')
 
     try:
+        # The agent's own records are flushed before each send, not in each
+        # commit (custom_agents.commit_flushes); set before any store opens.
+        from custom_agents.commit_flushes import flush_commits_at_exit, flush_commits_before_sending
+
+        flush_commits_before_sending()
+
         # Create the agent
         agent = create_strands_agent(agent_config)
 
@@ -1165,7 +1171,10 @@ def run_with_args(args: argparse.Namespace) -> None:
         logger.info(f'Tools: {[t.__name__ if hasattr(t, "__name__") else str(t) for t in agent.tools]}')
 
         # Run the agent (blocks until exit)
-        asyncio.run(run_agent_with_signal_handlers(agent))
+        try:
+            asyncio.run(run_agent_with_signal_handlers(agent))
+        finally:
+            flush_commits_at_exit(logger)
 
     except KeyboardInterrupt:
         logger.info('Received interrupt signal, shutting down...')
