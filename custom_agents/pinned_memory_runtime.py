@@ -48,6 +48,8 @@ from time_presentation import format_user_timestamp
 
 
 PINNED_MEMORY_BANKS = {COREMEM_BANK, USERMEM_BANK}
+# The team's bank, for gateway code that must not import the store (assistant_gateway.pinned_memory_commands).
+PINNED_MEMORY_TEAM_BANK = COREMEM_BANK
 # The command origin of agents' memory tools: they need agent write access to
 # the bank, and their replace and delete must name the fact version they read.
 AGENT_TOOL_COMMAND_ORIGIN = "agent_tool"

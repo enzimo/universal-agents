@@ -14,7 +14,7 @@ from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from custom_messages.contracts.control_v1 import PinnedMemoryCommandPayload
 from custom_messages.wire.frame import body_model
 from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS
-from storage.pinned_memory_repository import PinnedMemoryInputError
+from pydantic import ValidationError
 
 CODEC = RuntimePinnedMemoryCodec()
 
@@ -81,8 +81,9 @@ def test_an_ok_reply_becomes_the_view_the_gateway_renders() -> None:
                  "at most 256 characters", id="tag-too-long"),
 ])
 def test_a_body_the_contract_would_refuse_is_refused_before_sending_in_plain_words(command, says) -> None:
-    with pytest.raises(PinnedMemoryInputError) as refused:
+    with pytest.raises(ValueError) as refused:
         CODEC.wire_command(command, timezone_name=None)
+    assert not isinstance(refused.value, ValidationError)  # the codec's own sentence, not the model's error
     message = str(refused.value)
     assert says in message
     # Words a person knows: none of the model's own error text, codes or links.

@@ -23,6 +23,14 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def new_request_id() -> str:
+    """A fresh request id for a person's command: a UUIDv7 (the contract's "Fresh ids")."""
+
+    from custom_transport.protocol1.ids import new_message_id  # the gateway's own module stays free of transport code
+
+    return new_message_id()
+
+
 class MessageHostTeamServices:
     def __init__(self, host: Optional["GatewayMessageHost"], *, timeout_seconds: float,
                  logger: logging.Logger = _LOGGER) -> None:
