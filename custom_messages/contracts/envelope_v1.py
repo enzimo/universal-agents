@@ -5,7 +5,6 @@ from custom_messages.contracts.control_v1 import AgentCreationRequest
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.control_v1 import ControlInstruction
 from custom_messages.contracts.control_v1 import Instruction
-from custom_messages.contracts.control_v1 import ManagerKnowledgeCommand
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.control_v1 import ManagerTopicCommand
 from custom_messages.contracts.control_v1 import NoOpMessage
@@ -54,7 +53,6 @@ ContentType = Annotated[
         DelegatedTaskClaimedV1,
         DeliveryReceipt,
         Instruction,  # Used directly? Or always via ControlPayload? Let's assume via ControlPayload
-        ManagerKnowledgeCommand,
         ManagerRuntimeWorkCommand,
         ManagerScheduleCommand,
         ManagerTopicCommand,
@@ -92,7 +90,6 @@ ContentType = Annotated[
 # routing, the gateway's reply matching, the manager's admission rules and the
 # agent-forgery guard (custom_tools.providers.communication) all use this one list.
 GATEWAY_MANAGER_CONTROL_TYPES = (
-    ManagerKnowledgeCommand,
     ManagerRuntimeWorkCommand,
     ManagerScheduleCommand,
     ManagerTopicCommand,

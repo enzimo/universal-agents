@@ -54,3 +54,7 @@ class AccessStorePersonReferences:
     def person_ref(self, person_id: str) -> str | None:
         person = AccessRepository(self._storage).team_person(self._team_id, person_id)
         return None if person is None else person.person_ref
+
+    def person_id(self, person_ref: str) -> str | None:
+        person = AccessRepository(self._storage).team_person_by_ref(self._team_id, person_ref)
+        return None if person is None else person.person_id

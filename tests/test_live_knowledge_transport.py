@@ -1,114 +1,71 @@
-"""Knowledge review and restoration through the real gateway and NATS manager route.
+"""Knowledge review and restoration through the real gateway, NATS and the team services.
 
-No model is needed. The signed gateway request, wire models, durable pull consumer,
-reply matching and manager's SQLite store all run as they do in the application.
+No model is needed. The installation authority, the team services (with their memory and
+knowledge handlers on the test's SQLite database) and the gateway's own protocol 1 host
+run on nats-server 2.15.1: the gateway signs each person's command, the team services
+verify it and act for the person its token names, and the gateway checks and renders the
+reply, as in the application.
 """
 
 from __future__ import annotations
 
-import logging
+import asyncio
 import sqlite3
+from contextlib import AsyncExitStack
 from dataclasses import replace
-from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import pytest
-from live_nats_client import LiveNatsClient, resolve_live_transport_settings
 
+from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefused
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
+from assistant_gateway.message_host import gateway_profile
 from assistant_gateway.store import GatewayStateStore
-from custom_agents.knowledge_command_runtime import handle_manager_knowledge_command
-from custom_messages.contracts.control_v1 import AgentStatus, KnowledgeCommandAction, KnowledgeCommandPayload, ManagerKnowledgeCommand
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, MessageMetaType, RoutingType
-from custom_transport.base import SubscriptionDelivery
-from id_generation import new_id
-from knowledge_base.service import KnowledgeService
-from runtime_settings.knowledge import KnowledgeSettings
-from storage.knowledge_repository import create_knowledge_repository
-from tests.broker_access_support import forget_task_context_keys, use_gateway_key
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.control_v1 import KnowledgeCommandAction, KnowledgeCommandPayload
+from custom_transport.protocol1.host_runtime import MessageHost
+from knowledge_base.service import DraftInput, KnowledgeService
+from runtime_settings.knowledge import KnowledgeSettings, KnowledgeWriteLimits
+from storage.access_repository import AccessRepository
+from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES, create_knowledge_repository
+from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_operations, team_services_profile
 from tests.knowledge_support import agent as worker_actor
+from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
 
 @pytest.mark.asyncio
-async def test_gateway_reviews_notes_and_restores_archives_over_nats(tmp_path, monkeypatch):
-    use_gateway_key(monkeypatch)
-    try:
-        await _knowledge_over_nats(tmp_path)
-    finally:
-        forget_task_context_keys()
-
-
-async def _knowledge_over_nats(tmp_path) -> None:
-    team_id, manager_id = new_id("live_knowledge"), new_id("manager")
+async def test_gateway_reviews_notes_and_restores_archives_over_nats(
+    tmp_path, broker: str,  # noqa: F811 - the shared live NATS fixture
+) -> None:
     manager_db, gateway_db = tmp_path / "manager.db", tmp_path / "gateway.db"
     config = GatewayInstanceConfig.create(
         instance_name="live_knowledge", instance_root=str(tmp_path / "instance"),
-        team_id=team_id, timezone="UTC", display_name="Knowledge reviewer",
-        manager_agent_id=manager_id, manager_storage_sqlite_path=str(manager_db),
+        team_id=TEAM, timezone="UTC", display_name="Knowledge reviewer",
+        manager_agent_id="manager_live", manager_storage_sqlite_path=str(manager_db),
         state_storage_sqlite_path=str(gateway_db), named_agent_type="TeamArchitect",
     )
-    config.transport = resolve_live_transport_settings()
-    gateway = UserGateway(config, output_sink=None, state_store=GatewayStateStore(str(gateway_db)))
-    session = gateway.application.resolve_session(session_key=config.user.default_session_key)
-    context = GatewayRouteContextV1(session_key=session.session_key, canonical_user_id=config.user.canonical_user_id)
+    config.transport.nats_url = broker
+    config.transport.nats_servers = [broker]
+    person = config.user.canonical_user_id
+    AccessRepository(config.manager_storage_settings).record_person(TeamPersonV1(
+        team_id=TEAM, person_id=person, standing=PersonStanding.ACTIVE, roles=("owner",),
+        changed_at_utc=datetime.now(timezone.utc)))
     repository = create_knowledge_repository(config.manager_storage_settings)
     service = KnowledgeService(repository, settings=KnowledgeSettings())
-    worker = replace(worker_actor("review_worker", person=config.user.canonical_user_id), team_id=team_id)
+    worker = replace(worker_actor("review_worker", person=person), team_id=TEAM)
+    stop = asyncio.Event()
 
-    async with LiveNatsClient(team_id, transport=config.transport) as manager_client:
-        class ManagerComms:
-            async def send_message(self, *, message, routing_key) -> None:
-                await manager_client.publish(routing_key, message, durable=True)
-
-        manager = SimpleNamespace(
-            id=manager_id, name="Knowledge manager", named_agent_type="TeamArchitect",
-            team_id=team_id, is_team_lead=True, knowledge_config={},
-            _knowledge_repository=repository, _logger=logging.getLogger(__name__),
-            team_comms=ManagerComms(),
-        )
-
-        async def manager_command(delivery) -> None:
-            envelope = delivery.envelope
-            if isinstance(envelope.msg_content, ManagerKnowledgeCommand):
-                await handle_manager_knowledge_command(
-                    manager, command=envelope.msg_content,
-                    msg_header=envelope.msg_header, msg_meta=envelope.msg_meta,
-                )
-            await delivery.ack()
-
-        async def manager_status(delivery) -> None:
-            envelope = delivery.envelope
-            if isinstance(envelope.msg_content, AgentStatus) and envelope.msg_content.status_type == MessageMetaType.REQUEST:
-                response = MessageEnvelope(
-                    msg_content=AgentStatus(
-                        self_id=manager_id, team_id=team_id, named_agent_type="TeamArchitect",
-                        name=manager.name, agent_role="manager", is_paused=False,
-                        is_executing=False, has_execution_capacity=True, is_busy=False,
-                        status_type=MessageMetaType.RESPONSE, info_type=ControlType.STATUS_REQUEST_BASIC,
-                    ),
-                    msg_header=MessageHeader(from_agent_id=manager_id, to_routing_path=envelope.msg_header.response_routing_key),
-                    msg_meta=MessageMeta(msg_correlation_id=envelope.msg_meta.msg_correlation_id),
-                )
-                await manager_client.publish(RoutingType.ALL_AGENTS_ROUTE.value, response, operational=True, durable=False)
-            await delivery.ack()
-
-        await manager_client.adapter.subscribe_subject(
-            name="live-knowledge-manager-status", subject=manager_client.mapper.operational_subject(),
-            handler=manager_status, delivery=SubscriptionDelivery.CORE,
-            logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-        )
-        await manager_client.adapter.subscribe_subject(
-            name="live-knowledge-manager-control",
-            subject=manager_client.mapper.agent_control_subject(manager_id),
-            handler=manager_command,
-            durable_name=manager_client.mapper.durable_name(f"manager_{manager_id}_control"),
-            logical_route=manager_id,
-        )
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, config.layout, team_services_profile(TEAM), gateway_profile(TEAM))
+        host = MessageHost(config.layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        serving = asyncio.create_task(serve_team(host, TEAM, stop, team_operations(config, host.clock)))
+        gateway = UserGateway(config, output_sink=None, state_store=GatewayStateStore(str(gateway_db)))
+        session = gateway.application.resolve_session(session_key=config.user.default_session_key)
+        context = GatewayRouteContextV1(session_key=session.session_key, canonical_user_id=person)
 
         async def request(action, **fields):
             return await gateway.application.knowledge.run(context, KnowledgeCommandPayload(action=action, **fields))
@@ -116,7 +73,8 @@ async def _knowledge_over_nats(tmp_path) -> None:
         try:
             await gateway.connect(start_services=False)
             created = await request(KnowledgeCommandAction.WRITE, title="Runbook", body="Check the workers.", summary="Worker maintenance.")
-            assert created.page.revision == 1 and created.page.last_editor.person_id == ""
+            assert created.page.revision == 1 and created.page.last_editor.label == "You"
+            assert created.page.last_editor.person_id == ""
             kept = await request(KnowledgeCommandAction.WRITE, page="runbook", base_revision=1, body="Check all workers.")
             assert kept.page.summary == "Worker maintenance."
             cleared = await request(KnowledgeCommandAction.WRITE, page="runbook", base_revision=2, body="Check all workers.", summary="")
@@ -151,10 +109,31 @@ async def _knowledge_over_nats(tmp_path) -> None:
             assert final.total == 101 and len(final.contributions) == 1
             counted = await request(KnowledgeCommandAction.COUNT_CONTRIBUTIONS)
             assert counted.total == 101 and counted.contributions == []
+
+            # Text longer than Web Chat carries (agents may write it) is refused plainly over the
+            # wire too, and nothing changes (team_services.knowledge).
+            writer = replace(worker_actor("long_writer"), team_id=TEAM)
+            long_pages = KnowledgeService(
+                repository, settings=KnowledgeSettings(limits=KnowledgeWriteLimits(max_body_chars=500_000))
+            )
+            long_pages.write(writer, "team/handbook", DraftInput(title="Handbook", body="Long handbook line. " * 2_500))
+            long_pages.write(writer, "team/handbook", DraftInput(body="Short now."), base_revision=1)
+            before = [repository.export_rows(table) for table in KNOWLEDGE_TRANSFER_TABLES]
+            for action, fields in (
+                (KnowledgeCommandAction.READ, {"revision": 1}),
+                (KnowledgeCommandAction.REVERT, {"revision": 1, "base_revision": 2}),
+            ):
+                with pytest.raises(GatewayKnowledgeRefused) as refused:
+                    await request(action, page="handbook", **fields)
+                assert refused.value.code == "runtime_error"
+                assert refused.value.message.startswith("The text of revision 1 of this page has 49,999 characters")
+            assert [repository.export_rows(table) for table in KNOWLEDGE_TRANSFER_TABLES] == before
         finally:
             await gateway.close()
+            stop.set()
+            await serving
 
-    # Knowledge remains manager-owned; a passing wire round trip must not mask a
+    # Knowledge stays in the team's database; a passing wire round trip must not mask a
     # gateway accidentally opening a second knowledge store.
     with sqlite3.connect(gateway_db) as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}

@@ -286,7 +286,6 @@ from custom_messages.contracts.control_v1 import (
     AgentStatus,
     AgentStatusMap,
     ControlInstruction,
-    ManagerKnowledgeCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
     PersonStandingCommandV1,
@@ -4024,15 +4023,6 @@ class UniversalAgent(BaseModel):
             )
         elif isinstance(msg_content, ManagerRuntimeWorkCommand):
             await handle_manager_runtime_work_command(
-                self,
-                command=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
-        elif isinstance(msg_content, ManagerKnowledgeCommand):
-            from custom_agents.knowledge_command_runtime import handle_manager_knowledge_command
-
-            await handle_manager_knowledge_command(
                 self,
                 command=msg_content,
                 msg_header=msg_header,

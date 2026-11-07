@@ -66,7 +66,7 @@ from custom_messages.enums import ChangeRefusal
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 from .change_ledger import ChangeRefused, PlannedChange, check_change, ensure_ledger_tables, record_change, save_review
 from .config import StorageSettings
-from .operation_outcomes import CommandOutcome, ensure_outcome_table, save_refusal
+from .operation_outcomes import CommandOutcome, CommandOutcomeWrites, ensure_outcome_table
 from .pinned_memory_changes import MemoryWriter, planned_creation, planned_removal, planned_update
 from .postgres_connection import (
     PINNED_MEMORY_WRITE_LOCK_KEY,
@@ -292,7 +292,7 @@ class _Undo:
     writer: MemoryWriter
 
 
-class _RelationalPinnedMemoryRepository:
+class _RelationalPinnedMemoryRepository(CommandOutcomeWrites):
     _dialect: SqlDialect
     _logger: logging.Logger
 
@@ -328,12 +328,6 @@ class _RelationalPinnedMemoryRepository:
         except ChangeRefused as refused:
             self._save_review(refused)
             raise
-
-    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> None:
-        """Store a refused command's reply in a transaction of its own (``storage.operation_outcomes``)."""
-
-        with self._write() as conn:
-            save_refusal(conn, self._dialect, command_outcome, reply)
 
     def _save_review(self, refused: ChangeRefused) -> None:
         if refused.review is None or repositories_are_read_only():

@@ -129,19 +129,16 @@ def test_the_verified_person_comes_from_the_signature(manager) -> None:
 def test_commands_carry_no_person_or_authority_fields() -> None:
     from custom_messages.contracts.control_v1 import (
         KnowledgeCommandPayload,
-        ManagerKnowledgeCommand,
         ManagerRuntimeWorkCommand,
         ManagerTopicCommand,
         PersonStandingCommandV1,
     )
     from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 
-    # The Knowledge page's command names nobody: the manager acts for the signed person.
+    # The Knowledge page's request names nobody: the team services act for the token's person.
     person_fields = {"principal", "person_id", "canonical_user_id", "owner_person_id", "roles", "team_id"}
     assert not person_fields & set(KnowledgeCommandPayload.model_fields)
-    assert not person_fields & set(ManagerKnowledgeCommand.model_fields)
     for model in (
-        ManagerKnowledgeCommand,
         ManagerRuntimeWorkCommand,
         ManagerScheduleCommand,
         ManagerTopicCommand,

@@ -69,6 +69,7 @@ from knowledge_base.records import (
 )
 from knowledge_base.sensitive_content import SensitiveContentRules
 from knowledge_base.text import link_targets, overlaps, query_terms, slugify, text_fingerprint, written_links
+from storage.operation_outcomes import CommandOutcome
 from storage.knowledge_repository import utc_text
 from knowledge_base.vocabulary import (
     CONTRIBUTION_ID_PREFIX,
@@ -370,8 +371,13 @@ class KnowledgeService:
         change_summary: str = "",
         confirm_review: bool = False,
         write_key: Optional[KnowledgeWriteKey] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
-        """Create (``base_revision`` 0) or edit a page, or propose the change when it needs review."""
+        """Create (``base_revision`` 0) or edit a page, or propose the change when it needs review.
+
+        ``command_outcome``: a person's command from the team services, whose outcome the
+        store keeps with the change (``storage.operation_outcomes``).
+        """
 
         self._require_enabled()
         receipt = self._write_receipt(actor, write_key)
@@ -380,7 +386,7 @@ class KnowledgeService:
         try:
             return self._write_draft(
                 actor, reference, draft, base_revision=base_revision, change_summary=change_summary,
-                confirm_review=confirm_review, write_key=write_key,
+                confirm_review=confirm_review, write_key=write_key, command_outcome=command_outcome,
             )
         except KnowledgeError:
             # Another identical call may commit after the initial receipt read
@@ -401,6 +407,7 @@ class KnowledgeService:
         change_summary: str,
         confirm_review: bool,
         write_key: Optional[KnowledgeWriteKey],
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
         """Validate and save the draft; the write dispatcher handles committed retries."""
 
@@ -451,6 +458,7 @@ class KnowledgeService:
             limits=self._limits_for(actor),
             now=self._clock(),
             write_key=write_key,
+            command_outcome=command_outcome,
         )
         receipt = self._write_receipt(actor, write_key)
         return WriteResult(page=page, review_kinds=review, receipt=receipt)
@@ -477,7 +485,10 @@ class KnowledgeService:
             {"page_id": target.page_id, "redirects_to": target.reference()},
         )
 
-    def add_note(self, actor: KnowledgeActor, reference: str, note: str, *, confirm_review: bool = False) -> WriteResult:
+    def add_note(
+        self, actor: KnowledgeActor, reference: str, note: str, *, confirm_review: bool = False,
+        command_outcome: Optional[CommandOutcome] = None,
+    ) -> WriteResult:
         page = self._existing_page(actor, reference)
         text = (note or "").strip()
         if not text:
@@ -493,14 +504,18 @@ class KnowledgeService:
             return self._propose(actor, page.key, ContributionKind.NOTE, draft, page, page.revision, "", review)
         self._require_review_confirmed(actor, review, confirm_review, page_id=page.page_id)
         stored = self._repository.add_note(
-            page, body=text, actor=actor, limits=self._limits_for(actor), now=self._clock()
+            page, body=text, actor=actor, limits=self._limits_for(actor), now=self._clock(),
+            command_outcome=command_outcome,
         )
         if stored.page_id != page.page_id:
             # The store follows a merge that committed after our initial read.
             page = self._existing_page(actor, page.reference())
         return WriteResult(page=page, note=stored, review_kinds=review)
 
-    def archive(self, actor: KnowledgeActor, reference: str, *, base_revision: int, reason: str) -> WriteResult:
+    def archive(
+        self, actor: KnowledgeActor, reference: str, *, base_revision: int, reason: str,
+        command_outcome: Optional[CommandOutcome] = None,
+    ) -> WriteResult:
         page = self._existing_page(actor, reference)
         if page.status is PageStatus.ARCHIVED:
             raise KnowledgeError(CODE_INVALID, f"{page.reference()} is already archived.")
@@ -523,6 +538,7 @@ class KnowledgeService:
             self._change(page.key, base_revision, draft, PageStatus.ARCHIVED, ChangeKind.ARCHIVE, summary, actor),
             limits=self._limits_for(actor),
             now=self._clock(),
+            command_outcome=command_outcome,
         )
         return WriteResult(page=changed)
 
@@ -597,6 +613,7 @@ class KnowledgeService:
         base_revision: int = 0,
         note: Optional[str] = None,
         page: str = "",
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
         """Publish one pending contribution to the team space, optionally as an edited version.
 
@@ -660,7 +677,8 @@ class KnowledgeService:
                 )
             self._require_not_blocked(actor, (text,), page_id=current.page_id, action=WriteAction.NOTE)
             stored = self._repository.add_note(
-                current, body=text, actor=actor, limits=None, now=self._clock(), contribution_id=contribution_id
+                current, body=text, actor=actor, limits=None, now=self._clock(), contribution_id=contribution_id,
+                command_outcome=command_outcome,
             )
             if stored.page_id != current.page_id:
                 current = self._existing_page(actor, current.reference())
@@ -698,6 +716,7 @@ class KnowledgeService:
             self._change(key, revision, page_draft, status, kind, summary, actor, contribution_id=contribution_id),
             limits=None,
             now=self._clock(),
+            command_outcome=command_outcome,
         )
         return WriteResult(page=published)
 
@@ -711,10 +730,13 @@ class KnowledgeService:
             contribution_id, status=ContributionStatus.REJECTED, actor=actor, reason=text, now=self._clock()
         )
 
-    def withdraw_contribution(self, actor: KnowledgeActor, contribution_id: str) -> KnowledgeContribution:
+    def withdraw_contribution(
+        self, actor: KnowledgeActor, contribution_id: str, *, command_outcome: Optional[CommandOutcome] = None
+    ) -> KnowledgeContribution:
         self._pending(actor, contribution_id)
         return self._repository.decide_contribution(
-            contribution_id, status=ContributionStatus.WITHDRAWN, actor=actor, reason="withdrawn", now=self._clock()
+            contribution_id, status=ContributionStatus.WITHDRAWN, actor=actor, reason="withdrawn", now=self._clock(),
+            command_outcome=command_outcome,
         )
 
     def _pending(self, actor: KnowledgeActor, contribution_id: str) -> KnowledgeContribution:
@@ -732,7 +754,8 @@ class KnowledgeService:
     # curator is the guard the limits report to.
 
     def revert(
-        self, actor: KnowledgeActor, reference: str, *, to_revision: int, base_revision: int, reason: str
+        self, actor: KnowledgeActor, reference: str, *, to_revision: int, base_revision: int, reason: str,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> WriteResult:
         """Make an earlier revision current again, as a new revision."""
 
@@ -763,6 +786,7 @@ class KnowledgeService:
             ),
             limits=None,
             now=self._clock(),
+            command_outcome=command_outcome,
         )
         return WriteResult(page=changed)
 
@@ -1194,3 +1218,26 @@ __all__ = [
     "PageView",
     "WriteResult",
 ]
+
+
+def knowledge_service_for(
+    repository: KnowledgeRepository,
+    *,
+    settings: KnowledgeSettings,
+    personal_memory: Any = None,
+    logger: Optional[logging.Logger] = None,
+) -> KnowledgeService:
+    """The knowledge service on a store, with a person's memories for the overlap check.
+
+    One builder for agents' tools (``custom_tools.providers.knowledge.knowledge_service``)
+    and the team services' people's commands (``team_services.knowledge``), so both apply
+    the same settings. ``personal_memory`` is the pinned memory store, or None.
+    """
+
+    def personal_texts(person_id: str) -> list[str]:
+        if personal_memory is None:
+            return []
+        return [fact.fact_text for fact in personal_memory.list_usermem(canonical_user_id=person_id)]
+
+    return KnowledgeService(repository, settings=settings, personal_texts=personal_texts, logger=logger)
+

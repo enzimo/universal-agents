@@ -44,6 +44,9 @@ class GatewayPersonReferences(Protocol):
     def person_ref(self, person_id: str) -> str | None:
         """The person's opaque reference, or None when the gateway has not recorded them."""
 
+    def person_id(self, person_ref: str) -> str | None:
+        """Who a reference in a reply names, or None when no recorded person has it."""
+
 
 class GatewayTeamCommandService:
     """Send one person's command to the team services and return the reply body."""

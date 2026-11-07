@@ -64,6 +64,7 @@ from knowledge_base.records import (
     KnowledgeRevision,
     KnowledgeWriteKey,
     KnowledgeWriteReceipt,
+    LongTextCounts,
     PageChange,
     PageKey,
     PageMerge,
@@ -106,6 +107,7 @@ from storage.change_ledger import (
     work_writer,
 )
 from storage.read_only import repositories_are_read_only
+from storage.operation_outcomes import CommandOutcome, CommandOutcomeWrites, ensure_outcome_table
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
@@ -221,7 +223,7 @@ class KnowledgeRepository(Protocol):
 
     def apply_page_change(
         self, change: PageChange, *, limits: Optional[KnowledgeWriteLimits], now: datetime,
-        write_key: Optional[KnowledgeWriteKey] = None,
+        write_key: Optional[KnowledgeWriteKey] = None, command_outcome: Optional[CommandOutcome] = None,
     ) -> KnowledgePage: ...
 
     def merge_pages(self, merge: PageMerge, *, now: datetime) -> tuple[KnowledgePage, KnowledgePage]: ...
@@ -235,6 +237,7 @@ class KnowledgeRepository(Protocol):
         limits: Optional[KnowledgeWriteLimits],
         now: datetime,
         contribution_id: str = "",
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> KnowledgeNote: ...
 
     def add_contribution(
@@ -250,6 +253,7 @@ class KnowledgeRepository(Protocol):
         actor: KnowledgeActor,
         reason: str,
         now: datetime,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> KnowledgeContribution: ...
 
     def record_refusal(self, actor: KnowledgeActor, *, action: WriteAction, page_id: str, reason: str, now: datetime) -> None: ...
@@ -266,12 +270,14 @@ class KnowledgeRepository(Protocol):
 
     def page_problems(self, *, team_id: str, stale_before: datetime, limit: int) -> PageProblems: ...
 
+    def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts: ...
+
     def export_rows(self, table: str) -> list[dict[str, Any]]: ...
 
     def import_rows(self, table: str, rows: list[dict[str, Any]]) -> int: ...
 
 
-class _RelationalKnowledgeRepository:
+class _RelationalKnowledgeRepository(CommandOutcomeWrites):
     """SQL shared by both databases; subclasses supply connections and search."""
 
     _dialect: SqlDialect
@@ -294,6 +300,8 @@ class _RelationalKnowledgeRepository:
                 conn.execute(statement)
             # Personal page changes are recorded in the change ledger, in the same transaction.
             ensure_ledger_tables(conn, self._dialect)
+            # People's commands from the team services store their outcomes with the change.
+            ensure_outcome_table(conn)
             conn.commit()
 
     def _table_statements(self) -> list[str]:
@@ -810,18 +818,21 @@ class _RelationalKnowledgeRepository:
 
     def apply_page_change(
         self, change: PageChange, *, limits: Optional[KnowledgeWriteLimits], now: datetime,
-        write_key: Optional[KnowledgeWriteKey] = None,
+        write_key: Optional[KnowledgeWriteKey] = None, command_outcome: Optional[CommandOutcome] = None,
     ) -> KnowledgePage:
         """Create, edit, archive or restore one page in one transaction.
 
         ``limits`` is given for agent writes and ``None`` for people's edits
         and the curator's publishing. A refusal raises ``KnowledgeError`` and
-        is recorded in the edit log.
+        is recorded in the edit log. ``command_outcome`` (a person's command
+        from the team services) stores the command's receipt with the change.
         """
 
         action = _action_for(change.change_kind)
         try:
             with self._write() as conn:
+                if command_outcome is not None:
+                    command_outcome.raise_if_stored(conn, self._dialect)
                 if write_key is not None:
                     receipt = self._write_receipt(conn, change.actor, write_key)
                     if receipt is not None:
@@ -833,6 +844,8 @@ class _RelationalKnowledgeRepository:
                         KnowledgeWriteReceipt(reference=page.reference(), page_id=page.page_id, revision=page.revision),
                         now=now,
                     )
+                if command_outcome is not None:
+                    command_outcome.save(conn, self._dialect, page)
                 return page
         except KnowledgeError as error:
             self._save_ledger_review(error)
@@ -1267,6 +1280,7 @@ class _RelationalKnowledgeRepository:
         limits: Optional[KnowledgeWriteLimits],
         now: datetime,
         contribution_id: str = "",
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> KnowledgeNote:
         note = KnowledgeNote(
             note_id=new_id(NOTE_ID_PREFIX),
@@ -1285,6 +1299,8 @@ class _RelationalKnowledgeRepository:
         p = self._dialect.bind
         try:
             with self._write() as conn:
+                if command_outcome is not None:
+                    command_outcome.raise_if_stored(conn, self._dialect)
                 # The service read the page before this transaction. A merge
                 # may have committed meanwhile, so follow its name again under
                 # the write lock, including when publishing a proposed note.
@@ -1336,6 +1352,8 @@ class _RelationalKnowledgeRepository:
                     now=now,
                 )
                 self._record_ledger(conn, page, actor, noted, now=now)
+                if command_outcome is not None:
+                    command_outcome.save(conn, self._dialect, note)
         except KnowledgeError as error:
             self.record_refusal(actor, action=WriteAction.NOTE, page_id=page.page_id, reason=error.code, now=now)
             raise
@@ -1470,11 +1488,14 @@ class _RelationalKnowledgeRepository:
         actor: KnowledgeActor,
         reason: str,
         now: datetime,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> KnowledgeContribution:
         """Reject or withdraw a pending contribution (publishing goes through the page change)."""
 
         p = self._dialect.bind
         with self._write() as conn:
+            if command_outcome is not None:
+                command_outcome.raise_if_stored(conn, self._dialect)
             updated = conn.execute(
                 f"""
                 UPDATE knowledge_contributions
@@ -1506,7 +1527,10 @@ class _RelationalKnowledgeRepository:
             row = conn.execute(
                 f"SELECT * FROM knowledge_contributions WHERE contribution_id = {p}", (contribution_id,)
             ).fetchone()
-        return self._contribution(row)
+            decided = self._contribution(row)
+            if command_outcome is not None:
+                command_outcome.save(conn, self._dialect, decided)
+        return decided
 
     def record_refusal(self, actor: KnowledgeActor, *, action: WriteAction, page_id: str, reason: str, now: datetime) -> None:
         """Log a refused write (outside the refused transaction, which rolled back)."""
@@ -1731,6 +1755,45 @@ class _RelationalKnowledgeRepository:
             stale_pages=[(f"{team}/{row[0]}", str(row[1])) for row in stale],
             pages_with_open_notes=[(f"{team}/{row[0]}", int(row[1])) for row in noted],
             duplicate_pages=[(f"{team}/{row[0]}", f"{team}/{row[1]}") for row in duplicates],
+        )
+
+    def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts:
+        """Pages, earlier revisions, pending contributions and open notes whose text has more than ``longer_than`` characters.
+
+        For administrators' Status page (``custom_agents.long_knowledge``): counts only,
+        never names or text, because personal pages and proposals are their person's own.
+        Every text is measured in the database. The byte size comes first because
+        PostgreSQL reads it without decompressing the text, and a text longer than
+        ``longer_than`` characters is always longer than that many bytes; LENGTH then
+        counts characters on both databases, as Python's ``len`` does.
+        """
+
+        p = self._dialect.bind
+
+        def longer(column: str) -> str:
+            return f"{self._dialect.text_bytes(column)} > {p} AND LENGTH({column}) > {p}"
+
+        limit = (int(longer_than), int(longer_than))
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                  (SELECT COUNT(*) FROM knowledge_pages WHERE team_id = {p} AND {longer("body")}),
+                  (SELECT COUNT(*) FROM knowledge_revisions r JOIN knowledge_pages pg ON pg.page_id = r.page_id
+                   WHERE r.team_id = {p} AND r.revision < pg.revision AND {longer("r.body")}),
+                  (SELECT COUNT(*) FROM knowledge_contributions WHERE team_id = {p} AND status = {p}
+                   AND {longer("body")}),
+                  (SELECT COUNT(*) FROM knowledge_notes WHERE team_id = {p} AND status = {p} AND {longer("body")})
+                """,
+                (
+                    team_id, *limit,
+                    team_id, *limit,
+                    team_id, ContributionStatus.PENDING.value, *limit,
+                    team_id, NoteStatus.OPEN.value, *limit,
+                ),
+            ).fetchone()
+        return LongTextCounts(
+            pages=int(row[0]), earlier_revisions=int(row[1]), pending_contributions=int(row[2]), open_notes=int(row[3])
         )
 
     # -- write helpers ---------------------------------------------------------------------

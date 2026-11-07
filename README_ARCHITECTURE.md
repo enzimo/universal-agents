@@ -3780,7 +3780,9 @@ each read from the launcher's list of environment overrides (names only,
 configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
-schedules for administrators, receive loops that stopped), whether TeamLead
+schedules for administrators, receive loops that stopped, and knowledge too long
+to open in Web Chat, which only the team lead counts, at most every ten minutes and
+in a thread of its own, `custom_agents/long_knowledge.py`), whether TeamLead
 reports, its own configuration and receive loops, and storage filling up
 (`assistant_gateway/storage_capacity.py`). A source that does not answer is listed and shown as a
 problem, because silence must not look like health. Every five minutes the
@@ -3852,13 +3854,13 @@ After publishing or withdrawing a proposal, the refreshed list supplies the
 count. If navigation discards that list or the list read fails, a fresh count
 read updates the badge without changing the viewer. Replies from an earlier
 sign-in cannot start these reads in the next person's session.
-The store lives in the manager's database, so the gateway's routes
-(`website_handlers/knowledge.py`) send one `ManagerKnowledgeCommand` per request
-through `GatewayManagerCommandService`, like Settings memories. The command names
-no person: the manager builds a person actor (`ActorKind.PERSON`) from the
-gateway-signed context only (`custom_agents/knowledge_command_runtime.py`,
-`verified_command_person`), so `personal/` is always the signed-in person's own
-space. Both sides check the same ownership rule
+The store lives in the team's database, so the gateway's routes
+(`website_handlers/knowledge.py`) send one `knowledge.*` command per request to
+the team services (`assistant_gateway/application/knowledge_pages.py`, converted
+by `knowledge_wire.py`), like Settings memories. The command names its person only
+by their opaque reference in the authority token: the team services build a person
+actor (`ActorKind.PERSON`) from it (`team_services/knowledge.py`), so `personal/`
+is always the signed-in person's own space. They check the ownership rule
 (`access_control/knowledge_access.py` over `access_control.ownership`): every
 team member reads and edits team pages, personal pages and proposals are their
 owner's. The knowledge service then applies its own rules: a person's team edit
@@ -3869,8 +3871,9 @@ review flags carry kind, field and position, never the matched text. Archive and
 revert reasons are fixed by trusted code because they enter shared history. Pages
 show `[[links]]` as buttons: the manager resolves each one with the stored link
 rules, following merged names (`KnowledgeService.page_links`), and the browser
-replaces link syntax in rendered text nodes, never in code. The gateway replaces
-editor person ids with names before answering the browser. Like
+replaces link syntax in rendered text nodes, never in code. Replies name a person
+editor by reference; the gateway turns references into "You" or names before
+answering the browser. Like
 other Web Chat routes, these have no tool catalog levels: they are people's own
 controls behind the session, the write checks and the ownership rule.
 
@@ -4421,7 +4424,24 @@ They serve the team's address (`svc.team`) and answer, so far:
   sender that is not a gateway, is answered `not_allowed`. Agents' own memory operations
   (root task tokens) are not answered here yet; agents still use their tools in their own
   process. The same ownership rule decides as before (`access_control.ownership`). A
-  person's command no longer records the chat it came from with the fact's events.
+  person's command no longer records the chat it came from with the fact's events;
+- the Web Chat Knowledge page's commands, `knowledge.list`, `.read`, `.history`, `.write`,
+  `.add_note`, `.archive`, `.revert`, `.list_contributions`, `.count_contributions`,
+  `.read_contribution`, `.publish_contribution` and `.withdraw_contribution`
+  (`team_services.knowledge`), the durable `ManagerKnowledgeCommand` until phase 2, on the
+  same knowledge service (`knowledge_base.service.knowledge_service_for`, shared with the
+  agents' tools). Replies name a person editor by reference. Page text travels inline, at
+  most 32,768 characters (`knowledge_base.records.INLINE_TEXT_MAX`), until the contract's
+  object store exists, while agents' tools read and write whole pages up to
+  `agent.knowledge.limits.max_body_chars` (24,000 by default, at most 500,000). No
+  knowledge may be lost or cut because of the limit: reading longer text (a page, an
+  earlier revision, an open note, a proposal or the page it changes) is answered
+  `runtime_error` with a plain message saying nothing was changed or cut, and a change
+  that would replace, hide, revert or decide text the person could not open, or whose
+  reply could not show its result, is refused the same way before anything is stored.
+  The gateway refuses longer typed text before sending, and the editor keeps it. The team
+  lead counts the stored pages, earlier revisions, pending proposals and open notes over
+  the limit and reports them as a note on the Status page (`custom_agents.long_knowledge`).
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.
@@ -4431,9 +4451,15 @@ in the manager database): a change command is carried out once however often it 
 retried. The store that makes the change checks for a stored reply under its write
 lock, before changing anything, and stores the reply under the team and the command's
 retry key (the frame's idempotency key) in the same transaction as the change
-(`CommandOutcome`, passed to the memory store's writes). A refusal rolls the change back
-and is stored in a transaction of its own, except outcomes that ask for a retry
-(`runtime_error`, `record_busy` and others). Replies are kept seven days, the longest
+(`CommandOutcome`, passed to the memory and knowledge stores' writes). A refusal rolls the
+change back and is stored in a transaction of its own, except outcomes that ask for a retry
+(`runtime_error`, `record_busy` and others). The team services also look the outcome up
+before a command runs, and again after a refusal (`team_services.outcomes`), because a
+service checks a command before it reaches the store (a page's revision, whether a proposal
+still waits), and after the first try those checks would refuse a retry as stale. A reply
+that shows the result as readers see it after the commit (a knowledge page with its links
+in and notes) is stored as a receipt in the change's transaction and replaced by the full
+reply right after; a retry that finds only the receipt rebuilds the reply from it. Replies are kept seven days, the longest
 life of an authority token; a repeated key with another body gets the stored reply, and
 both body digests are logged. The table is created when a store that uses it opens, so
 an older database gets it at its first start on this version.

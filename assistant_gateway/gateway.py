@@ -586,10 +586,16 @@ def _team_commands(
             getattr(runtime, "message_host", None),
             timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
         ),
-        references=AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id),
+        references=_person_references(config),
         id_generator=id_generator,
         logger=logger,
     )
+
+
+def _person_references(config: GatewayInstanceConfig) -> AccessStorePersonReferences:
+    """People's opaque references, from the gateway's copy of the team's people."""
+
+    return AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id)
 
 
 class UserGateway:
@@ -1359,9 +1365,12 @@ class UserGateway:
                 person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
             ),
-            # People's Knowledge page; the knowledge base is in the manager's database.
+            # People's Knowledge page; the team services answer it (team_services.knowledge).
             knowledge=GatewayKnowledgePages(
-                runner=self._command_operations,
+                team_commands=_team_commands(
+                    config, resolved_manager_runtime, team_services, id_generator=self._id_generator
+                ),
+                references=_person_references(config),
                 display_name=self.access_inbox.display_name,
                 enabled=config.agent.knowledge.enabled,
             ),

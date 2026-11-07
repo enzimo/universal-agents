@@ -632,7 +632,7 @@ class ManagerTopicCommand(BaseModel):
 
 
 class KnowledgeCommandAction(StrEnum):
-    """What a person does on the Web Chat Knowledge page (``ManagerKnowledgeCommand``)."""
+    """What a person does on the Web Chat Knowledge page (a ``knowledge.*`` command to the team services)."""
 
     LIST = "list"
     READ = "read"
@@ -817,45 +817,6 @@ class KnowledgeCommandResultPayload(BaseModel):
     contribution: Optional[KnowledgeContributionPayload] = None
     # Flags the person confirmed when saving.
     review_flags: List[KnowledgeReviewFlagPayload] = Field(default_factory=list)
-
-
-class ManagerKnowledgeCommand(BaseModel):
-    """Durable gateway-to-manager command from a person's Web Chat Knowledge page.
-
-    The manager runs it with ``knowledge_base.service.KnowledgeService`` as a
-    person (``ActorKind.PERSON``) built from the gateway-signed context only
-    (``custom_agents.knowledge_command_runtime``).
-    """
-
-    message_class: Literal["ManagerKnowledgeCommand"] = "ManagerKnowledgeCommand"
-    command_id: str = Field(default_factory=lambda: new_id("mgr_knowledge"))
-    command_type: MessageMetaType = MessageMetaType.REQUEST
-    command: KnowledgeCommandPayload
-    success: Optional[bool] = None
-    result: Optional[KnowledgeCommandResultPayload] = None
-    error_code: Optional[
-        Literal[
-            "authorization_denied",
-            "conflict",
-            "page_exists",
-            "merged",
-            "review_required",
-            "sensitive_content",
-            "not_found",
-            "invalid_request",
-            "knowledge_off",
-            "runtime_error",
-        ]
-    ] = None
-    # Plain words for the person; never the content a rule refused.
-    error_message: str = ""
-    review_flags: List[KnowledgeReviewFlagPayload] = Field(default_factory=list)
-    current_revision: int = Field(default=0, ge=0)
-    # ``merged``: the page a merged page's name now leads to (``team/new-name``).
-    merged_into: str = ""
-
-    def get_id(self) -> str:
-        return self.command_id
 
 
 class MovedTeamScheduleV1(BaseModel):

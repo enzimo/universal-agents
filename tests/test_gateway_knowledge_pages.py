@@ -2,9 +2,10 @@
 
 Reads need the signed-in session and the person's own Web Chat thread; changes
 also need the CSRF header, the page's own origin and same-origin fetch
-metadata. The browser never names a person; the gateway names editors and
-never sends person ids. The manager's refusals keep their codes, plain words
-and review flags.
+metadata. The browser never names a person: the gateway sends the signed-in
+person's reference, names editors, and never sends person ids or references to
+the browser. The team services' refusals keep their codes, plain words and
+review flags.
 """
 
 from __future__ import annotations
@@ -21,18 +22,9 @@ from assistant_gateway.application.knowledge_pages import (
     YOU_LABEL,
     GatewayKnowledgePages,
 )
-from assistant_gateway.application.manager_commands import GatewayManagerCommandService
-from assistant_gateway.runtime_ports import OwnershipPrivateResourceAuthorizer
+from assistant_gateway.application.knowledge_wire import INLINE_TEXT_MAX
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from assistant_gateway.store import GatewayStateStore
-from custom_messages.contracts.control_v1 import (
-    KnowledgeCommandAction,
-    KnowledgeCommandPayload,
-    KnowledgeCommandResultPayload,
-    KnowledgeEditorPayload,
-    KnowledgePageDetailPayload,
-    KnowledgeReviewFlagPayload,
-    ManagerKnowledgeCommand,
-)
 from tests.test_gateway_website_app import (
     InternalWebsiteInteractiveApp,
     _config,
@@ -41,36 +33,45 @@ from tests.test_gateway_website_app import (
 
 SESSION_KEY = "website:web-chat:knowledge"
 OTHER_SESSION_KEY = "website:web-chat:someone-else"
+REFERENCES = {"user_alpha": "p-alpha", "user_beta": "p-beta", "user_gamma": "p-gamma"}
 
 
-class _Runner:
-    """Stands in for the manager: records each request and answers with ``reply``."""
+class _TeamServices:
+    """Stands in for the team services: records each command and answers with ``reply``."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[KnowledgeCommandPayload, object]] = []
-        self.reply = ManagerKnowledgeCommand(
-            command=KnowledgeCommandPayload(action=KnowledgeCommandAction.LIST),
-            success=True,
-            result=KnowledgeCommandResultPayload(action=KnowledgeCommandAction.LIST),
-        )
+        self.calls: list[tuple[str, dict, str]] = []
+        self.reply: dict = {"outcome": "ok", "pages": [], "total": 0}
 
-    async def execute_knowledge_command(self, command, *, context):
-        self.calls.append((command.command, context))
+    async def command(self, kind: str, body: dict, *, person_ref: str, request_id: str) -> dict:
+        assert body["request_id"] == request_id
+        self.calls.append((kind, body, person_ref))
         return self.reply
 
-    def refuse(self, code: str, message: str, **fields) -> None:
-        self.reply = ManagerKnowledgeCommand(
-            command=KnowledgeCommandPayload(action=KnowledgeCommandAction.WRITE),
-            success=False, error_code=code, error_message=message, **fields,
-        )
+    def refuse(self, outcome: str, message: str, **fields) -> None:
+        self.reply = {"outcome": outcome, "message": message, **fields}
 
 
-def _page(editor: KnowledgeEditorPayload) -> KnowledgePageDetailPayload:
-    return KnowledgePageDetailPayload(
-        space="team", page="deploys", title="Deploys", page_type="how-to", revision=2, status="active",
-        updated_at_utc="2026-10-10T12:00:00.000000Z", body="Deploy on Tuesdays.",
-        created_at_utc="2026-10-09T12:00:00.000000Z", last_editor=editor,
-    )
+class _References:
+    def person_ref(self, person_id: str) -> str | None:
+        return REFERENCES.get(person_id)
+
+    def person_id(self, person_ref: str) -> str | None:
+        return next((person for person, reference in REFERENCES.items() if reference == person_ref), None)
+
+
+class _Ids:
+    def new_correlation_id(self) -> str:
+        return "cmd-1"
+
+
+def _page(editor: dict) -> dict:
+    return {
+        "type": "inline", "space": "team", "page": "deploys", "title": "Deploys", "page_type": "how-to",
+        "summary": "", "tags": [], "status": "active", "seen_version": "2", "updated_at": "2026-10-10T12:00:00.000Z",
+        "content": {"type": "inline", "text": "Deploy on Tuesdays."}, "created_at": "2026-10-09T12:00:00.000Z",
+        "updated_by": editor, "backlinks": [], "open_notes": [], "pending_contributions": [], "links": [],
+    }
 
 
 @pytest.fixture
@@ -84,11 +85,15 @@ def site(tmp_path: Path):
             session_key=key, conversation_id="conv_" + owner, manager_agent_id="manager_1",
             channel_name="website", user_id=owner, chat_id="web-chat", owner_canonical_user_id=owner,
         )
-    runner = _Runner()
+    team = _TeamServices()
     names = {"user_beta": "Beatrix", "user_gamma": "user_gamma"}
-    gateway.knowledge = GatewayKnowledgePages(runner=runner, display_name=lambda pid: names.get(pid, pid), enabled=True)
+    references = _References()
+    gateway.knowledge = GatewayKnowledgePages(
+        team_commands=GatewayTeamCommandService(team_services=team, references=references, id_generator=_Ids()),
+        references=references, display_name=lambda pid: names.get(pid, pid), enabled=True,
+    )
     app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
-    return SimpleNamespace(app=app, runner=runner, gateway=gateway)
+    return SimpleNamespace(app=app, team=team, gateway=gateway)
 
 
 async def _signed_in(client: TestClient) -> dict[str, str]:
@@ -120,11 +125,9 @@ async def test_reads_need_the_session_and_the_persons_own_thread(site) -> None:
     assert access.headers["Cache-Control"] == "no-store"
     assert listed.status == 200
     assert (someone_elses.status, no_thread.status) == (404, 400)
-    [(payload, context)] = site.runner.calls
-    assert (payload.action, payload.space, payload.status, payload.query, payload.offset) == (
-        KnowledgeCommandAction.LIST, "personal", "archived", "deploy", 20,
-    )
-    assert (context.canonical_user_id, context.session_key) == ("user_alpha", SESSION_KEY)
+    [(kind, body, person_ref)] = site.team.calls
+    assert kind == "knowledge.list" and person_ref == REFERENCES["user_alpha"]
+    assert (body["space"], body["status"], body["query"], body["offset"]) == ("personal", "archived", "deploy", 20)
 
 
 @pytest.mark.asyncio
@@ -136,7 +139,7 @@ async def test_changes_need_csrf_origin_and_same_origin_fetch(site) -> None:
         no_csrf = await client.post(path, json=body, headers={**headers, "X-UA-Permission-CSRF": ""})
         other_origin = await client.post(path, json=body, headers={**headers, "Origin": "https://evil.example"})
         cross_site = await client.post(path, json=body, headers={**headers, "Sec-Fetch-Site": "cross-site"})
-        assert site.runner.calls == []
+        assert site.team.calls == []
         created = await client.post(
             path, headers=headers,
             json={**body, "base_revision": 7, "person_id": "user_beta", "canonical_user_id": "user_beta"},
@@ -151,35 +154,35 @@ async def test_changes_need_csrf_origin_and_same_origin_fetch(site) -> None:
 
     assert (no_csrf.status, other_origin.status, cross_site.status) == (403, 403, 403)
     assert (created.status, noted.status, unknown.status) == (200, 200, 404)
-    (create, create_context), (note, _) = site.runner.calls
-    # A new page is always a creation, and the body cannot name a person.
-    assert (create.action, create.space, create.base_revision, create.title) == (
-        KnowledgeCommandAction.WRITE, "team", 0, "Deploys",
+    (create_kind, create, create_person), (note_kind, note, _) = site.team.calls
+    # A new page is always a creation (no version), and the body cannot name a person.
+    assert (create_kind, create["space"], create["title"], "seen_version" in create) == (
+        "knowledge.write", "team", "Deploys", False,
     )
-    assert create_context.canonical_user_id == "user_alpha"
-    assert (note.action, note.page, note.note, note.confirm_review) == (
-        KnowledgeCommandAction.ADD_NOTE, "deploys", "Check the freeze calendar.", True,
+    assert create_person == REFERENCES["user_alpha"] and "user_beta" not in json.dumps(create)
+    assert (note_kind, note["page"], note["note"]["text"], note["confirm_review"]) == (
+        "knowledge.add_note", "deploys", "Check the freeze calendar.", True,
     )
 
 
 @pytest.mark.asyncio
 async def test_refusals_keep_their_code_words_and_review_flags(site) -> None:
-    flag = KnowledgeReviewFlagPayload(kind="email_address", label="an email address", field="body", line=2, column=10)
+    flag = {"kind": "email_address", "label": "an email address", "field": "body", "line": 2, "column": 10}
     cases = [
-        ("conflict", 409, {"current_revision": 3}),
-        ("merged", 409, {"merged_into": "team/ci-pipeline"}),
-        ("review_required", 409, {"review_flags": [flag]}),
-        ("sensitive_content", 422, {}),
-        ("not_found", 404, {}),
-        ("authorization_denied", 403, {}),
-        ("knowledge_off", 503, {}),
-        ("invalid_request", 400, {}),
+        ("conflict", "changed_since_read", 409, {"current_version": "3"}),
+        ("merged", "merged", 409, {"merged_into": "team/ci-pipeline"}),
+        ("review_required", "review_required", 409, {"review_flags": [flag]}),
+        ("sensitive_content", "sensitive_content", 422, {"review_flags": []}),
+        ("not_found", "not_found", 404, {}),
+        ("authorization_denied", "not_allowed", 403, {}),
+        ("knowledge_off", "feature_off", 503, {}),
+        ("invalid_request", "invalid_request", 400, {}),
     ]
     answers = []
     async with TestClient(TestServer(site.app.build_app())) as client:
         headers = await _signed_in(client)
-        for code, _status, fields in cases:
-            site.runner.refuse(code, f"Refused: {code}.", **fields)
+        for code, outcome, _status, fields in cases:
+            site.team.refuse(outcome, f"Refused: {code}.", **fields)
             response = await client.post(
                 "/api/web-chat/knowledge/pages/team/deploys/save", headers=headers,
                 json={"session_key": SESSION_KEY, "base_revision": 2, "title": "Deploys", "body": "New text."},
@@ -192,7 +195,7 @@ async def test_refusals_keep_their_code_words_and_review_flags(site) -> None:
         bad_tags_payload = await bad_tags.json()
         bad_status = await client.get(f"/api/web-chat/knowledge/pages?session_key={SESSION_KEY}&status=deleted")
 
-    for (code, status, _fields), (got_status, payload) in zip(cases, answers):
+    for (code, _outcome, status, _fields), (got_status, payload) in zip(cases, answers):
         assert got_status == status, code
         assert payload["error"] == {"code": code, "message": f"Refused: {code}."}
     assert answers[0][1]["current_revision"] == 3
@@ -207,17 +210,14 @@ async def test_refusals_keep_their_code_words_and_review_flags(site) -> None:
 
 @pytest.mark.asyncio
 async def test_the_proposal_count_answers_only_the_number_for_the_persons_own_thread(site) -> None:
-    site.runner.reply = ManagerKnowledgeCommand(
-        command=KnowledgeCommandPayload(action=KnowledgeCommandAction.COUNT_CONTRIBUTIONS), success=True,
-        result=KnowledgeCommandResultPayload(action=KnowledgeCommandAction.COUNT_CONTRIBUTIONS, total=3),
-    )
+    site.team.reply = {"outcome": "ok", "total": 3}
     async with TestClient(TestServer(site.app.build_app())) as client:
         signed_out = await client.get(f"/api/web-chat/knowledge/counts?session_key={SESSION_KEY}")
         await _signed_in(client)
         counted = await client.get(f"/api/web-chat/knowledge/counts?session_key={SESSION_KEY}")
         counted_payload = await counted.json()
         someone_elses = await client.get(f"/api/web-chat/knowledge/counts?session_key={OTHER_SESSION_KEY}")
-        site.runner.refuse("knowledge_off", "The knowledge base is turned off.")
+        site.team.refuse("feature_off", "The knowledge base is turned off.")
         off = await client.get(f"/api/web-chat/knowledge/counts?session_key={SESSION_KEY}")
         off_payload = await off.json()
 
@@ -227,55 +227,70 @@ async def test_the_proposal_count_answers_only_the_number_for_the_persons_own_th
     assert counted_payload == {"status": "ok", "pending_proposals": 3}
     assert someone_elses.status == 404
     assert (off.status, off_payload["error"]["code"]) == (503, "knowledge_off")
-    [(payload, context), _off] = site.runner.calls
-    assert payload.action is KnowledgeCommandAction.COUNT_CONTRIBUTIONS
-    assert (context.canonical_user_id, context.session_key) == ("user_alpha", SESSION_KEY)
+    [(kind, body, person_ref), _off] = site.team.calls
+    assert (kind, person_ref) == ("knowledge.count_contributions", REFERENCES["user_alpha"])
 
 
 @pytest.mark.asyncio
 async def test_editors_are_named_and_person_ids_never_reach_the_browser(site) -> None:
     async def page_by(editor):
-        site.runner.reply = ManagerKnowledgeCommand(
-            command=KnowledgeCommandPayload(action=KnowledgeCommandAction.READ), success=True,
-            result=KnowledgeCommandResultPayload(action=KnowledgeCommandAction.READ, page=_page(editor)),
-        )
+        site.team.reply = {"outcome": "ok", "page": _page(editor)}
         response = await client.get(f"/api/web-chat/knowledge/pages/team/deploys?session_key={SESSION_KEY}")
         return await response.text()
 
     async with TestClient(TestServer(site.app.build_app())) as client:
         await _signed_in(client)
-        mine = await page_by(KnowledgeEditorPayload(kind="person", person_id="user_alpha"))
-        named = await page_by(KnowledgeEditorPayload(kind="person", person_id="user_beta"))
-        unnamed = await page_by(KnowledgeEditorPayload(kind="person", person_id="user_gamma"))
-        by_agent = await page_by(KnowledgeEditorPayload(kind="agent", agent_type="KnowledgeCuratorAgent"))
+        mine = await page_by({"kind": "person", "person": REFERENCES["user_alpha"]})
+        named = await page_by({"kind": "person", "person": REFERENCES["user_beta"]})
+        unnamed = await page_by({"kind": "person", "person": REFERENCES["user_gamma"]})
+        stranger = await page_by({"kind": "person", "person": "p-unknown"})
+        by_agent = await page_by({"kind": "agent", "agent_type": "KnowledgeCuratorAgent"})
 
     for text, label, person_id in (
         (mine, YOU_LABEL, "user_alpha"),
         (named, "Beatrix", "user_beta"),
         (unnamed, TEAM_MEMBER_LABEL, "user_gamma"),
+        (stranger, TEAM_MEMBER_LABEL, "p-unknown"),
         (by_agent, "KnowledgeCuratorAgent", ""),
     ):
         assert json.loads(text)["page"]["last_editor"]["label"] == label
         assert not person_id or person_id not in text
+        assert not person_id or REFERENCES.get(person_id, person_id) not in text
 
 
-def test_the_gateway_checks_the_same_ownership_rule_before_sending() -> None:
-    authorizer = OwnershipPrivateResourceAuthorizer()
+@pytest.mark.asyncio
+async def test_text_longer_than_web_chat_carries_is_refused_plainly(site) -> None:
+    """Longer typed text is refused before anything is sent; the team services' refusal of longer stored text reaches the browser as written."""
 
-    def allowed(payload: KnowledgeCommandPayload, roles: tuple[str, ...] = ("member",)) -> bool:
-        target = GatewayManagerCommandService._private_resource_target(
-            ManagerKnowledgeCommand(command=payload), session=SimpleNamespace(), person=SimpleNamespace(canonical_user_id="alice"),
-        )
-        return authorizer.can_access(
-            actor_canonical_user_id="alice",
-            owner_canonical_user_id="alice" if target.owned_by_person else None,
-            resource_type=target.resource_type, resource_id=target.resource_id, action=target.action,
-            team_id="team_1", roles=roles,
-        )
+    exact, over = "x" * INLINE_TEXT_MAX, "x" * (INLINE_TEXT_MAX + 1)
+    too_long = (
+        "This page's text has 40,000 characters, more than the 32,768 Web Chat can show. Nothing was changed and "
+        "nothing was cut. Agents can still read and change all of it, for example to split the page into smaller "
+        "linked pages."
+    )
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        headers = await _signed_in(client)
+        save = "/api/web-chat/knowledge/pages/team/deploys/save"
+        refused_save = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
+                                                                      "body": over})
+        refused_note = await client.post("/api/web-chat/knowledge/pages/team/deploys/notes", headers=headers,
+                                         json={"session_key": SESSION_KEY, "note": over})
+        typed = [(response.status, await response.json()) for response in (refused_save, refused_note)]
+        assert site.team.calls == []
+        sent = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
+                                                              "body": exact})
+        site.team.refuse("runtime_error", too_long)
+        refused_read = await client.get(f"/api/web-chat/knowledge/pages/team/handbook?session_key={SESSION_KEY}")
+        refused_payload = await refused_read.json()
 
-    team_edit = KnowledgeCommandPayload(action=KnowledgeCommandAction.WRITE, page="deploys", base_revision=2)
-    assert allowed(team_edit) is True
-    assert allowed(team_edit, roles=()) is False
-    assert allowed(KnowledgeCommandPayload(action=KnowledgeCommandAction.READ, space="personal", page="travel")) is True
-    assert allowed(KnowledgeCommandPayload(action=KnowledgeCommandAction.PUBLISH_CONTRIBUTION, contribution_id="kb_contrib_1")) is True
-    assert allowed(KnowledgeCommandPayload(action=KnowledgeCommandAction.COUNT_CONTRIBUTIONS)) is True
+    for status, payload in typed:
+        assert status == 400
+        assert payload["error"] == {
+            "code": "invalid_request",
+            "message": f"The text is {INLINE_TEXT_MAX + 1} characters long; at most {INLINE_TEXT_MAX} can be sent. Shorten it.",
+        }
+    assert sent.status == 200
+    [(kind, body, _person), _read] = site.team.calls
+    assert kind == "knowledge.write" and body["content"]["text"] == exact
+    assert refused_read.status == 503
+    assert refused_payload["error"] == {"code": "runtime_error", "message": too_long}
