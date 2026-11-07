@@ -103,8 +103,14 @@ receiver asks for its next message when it can act on it, and NATS never picks a
 receiver and pushes (decision of 2026-10-04). Workers of one type share one
 queue and ask for a task only while they are free. The transport adapter
 refuses a push listener on the work stream, and an architecture test fails when
-production code creates a deliver group or subscribes to NATS outside the
-adapter (`tests/test_runtime_architecture_boundaries.py`). Presence records let late
+production code creates a deliver group, subscribes to NATS outside the adapter
+and the protocol 1 kernel, or uses a raw NATS handle (publishing, requests,
+key-value and object-store buckets, streams, consumers) outside the modules it
+lists (`NATS_CLIENT_MODULES` in `tests/test_runtime_architecture_boundaries.py`).
+Protocol 1's request/reply and key-value calls live in `custom_transport.protocol1`
+rather than in the adapter: they sign and verify frames and records, which the
+adapter knows nothing about, and the list keeps them, the adapter and the topology
+code the only places that reach NATS directly (plan 13B.6). Presence records let late
 joiners and the gateway discover live agents without turning presence into
 proof of identity or authority. Agent status requests and snapshots bypass the
 short broadcast age limit: a restarted manager must receive retained presence
@@ -4239,6 +4245,66 @@ frozen previous-section fixtures cover conversions and refused edits. PostgreSQL
 and Sealbox acceptance require those services; file-store tests do not prove
 their deployment behavior. Browser checks cover unsaved edits, confirmation
 invalidation, selection changes and the validate/import sequence.
+
+## Message hosts and their trust
+
+The message contract (`contracts/messages/v1`) has every process that sends its
+messages sign them as a host, with a key of its own, and every receiver check who
+signed against records that chain to the installation's authority keys.
+`custom_transport.protocol1` is what a running host needs for that:
+
+- **Keys** (`host_keys`): each host's Ed25519 application key and NATS user key, and
+  the installation authority's key, in the instance's `trust/` folder
+  (`InstanceLayout.trust_dir`), written whole, readable only by their owner and
+  created exclusively. The launcher creates missing keys; each process loads only its
+  own. All processes run as one operating-system user, so this keeps keys apart by
+  path, not by permission: a broken-into process could read another host's key file.
+  Remote hosts keep their keys on their own machines.
+- **The bootstrap bundle** (`bootstrap`): the authority public keys and the records a
+  new host needs before it has a certificate. The authority keys are the root of
+  trust, so only the launcher and the installation authority write the file, in the
+  owner-only trust folder; the records in it are verified like any other copy.
+- **Kept trust records** (`trust_state`): the revocations record the host holds, plus
+  any older one that still lists an entry the newer one left out early, and the
+  highest block-list sequence of each team survive a restart, as the contract
+  requires, so a host restarted from an older bundle never trusts a revoked key again.
+  Kept records are added before the bundle's and verified again; one that cannot be
+  checked yet (another installation's, before its agreement) stays kept and comes
+  first once it can. Saves are merged under a file lock, so two copies of one host
+  never drop each other's records; a failed save is retried at the next change. A
+  file that cannot be read is moved aside with an error and the host continues from
+  the bundle, since it reads the current record from the buckets when it starts.
+- **Live messages** (`live`): signed requests and replies over NATS with the host's
+  own reply inbox (`NatsTransportConfig.reply_inbox_runtime`; `request` refuses a
+  connection with another), every received frame checked by
+  `custom_messages.wire.frame.verify_frame` before a handler sees it, and refused
+  requests answered at once with only the refusal's code and known pointer. A served
+  address answers only on the requester's own inbox (`answer_subject`): NATS lets a
+  receiver answer once past its own grants, so an answer on a subject the requester
+  named, such as a JetStream API subject, would act with the receiver's rights. Each
+  request is handled in a task of its own: kinds run one at a time in arrival order
+  unless the caller lets them run side by side (handlers that only wait on another
+  host), an address holds at most 64 requests, and one that waited past its expiry is
+  not handled. The replay record keeps each frame only until it can no longer be
+  accepted, and lives in memory: only a frame's signer could reuse its id after a
+  restart.
+- **Signed records** (`state_records`): records in the key-value buckets, signed with
+  the identity the host has when it signs (a renewal switches frames and records
+  together), with compare-and-set for placements, and verified on every read; a record
+  stored under another key than its own is refused.
+- **Private files** (`private_files`): keys, the bundle and kept records are written
+  whole (a temporary file, flushed, then published and the folder flushed), 0600, in
+  folders that are 0700 at every level.
+
+Protocol 1 requests, replies, refusals and key-value writes await
+`custom_transport.send_barrier.before_send()` before sending. They use the same
+flush barrier as the NATS adapter, so a power loss cannot undo an agent's local
+records after another process has acted on its message. A failed flush prevents
+the send. Hosts outside an agent process install no barrier and keep flushing
+each commit.
+
+The kernel runs nowhere yet; the installation authority and team services processes
+use it first.
 
 ## Certificate trust
 

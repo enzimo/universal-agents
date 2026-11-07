@@ -260,6 +260,11 @@ class NatsTransportConfig:
     user: Optional[str] = None
     password: Optional[str] = None
     credentials_file: Optional[str] = None
+    # This process's protocol 1 runtime id: its NATS reply inbox becomes
+    # _INBOX.<runtime>., which the message contract requires (transport.yaml
+    # reply_inbox_prefix) so a host's credential can grant it only its own replies.
+    # None keeps nats-py's shared _INBOX prefix.
+    reply_inbox_runtime: Optional[str] = None
 
 
 class NatsTransportAdapter:
@@ -289,6 +294,14 @@ class NatsTransportAdapter:
     def connected(self) -> bool:
         return bool(self._nc)
 
+    @property
+    def nats_connection(self) -> Any:
+        """The open NATS connection, for protocol 1's live messages and records (``custom_transport.protocol1``)."""
+
+        if self._nc is None:
+            raise RuntimeError("The NATS transport adapter is not connected.")
+        return self._nc
+
     async def connect(self, *, reconcile_topology: bool = False) -> None:
         try:
             import nats
@@ -311,6 +324,12 @@ class NatsTransportAdapter:
             kwargs["password"] = self.config.password
         if self.config.credentials_file:
             kwargs["user_credentials"] = self.config.credentials_file
+        if self.config.reply_inbox_runtime:
+            # Imported here: the contract's generated module costs about half a second to
+            # load, which only protocol 1 hosts, which use it anyway, should pay.
+            from custom_messages.wire.kinds import REPLY_INBOX_PREFIX
+
+            kwargs["inbox_prefix"] = REPLY_INBOX_PREFIX.format(runtime=self.config.reply_inbox_runtime).encode("ascii")
         self._closing = False
         self._nc = await nats.connect(**kwargs)
         try:
