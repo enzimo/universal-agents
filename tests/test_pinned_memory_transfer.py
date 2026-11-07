@@ -21,6 +21,7 @@ from custom_agents.pinned_memory_transfer import (
     ImportOutcome,
     PersonTargets,
     PinnedMemoryExportV1,
+    apply_import,
     plan_import,
 )
 from custom_messages.contracts.access_v2 import PersonStanding
@@ -303,6 +304,39 @@ def test_the_planner_skips_repeats_within_the_file_and_expired_facts() -> None:
     )
 
     assert [item.outcome for item in plan] == [ImportOutcome.IMPORTED, ImportOutcome.ALREADY_THERE, ImportOutcome.EXPIRED]
+
+
+def test_the_import_stores_times_with_their_zone_when_the_export_names_none(tmp_path: Path) -> None:
+    """Older exports wrote times without a zone; the store writes UTC with its zone, and so does the import."""
+
+    _, config = _instance(tmp_path, "new", NEW_TEAM)
+    fact = {
+        "bank": USERMEM_BANK,
+        "person_id": "usr_a",
+        "memory_id": 1,
+        "fact_text": "Office moves in January.",
+        "valid_from_utc": "2026-01-01T09:00:00",
+        "invalid_after_utc": "2099-01-01T00:00:00",
+        "created_by_kind": "user",
+        "created_at_utc": PAST,
+        "updated_at_utc": PAST,
+    }
+    document = PinnedMemoryExportV1.model_validate(
+        {"exported_at_utc": PAST, "source_instance": "old", "source_team_id": OLD_TEAM, "facts": [fact]}
+    )
+    repo = _repo(config)
+    plan = plan_import(
+        document,
+        existing_rows=[],
+        team_id=NEW_TEAM,
+        targets=PersonTargets(explicit={}, known={"usr_a": PersonStanding.ACTIVE}),
+        memory_config={},
+    )
+
+    apply_import(repo, plan, memory_config={}, team_id=NEW_TEAM)
+
+    (row,) = repo.list_usermem(canonical_user_id="usr_a")
+    assert (row.valid_from_utc, row.invalid_after_utc) == ("2026-01-01T09:00:00+00:00", "2099-01-01T00:00:00+00:00")
 
 
 def test_the_import_refuses_a_file_it_cannot_read(tmp_path: Path) -> None:

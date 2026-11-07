@@ -4152,6 +4152,113 @@ async def test_settings_memory_operation_reaches_the_team_services_as_the_signed
     assert result.available_actions
 
 
+class _FailingTeamServices:
+    """A team services port that fails inside the gateway, as a defect there would."""
+
+    def __init__(self) -> None:
+        self.sent = 0
+
+    async def command(self, kind: str, body: dict, *, person_ref: str, request_id: str) -> dict:
+        self.sent += 1
+        raise RuntimeError("socket state corrupted at 0x7f3a")
+
+
+@pytest.mark.asyncio
+async def test_a_memory_command_the_gateway_cannot_send_is_answered_in_a_plain_sentence(
+    tmp_path: Path, gateway_signed_commands: None, caplog
+):
+    config = _build_test_config(tmp_path)
+    bootstrap_instance(config)
+    failing = _FailingTeamServices()
+    gateway = UserGateway(
+        config,
+        output_sink=None,
+        state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=failing,
+    )
+    await _link_bootstrap_admin_channel(
+        gateway, config, channel_name="telegram", user_id="tg_memory_admin", chat_id="chat_memory"
+    )
+
+    async def chat(text: str) -> str | None:
+        _, _, reply = await handle_interactive_session_command(
+            raw_text=text,
+            gateway=gateway,
+            current_session_key=None,
+            channel_name="telegram",
+            user_id="tg_memory_admin",
+            chat_id="chat_memory",
+        )
+        return reply
+
+    empty = await chat("/usermem add")
+    with caplog.at_level(logging.ERROR):
+        failed = await chat('/usermem add "Prefers short answers."')
+
+    assert empty == "The fact's text cannot be empty."
+    assert failing.sent == 1  # the empty fact never left the gateway
+    assert failed == (
+        "The memory command failed because of an error in the gateway. An administrator can find it in the "
+        "gateway log."
+    )
+    assert "0x7f3a" not in failed
+    assert "event=gateway_memory_command_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_times_a_person_writes_reach_the_team_services_in_utc_from_their_own_zone(
+    tmp_path: Path, gateway_signed_commands: None
+):
+    """The chat and the Settings page read a written time in the person's own zone, not the instance's."""
+
+    config = _build_test_config(tmp_path)
+    config.user.timezone = "UTC"  # the instance's default zone
+    config.save()
+    bootstrap_instance(config)
+    state_store = GatewayStateStore(str(tmp_path / "state.db"))
+    # The first administrator lives in Chicago; the gateway keeps a recorded person's own zone when it starts.
+    state_store.create_gateway_user(
+        canonical_user_id=config.user.canonical_user_id,
+        display_name=config.user.display_name,
+        timezone="America/Chicago",
+    )
+    team_services = InProcessTeamServices(config)
+    gateway = UserGateway(config, output_sink=None, state_store=state_store, team_services=team_services)
+    await _link_bootstrap_admin_channel(
+        gateway, config, channel_name="telegram", user_id="tg_zone_admin", chat_id="chat_zone"
+    )
+    person = gateway.state_store.get_gateway_user(config.user.canonical_user_id)
+    assert person is not None and person.timezone == "America/Chicago"
+
+    _, _, saved = await handle_interactive_session_command(
+        raw_text='/usermem add "Office closed" from=2026-11-05T09:00',
+        gateway=gateway,
+        current_session_key=None,
+        channel_name="telegram",
+        user_id="tg_zone_admin",
+        chat_id="chat_zone",
+    )
+    operations = gateway._command_operations
+    await operations.execute_pinned_memory_operation(
+        command=PinnedMemoryCommandPayload(
+            bank="usermem", action="create", fact_text="Dentist.", valid_from_utc="2026-11-05T09:00"
+        ),
+        session_key=operations._settings.default_session_key,
+        channel_name="telegram",
+        user_id="tg_zone_admin",
+        chat_id="chat_zone",
+        thread_id=None,
+        canonical_user_id=config.user.canonical_user_id,
+    )
+
+    assert saved is not None and "User memory saved" in saved
+    # 09:00 in Chicago on 5 November 2026 (standard time, UTC-6) is 15:00 UTC.
+    assert [body["valid_from"] for kind, body, _ in team_services.sent if kind == "memory.create"] == [
+        "2026-11-05T15:00:00.000Z",
+        "2026-11-05T15:00:00.000Z",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_knowledge_page_requests_reach_the_manager_as_the_signed_person(
     tmp_path: Path, gateway_signed_commands: None
