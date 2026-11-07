@@ -74,7 +74,7 @@ async def test_a_persons_memory_commands_run_at_the_team_services(
                                                     "offset": 0, "limit": 10}, person_ref=ADA, request_id="cmd-2")
         stranger = await team.command("memory.list", {"request_id": "cmd-3", "bank": "usermem", "sort": "newest",
                                                       "offset": 0, "limit": 10},
-                                      person_ref="p-NobodyNobodyNobodyNob", request_id="cmd-3")
+                                      person_ref="p-NobodyNobodyNobodyNobo", request_id="cmd-3")
         with pytest.raises(TeamCommandRefused) as refused:
             await team.command("knowledge.list", {"request_id": "cmd-4", "space": "team", "status": "active",
                                                   "offset": 0, "limit": 10}, person_ref=ADA, request_id="cmd-4")
