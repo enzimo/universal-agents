@@ -100,3 +100,26 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
     with pytest.raises(OSError, match="disk flush failed"):
         await send()
     assert sum(write.await_count for write in writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_team_bucket_bindings_follow_the_record_key_and_require_a_team_for_watches():
+    js = SimpleNamespace(key_value=AsyncMock(return_value=SimpleNamespace()))
+    worker = live_host(None, "worker-host-1", "test-worker-key-1", 3)
+    records = StateRecords(js, worker.identity, worker.trust)
+
+    for record, key, name in [
+        ("team_view", "team_one.task.task1", "UA1_TEAM_VIEW_team_one"),
+        ("team_view", "team_two.task.task1", "UA1_TEAM_VIEW_team_two"),
+        ("block_list", "team_one", "UA1_BLOCK_LIST_team_one"),
+        ("agent", "team_one.agent1", "UA1_AGENTS"),
+    ]:
+        await records._bucket(record, key)
+        js.key_value.assert_awaited_with(name)
+    await records._bucket("block_list", team="team_two")
+    js.key_value.assert_awaited_with("UA1_BLOCK_LIST_team_two")
+    calls = js.key_value.await_count
+    with pytest.raises(ValueError, match="name the team"):
+        await anext(records.watch("block_list"))
+    assert js.key_value.await_count == calls
+
