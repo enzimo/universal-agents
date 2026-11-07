@@ -20,6 +20,14 @@ from tests.upgrade_schemas import (  # noqa: E402,F401 - pytest hooks: --upgrade
     pytest_runtest_setup,
     pytest_unconfigure,
 )
+import storage.sqlite_connection as _sqlite_connection  # noqa: E402
+
+# The product commits with synchronous=FULL, so a commit survives a power loss
+# (storage.sqlite_connection). No test cuts the power, and the extra disk flushes
+# made the store tests about six times slower, so tests in this process commit with
+# NORMAL. tests/test_sqlite_connection.py checks the product's setting in a fresh
+# process; child processes the tests start keep the product's setting.
+_sqlite_connection.SQLITE_SYNCHRONOUS = "NORMAL"
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

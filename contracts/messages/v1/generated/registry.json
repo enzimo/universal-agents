@@ -6267,7 +6267,7 @@
     },
     "block_list": {
       "body": "state/block_list.schema.json",
-      "bucket": "UA1_BLOCK_LIST",
+      "bucket": "UA1_BLOCK_LIST_{team}",
       "description": "A team's blocks on tools and its people's standing, read by the team's hosts that decide tool calls from signed lists.",
       "fresh_seconds": 900,
       "key": "<team>",
@@ -6309,8 +6309,8 @@
         "installation_authority",
         "scheduler"
       ],
-      "ttl_seconds": 60,
-      "write_rule": "written by the host itself every 10 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
+      "ttl_seconds": 30,
+      "write_rule": "written by the host itself every 10 seconds, expiring within ttl_seconds (30 seconds), so a host that stops is reported unavailable within about 30 seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions",
       "writers": [
         "gateway",
         "lead_host",
@@ -6350,7 +6350,7 @@
     },
     "team_view": {
       "body": "state/team_view.schema.json",
-      "bucket": "UA1_TEAM_VIEW",
+      "bucket": "UA1_TEAM_VIEW_{team}",
       "description": "One entry of a team's shared view of its members, requests, tasks and Objectives.",
       "key": "<team>.<entry>.<id>",
       "signer": "host",
