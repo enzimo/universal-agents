@@ -29,7 +29,7 @@ RECEIVER = Receiver("install_example", TEAM, "team_services", TEAM, "team-servic
 
 def live_host(connection, runtime, key, epoch):
     return LiveHost(connection, example_identity(runtime, key, epoch),
-                    PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"), {}, {}),
+                    PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent")),
                     clock=lambda: fixtures.NOW)
 
 

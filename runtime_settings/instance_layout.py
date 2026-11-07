@@ -53,12 +53,15 @@ agent can reach:
 ``trust/``
     The keys and trust records of the instance's message hosts
     (``custom_transport.protocol1``): the installation authority's key
-    (``authority/``), each host's own keys and the newest revocations record
-    it verified (``hosts/<runtime>/``), the bootstrap bundle every host starts
-    from (``bootstrap.json``) and the hosts the launcher started
-    (``expected-hosts.json``). Only the launcher and each host process touch
-    them; each process is given only its own key folder. A team transfer never
-    carries them: a new instance makes its own.
+    (``authority/``), each host's own keys (``hosts/<runtime>/keys.json``) and
+    the revocations records and block-list sequences it keeps across restarts
+    (``hosts/<runtime>/trust-state.json``), the bootstrap bundle every host
+    starts from (``bootstrap.json``) and the hosts the launcher started
+    (``expected-hosts.json``). Every folder and file is owner-only. Only the
+    launcher and the host processes touch them, and each process loads only
+    its own keys; all run as one operating-system user, so this keeps hosts
+    apart by path, not by permission. A team transfer never carries them: a new
+    instance makes its own.
 
 Tools the team adds (web API tools and installed command-line tools) are
 control files: ``control/access/tools``.

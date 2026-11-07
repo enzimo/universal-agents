@@ -55,7 +55,7 @@ async def host(stack: AsyncExitStack, url: str, who: HostIdentity) -> LiveHost:
 
     connection = await nats.connect(url, inbox_prefix=f"_INBOX.{who.runtime}".encode(), allow_reconnect=False)
     stack.push_async_callback(connection.close)
-    trust = PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"), {}, {})
+    trust = PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"))
     return LiveHost(connection, who, trust, clock=lambda: fixtures.NOW)
 
 
