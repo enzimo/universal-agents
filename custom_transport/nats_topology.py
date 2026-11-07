@@ -147,6 +147,13 @@ class NatsStreamTopology:
 
     async def reconcile(self, jetstream: Any, logger: logging.Logger) -> None:
         await self._delete_retired_streams(jetstream, logger)
+        if str(self.config.storage).lower() != "file":
+            # Flushing to disk (sync_interval: always) cannot keep what is only in memory.
+            logger.warning(
+                "NATS streams are kept in memory (transport.storage): queued work is lost when the NATS "
+                "server restarts or the machine loses power. event=nats_streams_in_memory storage=%s",
+                self.config.storage,
+            )
         for expected in self.specifications():
             try:
                 actual = (await jetstream.stream_info(expected.name)).config

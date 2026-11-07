@@ -97,7 +97,7 @@ transport:
   nats_name: null                               # Optional NATS connection name.
   jetstream_enabled: true                       # Use JetStream for durable work/reply/presence messages.
   subject_prefix: ""                            # Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.
-  storage: "file"                               # JetStream storage: "file" or "memory".
+  storage: "file"                               # JetStream storage: "file" or "memory". "memory" loses queued work when the NATS server restarts or the machine loses power (a warning is logged); for tests only.
   replicas: 1                                   # JetStream stream replica count.
   ack_wait_seconds: 3600.0                      # Delivery ack wait for long-running agent work.
   max_deliver: 5                                # Maximum redelivery attempts before termination.
@@ -640,7 +640,7 @@ storage:
 
   # SQLite backend settings.
   sqlite:
-    path: "dbs/task_history.db"                 # Manager/task-history/schedule SQLite DB. Relative paths resolve under agent.instance_root; runtime connections use WAL, synchronous=NORMAL, busy_timeout=2500ms.
+    path: "dbs/task_history.db"                 # Manager/task-history/schedule SQLite DB. Relative paths resolve under agent.instance_root; connections use WAL, synchronous=FULL (an agent's own records flush before it sends), busy_timeout=2500ms.
     vector:
       enabled: true                             # Enable sqlite-vec indexes in the manager/task-history store for memory graph vector search.
       provider: "sqlite_vec"                    # SQLite vector provider; only the non-alpha sqlite-vec package is supported.
