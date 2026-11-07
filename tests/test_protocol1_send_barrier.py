@@ -37,7 +37,7 @@ def live_host(connection, runtime, key, epoch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", [
     "request", "reply", "unsupported", "handler_failed", "bad_reply", "invalid_frame",
-    "put", "create", "update", "join", "delete",
+    "put", "create", "update", "join", "delete", "event",
 ])
 async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeypatch, operation):
     entered, release = asyncio.Event(), asyncio.Event()
@@ -74,6 +74,11 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
         if operation in {"put", "create", "update"}:
             await records.put("agent", f"{TEAM}.researcher-2", {},
                               last_revision={"put": None, "create": 0, "update": 1}[operation])
+        elif operation == "event":
+            await worker.publish("skills.changed", {
+                "operation": "install", "change_id": "skill_install_" + "a" * 12,
+                "skill_name": "example", "installed_tree_sha256": "a" * 64,
+            }, {**AUDIENCE, "target": "team"}, team=TEAM)
         elif operation == "delete":
             await records.delete("agent", f"{TEAM}.researcher-2")
         elif operation == "join":

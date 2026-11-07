@@ -18,17 +18,14 @@ from custom_agents.conversation_runtime import finalize_conversation_turn
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_manager import TaskInfo
 from storage.delegated_task_repository import DELEGATED_QUEUED
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskStatus
+from id_generation import new_id
 from custom_messages.enums import (
     ExecutionPlanItemStatus,
     ExecutionUnknownStatus,
     MessageMetaType,
     ProgressState,
     RecoverablePauseTrigger,
-    RequesterType,
-    RoutingType,
     RuntimeBudgetPolicyMode,
     TaskHistoryImportance,
     TaskHistoryType,
@@ -491,64 +488,70 @@ async def _complete_local_task_finalization_after_dispatch(
 async def _probe_subtask_task_status(
     self, *, subtask_info: TaskInfo, holder_agent_id: Optional[str] = None
 ) -> Optional[TaskStatus]:
-    """Ask about one delegated task; only the worker holding it should answer.
+    """Ask about one delegated task (``task.probe``); only the worker holding it should answer.
 
-    With ``holder_agent_id`` (from the task's claim) only that worker replies.
-    Without it the probe goes to the task's worker type, and replies from
-    workers that do not know the task are ignored: before 2026-10-04 the first
-    reply won, so an idle worker's "unknown" could fail a task another worker
-    was running.
+    With ``holder_agent_id`` (from the task's claim) only that worker is asked. Without it
+    every live worker of the task's type (or the named worker) is asked, from the team's
+    agent records (``custom_agents.agent_host.team_view``), and only an answer from one that
+    knows the task counts: before 2026-10-04 the first reply won, so an idle worker's
+    "unknown" could fail a task another worker was running. The answer keeps today's
+    ``TaskStatus`` form for the watchdog's decision and its history entry.
     """
 
-    if not self.team_id or not self._operational_exchange_name:
+    from custom_agents.agent_requests import AgentUnreachable, ask_agent, team_view
+    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+
+    if not self.team_id:
         return None
-    probe = TaskStatus(
-        status_type=MessageMetaType.REQUEST,
-        task_id=subtask_info.task.task_id,
-        parent_task_id=subtask_info.task.parent_task_id,
-        target_agent_id=holder_agent_id,
-        target_agent_name=None if holder_agent_id else getattr(subtask_info.meta, "to_agent_name", None),
-        target_named_agent_type=getattr(subtask_info.meta, "to_named_agent_type", None),
-        correlation_id=getattr(subtask_info.meta, "msg_correlation_id", None),
-    )
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future = loop.create_future()
-    self._pending_task_status_futures[probe.task_status_id] = future
-    if holder_agent_id is None:
-        self._known_only_task_status_probes.add(probe.task_status_id)
-    envelope = MessageEnvelope(
-        msg_content=probe,
-        msg_header=MessageHeader(
-            from_agent_id=self.id,
-            to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-            response_routing_key=self.id,
-            agent_signature="",
-        ),
-        msg_meta=MessageMeta(
-            from_agent_name=self.name,
-            to_agent_name=probe.target_agent_name,
-            to_named_agent_type=probe.target_named_agent_type,
-            msg_correlation_id=probe.correlation_id,
-            conversation_id=getattr(subtask_info.meta, "conversation_id", None),
-            requester_type=RequesterType.AGENT_REQUESTER,
-            is_response_requested=True,
-            request_timezone=getattr(subtask_info.meta, "request_timezone", None),
-        ),
-    )
-    try:
-        await self._send_operational_message(envelope)
-        timeout = max(0.1, float(self.subtask_status_probe_timeout_seconds or 5.0))
-        return await asyncio.wait_for(future, timeout=timeout)
-    except asyncio.TimeoutError:
+    task_id = subtask_info.task.task_id
+    view = team_view()
+    names: dict[str, tuple[Optional[str], Optional[str]]] = {}
+    if holder_agent_id is not None:
+        known = view.agent(holder_agent_id) if view is not None else None
+        names[holder_agent_id] = (known.display_name if known else None, known.agent_type if known else None)
+    elif view is not None:
+        target_name = getattr(subtask_info.meta, "to_agent_name", None)
+        target_type = getattr(subtask_info.meta, "to_named_agent_type", None)
+        named = view.named(target_name) if target_name else None
+        for item in ([named] if named is not None else view.of_type(str(target_type or ""))):
+            if item.agent != str(self.id):
+                names[item.agent] = (item.display_name, item.agent_type)
+    if not names:
         return None
-    except Exception as exc:
-        self._logger.warning(
-            f"[{self.id}] TaskStatus probe for subtask {subtask_info.task.task_id} failed: {exc}"
+    timeout = max(0.1, float(self.subtask_status_probe_timeout_seconds or 5.0))
+    probe_id = new_id("task_status")
+
+    async def ask(target: str) -> Optional[TaskStatus]:
+        try:
+            reply = await ask_agent(self, "task.probe", {"task_id": task_id}, target, timeout=timeout)
+        except (AgentUnreachable, ServiceUnavailable, RequestRefused) as error:
+            self._logger.info("[%s] A task probe got no answer. event=subtask_task_probe_unanswered task_id=%s "
+                              "target_agent_id=%s reason=%s", self.id, task_id, target, error)
+            return None
+        state = reply.get("state")
+        name, agent_type = names[target]
+        return TaskStatus(
+            task_status_id=probe_id,
+            status_type=MessageMetaType.RESPONSE,
+            task_id=task_id,
+            parent_task_id=subtask_info.task.parent_task_id,
+            target_agent_id=holder_agent_id,
+            responder_agent_id=target,
+            responder_agent_name=name,
+            responder_named_agent_type=agent_type,
+            is_known_task=bool(reply.get("known")),
+            is_current_task=bool(reply.get("current")),
+            task_state=ProgressState(state) if state else None,
+            last_task_update_at=reply.get("last_update_at"),
+            is_executing=bool(reply.get("executing")),
+            is_exiting=bool(reply.get("exiting")),
         )
-        return None
-    finally:
-        self._pending_task_status_futures.pop(probe.task_status_id, None)
-        self._known_only_task_status_probes.discard(probe.task_status_id)
+
+    answers = await asyncio.gather(*(ask(target) for target in sorted(names)))
+    if holder_agent_id is not None:
+        return answers[0]
+    # A worker that does not hold the task says so; wait for the one that does.
+    return next((answer for answer in answers if answer is not None and answer.is_known_task), None)
 
 
 def _task_status_extends_subtask_wait(self, status: Optional[TaskStatus]) -> bool:

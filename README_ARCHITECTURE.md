@@ -104,21 +104,12 @@ receiver and pushes (decision of 2026-10-04). Workers of one type share one
 queue and ask for a task only while they are free. The transport adapter
 refuses a push listener on the work stream, and an architecture test fails when
 production code creates a deliver group or subscribes to NATS outside the
-adapter (`tests/test_runtime_architecture_boundaries.py`). Presence records let late
-joiners and the gateway discover live agents without turning presence into
-proof of identity or authority. Agent status requests and snapshots bypass the
-short broadcast age limit: a restarted manager must receive retained presence
-even when startup takes longer than 100 ms. Replay keeps the sender's original
-`last_seen_at`; liveness checks use that time and process evidence, so receiving
-an old snapshot does not make a stopped worker look newly alive.
-An explicit live probe accepts its correlated reply, or a presence snapshot
-whose sender time falls between the probe's start and arrival. Older retained
-snapshots remain discovery data and cannot verify an exact delegation target.
-Before changing discovery or acting on an exit, the receiver calls
-`custom_agents.agent_liveness.reconcile_received_status` to select the newest
-sender-written status from the message, memory and the shared database.
-An old exit cannot fail current work after a newer running status, and an old
-running snapshot cannot restore an agent whose newer status says it exited.
+adapter (`tests/test_runtime_architecture_boundaries.py`). Agents learn who is
+live on their team from the team's signed agent records ("Agent records and who
+is live", "Agents asking each other"), not from presence messages: a record says
+an agent is live only while its host keeps reporting, so an old message can no
+longer make a stopped worker look alive. The gateway still reads presence until
+it moves to the records too (message contract step 7c).
 
 ## Work, scheduling, and recovery
 
@@ -695,11 +686,11 @@ Four repairs keep work from getting stuck in the first place:
   assumes every agent process of a team is a child of one supervisor run on one
   host: a process from another run counts as gone whatever host it names, so
   agent processes of a second runtime sharing the database are not supported.
-  Each agent writes only its own status row as it stops (marked exiting from
-  the moment its exit begins); the team lead stores other agents' presence only
-  when it is newer, never later than its own clock, and removes rows of agents
-  that are gone on its own timer, so a manager-only restart no longer makes
-  running startup agents look gone.
+  Each agent writes only its own status row, including as it stops (marked
+  exiting from the moment its exit begins); nobody else writes it (until step
+  7b the team lead also copied other agents' presence into it). The team lead
+  removes rows of agents that are gone on its own timer, so a manager-only
+  restart does not make running startup agents look gone.
 - A worker stays up while it holds any unfinished task, waiting ones included
   (`strands_team.worker_holds_work`); replies to a waiting task are addressed to
   it.
@@ -2595,7 +2586,7 @@ A restart's approval covers the tasks the restart interrupts
 (`custom_agents/runtime_restart_service.py`). The plan records the runtime
 state and, from it, the tasks the restart would interrupt or delay: every
 request execution root the manager holds, whatever its state, and for an `all` restart
-the work other agents report running. Work on a task the manager delegated
+the work other agents are running. Work on a task the manager delegated
 counts as that task. Locally runnable plan-step and recovery tasks are grouped
 under that same root too: they have no `parent_task_id`, but the manager's
 execution graph records which request owns them. Finishing one step and
@@ -2611,12 +2602,45 @@ current task and other agents' queue counts, so any scheduled run, heartbeat
 item, finished worker or new message made an approved restart unusable, and
 with background work running a restart could rarely be applied. A refusal uses
 the approval up, as for any plan that no longer applies, and names the new
-tasks, so TeamArchitect stages a fresh plan that lists them. Plans need schema
-3: plans staged under the earlier rule are refused rather than converted,
-because their approval text promised the stricter rule. The review lists the
+tasks, so TeamArchitect stages a fresh plan that lists them. The review lists the
 tasks in one line of at most 1000 characters, naming them while they fit and
 always giving the exact count; a busy manager used to produce a longer line,
 which could not be shown for review at all.
+
+Other agents' work comes from their own answers. The team's agent records say
+which agents are live, but not which task each runs, so while it captures an
+`all` restart's state (when staging, before a person is asked, when applying,
+and for `get_runtime_restart_status`) the team lead sends every other live agent
+a full `agent.status` request and names each one's work by the task it reports.
+It asks them all at once and waits at most five seconds in total
+(`TEAM_STATUS_TIMEOUT_SECONDS`), however many agents there are. An agent that
+does not answer in time, refuses or cannot be reached is recorded as not
+answering (`answered: false`, with its task, counts and running flag left empty
+rather than false or zero) and counts as `<agent id>:not-answering`: the person
+approves interrupting whatever it runs, and the review lists those agents on a
+line of their own. The approval keys stay free of ages, counts and clocks, so the
+same work gives the same `runtime_state_digest`. On a re-check the same rule as
+for tasks applies: an agent that answered and no longer does is refused (it may
+now run a task nobody approved), one that did not answer and now reports a task
+outside the approved ones is refused (nobody can tell whether it started after
+planning), and one that did not answer either time keeps the approval, since a
+team with an agent that hangs is when a restart is needed most. When the team
+lead's process cannot see the team's agents yet (it has not joined), an `all`
+restart is refused with that reason rather than shown as interrupting no other
+agent's work; a `manager` restart does not need the team.
+
+The capture runs in the tool's worker thread (Strands runs synchronous tools
+there; `apply_change` describes and applies plans there). It runs the requests
+on a private event loop in that thread, and they reach the other agents through
+the process's host, which works on the team lead's own loop; that loop is free
+while the tool waits, so the capture never waits on a loop it blocks. A capture
+on an event loop is refused (`event=runtime_restart_capture_on_event_loop`).
+
+Plans need schema 4, which records whether each other agent answered. Plans of
+earlier schemas are refused with a message to stage a fresh plan, rather than
+converted: schema 3 plans took other agents' work from what they reported on
+their own, and their review never said an agent was not answering. Plans last
+an hour, so only a plan staged just before an upgrade is affected.
 
 An installed MCP server is one team tool, `mcp:<name>`, in the `mcp_servers`
 tool set that members hold as a standard set (`access_catalog/catalog.py`,
@@ -3508,9 +3532,11 @@ broker refusal until access or the server changes. Fixed tool groups,
 capability attachments and restart-to-attach were removed for this. Skills provide reusable instructions without loading every
 procedure into the base prompt. A reviewed managed-skill change commits an
 immutable local receipt before TeamArchitect sends an authority-free team
-reload hint. Running specialists verify that receipt, refresh their own SDK
-cache, and republish presence. Heartbeat fingerprint checks repair missed live
-hints without a process restart. External and hosted MCP tools enter through
+reload hint, the `skills.changed` event, which every agent process receives once
+and hands to each agent it runs; only the team lead's own session may send it.
+Running specialists verify that receipt and refresh their own SDK cache.
+Fingerprint checks at each heartbeat and each `agent.status` request repair
+missed hints without a process restart. External and hosted MCP tools enter through
 the same installed registry and the broker's per-call access check.
 
 A model often asks for several tool calls in one step, and Strands runs them
@@ -4561,6 +4587,10 @@ seconds after its last liveness write. Whether an agent is the team lead comes f
 session's `agent_role`, which the team services signed. The view is replaced as a whole on
 each change, so agents on other threads read it without locks. The team lead's process and
 the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
+A record the reader cannot verify yet for a reason that can pass (the writer's certificate
+is not readable yet while hosts join, revocations not current, a record dated just ahead
+of its clock) is kept and verified again at each check, since placements and an idle
+agent's record are written only once (`event=team_agents_record_refused retrying=true`).
 A host record that names another contract digest is authentic but its body is not read, so
 the host's certificate epoch comes from the record's signer. Its agents stay in the view,
 so control messages about the tasks they hold still reach them, marked with that digest
@@ -4604,6 +4634,40 @@ Once no agent holds an unfinished task or a waiting request, the host closes the
 with no record to write. Under one launcher this happens only when a process, such as the
 team lead's after a restart of `manager`, starts on code that changed under the running
 installation.
+
+**Agents asking each other** (step 7b, `custom_agents.agent_host`,
+`custom_agents.live_controls`, `custom_agents.team_directory`): each agent process reads
+the team's live agents once, and keeps every agent's in-memory directory
+(`known_agents`, the name-to-id map the model and messages use) in step with it on the
+agent's own loop. An entry says only what the records say: id, type, name, lead or not,
+paused, busy, and whether it accepts work. When an agent's record said it was exiting, the
+team lead fails the subtasks it asked that agent for by name, as presence's exit did; an
+agent whose host only stopped reporting leaves the directory but is not given up for (the
+subtask watchdog handles work that never comes back). An agent whose host runs another
+contract stays in the directory, so the requests below about the tasks it holds still reach
+it, but its entry says it accepts no work and delegation passes it over. Agents ask each other on
+`ctl.agent.<agent>`, signed with the asking agent's session, through
+`custom_agents.agent_requests` (`ask_agent`, `announce`, `team_view`, which hold this
+process's host apart from the host's own module so the import graph stays free of loops):
+- delegation checks and the maintenance worker check read the directory and send nothing;
+- the team lead's pause, resume and exit tool sends `agent.pause`, `agent.resume` and
+  `agent.exit`, and reports what the agent answered;
+- the live status tool sends `agent.status`. A basic answer, which any allowed sender gets,
+  has the agent's state, queue, context and budget measurements, skills and findings; a full
+  one adds its diagnostics and goes only to the team lead, checked against the sender's
+  session. Tools are left out: the contract names them by catalog ids, which the agent's
+  tool list does not carry;
+- the subtask watchdog sends `task.probe` to the holder, or to every live worker of the
+  task's type, and only a worker that knows the task counts. Any agent may delegate, so
+  worker hosts may send `task.probe` too (plan decision 70);
+- the managed skill hint is the `skills.changed` team event.
+
+Agents no longer subscribe to presence or the broadcast subject, ignore status replies on
+`.operational`, and the team lead no longer writes other agents' rows in `agent_states`.
+Restart approvals name other agents' running work by task: the team lead asks each live
+agent for its full status while it captures an `all` restart's state, and shows an agent
+that does not answer as not answering (see the restart approvals under "Authorization and
+credentials").
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is

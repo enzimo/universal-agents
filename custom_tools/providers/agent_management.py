@@ -1,6 +1,7 @@
 """Agent management support for the trusted Strands tool surface."""
 
 import json
+from typing import Any
 import logging
 from typing import TYPE_CHECKING, Optional
 
@@ -9,10 +10,8 @@ from strands import tool
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import AgentCreationResultV1
 from custom_agents.team_templates import load_team_templates, summarize_team_templates
-from custom_messages.contracts.control_v1 import AGENT_STATUS_RUNTIME_ONLY_FIELDS, AgentCreationRequest, AgentStatus
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
+from custom_messages.contracts.control_v1 import AGENT_STATUS_RUNTIME_ONLY_FIELDS, AgentCreationRequest
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, MessageMetaType, RoutingType
 from custom_tools.agent_team_port import current_agent_type_map
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import (
@@ -96,6 +95,18 @@ def get_known_agents() -> str:
     )
 
 
+async def _live_status(agent: Any, target_id: str, level: str) -> dict[str, Any]:
+    """One agent's own status answer (``agent.status``), or why it could not be asked."""
+
+    from custom_agents.agent_requests import AgentUnreachable, ask_agent
+    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+
+    try:
+        return await ask_agent(agent, "agent.status", {"level": level}, target_id, timeout=10.0)
+    except (AgentUnreachable, ServiceUnavailable, RequestRefused) as error:
+        return {"outcome": "unavailable", "message": str(error)}
+
+
 @tool
 def query_agent_state(
     agent_name: str = "",
@@ -124,14 +135,13 @@ def query_agent_state(
         team_id: Filter by team ID (exact match).
 
     Args:
-        live: When "true", "1", or "yes", also send live AgentStatus request messages
-            before returning. This does not wait for replies; it triggers refresh and
-            returns the current persisted snapshot.
-        target_agent: Optional explicit agent ID/name to refresh when `live=true`.
-        info_level: Live refresh detail level when `live=true` - "basic" or "full".
+        live: When "true", "1", or "yes", also ask each matching agent (or `target_agent`) for its
+            status now and include its answers under "live_status".
+        target_agent: Optional explicit agent ID/name to ask when `live=true`.
+        info_level: Detail of the live answer when `live=true` - "basic" or "full" (full adds diagnostics).
 
     Returns:
-        JSON object containing matching AgentStatus rows and optional live-refresh metadata.
+        JSON object containing matching AgentStatus rows and, with `live`, each agent's own answer.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -160,80 +170,18 @@ def query_agent_state(
 
     try:
         live_requested = live.lower() in ("true", "1", "yes")
-        live_targets: list[str] = []
+        live_answers: dict[str, Any] = {}
         if live_requested:
-            current_task_id = bound_task_id()
-            current_task_info = (
-                agent.task_manager.operations_runtime.run_sync(
-                    agent.task_manager.get_task_info, current_task_id
-                )
-                if current_task_id
-                else None
-            )
-            conversation_id = getattr(
-                getattr(current_task_info, "meta", None), "conversation_id", None
-            )
-            request_timezone = getattr(
-                getattr(current_task_info, "meta", None), "request_timezone", None
-            )
-            info_type = (
-                ControlType.STATUS_REQUEST_FULL
-                if info_level == "full"
-                else ControlType.STATUS_REQUEST_BASIC
-            )
-            status_request = AgentStatus(
-                self_id=agent.id,
-                team_id=agent.team_id,
-                named_agent_type=agent.named_agent_type,
-                is_paused=bool(getattr(agent, "paused", False)),
-                is_executing=bool(getattr(agent, "is_executing", False)),
-                has_execution_capacity=bool(
-                    getattr(agent, "_has_execution_capacity", lambda: False)()
-                ),
-                is_busy=bool(getattr(agent, "is_executing", False)),
-                name=agent.name,
-                agent_role=agent.role,
-                status_type=MessageMetaType.REQUEST,
-                info_type=info_type,
-            )
-
             if target_agent:
                 live_targets = [target_agent]
+            elif agent_state_store is None:
+                return json.dumps({"error": "AgentStateStore not initialized on this agent."})
             else:
-                if agent_state_store is None:
-                    return json.dumps(
-                        {"error": "AgentStateStore not initialized on this agent."}
-                    )
-                matched_statuses = agent_state_store.query(filters)
-                live_targets = [
-                    status.self_id
-                    for status in matched_statuses
-                    if status.self_id
-                ]
-
+                live_targets = [status.self_id for status in agent_state_store.query(filters) if status.self_id]
+            level = "full" if info_level == "full" else "basic"
             for raw_target in live_targets:
-                routing_key = agent._agent_id_by_name.get(raw_target, raw_target)
-                target_is_known_name = raw_target in agent._agent_id_by_name
-                envelope = MessageEnvelope(
-                    msg_content=status_request,
-                    msg_header=MessageHeader(
-                        from_agent_id=agent.id,
-                        to_routing_path=RoutingType.ALL_AGENTS_ROUTE
-                        if target_is_known_name
-                        else routing_key,
-                        response_routing_key=getattr(
-                            agent, "_operational_queue_name", None
-                        )
-                        or agent.id,
-                    ),
-                    msg_meta=MessageMeta(
-                        from_agent_name=agent.name,
-                        to_agent_name=raw_target if target_is_known_name else None,
-                        conversation_id=conversation_id,
-                        request_timezone=request_timezone,
-                    ),
-                )
-                _run_agent_coroutine(agent, agent._send_operational_message(envelope))
+                target_id = agent._agent_id_by_name.get(raw_target, raw_target)
+                live_answers[raw_target] = _run_agent_coroutine(agent, _live_status(agent, target_id, level))
 
         if agent_state_store is None:
             if live_requested and target_agent:
@@ -247,9 +195,8 @@ def query_agent_state(
         return json.dumps(
             {
                 "returned": len(results),
-                "live_refresh_requested": live_requested,
-                "live_refresh_targets": live_targets,
                 "agents": [r.model_dump(exclude=set(AGENT_STATUS_RUNTIME_ONLY_FIELDS)) for r in results],
+                **({"live_status": live_answers} if live_requested else {}),
             },
             default=str,
         )
@@ -525,7 +472,7 @@ def send_control_instruction(target_agent: str, instruction: str) -> str:
         instruction: The control instruction - one of: "pause", "resume", "exit"
 
     Returns:
-        Confirmation that the instruction was sent, or error message.
+        What the agent answered (for example "paused" or "already paused"), or why it could not be reached.
     """
     valid_instructions = ["pause", "resume", "exit"]
     if instruction.lower() not in valid_instructions:
@@ -537,14 +484,12 @@ def send_control_instruction(target_agent: str, instruction: str) -> str:
 
     try:
         normalized_instruction = instruction.lower()
-        _run_agent_coroutine(
+        return _run_agent_coroutine(
             agent,
             _send_control_instruction_payload(
                 agent, target_agent, normalized_instruction
             ),
         )
-
-        return f"Control instruction '{normalized_instruction}' sent to {target_agent}"
 
     except Exception as e:
         return f"Error sending control instruction: {e}"

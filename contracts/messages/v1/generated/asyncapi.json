@@ -5208,7 +5208,7 @@
             }
           ]
         },
-        "summary": "Whether the holder still has a task, asked by the watchdog."
+        "summary": "Whether the holder still has a task, asked by the watchdog of the agent that delegated it (any agent may delegate, so worker hosts send it too)."
       },
       "task_probe_reply": {
         "name": "task.probe.reply",

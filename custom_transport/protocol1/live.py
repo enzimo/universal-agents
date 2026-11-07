@@ -267,6 +267,15 @@ class LiveHost:
         self.replay.admit(verified, now)
         return verified
 
+    async def publish(self, kind: str, body: Mapping[str, Any], audience: Mapping[str, Any], *, team: str,
+                      agent: Optional[str] = None) -> None:
+        """Send an event (no reply); whoever serves its address receives it (``serve`` with no reply subject)."""
+
+        frame = self.sign(kind, body, audience, team=team, agent=agent)
+        data, headers = self.encode(frame)
+        await before_send()
+        await self.nc.publish(frame["subject"], data, headers=headers)
+
     # -- serving --------------------------------------------------------------------------------
 
     async def serve(self, address: str, receiver: Receiver, handler: Handler, *,

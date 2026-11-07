@@ -2740,14 +2740,14 @@ kinds:
     rendering: none
 
   task.probe:
-    description: Whether the holder still has a task, asked by the watchdog.
+    description: Whether the holder still has a task, asked by the watchdog of the agent that delegated it (any agent may delegate, so worker hosts send it too).
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/task.probe.schema.json
     reply:
       body: bodies/task.probe.reply.schema.json
       errors: []
-    senders: [lead_host, team_services]
+    senders: [lead_host, worker_host, team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
     authority: none

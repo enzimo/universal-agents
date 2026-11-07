@@ -45,6 +45,13 @@ Why it is shaped this way:
 - **The agent's own loop does the work.** A request for a thread worker arrives on the
   host's loop and runs on the worker's loop (``run_coroutine_threadsafe``), where its task
   manager lives.
+- **The team as each agent sees it.** After joining, the host reads the team's live agents
+  from their records (``custom_transport.protocol1.team_agents``), once for the whole
+  process, and keeps every attached agent's directory in step with it on the agent's own
+  loop (``custom_agents.team_directory``). It also receives the team's events
+  (``skills.changed``) once and hands each to every agent it runs. Agents ask each other
+  through it (``ask_agent``, ``announce``): requests are signed with the asking agent's
+  session.
 - **Each agent's record.** The host signs each agent's state (``UA1_AGENTS``, key
   ``<team>.<agent>``: starting, idle, busy, paused or exiting, whether it accepts work, and
   its name) when it changes, at most every 2 seconds, so a burst of busy and idle turns
@@ -79,7 +86,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 
@@ -90,7 +97,9 @@ from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
+from custom_agents.agent_requests import AgentUnreachable, process_host
 from custom_transport.protocol1.state_records import StoredRecord
+from custom_transport.protocol1.team_agents import TeamAgent, TeamAgents
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
@@ -99,6 +108,8 @@ LEAD_HOST_RUNTIME = "lead"
 LEAD_HOST_ROLES = ("lead_host", "worker_host")
 STARTUP_AGENT_HOST_ROLES = ("worker_host",)
 AGENT_ADDRESS = "ctl.agent.{agent}"
+# The team's events, received once per process and handed to every agent it runs.
+SKILLS_EVENT_ADDRESS = "evt.skills_changed"
 # How long a retry waits while the authority or the team services are not answering yet.
 RETRY_SECONDS = (0.5, 1.0, 2.0, 5.0, 10.0)
 # How long a refused session waits before it is asked for again: the first, doubling up to the last.
@@ -253,6 +264,10 @@ class AgentProcessHost:
     _drain_started: asyncio.Event = field(default_factory=asyncio.Event)
     _stop: Optional[asyncio.Event] = None
     _task: Optional[asyncio.Task[None]] = None
+    # The team's live agents (module docstring), and the view the agents' directories last got.
+    team_agents: Optional[TeamAgents] = None
+    _view_before: Mapping[str, TeamAgent] = field(default_factory=dict)
+    event_handlers: dict[str, AgentHandler] = field(default_factory=dict)
 
     # -- the agent's side (called on the agent's own loop) --------------------------------
 
@@ -311,10 +326,14 @@ class AgentProcessHost:
             return
         await self._close_earlier_sessions()
         await self._remove_earlier_records()
+        self.team_agents = TeamAgents(self.host, self.team, logger=self.logger)
+        self.team_agents.listen(self._team_changed)
+        loop = asyncio.get_running_loop()
+        viewing = loop.create_task(self._view_team(), name="agent_host_team_agents")
+        await self._serve_events()
         self._joined.set()
         self.logger.info("This process joined as a protocol 1 host. event=agent_host_joined runtime=%s",
                          self.profile.runtime)
-        loop = asyncio.get_running_loop()
         renewals = loop.create_task(self._renew_sessions())
         following = loop.create_task(self.host.follow_contract(), name="agent_host_contract")
         try:
@@ -324,6 +343,7 @@ class AgentProcessHost:
             following.cancel()
             if self._draining is not None:
                 self._draining.cancel()
+            await asyncio.gather(viewing, return_exceptions=True)
 
     async def _retrying(self, what: str, step: Callable[[], Awaitable[Any]]) -> bool:
         """Run ``step`` until it succeeds or the host stops; False when it stopped first."""
@@ -347,6 +367,118 @@ class AgentProcessHost:
                 except asyncio.TimeoutError:
                     pass
         return False
+
+    async def _view_team(self) -> None:
+        """Read the team's live agents until the host stops; a failed watch starts again."""
+
+        assert self._stop is not None and self.team_agents is not None
+        while not self._stop.is_set():
+            try:
+                await self.team_agents.run(self._stop)
+            except Exception:
+                self.logger.exception("Reading the team's agents failed; starting again. "
+                                      "event=agent_host_team_view_failed runtime=%s", self.profile.runtime)
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=RETRY_SECONDS[-1])
+                except asyncio.TimeoutError:
+                    pass
+
+    async def _serve_events(self) -> None:
+        assert self.host is not None and self.host.live is not None
+        if not self.event_handlers:
+            return
+        receiver = Receiver(self.host.identity.installation, self.team, "team", self.team, self.profile.runtime)
+        await self.host.live.serve(SKILLS_EVENT_ADDRESS, receiver, self._event)
+
+    async def _event(self, verified: VerifiedFrame) -> dict[str, Any]:
+        """A team event: every agent this process runs gets it, on its own loop."""
+
+        handler = self.event_handlers.get(verified.frame.kind)
+        if handler is None:
+            raise Unsupported(verified.frame.kind)
+        for hosted in list(self.agents.values()):
+            self._on_agent_loop(hosted, lambda agent=hosted.agent: handler(agent, verified), what=verified.frame.kind)
+        return {}
+
+    def _team_changed(self, changed: frozenset[str], exited: frozenset[str]) -> None:
+        """On the host's loop: bring every attached agent's directory up to date (``custom_agents.team_directory``)."""
+
+        from custom_agents.team_directory import apply_team_change
+
+        assert self.team_agents is not None
+        before, after = self._view_before, self.team_agents.live()
+        self._view_before = after
+        for hosted in list(self.agents.values()):
+            self._on_agent_loop(hosted, lambda agent=hosted.agent: apply_team_change(agent, before, after, changed, exited),
+                                what="team_directory")
+
+    def _sync_directory(self, hosted: _HostedAgent) -> None:
+        """A newly attached agent gets the whole current view."""
+
+        from custom_agents.team_directory import apply_team_change
+
+        if self.team_agents is None or not self.team_agents.ready.is_set():
+            return  # the view's first reading tells every attached agent
+        live = self.team_agents.live()
+        self._on_agent_loop(hosted, lambda: apply_team_change(hosted.agent, {}, live, frozenset(live), frozenset()),
+                            what="team_directory")
+
+    def _on_agent_loop(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]], *, what: str) -> None:
+        agent_loop = getattr(hosted.agent, "_runtime_loop", None)
+
+        def done(future: Any) -> None:
+            if not future.cancelled() and future.exception() is not None:
+                self.logger.error("An agent could not take a team update. event=agent_host_agent_update_failed "
+                                  "runtime=%s agent=%s what=%s", self.profile.runtime, hosted.agent.id, what,
+                                  exc_info=future.exception())
+
+        if agent_loop is None or agent_loop is asyncio.get_running_loop():
+            task = asyncio.get_running_loop().create_task(work())
+            task.add_done_callback(done)
+        elif not agent_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(work(), agent_loop).add_done_callback(done)
+
+    # -- asking other agents (from an agent's own loop) ---------------------------------
+
+    def _agent_audience(self, agent_id: str) -> dict[str, str]:
+        assert self.host is not None
+        return {"installation": self.host.identity.installation, "team": self.team, "target": "agent", "id": agent_id}
+
+    async def _on_host_loop(self, coroutine: Awaitable[Any]) -> Any:
+        assert self.loop is not None
+        if asyncio.get_running_loop() is self.loop:
+            return await coroutine
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, self.loop))  # type: ignore[arg-type]
+
+    def _sender_session(self, sender_agent: str) -> None:
+        sender = self.agents.get(sender_agent)
+        if self.host is None or self.host.live is None or self._joined is None or not self._joined.is_set():
+            raise AgentUnreachable("this process has not joined yet")
+        if sender is None or sender.session is None:
+            raise AgentUnreachable(f"agent {sender_agent} has no session yet")
+
+    async def ask(self, kind: str, body: Mapping[str, Any], target_agent: str, *, sender_agent: str,
+                  timeout: Optional[float] = None) -> dict[str, Any]:
+        """A request to another agent, signed as ``sender_agent``; the reply's body.
+
+        Raises ``AgentUnreachable`` when this process cannot send yet, and the live host's
+        ``ServiceUnavailable`` (nobody answered) or ``RequestRefused``.
+        """
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        reply = await self._on_host_loop(self.host.live.request(kind, body, self._agent_audience(target_agent),
+                                                                team=self.team, agent=sender_agent, timeout=timeout))
+        return dict(reply.raw["body"])
+
+    async def announce(self, kind: str, body: Mapping[str, Any], *, sender_agent: str) -> None:
+        """A team event, signed as ``sender_agent``."""
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        audience = {"installation": self.host.identity.installation, "team": self.team, "target": "team",
+                    "id": self.team}
+        await self._on_host_loop(self.host.live.publish(kind, body, audience, team=self.team, agent=sender_agent))
 
     def _audience(self) -> dict[str, str]:
         assert self.host is not None
@@ -423,6 +555,7 @@ class AgentProcessHost:
             # The process runs another contract: no new agent gets a session here (module docstring).
             self._drain_one(hosted)
             return
+        self._sync_directory(hosted)
         await self._hold_session(hosted)
 
     async def _hold_session(self, hosted: _HostedAgent) -> None:
@@ -847,40 +980,11 @@ class AgentProcessHost:
                                       self.profile.runtime, hosted.agent.id)
             return True
 
-    def _on_agent_loop(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]], *, what: str) -> None:
-        agent_loop = getattr(hosted.agent, "_runtime_loop", None)
-
-        def done(future: Any) -> None:
-            if not future.cancelled() and future.exception() is not None:
-                self.logger.error("An agent could not take a team update. event=agent_host_agent_update_failed "
-                                  "runtime=%s agent=%s what=%s", self.profile.runtime, hosted.agent.id, what,
-                                  exc_info=future.exception())
-
-        if agent_loop is None or agent_loop is asyncio.get_running_loop():
-            task = asyncio.get_running_loop().create_task(work())
-            task.add_done_callback(done)
-        elif not agent_loop.is_closed():
-            asyncio.run_coroutine_threadsafe(work(), agent_loop).add_done_callback(done)
-
     async def _on_agent_loop_result(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]]) -> Any:
         agent_loop = getattr(hosted.agent, "_runtime_loop", None)
         if agent_loop is None or agent_loop is asyncio.get_running_loop():
             return await work()
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(work(), agent_loop))  # type: ignore[arg-type]
-
-
-_PROCESS_HOST: Optional[AgentProcessHost] = None
-
-
-def configure_process_host(host: Optional[AgentProcessHost]) -> None:
-    """Set this process's host (``strands_main.py``); ``None`` when the launcher gave it no host id."""
-
-    global _PROCESS_HOST
-    _PROCESS_HOST = host
-
-
-def process_host() -> Optional[AgentProcessHost]:
-    return _PROCESS_HOST
 
 
 def agent_definition_sha256(agent: Any) -> str:
@@ -973,6 +1077,7 @@ def process_host_for(runtime: str, layout: InstanceLayout, team: str, *, is_lead
     """
 
     from custom_agents.agent_catalog import load_agent_catalog
+    from custom_agents.live_controls import EVENT_HANDLERS, LIVE_CONTROL_HANDLERS
     from custom_agents.relayed_task_controls import RELAYED_HANDLERS
     from custom_transport.protocol1.joining import certificate_agent_types
     from installation_authority.expected_hosts import read_expected_hosts
@@ -993,7 +1098,8 @@ def process_host_for(runtime: str, layout: InstanceLayout, team: str, *, is_lead
         profile = startup_agent_host_profile(team, runtime, agent_type)
     if profile.runtime != runtime:
         raise ValueError(f"the launcher named this host {runtime!r}, but its profile is {profile.runtime!r}")
-    return AgentProcessHost(layout, profile, team, handlers=dict(RELAYED_HANDLERS), catalog_types=catalog_types)
+    return AgentProcessHost(layout, profile, team, handlers={**RELAYED_HANDLERS, **LIVE_CONTROL_HANDLERS},
+                            event_handlers=dict(EVENT_HANDLERS), catalog_types=catalog_types)
 
 
 def lead_session_limit(pools: Any) -> int:

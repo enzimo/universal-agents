@@ -15,10 +15,6 @@ from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     ScheduleStore,
 )
-from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, RoutingType
 from id_generation import (
     new_id,
 )
@@ -34,30 +30,27 @@ logger = logging.getLogger(__name__)
 async def _send_control_instruction_payload(
     agent: "UniversalAgent", target_agent: str, instruction: str
 ) -> str:
-    routing_key = agent._agent_id_by_name.get(target_agent, target_agent)
-    target_is_known_name = target_agent in agent._agent_id_by_name
-    envelope = MessageEnvelope(
-        msg_content=ControlInstruction(
-            type=ControlType.CONTROL_MSG,
-            instruction=Instruction(instruction=instruction),
-        ),
-        msg_meta=MessageMeta(
-            from_agent_name=agent.name,
-            to_agent_name=target_agent if target_is_known_name else None,
-        ),
-        msg_header=MessageHeader(
-            from_agent_id=agent.id,
-            to_routing_path=RoutingType.ALL_AGENTS_ROUTE
-            if target_is_known_name
-            else routing_key,
-            agent_signature="",
-        ),
-    )
-    if hasattr(agent, "_send_operational_message"):
-        await agent._send_operational_message(envelope)
-    else:
-        await agent.team_comms.send_message(message=envelope, routing_key=routing_key)
-    return routing_key
+    """Pause, resume or stop another agent (``agent.pause``, ``.resume``, ``.exit`` to its address).
+
+    ``target_agent`` is the agent's name or id; names come from the team's agent records
+    (``custom_agents.team_directory``). Returns what the agent answered, in words.
+    """
+
+    from custom_agents.agent_requests import AgentUnreachable, ask_agent
+    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+    from id_generation import new_id
+
+    target_id = agent._agent_id_by_name.get(target_agent, target_agent)
+    kind = {"pause": "agent.pause", "resume": "agent.resume", "exit": "agent.exit"}[instruction]
+    try:
+        reply = await ask_agent(agent, kind, {"request_id": new_id("agent_control")}, target_id)
+    except (AgentUnreachable, ServiceUnavailable, RequestRefused) as error:
+        logger.warning("An agent control got no answer. event=agent_control_unanswered agent_id=%s target=%s "
+                       "instruction=%s reason=%s", agent.id, target_id, instruction, error)
+        return f"{target_agent} did not answer ({error}); nothing was changed there."
+    if reply.get("outcome") != "ok":
+        return f"{target_agent} did not {instruction}: {reply.get('message') or reply.get('outcome')}."
+    return f"{target_agent}: {str(reply.get('state', 'done')).replace('_', ' ')}."
 
 
 def _on_event_loop_thread() -> bool:
@@ -88,7 +81,7 @@ def _refuse_tool_send(agent: "UniversalAgent", coroutine: Any, reason: str) -> N
 
 def _run_agent_coroutine(
     agent: "UniversalAgent", coroutine: Any, *, timeout: float = 15.0
-) -> None:
+) -> Any:
     """Run an agent coroutine from a sync tool's worker thread and wait for it.
 
     Strands runs sync tools in a worker thread, so a send has finished, or
@@ -113,7 +106,7 @@ def _run_agent_coroutine(
     # The tool shows these errors' text to the model, so each says why plainly
     # (a bare TimeoutError or CancelledError prints as an empty string).
     try:
-        future.result(timeout=timeout)
+        return future.result(timeout=timeout)
     except TimeoutError:
         future.cancel()
         logger.warning(

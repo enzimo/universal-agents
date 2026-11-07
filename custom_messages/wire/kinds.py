@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '250a6c77b555d2d2cf1ab691b658c93fee248ec34131c599f326b3153e5c0136'
+CONTRACT_SHA256 = '4cb0ee0669e161f75cfce69b19cefb9ed88ec73fe87e8fb623feb43a2d69cd31'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -3180,7 +3180,7 @@ KINDS: dict[str, KindSpec] = {
         body_model=models.TaskProbeBodyAdapter,
         reply_model=models.TaskProbeReplyAdapter,
         reply_errors=(),
-        senders=('lead_host', 'team_services'),
+        senders=('lead_host', 'worker_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
         expiry_seconds=30,

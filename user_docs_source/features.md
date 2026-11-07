@@ -940,7 +940,8 @@ Restarting a supervised process is high risk because active work can be
 interrupted. Team Architect must stage an exact `manager`, `gateway`, or `all`
 plan first. The plan reports affected processes, the current task, tracked,
 runnable, and waiting counts, top-level task ids/states and delegated subtasks,
-plus team-visible active work for an `all` restart. Gateway session count is
+plus, for an `all` restart, what each other agent is running: Team Architect
+asks each one and waits a few seconds at most. Gateway session count is
 not visible to the agent, so the prompt states that connected sessions may
 need to reconnect rather than pretending the count is known.
 
@@ -950,13 +951,17 @@ chat). The request lists the tasks the restart may interrupt or delay: every
 task Team Architect holds, whether running, queued or waiting, and for an `all`
 restart also the work other agents are running. Work an agent does on a task
 Team Architect handed it counts as that task.
-The next plan step or a recovery task for that request is covered too.
+The next plan step or a recovery task for that request is covered too. An agent
+that did not answer is listed separately as not answering: what it is doing is
+unknown, and approving the restart means interrupting whatever that is.
 
 Your approval covers those tasks. Applying re-reads the running state first.
 If some listed tasks finished or changed state in the meantime, the restart
 still goes ahead. If a new task arrived that the restart would interrupt, such
 as another message or a scheduled run, the restart is refused and Team
-Architect must ask you again with a fresh plan that lists it. Approving a
+Architect must ask you again with a fresh plan that lists it. The same happens
+when an agent that answered no longer answers, or when an agent that did not
+answer turns out to be running a task that was not listed. Approving a
 settings change or a skill never approves a restart.
 
 The supervisor acts only on restart requests that record their approval: your
