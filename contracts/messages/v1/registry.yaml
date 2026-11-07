@@ -217,15 +217,15 @@ state_records:
     max_lifetime_seconds: 31622400  # 366 days
     write_rule: rewritten with a higher sequence to change, renew or end it; only the receiver's own authority signs it; deleted once receivers forget it (README, "Trust over time")
   host:
-    description: A runtime host's liveness and capacity, written by the host itself every 20 seconds and naming its certificate.
+    description: A runtime host's liveness and capacity, written by the host itself every 10 seconds and naming its certificate.
     bucket: UA1_HOSTS
     key: "<runtime>"
     signer: host
     signer_roles: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     body: state/host.schema.json
-    ttl_seconds: 60
-    write_rule: written by the host itself every 20 seconds, expiring within ttl_seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
+    ttl_seconds: 30
+    write_rule: written by the host itself every 10 seconds, expiring within ttl_seconds (30 seconds), so a host that stops is reported unavailable within about 30 seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
   agent:
     description: An agent's state, written by the host it is placed on when the state changes.
     bucket: UA1_AGENTS
@@ -246,7 +246,7 @@ state_records:
     write_rule: compare-and-set on the last key-value revision, with the next sequence; the signed sequence, not the unsigned revision, is the fencing token, so a stored copy written back is never newer
   team_view:
     description: One entry of a team's shared view of its members, requests, tasks and Objectives.
-    bucket: UA1_TEAM_VIEW
+    bucket: UA1_TEAM_VIEW_{team}
     key: "<team>.<entry>.<id>"
     signer: host
     signer_roles: [team_services]
@@ -255,7 +255,7 @@ state_records:
     write_rule: deleted when the item closes or the person it names departs; each entry at most 4 KiB
   block_list:
     description: A team's blocks on tools and its people's standing, read by the team's hosts that decide tool calls from signed lists.
-    bucket: UA1_BLOCK_LIST
+    bucket: UA1_BLOCK_LIST_{team}
     key: "<team>"
     signer: host
     signer_roles: [team_services]
@@ -2484,6 +2484,66 @@ kinds:
     routing: team
     topology_edge: none
     ledger: coordination_wait_open
+    wakes_model: never
+    rendering: none
+
+  sessions.open:
+    description: A host asks the team services to place an agent on it and sign the agent's session; the reply carries the signed session (README, "Agent sessions").
+    class: request_reply
+    address: svc.team
+    body: bodies/sessions.open.schema.json
+    reply:
+      body: bodies/sessions.open.reply.schema.json
+      errors: [not_allowed, already_placed, limit_reached, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  sessions.renew:
+    description: A host renews one of its agents' sessions while it is connected.
+    class: request_reply
+    address: svc.team
+    body: bodies/sessions.renew.schema.json
+    reply:
+      body: bodies/sessions.renew.reply.schema.json
+      errors: [not_found, not_allowed, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  sessions.close:
+    description: A host reports that one of its agents' sessions ended.
+    class: request_reply
+    address: svc.team
+    body: bodies/sessions.close.schema.json
+    reply:
+      body: bodies/sessions.close.reply.schema.json
+      errors: [not_found, runtime_error]
+    senders: [lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: team
+    topology_edge: none
+    ledger: none
     wakes_model: never
     rendering: none
 

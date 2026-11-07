@@ -10,6 +10,11 @@ certificate for the issuer's installation, runtime and membership epoch, and the
 agent session the frame names (README, "Who sent it"). Nothing the frame says about
 its sender counts until those records confirm it.
 
+A join or renewal from a host on another pre-release contract (README, "Versions") is
+read for its contract digest before the rest of its body, so that host learns
+``protocol_mismatch`` instead of a refusal of a body another contract shaped:
+``VerifiedFrame.other_contract`` marks it, like ``TrustStore.verify`` marks a host record.
+
 Verification has no side effects. A receiver that admits a frame records
 ``VerifiedFrame.replay_key`` with ``VerifiedFrame.frame_digest`` in the same
 transaction as the admission, so a redelivery is recognised and other content under
@@ -19,6 +24,7 @@ the same id is refused as ``replayed``.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
@@ -62,7 +68,7 @@ from custom_messages.wire.values import parse_timestamp
 
 __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
-    "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
+    "answer_subject", "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
     "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_frame",
     "sign_renew_key_proof", "signing_bytes", "verify_authority_token", "verify_frame",
 ]
@@ -84,6 +90,9 @@ OUTSIDE_ROLE = "edge_adapter"
 LEAD_ROLE, SERVICES_ROLE = "lead", "team_services"
 # Audience targets an address delivers to as a whole team (audience id is the team id).
 TEAM_WIDE_TARGETS = frozenset({"team", "team_services"})
+# Replies to a request a host sent for no agent (sessions.*) name the host itself: its
+# runtime id is both the audience id and the audience runtime. No request goes to a host.
+HOST_TARGET = "host"
 # NATS headers that copy frame fields (README, "NATS headers").
 HEADER_KIND, HEADER_ID, HEADER_MSG_ID = "UA-Kind", "UA-Id", "Nats-Msg-Id"
 DURABLE = "durable"
@@ -100,6 +109,14 @@ _HOST_RENEW = "host.renew"
 _KEY_ROTATION = "application_key_rotation"
 # Where a join or renewal reply carries the certificate the authority issued.
 ISSUED_CERTIFICATE_AT = "/body/certificate"
+# Where a sessions.open or sessions.renew reply carries the session the team services signed.
+ISSUED_SESSION_AT = "/body/session"
+_SESSIONS_OPEN, _SESSIONS_RENEW = "sessions.open", "sessions.renew"
+# A host asks for its agents' sessions for itself, never as one of its agents: the reply goes to
+# the host (README, "Agent sessions").
+_HOST_OWN_KINDS = frozenset({_SESSIONS_OPEN, _SESSIONS_RENEW, "sessions.close"})
+# What a renewal keeps of the session it renews: everything but its end and its sequence.
+_RENEWAL_KEEPS = ("agent", "agent_type", "agent_role", "runtime", "placement_revision", "started_at")
 
 
 def idempotency_key(kind: str, *parts: str | int | None) -> str:
@@ -261,6 +278,13 @@ class VerifiedAuthority:
 
 @dataclass(frozen=True)
 class VerifiedFrame:
+    """A frame that passed the receiver's checks.
+
+    ``other_contract`` marks a join or renewal whose host runs another pre-release contract
+    (README, "Versions"): everything before its body was checked (``verify_frame``), but its
+    body was not read, so ``body`` is None and ``their_contract_sha256`` names that contract.
+    """
+
     frame: Frame
     body: Any
     certificate: Optional[HostCertificate]  # None for a join, signed by the key it presents
@@ -269,6 +293,8 @@ class VerifiedFrame:
     replay_key: ReplayKey
     frame_digest: str
     raw: dict[str, Any] = field(repr=False)
+    other_contract: bool = False
+    their_contract_sha256: Optional[str] = None
 
 
 def _newer_minor(raw: Mapping[str, Any]) -> bool:
@@ -361,14 +387,16 @@ def _verify_signature(raw: Mapping[str, Any], frame: Frame, public_key: Ed25519P
         raise FrameRefused("bad_signature", at="/signature") from error
 
 
-def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore, now: datetime) -> None:
+def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: TrustStore, now: datetime, *,
+                 read_body: bool = True) -> None:
     """A join speaks for its own new host only (README, "Installation traffic").
 
     Its key must not be revoked, by its key id or by its public key under any key id,
     and the receiver needs a current revocations record to know that. It names the installation scope, no agent, epoch zero and an unreserved
     runtime id; its body asks for that runtime in that installation, and only for roles a
     joining host may hold (the kind's senders, which the receiver cannot check against a
-    certificate the host does not have yet).
+    certificate the host does not have yet). The body is not read (``read_body=False``) for
+    a join of another contract, except the key it presents, which its signature needed.
     """
 
     issuer = frame.issuer
@@ -391,6 +419,8 @@ def _verify_join(raw: Mapping[str, Any], frame: Frame, spec: KindSpec, trust: Tr
             raise FrameRefused("wrong_issuer", "a host joins at epoch zero", at=f"/issuer/{field_name}")
     if issuer.runtime.startswith(RESERVED_RUNTIME_PREFIXES):
         raise FrameRefused("wrong_issuer", "runtime ids starting with x- or _ are reserved", at="/issuer/runtime")
+    if not read_body:
+        return
     body = raw["body"]
     for field_name in ("runtime", "installation"):
         if body.get(field_name) != getattr(issuer, field_name):
@@ -462,6 +492,8 @@ def _verify_issuer(frame: Frame, spec: Optional[KindSpec], certificate: HostCert
             raise FrameRefused("wrong_issuer", "an installation operation speaks for its host, not an agent", at="/issuer/agent")
     elif issuer.team not in certificate.teams:
         raise FrameRefused("wrong_issuer", "the certificate does not serve the issuer's team", at="/issuer/team")
+    if spec is not None and spec.name in _HOST_OWN_KINDS and (issuer.agent is not MISSING or issuer.session is not MISSING):
+        raise FrameRefused("wrong_issuer", "a host asks for its agents' sessions for itself, not as an agent", at="/issuer/agent")
     if (issuer.agent is MISSING) != (issuer.session is MISSING):
         raise FrameRefused("wrong_issuer", "a frame names an agent and its session together", at="/issuer/session")
     if issuer.agent is not MISSING:
@@ -485,6 +517,19 @@ def _verify_issuer(frame: Frame, spec: Optional[KindSpec], certificate: HostCert
     if asked.target == "agent" and issuer.agent != asked.id:
         # Results and answers are accepted only from the agent that holds the work.
         raise FrameRefused("wrong_issuer", "the reply comes from another agent than the one asked", at="/issuer/agent")
+
+
+def _other_contract(raw: Mapping[str, Any], spec: Optional[KindSpec], is_reply: bool, trust: TrustStore) -> Optional[str]:
+    """The contract digest a join or renewal names when it is not the receiver's own (README, "Versions").
+
+    Only requests whose body carries the host's digest (``contract_sha256``: joins and
+    renewals) are read this way; it is read on its own, as ``TrustStore.other_contract``
+    reads a host record's.
+    """
+
+    if is_reply or spec is None or "contract_sha256" not in spec.body_shape.get("properties", {}):
+        return None
+    return trust.other_contract(raw.get("body"))
 
 
 def _verify_renewal(raw: Mapping[str, Any], frame: Frame, certificate: HostCertificate) -> None:
@@ -549,7 +594,74 @@ def _verify_outside_boundary(frame: Frame, roles: frozenset[str] | set[str], ses
         raise FrameRefused("wrong_sender", "only the lead or the team services contact an outside agent", at="/issuer")
 
 
-def _verify_audience(frame: Frame, receiver: Receiver) -> None:
+def reply_audience(request: Frame) -> dict[str, str]:
+    """Whom the reply to ``request`` names (README, "Replies"): the requester as it receives.
+
+    The agent, when the request names one; the requesting runtime as the installation
+    service's caller, for an installation operation; otherwise the requesting host
+    itself. The reply goes to that runtime's inbox in every case.
+    """
+
+    issuer = request.issuer
+    base = {"installation": issuer.installation, "team": issuer.team, "runtime": issuer.runtime}
+    if issuer.agent is not MISSING:
+        return {**base, "target": "agent", "id": str(issuer.agent)}
+    if issuer.team == INSTALLATION_SCOPE:
+        return {**base, "target": "installation_service", "id": issuer.runtime}
+    return {**base, "target": HOST_TARGET, "id": issuer.runtime}
+
+
+# A sender slot or runtime id: one subject token of id characters (common.schema.json ids).
+_SLOT_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
+# A NATS subject token that is not a wildcard and holds no whitespace.
+_PLAIN_TOKEN = re.compile(r"[^\s*>]+")
+# Tokens of the subject root (ua.v1); the team token and the sender slot follow it.
+_ROOT_TOKENS = len(SUBJECT_ROOT.rstrip(".").split("."))
+
+
+def answer_subject(request_subject: str, reply_subject: Optional[str]) -> Optional[str]:
+    """The NATS subject to answer a request on, or ``None`` when the receiver must not answer (README, "Replies").
+
+    NATS ``allow_responses`` lets a receiver publish one answer to whatever reply subject
+    the request names, past the receiver's own grants. A requester could otherwise name a
+    JetStream API or key-value subject and have the answer, even an empty refusal,
+    written there with the receiver's rights (an empty message on
+    ``$JS.API.STREAM.DELETE.<stream>`` deletes the stream). So a receiver answers, with a
+    signed reply or a refusal, only on the requester's own inbox:
+    ``_INBOX.<sender slot>.<token>...``, with at least one token after the slot and no
+    wildcard, where the sender slot is the one in the subject the request arrived on
+    (``ua.v1.<team>.<slot>.`` or ``ua.v1._install.<slot>.svc``). The requester's NATS
+    publish permissions fix that slot to its own runtime id, so it can only name its
+    own inbox. A peer installation's slot (``x-<installation>``) gets no answer, since
+    request/reply stays inside one installation. A receiver that gets ``None`` drops the
+    request without answering and logs it.
+    """
+
+    if not reply_subject or not request_subject.startswith(SUBJECT_ROOT):
+        return None
+    tokens = request_subject.split(".")
+    if len(tokens) < _ROOT_TOKENS + 3:  # the team, the sender slot and at least one address token
+        return None
+    slot = tokens[_ROOT_TOKENS + 1]
+    if not _SLOT_TOKEN.fullmatch(slot) or slot.startswith(RESERVED_RUNTIME_PREFIXES):
+        return None
+    inbox = REPLY_INBOX_PREFIX.format(runtime=slot) + "."
+    if not reply_subject.startswith(inbox):
+        return None
+    rest = reply_subject[len(inbox):].split(".")
+    if not all(_PLAIN_TOKEN.fullmatch(token) for token in rest):
+        return None
+    return reply_subject
+
+
+def _verify_audience(frame: Frame, receiver: Receiver, answering: Optional[Frame] = None) -> None:
+    if answering is not None:
+        expected = reply_audience(answering)
+        named = frame.audience
+        for field_name in ("target", "id", "runtime"):
+            if getattr(named, field_name) != expected[field_name]:
+                raise FrameRefused("wrong_audience", "a reply names its requester as it receives (README, \"Replies\")",
+                                   at=f"/audience/{field_name}")
     audience = frame.audience
     if audience.installation != receiver.installation:
         raise FrameRefused("wrong_team", "the frame is for another installation", at="/audience/installation")
@@ -932,6 +1044,48 @@ def _verify_issued_certificate(raw: Mapping[str, Any], answering: Frame, trust: 
                            at="/body/connection/expires_at")
 
 
+def _verify_issued_session(raw: Mapping[str, Any], frame: Frame, answering: Frame, trust: TrustStore) -> None:
+    """The session a sessions.open or sessions.renew reply carries (README, "Agent sessions").
+
+    It verifies against the replying team services host's certificate, belongs to the
+    team the request was for, and places on the host that asked the agent and type an
+    open asked for, or renews the session a renewal named.
+    """
+
+    document = _pointed(raw, ISSUED_SESSION_AT)
+    if not isinstance(document, Mapping):
+        return  # only success replies carry one, and their schema requires it
+    try:
+        issued = trust.issued_session(document)
+    except FrameRefused as refused:
+        raise FrameRefused("invalid_body", refused.detail, at=ISSUED_SESSION_AT + refused.at,
+                           known_at=ISSUED_SESSION_AT + refused.known_at) from refused
+
+    def refuse(field_name: str, detail: str) -> FrameRefused:
+        return FrameRefused("invalid_body", detail, at=f"{ISSUED_SESSION_AT}/body/{field_name}")
+
+    if issued.signer.runtime != frame.issuer.runtime:
+        raise FrameRefused("invalid_body", "the session is signed by another host than the one that replied",
+                           at=f"{ISSUED_SESSION_AT}/writer/runtime")
+    if issued.team != answering.audience.team:
+        raise refuse("team", "the session is for another team than the one asked")
+    if issued.runtime != answering.issuer.runtime:
+        raise refuse("runtime", "the session places the agent on another host than the one that asked")
+    asked = answering.body
+    if answering.kind == _SESSIONS_OPEN:
+        if issued.agent != asked.get("agent"):
+            raise refuse("agent", "the session is for another agent than the one asked for")
+        if issued.agent_type != asked.get("agent_type"):
+            raise refuse("agent_type", "the session names another agent type than the one asked for")
+    else:
+        if issued.session != asked.get("session"):
+            raise refuse("session", "the renewal returned another session than the one it named")
+        held = trust.agent_session(issued.installation, issued.team, issued.session)
+        for field_name in _RENEWAL_KEEPS if held is not None else ():
+            if getattr(issued, field_name) != getattr(held, field_name):
+                raise refuse(field_name, "a renewal keeps every field of the session but its end")
+
+
 def _verify_joined_certificate(issued: HostCertificate, asked: Mapping[str, Any],
                                refuse: Callable[[str, str], FrameRefused]) -> None:
     """A join's certificate names the keys and connection class it presented, and grants at most what it asked for."""
@@ -992,7 +1146,10 @@ def verify_frame(
 ) -> VerifiedFrame:
     """Check one received frame in the registry's order; raise ``FrameRefused`` on the first failure.
 
-    ``headers`` are the NATS headers the frame arrived with, ``{}`` when it arrived
+    A join or renewal that names another pre-release contract's digest is checked for
+    everything before its body (its signature, which for a join needs the key it presents,
+    its issuer, sender, audience, subject, times and replay) and returned with
+    ``other_contract`` set and no body (module docstring). ``headers`` are the NATS headers the frame arrived with, ``{}`` when it arrived
     with none (nats-py reports that as None), or None only for a frame read from
     storage. ``answering`` is the request a reply answers; replies are refused
     without it. ``stored_at`` is when a stream stored a queued frame: JetStream's
@@ -1023,18 +1180,19 @@ def verify_frame(
         _verify_signature(raw, frame, certificate.public_key)
     if body_digest(raw["body"]) != frame.body_digest:
         raise FrameRefused("bad_digest", at="/body_digest")
+    theirs = _other_contract(raw, spec, is_reply, trust)
     if certificate is None:
         assert spec is not None  # only a known kind proves possession
-        _verify_join(raw, frame, spec, trust, now)
+        _verify_join(raw, frame, spec, trust, now, read_body=theirs is None)
     else:
         session = _session(frame, trust)
         _verify_revocation(frame, certificate, session, trust, now)
         _verify_epochs(certificate, spec, trust)
         _verify_issuer(frame, spec, certificate, session, issued_at, is_reply, answering)
-        if not is_reply:
+        if not is_reply and theirs is None:
             _verify_renewal(raw, frame, certificate)
         _verify_sender(frame, certificate, session, spec, is_reply, trust, issued_at, receiver)
-    _verify_audience(frame, receiver)
+    _verify_audience(frame, receiver, answering if is_reply else None)
     _verify_subject(raw, frame, spec, is_reply, arrived_on, headers)
     _verify_time(frame, spec, now, issued_at)
     replay_key = ReplayKey(frame.issuer.installation, frame.issuer.runtime, frame.issuer.membership_epoch, frame.message_id)
@@ -1044,6 +1202,10 @@ def verify_frame(
         raise FrameRefused("replayed", "this message id was admitted with other content", at="/message_id")
     if spec is None:
         raise FrameRefused("unknown_kind", frame.kind, at="/kind")
+    if theirs is not None:
+        return VerifiedFrame(frame=frame, body=None, certificate=certificate, session=session, authority=None,
+                             replay_key=replay_key, frame_digest=digest, raw=raw, other_contract=True,
+                             their_contract_sha256=theirs)
     model, shape = body_model(frame.kind)
     # The body as this version knows it: a newer minor's unknown optional fields are
     # dropped. Checks that look inside the body start from a field only when the schema
@@ -1064,6 +1226,9 @@ def verify_frame(
     elif _installation_operation(spec) and ISSUED_CERTIFICATE_AT.rsplit("/", 1)[1] in known:
         assert answering is not None  # _verify_issuer refused replies without their request
         _verify_issued_certificate(raw, answering, trust)
+    elif spec.name in {_SESSIONS_OPEN, _SESSIONS_RENEW} and ISSUED_SESSION_AT.rsplit("/", 1)[1] in known:
+        assert answering is not None  # _verify_issuer refused replies without their request
+        _verify_issued_session(raw, frame, answering, trust)
     authority = _verify_authority(raw, frame, spec, is_reply, trust, certificate, receiver, now, stored_at)
     return VerifiedFrame(frame=frame, body=body, certificate=certificate, session=session, authority=authority,
                          replay_key=replay_key, frame_digest=digest, raw=raw)

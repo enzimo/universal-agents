@@ -6,7 +6,7 @@
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "authority_token_domain": "universal-agents/authority-token/v1",
-  "contract_sha256": "85b7b8e0b4159107bbf74a86ab7a9154597c1fcfd3dbceb7bf26df740c08058a",
+  "contract_sha256": "ce747c94ff1efa51852042f4deaf141c93a4340141d3be18c9a5f7846e458de7",
   "kinds": [
     "access.decision",
     "access.request",
@@ -98,6 +98,9 @@
     "schedules.resume",
     "schedules.set_worker",
     "schedules.update",
+    "sessions.close",
+    "sessions.open",
+    "sessions.renew",
     "shared_work.check",
     "shared_work.claim",
     "shared_work.count",

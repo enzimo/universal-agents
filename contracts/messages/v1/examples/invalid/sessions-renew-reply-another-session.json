@@ -1,0 +1,18 @@
+{
+  "description": "A renewal's reply returns the session the renewal named.",
+  "refusal": "invalid_body",
+  "at": "/body/session/body/session",
+  "base": "sessions.renew.reply/ok.json",
+  "changes": [
+    {
+      "set": "/body/session/key",
+      "to": "session.install_example.team_example.s-researcher-2-9"
+    },
+    {
+      "set": "/body/session/body/session",
+      "to": "s-researcher-2-9"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"sessions.renew.reply\", \"message_id\": \"01928f3a-7b2c-7d08-8000-000000000d08\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"revocation_epoch\": 1, \"key_id\": \"test-services-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"host\", \"id\": \"worker-host-1\", \"runtime\": \"worker-host-1\"}, \"subject\": \"_INBOX.worker-host-1.01928f3a-7b2c-7d07-8000-000000000d07\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"outcome\": \"ok\", \"session\": {\"record\": \"agent_session\", \"protocol\": \"1.0-pre\", \"key\": \"session.install_example.team_example.s-researcher-2-9\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"team-services-1\", \"membership_epoch\": 2, \"key_id\": \"test-services-key-1\"}, \"sequence\": 2, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"session\": \"s-researcher-2-9\", \"installation\": \"install_example\", \"team\": \"team_example\", \"agent\": \"researcher-2\", \"agent_type\": \"researcher\", \"agent_role\": \"worker\", \"runtime\": \"worker-host-1\", \"placement_revision\": 12, \"started_at\": \"2026-10-22T04:00:00.000Z\", \"ends_at\": \"2026-10-29T04:00:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"LQsBy5K2LnUXgJ59U10yBUoDSNSqGeBGpKYilFWtd0E\", \"signature\": \"M2uewJQc5ZScB5f3Yv0kTP_NnlPYVKWJIPxzqdOMsifFHTje99bav0FbbSvR5cMy2NDaolTuNDnq-nnjL0UHDg\"}}, \"causation_id\": \"01928f3a-7b2c-7d07-8000-000000000d07\", \"idempotency_key\": \"sessions.renew.reply:mSf2lAWjtp2yvjGHWX2AkaQt5EdyU_zxiK-fySmcIuM\", \"body_digest\": \"rYY-wY2zl2_NPq6UdnNiW0JUya3BTH6D9lZHNg5bssE\", \"signature\": \"MDj7-d7G8O51BK34MWgN62lmwagZZQ0or9yc2P5v8X-4nbSZQm6gQ1wH6sgY9x-u9squO-GJYGZr1oH9UdH9CQ\"}"
+}
