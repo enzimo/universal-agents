@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.count.schema.json",
+  "title": "shared_work.count request",
+  "description": "The number of the person's other running requests, for the line in each turn.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "description": "The task the agent acts for; the team services check that the agent holds it and that the token is bound to its root task.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    }
+  },
+  "required": [
+    "task_id"
+  ],
+  "additionalProperties": false
+}

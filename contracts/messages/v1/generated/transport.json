@@ -12,6 +12,15 @@
       "gateway",
       "edge_adapter"
     ],
+    "host": [
+      "gateway",
+      "lead_host",
+      "worker_host",
+      "team_services",
+      "edge_adapter",
+      "installation_authority",
+      "scheduler"
+    ],
     "installation_service": [
       "installation_authority"
     ],
@@ -43,7 +52,7 @@
       "description": "set-aside copies and notices, under the receiving runtime's id",
       "max_expiry_seconds": 2592000,
       "streams": [
-        "UA1_DLQ"
+        "UA1_DLQ_{team}"
       ]
     },
     "durable": {
@@ -104,6 +113,15 @@
       "name": "agent~{team}~{agent}",
       "stream": "UA1_AGENT_WORK_{team}"
     },
+    "dead_letters": {
+      "ack": "explicit",
+      "ack_wait_seconds": 60,
+      "filter": "ua.v1.{team}.*.dlq.notice.*",
+      "max_deliveries": 20,
+      "mode": "pull",
+      "name": "dlq~{team}",
+      "stream": "UA1_DLQ_{team}"
+    },
     "edge": {
       "ack": "explicit",
       "ack_wait_seconds": 60,
@@ -132,32 +150,167 @@
       "stream": "UA1_WORK"
     }
   },
+  "dead_letter_custody": {
+    "role": "team_services",
+    "streams": [
+      "UA1_DLQ_{team}"
+    ]
+  },
   "installation_scope": "_install",
   "key_value": {
     "UA1_AGENTS": {
       "description": "one record per agent (availability, busy, idle, paused, exiting), written only on change",
-      "per_key_ttl_seconds": 0
+      "per_key_ttl_seconds": 0,
+      "readers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "writers": {
+        "lead_host": [
+          "{team}.{agent}"
+        ],
+        "worker_host": [
+          "{team}.{agent}"
+        ]
+      }
     },
-    "UA1_BLOCK_LIST": {
-      "description": "one block list per team, written by the team services and read by every host of the team; each record states its own expiry",
-      "per_key_ttl_seconds": 0
+    "UA1_BLOCK_LIST_{team}": {
+      "description": "one team's block list, written by its team services and read by its hosts; one bucket per team, since it names people's blocks and standing; each record states its own expiry",
+      "per_key_ttl_seconds": 0,
+      "readers": [
+        "lead_host",
+        "worker_host",
+        "team_services"
+      ],
+      "writers": {
+        "team_services": [
+          "{team}"
+        ]
+      }
     },
     "UA1_CERTS": {
       "description": "host certificates, revocations, agent sessions and agreements (registry state_records); each record is signed, so readers trust the signature, not the bucket",
-      "per_key_ttl_seconds": 0
+      "per_key_ttl_seconds": 0,
+      "readers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "writers": {
+        "edge_adapter": [
+          "host.{peer}.>",
+          "revocations.{peer}",
+          "session.{peer}.>"
+        ],
+        "installation_authority": [
+          "host.{installation}.>",
+          "revocations.{installation}",
+          "agreement.*"
+        ],
+        "team_services": [
+          "session.{installation}.{team}.*"
+        ]
+      }
     },
     "UA1_HOSTS": {
-      "description": "one record per runtime host; written every 20 s, expires after 60 s (each record also states its expiry)",
-      "per_key_ttl_seconds": 60
+      "description": "one record per runtime host; written every 10 s, expires after at most 30 s (each record also states its expiry)",
+      "per_key_ttl_seconds": 30,
+      "readers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "writers": {
+        "edge_adapter": [
+          "{self}"
+        ],
+        "gateway": [
+          "{self}"
+        ],
+        "installation_authority": [
+          "{self}"
+        ],
+        "lead_host": [
+          "{self}"
+        ],
+        "scheduler": [
+          "{self}"
+        ],
+        "team_services": [
+          "{self}"
+        ],
+        "worker_host": [
+          "{self}"
+        ]
+      }
+    },
+    "UA1_LOCKS": {
+      "description": "the team services' single-instance lock, one key per team (team_services.<team>), its value schemas/team-services-lock.schema.json: the holder's runtime id, its process instance and its lease's end, a 30-second lease taken and renewed every 10 seconds with compare-and-set; another instance does not serve while the lease holds",
+      "per_key_ttl_seconds": 0,
+      "readers": [
+        "team_services"
+      ],
+      "writers": {
+        "team_services": [
+          "team_services.{team}"
+        ]
+      }
     },
     "UA1_PLACEMENT": {
       "description": "which host runs an agent and that host's epoch; the record's signed sequence is the fencing token",
-      "per_key_ttl_seconds": 0
+      "per_key_ttl_seconds": 0,
+      "readers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services",
+        "edge_adapter",
+        "installation_authority",
+        "scheduler"
+      ],
+      "writers": {
+        "team_services": [
+          "{team}.*"
+        ]
+      }
     },
-    "UA1_TEAM_VIEW": {
-      "description": "the team's shared view of open work",
-      "per_key_ttl_seconds": 0
+    "UA1_TEAM_VIEW_{team}": {
+      "description": "one team's shared view of open work; one bucket per team, since an Objective's title is a person's own words",
+      "per_key_ttl_seconds": 0,
+      "readers": [
+        "gateway",
+        "lead_host",
+        "worker_host",
+        "team_services"
+      ],
+      "writers": {
+        "team_services": [
+          "{team}.>"
+        ]
+      }
     }
+  },
+  "key_value_stream": {
+    "allow_direct": true,
+    "allow_rollup_hdrs": false,
+    "deny_delete": true,
+    "deny_purge": true,
+    "history": 1,
+    "max_consumers": 4096,
+    "storage": "file"
   },
   "limits": {
     "max_credential_bytes": 65536,
@@ -193,13 +346,15 @@
         "ua.v1.{team}.*.work.pool.*"
       ]
     },
-    "UA1_DLQ": {
+    "UA1_DLQ_{team}": {
       "max_age_seconds": 2592060,
+      "max_consumers": 16,
       "max_message_bytes": 263168,
+      "max_msgs_per_subject": 1,
       "retention": "limits",
       "storage": "file",
       "subjects": [
-        "ua.v1.*.*.dlq.>"
+        "ua.v1.{team}.*.dlq.>"
       ]
     },
     "UA1_WORK": {

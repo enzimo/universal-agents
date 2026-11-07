@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "shared_work.release.reply",
+  "message_id": "01928f3a-7b2c-7c1e-8000-000000000c1e",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7c1b-8000-000000000c1b",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "runtime_error",
+    "message": "The claim could not be released."
+  },
+  "causation_id": "01928f3a-7b2c-7c1b-8000-000000000c1b",
+  "idempotency_key": "shared_work.release.reply:Yog3E_5zHujc_WoyEiIIsbDU10NO_3L5-ufuTS6q-8M",
+  "body_digest": "ZTNFZ6pkGHtoIBR_cKjQPAvpaiQVx6Ta5RQAT4gZHio",
+  "signature": "nd1nL3AWtYAy3djUKjX9qgzU5C1Vvxd0F3HNyuh7LlZI_vOIdUcGOFSv68e5WPJgvuKqprmceiNRf9IIOJuABA"
+}

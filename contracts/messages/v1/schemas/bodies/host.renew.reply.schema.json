@@ -14,13 +14,13 @@
           "$ref": "../certificate-document.schema.json"
         },
         "connection": {
+          "description": "The host's NATS connection credential; absent when the installation issues none and its hosts share one NATS login.",
           "$ref": "../common.schema.json#/$defs/connection_credential"
         }
       },
       "required": [
         "outcome",
-        "certificate",
-        "connection"
+        "certificate"
       ],
       "additionalProperties": false
     },
@@ -71,6 +71,10 @@
         "accepted": {
           "$ref": "../common.schema.json#/$defs/protocol_label"
         },
+        "accepted_contract_sha256": {
+          "description": "The contract digest the installation authority runs, so a host that runs the same label can see that its contract differs (README, \"Versions\").",
+          "$ref": "../common.schema.json#/$defs/contract_sha256"
+        },
         "install": {
           "type": "string",
           "minLength": 1,
@@ -83,6 +87,7 @@
       "required": [
         "outcome",
         "accepted",
+        "accepted_contract_sha256",
         "install"
       ],
       "additionalProperties": false

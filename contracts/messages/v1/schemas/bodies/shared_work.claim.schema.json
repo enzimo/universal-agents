@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.claim.schema.json",
+  "title": "shared_work.claim request",
+  "description": "Claim up to eight resources for this request, all or none, for one period.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The agent's id for this change; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "task_id": {
+      "description": "The task the agent acts for; the team services check that the agent holds it and that the token is bound to its root task.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "$ref": "../common.schema.json#/$defs/resource_key"
+      },
+      "minItems": 1,
+      "maxItems": 8
+    },
+    "reason": {
+      "$ref": "../common.schema.json#/$defs/short_text"
+    }
+  },
+  "required": [
+    "request_id",
+    "task_id",
+    "resources",
+    "reason"
+  ],
+  "additionalProperties": false
+}

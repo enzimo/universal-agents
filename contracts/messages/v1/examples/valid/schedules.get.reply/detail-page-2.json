@@ -13,8 +13,8 @@
   "audience": {
     "installation": "install_example",
     "team": "team_example",
-    "target": "edge",
-    "id": "web",
+    "target": "host",
+    "id": "gateway-1",
     "runtime": "gateway-1"
   },
   "subject": "_INBOX.gateway-1.01928f3a-7b2c-7e60-8000-0000000003f0",
@@ -25,6 +25,9 @@
     "outcome": "ok",
     "schedule_id": "schedule_id_1",
     "seen_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "action": {
+      "type": "task"
+    },
     "detail": {
       "text": " Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review the build and its résumé. Review",
       "offset": 4000,
@@ -37,6 +40,6 @@
   },
   "causation_id": "01928f3a-7b2c-7e60-8000-0000000003f0",
   "idempotency_key": "schedules.get.reply:gFZLddk6i7D7nApc_47Evzpf4uW9msbnNjVbiT34Frs",
-  "body_digest": "S0QLkWMXh0Th8deAPCcsPVPTtgWU-H7xC89SqP9U6bI",
-  "signature": "MlAGHMLJ8ammDQpuo_lP5OilHRe_M-CuLqX8TumtGwgBmbB973QkFpg5GFmft0TOBf9Ypc7gzvsdxsJZhfVuBg"
+  "body_digest": "LuFi6FztvO678m-f2fCDCaCJS4ZdjJ-UKOUW1C45Bh8",
+  "signature": "RjJGrIhvLQ4mmTd-H0gVojNGfTyoGYrhaYVbWNSV61biOvo8suDpD1aV3DfyGuhU6B56mqiPBy9Jo1ZE1jaxCg"
 }

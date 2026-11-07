@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/shared_work.check.reply.schema.json",
+  "title": "shared_work.check reply",
+  "description": "Live claims on, above or under each resource, the notes left on it, and whether waiting on it is possible.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "resource": {
+                "$ref": "../common.schema.json#/$defs/resource_key"
+              },
+              "claims": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/coordination_seen_claim"
+                },
+                "maxItems": 8
+              },
+              "notes": {
+                "type": "array",
+                "items": {
+                  "$ref": "../common.schema.json#/$defs/coordination_seen_note"
+                },
+                "maxItems": 8
+              },
+              "can_wait": {
+                "description": "Whether a wait on it would be accepted now.",
+                "type": "boolean"
+              },
+              "claims_total": {
+                "description": "How many live claims on, above or under it there are in all; the list holds the newest of them.",
+                "$ref": "../common.schema.json#/$defs/count"
+              },
+              "notes_total": {
+                "description": "How many notes on it there are in all; the list holds the newest of them.",
+                "$ref": "../common.schema.json#/$defs/count"
+              }
+            },
+            "required": [
+              "resource",
+              "claims",
+              "claims_total",
+              "notes",
+              "notes_total",
+              "can_wait"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "outcome",
+        "resources"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "invalid_request"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

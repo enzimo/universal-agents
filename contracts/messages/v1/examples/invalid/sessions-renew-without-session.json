@@ -1,0 +1,13 @@
+{
+  "description": "A renewal names the session it renews.",
+  "refusal": "invalid_body",
+  "at": "/body/session",
+  "base": "sessions.renew/full.json",
+  "changes": [
+    {
+      "remove": "/body/session"
+    }
+  ],
+  "context": {},
+  "frame_text": "{\"protocol\": \"1.0-pre\", \"kind\": \"sessions.renew\", \"message_id\": \"01928f3a-7b2c-7d07-8000-000000000d07\", \"issuer\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"runtime\": \"worker-host-1\", \"membership_epoch\": 3, \"revocation_epoch\": 1, \"key_id\": \"test-worker-key-1\"}, \"audience\": {\"installation\": \"install_example\", \"team\": \"team_example\", \"target\": \"team_services\", \"id\": \"team_example\"}, \"subject\": \"ua.v1.team_example.worker-host-1.svc.team\", \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:30:30.000Z\", \"algorithm\": \"ed25519\", \"body\": {\"request_id\": \"renew_researcher_2\"}, \"idempotency_key\": \"sessions.renew:2-8Yse1YU1dGSMpIg4iQVI4KfpDom1uIxB_b4qU5V7Q\", \"body_digest\": \"CgavuAgjwFQbxOmyf2eeryN5l1chZ0k5SjDZNXNu4Kc\", \"signature\": \"z4-FycVI1bZk8UFfTQcoR_8_CZcoNUFCxZd7mYwYx0Dh6wrPZLJ3WVW26DA2CcIKtwcLd6PdPNTuu0uMgWJiCg\"}"
+}

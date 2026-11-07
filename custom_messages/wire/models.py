@@ -104,11 +104,11 @@ class Issuer(WireModel):
 
 
 class Audience(WireModel):
-    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id."
+    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id. A reply to a request a host sent for no agent (sessions.*) names the host: target host, id and runtime its runtime id. No request is delivered to a host target."
 
     installation: InstallationId
     team: ScopeId
-    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service']
+    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service', 'host']
     id: TokenId
     runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
@@ -272,6 +272,176 @@ class TaskAccessList(WireModel):
     ends_at: Timestamp
     tools: Annotated[list[TaskAccessListToolsItem], Field(max_length=1024)]
     one_time: Annotated[list[TaskAccessListOneTimeItem], Field(max_length=64)]
+
+
+ContractSha256 = Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
+
+
+ResourceKey = Annotated[str, StringConstraints(pattern='^(?:file:(?:team|agents|users/(?:[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.\\.[^/\\\\\x00-\x1f\x7f]+)|data/(?:[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.\\.[^/\\\\\x00-\x1f\x7f]+))(?:/|(?:/(?:[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.[^/\\\\.\x00-\x1f\x7f][^/\\\\\x00-\x1f\x7f]*|\\.\\.[^/\\\\\x00-\x1f\x7f]+))+/?)|record:knowledge_page:(?:team|personal):[a-z0-9][a-z0-9-]{0,79}|record:memory_fact:(?:coremem|usermem):[1-9][0-9]{0,15}|record:(?:schedule|objective|heartbeat_item):[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}|account:(?:fn|cli|http|mcp|procedure|code):[a-z0-9][a-z0-9_.-]{0,95}:(?:team|person))$', max_length=1100)]
+
+
+CoordinationRequestTitle = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+
+
+class CoordinationClaim(WireModel):
+    "One of the asking person's claims, as its own requests see it."
+
+    claim_id: RecordId
+    resources: Annotated[list[ResourceKey], Field(min_length=1, max_length=8)]
+    ends_at: Timestamp
+    extensions_left: Annotated[int, Field(ge=0, le=2)]
+    reason: ShortText
+
+
+class CoordinationNote(WireModel):
+    "A note one of the asking person's requests left."
+
+    note_id: RecordId
+    resource: ResourceKey
+    text: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    written_at: Timestamp
+
+
+class CoordinationHolderThisRequest(WireModel):
+    whose: Literal['this_request']
+    agent: AgentId
+    reason: ShortText
+
+
+class CoordinationHolderSamePerson(WireModel):
+    whose: Literal['same_person']
+    root_task_id: RecordId
+    title: CoordinationRequestTitle
+    reason: ShortText
+
+
+class CoordinationHolderAnotherMember(WireModel):
+    whose: Literal['another_member']
+
+
+class CoordinationHolderTeamMaintenance(WireModel):
+    whose: Literal['team_maintenance']
+    reason: ShortText
+
+
+CoordinationHolder = Annotated[Union[CoordinationHolderThisRequest, CoordinationHolderSamePerson, CoordinationHolderAnotherMember, CoordinationHolderTeamMaintenance], Field(discriminator='whose')]
+
+
+class CoordinationSeenClaim(WireModel):
+    "A live claim on, above or under a resource."
+
+    claim_id: RecordId
+    resource: ResourceKey
+    relation: Literal['exact', 'above', 'below']
+    ends_at: Timestamp
+    holder: CoordinationHolder
+
+
+class CoordinationOwnSeenClaimHolder(WireModel):
+    whose: Literal['this_request']
+    agent: AgentId
+    reason: ShortText
+
+
+class CoordinationOwnSeenClaim(WireModel):
+    "One of the asking request's own live claims on, above or under a resource it asked about, as shared_work.claim lists its own (holder this_request), so the model sees which claim to use, extend or release."
+
+    claim_id: RecordId
+    resource: ResourceKey
+    relation: Literal['exact', 'above', 'below']
+    ends_at: Timestamp
+    holder: CoordinationOwnSeenClaimHolder
+
+
+class CoordinationSeenNoteThisRequest(WireModel):
+    whose: Literal['this_request']
+    note_id: RecordId
+    text: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    written_at: Timestamp
+
+
+class CoordinationSeenNoteSamePerson(WireModel):
+    whose: Literal['same_person']
+    note_id: RecordId
+    root_task_id: RecordId
+    title: CoordinationRequestTitle
+    text: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    written_at: Timestamp
+
+
+class CoordinationSeenNoteAnotherMember(WireModel):
+    whose: Literal['another_member']
+
+
+class CoordinationSeenNoteTeamMaintenance(WireModel):
+    whose: Literal['team_maintenance']
+    note_id: RecordId
+    text: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+    written_at: Timestamp
+
+
+CoordinationSeenNote = Annotated[Union[CoordinationSeenNoteThisRequest, CoordinationSeenNoteSamePerson, CoordinationSeenNoteAnotherMember, CoordinationSeenNoteTeamMaintenance], Field(discriminator='whose')]
+
+
+class CoordinationEventWaitedForResourceWaitsItem(WireModel):
+    resource: ResourceKey
+    ended: Literal['claim_granted', 'record_removed', 'limit_reached']
+
+
+class CoordinationEventWaitedForResource(WireModel):
+    event: Literal['waited_for_resource']
+    waits: Annotated[list[CoordinationEventWaitedForResourceWaitsItem], Field(min_length=1, max_length=8)]
+    total: Count
+
+
+class CoordinationEventWaitedForRequestWaitsItem(WireModel):
+    other_root_task_id: RecordId
+    ended: Literal['request_ended', 'limit_reached']
+
+
+class CoordinationEventWaitedForRequest(WireModel):
+    event: Literal['waited_for_request']
+    waits: Annotated[list[CoordinationEventWaitedForRequestWaitsItem], Field(min_length=1, max_length=8)]
+    total: Count
+
+
+class CoordinationEventWaitRefusedRefusalsItemResource(WireModel):
+    on: Literal['resource']
+    resource: ResourceKey
+    reason: Literal['own_request', 'loop', 'holds_claim']
+
+
+class CoordinationEventWaitRefusedRefusalsItemRequest(WireModel):
+    on: Literal['request']
+    other_root_task_id: RecordId
+    reason: Literal['own_request', 'loop']
+
+
+class CoordinationEventWaitRefused(WireModel):
+    event: Literal['wait_refused']
+    refusals: Annotated[list[Annotated[Union[CoordinationEventWaitRefusedRefusalsItemResource, CoordinationEventWaitRefusedRefusalsItemRequest], Field(discriminator='on')]], Field(min_length=1, max_length=8)]
+    total: Count
+
+
+class CoordinationEventWriteRefused(WireModel):
+    event: Literal['write_refused']
+    resources: Annotated[list[ResourceKey], Field(min_length=1, max_length=8)]
+    total: Count
+
+
+class CoordinationEventClaimRanOut(WireModel):
+    event: Literal['claim_ran_out']
+    resources: Annotated[list[ResourceKey], Field(min_length=1, max_length=8)]
+    total: Count
+
+
+class CoordinationEventNoteLeft(WireModel):
+    event: Literal['note_left']
+    resources: Annotated[list[ResourceKey], Field(min_length=1, max_length=8)]
+    total: Count
+
+
+CoordinationEvent = Annotated[Union[CoordinationEventWaitedForResource, CoordinationEventWaitedForRequest, CoordinationEventWaitRefused, CoordinationEventWriteRefused, CoordinationEventClaimRanOut, CoordinationEventNoteLeft], Field(discriminator='event')]
 
 
 class Attachment(WireModel):
@@ -529,6 +699,12 @@ RecordVersion = Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]{1,128}$
 ProgressState = Literal['abandoned', 'accepted', 'cancelled', 'completed', 'finalizing_plan', 'failed', 'in_progress', 'not_started', 'partial', 'paused', 'preparing', 'retrying', 'undefined', 'waiting']
 
 
+class ScheduleAction(WireModel):
+    "What each run of a schedule does, with schedules.install's action types: task gives the instruction to a model turn; fixed_message sends the text as it is, without a model turn."
+
+    type: Literal['task', 'fixed_message']
+
+
 class TextContentInline(WireModel):
     type: Literal['inline']
     text: LongText
@@ -585,6 +761,47 @@ class ConnectionCredential(WireModel):
     type: Literal['nats_user_jwt']
     jwt: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$', max_length=65536)]
     expires_at: Timestamp
+
+
+class CoordinationResourceNotes(WireModel):
+    "The notes on one resource, newest first."
+
+    resource: ResourceKey
+    notes: Annotated[list[CoordinationSeenNote], Field(max_length=8)]
+    notes_total: Count
+
+
+class CoordinationWaitTargetResource(WireModel):
+    type: Literal['resource']
+    resource: ResourceKey
+
+
+class CoordinationWaitTargetRequest(WireModel):
+    type: Literal['request']
+    root_task_id: RecordId
+    title: CoordinationRequestTitle
+
+
+CoordinationWaitTarget = Annotated[Union[CoordinationWaitTargetResource, CoordinationWaitTargetRequest], Field(discriminator='type')]
+
+
+class CoordinationOwnWait(WireModel):
+    "One of the asking request's own waits."
+
+    wait_id: RecordId
+    task_id: RecordId
+    on: CoordinationWaitTarget
+    ends_by: Timestamp
+
+
+class BusyClaim(WireModel):
+    "The claim that made a covered change wait (README, \"Covered changes\"): its id and resource, when it ends, whose kind of request holds it, and how many notes are on the resource. The host reads the holder's description and the notes with shared_work.check when it shows the refusal to the model."
+
+    claim_id: RecordId
+    resource: ResourceKey
+    ends_at: Timestamp
+    whose: Literal['same_person', 'another_member', 'team_maintenance']
+    notes_total: Count
 
 
 class Frame(WireModel):
@@ -748,13 +965,14 @@ class HostStateComponentsItem(WireModel):
 
 
 class HostState(WireModel):
-    "A runtime host's liveness and capacity, written by the host itself every 20 seconds and expiring within 60. Its roles, teams and agent types are the ones its certificate states; the record names that certificate."
+    "A runtime host's liveness and capacity, written by the host itself every 10 seconds and expiring within 30. Its roles, teams and agent types are the ones its certificate states; the record names that certificate."
 
     runtime: RuntimeId
     certificate: CertificateRef
     session_limit: Annotated[int, Field(ge=0, le=100000)]
     sessions_active: Count
     protocol: ProtocolLabel
+    contract_sha256: ContractSha256
     state: Literal['starting', 'accepting', 'draining', 'drained']
     health: Literal['healthy', 'degraded', 'unhealthy']
     components: Annotated[list[HostStateComponentsItem], Field(max_length=16)]
@@ -1559,6 +1777,7 @@ class HeartbeatItemsAddReplyNeedsPersonDecision(WireModel):
 class HeartbeatItemsAddReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1619,6 +1838,7 @@ class HeartbeatItemsDisableReplyNeedsPersonDecision(WireModel):
 class HeartbeatItemsDisableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1679,6 +1899,7 @@ class HeartbeatItemsEnableReplyNeedsPersonDecision(WireModel):
 class HeartbeatItemsEnableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1777,6 +1998,7 @@ class HeartbeatItemsRemoveReplyNeedsPersonDecision(WireModel):
 class HeartbeatItemsRemoveReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1841,6 +2063,7 @@ class HeartbeatItemsUpdateReplyNeedsPersonDecision(WireModel):
 class HeartbeatItemsUpdateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1864,6 +2087,7 @@ class HostJoinBody(WireModel):
     connection_class: ConnectionClass
     tools: Union[ToolList, MISSING] = Field(default=MISSING)
     protocol: ProtocolLabel
+    contract_sha256: ContractSha256
     deployment: Literal['local', 'operator_managed', 'third_party']
     profile_sha256: Sha256Digest
     software: Union[Software, MISSING] = Field(default=MISSING)
@@ -1896,7 +2120,7 @@ class CertificateDocument(WireModel):
 class HostJoinReplyOk(WireModel):
     outcome: Literal['ok']
     certificate: CertificateDocument
-    connection: ConnectionCredential
+    connection: Union[ConnectionCredential, MISSING] = Field(default=MISSING)
 
 
 class HostJoinReplyPending(WireModel):
@@ -1916,6 +2140,7 @@ class HostJoinReplyDenied(WireModel):
 class HostJoinReplyProtocolMismatch(WireModel):
     outcome: Literal['protocol_mismatch']
     accepted: ProtocolLabel
+    accepted_contract_sha256: ContractSha256
     install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
@@ -1939,6 +2164,7 @@ class HostRenewBody(WireModel):
     certificate_id: RecordId
     membership_epoch: Epoch
     profile_sha256: Sha256Digest
+    contract_sha256: ContractSha256
     software: Union[Software, MISSING] = Field(default=MISSING)
     new_nats_public_key: Union[NatsUserKey, MISSING] = Field(default=MISSING)
     application_key_rotation: Union[HostRenewBodyApplicationKeyRotation, MISSING] = Field(default=MISSING)
@@ -1947,7 +2173,7 @@ class HostRenewBody(WireModel):
 class HostRenewReplyOk(WireModel):
     outcome: Literal['ok']
     certificate: CertificateDocument
-    connection: ConnectionCredential
+    connection: Union[ConnectionCredential, MISSING] = Field(default=MISSING)
 
 
 class HostRenewReplyRevoked(WireModel):
@@ -1965,6 +2191,7 @@ class HostRenewReplyNeedsApproval(WireModel):
 class HostRenewReplyProtocolMismatch(WireModel):
     outcome: Literal['protocol_mismatch']
     accepted: ProtocolLabel
+    accepted_contract_sha256: ContractSha256
     install: Annotated[str, StringConstraints(min_length=1, max_length=500)]
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
@@ -2183,6 +2410,7 @@ class KnowledgeAddNoteReplyNeedsPersonDecision(WireModel):
 class KnowledgeAddNoteReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -2301,6 +2529,7 @@ class KnowledgeArchiveReplyNeedsPersonDecision(WireModel):
 class KnowledgeArchiveReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -2646,6 +2875,7 @@ class KnowledgeMergeReplyNeedsPersonDecision(WireModel):
 class KnowledgeMergeReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -2751,6 +2981,7 @@ class KnowledgePublishContributionReplyNeedsPersonDecision(WireModel):
 class KnowledgePublishContributionReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3024,6 +3255,7 @@ class KnowledgeRevertReplyNeedsPersonDecision(WireModel):
 class KnowledgeRevertReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3240,6 +3472,7 @@ class KnowledgeWriteReplyNeedsPersonDecision(WireModel):
 class KnowledgeWriteReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3291,7 +3524,7 @@ class LedgerFactBodyFactSteeringSeen(WireModel):
 
 class LedgerFactBodyFactWait(WireModel):
     type: Literal['wait']
-    kind: Literal['change_conflict', 'other_request_form']
+    kind: Literal['change_conflict', 'other_request_form', 'claimed_resource', 'other_request']
     case_id: Union[RecordId, MISSING] = Field(default=MISSING)
     state: Literal['open', 'resolved']
     until: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -3395,6 +3628,7 @@ class MemoryCreateReplyNeedsPersonDecision(WireModel):
 class MemoryCreateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3461,6 +3695,7 @@ class MemoryDeleteReplyNeedsPersonDecision(WireModel):
 class MemoryDeleteReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3584,6 +3819,7 @@ class MemoryReplaceReplyNeedsPersonDecision(WireModel):
 class MemoryReplaceReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3704,6 +3940,7 @@ class MemoryUndoReplyNeedsPersonDecision(WireModel):
 class MemoryUndoReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3829,6 +4066,7 @@ class ObjectivesActivatePlanReplyNeedsPersonDecision(WireModel):
 class ObjectivesActivatePlanReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -3931,6 +4169,7 @@ class ObjectivesCreateReplyNeedsPersonDecision(WireModel):
 class ObjectivesCreateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -4335,6 +4574,7 @@ class ObjectivesRecordCheckpointReplyNeedsPersonDecision(WireModel):
 class ObjectivesRecordCheckpointReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -4455,6 +4695,7 @@ class ObjectivesStartTaskReplyNeedsPersonDecision(WireModel):
 class ObjectivesStartTaskReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -4598,6 +4839,7 @@ class ObjectivesUpdateProgressReplyNeedsPersonDecision(WireModel):
 class ObjectivesUpdateProgressReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -4695,6 +4937,7 @@ class ObjectivesUpdateStatusReplyNeedsPersonDecision(WireModel):
 class ObjectivesUpdateStatusReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -4954,6 +5197,7 @@ class ObjectivesWorkProfilesApplyReplyNeedsPersonDecision(WireModel):
 class ObjectivesWorkProfilesApplyReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -5350,6 +5594,7 @@ class ObjectivesWorkSessionsDisableReplyNeedsPersonDecision(WireModel):
 class ObjectivesWorkSessionsDisableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -5436,6 +5681,7 @@ class ObjectivesWorkSessionsEnableReplyNeedsPersonDecision(WireModel):
 class ObjectivesWorkSessionsEnableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -5546,6 +5792,7 @@ class ObjectivesWorkSessionsStartReplyNeedsPersonDecision(WireModel):
 class ObjectivesWorkSessionsStartReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -6010,6 +6257,7 @@ class SchedulesDisableReplyNeedsPersonDecision(WireModel):
 class SchedulesDisableReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -6040,6 +6288,7 @@ class SchedulesGetReplyOk(WireModel):
     outcome: Literal['ok']
     schedule_id: RecordId
     seen_version: Annotated[str, StringConstraints(pattern='^[0-9a-f]{64}$')]
+    action: ScheduleAction
     detail: SchedulesGetReplyOkDetail
     delivery_ref: Union[DeliveryRef, MISSING] = Field(default=MISSING)
     conversation_id: Union[RecordId, MISSING] = Field(default=MISSING)
@@ -6429,6 +6678,7 @@ class SchedulesInstallReplyNeedsPersonDecision(WireModel):
 class SchedulesInstallReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -6502,6 +6752,7 @@ class SchedulesListReplyOkSchedulesItemUser(WireModel):
     management_class: Literal['user']
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     instruction_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    action: ScheduleAction
     timing: Annotated[Union[SchedulesListReplyOkSchedulesItemUserTimingInterval, SchedulesListReplyOkSchedulesItemUserTimingCron, SchedulesListReplyOkSchedulesItemUserTimingOnce], Field(discriminator='kind')]
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -6571,6 +6822,7 @@ class SchedulesListReplyOkSchedulesItemSystem(WireModel):
     system_schedule_kind: Union[Literal['unclassified', 'heartbeat_launcher', 'memory_review_coremem', 'memory_review_usermem', 'memory_review_stale_conversations', 'internal_improvement', 'after_action_report_review', 'delegation_assurance', 'isolated_recovery_checkpoint', 'provider_overload_retry', 'objective_work_session', 'knowledge_curation_person', 'knowledge_curation_team'], MISSING] = Field(default=MISSING)
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
     instruction_preview: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    action: ScheduleAction
     timing: Annotated[Union[SchedulesListReplyOkSchedulesItemSystemTimingInterval, SchedulesListReplyOkSchedulesItemSystemTimingCron, SchedulesListReplyOkSchedulesItemSystemTimingOnce], Field(discriminator='kind')]
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     paused_until: Union[Timestamp, MISSING] = Field(default=MISSING)
@@ -6661,6 +6913,7 @@ class SchedulesPauseReplyNeedsPersonDecision(WireModel):
 class SchedulesPauseReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -6773,6 +7026,7 @@ class SchedulesRemoveReplyNeedsPersonDecision(WireModel):
 class SchedulesRemoveReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -6841,6 +7095,7 @@ class SchedulesResumeReplyNeedsPersonDecision(WireModel):
 class SchedulesResumeReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -6924,6 +7179,7 @@ class SchedulesSetWorkerReplyNeedsPersonDecision(WireModel):
 class SchedulesSetWorkerReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -6983,13 +7239,14 @@ class SchedulesUpdateBodyRunNotes(WireModel):
 
 
 class SchedulesUpdateBody(WireModel):
-    "Change a schedule's name, instruction, timing, controls or run notes."
+    "Change a schedule's name, instruction, action type, timing, controls or run notes."
 
     request_id: RecordId
     schedule_id: RecordId
     seen_version: RecordVersion
     name: Union[Annotated[str, StringConstraints(min_length=0, max_length=16384)], MISSING] = Field(default=MISSING)
     instruction: Union[TextContent, MISSING] = Field(default=MISSING)
+    action: Union[ScheduleAction, MISSING] = Field(default=MISSING)
     timing: Union[Annotated[Union[SchedulesUpdateBodyTimingInterval, SchedulesUpdateBodyTimingCron, SchedulesUpdateBodyTimingOnce], Field(discriminator='kind')], MISSING] = Field(default=MISSING)
     expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
@@ -7079,6 +7336,7 @@ class SchedulesUpdateReplyNeedsPersonDecision(WireModel):
 class SchedulesUpdateReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -7090,6 +7348,461 @@ class SchedulesUpdateReplyRuntimeError(WireModel):
 class SchedulesUpdateReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
     reason: Annotated[str, StringConstraints(min_length=0, max_length=4096)]
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsCloseBody(WireModel):
+    "A host reports that one of its agents' sessions ended."
+
+    request_id: RecordId
+    session: SessionId
+    reason: Literal['exited', 'failed', 'handed_over']
+
+
+class SessionsCloseReplyOk(WireModel):
+    outcome: Literal['ok']
+    ended_at: Timestamp
+
+
+class SessionsCloseReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsCloseReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenBody(WireModel):
+    "A host asks the team services to place an agent on it and sign the agent's session."
+
+    request_id: RecordId
+    agent: AgentId
+    agent_type: AgentType
+    definition_sha256: Sha256Digest
+
+
+class SessionDocumentWriter(WireModel):
+    "Only a team services host signs a session."
+
+    type: Literal['host']
+    installation: InstallationId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    key_id: KeyId
+
+
+class SessionDocument(WireModel):
+    "The signed state document returned by sessions.open and sessions.renew. Its record is agent_session, its writer the team services host that placed the agent, and its body an agent session. The host that asked verifies its signature with that host's certificate and checks that it places the agent it asked for on itself (README, \"Agent sessions\")."
+
+    record: Literal['agent_session']
+    protocol: ProtocolLabel
+    key: StateKey
+    writer: SessionDocumentWriter
+    sequence: StateSequence
+    issued_at: Timestamp
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    algorithm: Literal['ed25519']
+    body_digest: Sha256Digest
+    body: AgentSessionState
+    signature: Ed25519Signature
+
+
+class SessionsOpenReplyOk(WireModel):
+    outcome: Literal['ok']
+    session: SessionDocument
+
+
+class SessionsOpenReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyAlreadyPlaced(WireModel):
+    outcome: Literal['already_placed']
+    host: RuntimeId
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewBody(WireModel):
+    "A host renews one of its agents' sessions while it is connected."
+
+    request_id: RecordId
+    session: SessionId
+
+
+class SessionsRenewReplyOk(WireModel):
+    outcome: Literal['ok']
+    session: SessionDocument
+
+
+class SessionsRenewReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkCheckBody(WireModel):
+    "Live claims on, above or under each resource, the notes left on it, and whether waiting on it is possible."
+
+    task_id: RecordId
+    resources: Annotated[list[ResourceKey], Field(min_length=1, max_length=8)]
+
+
+class SharedWorkCheckReplyOkResourcesItem(WireModel):
+    resource: ResourceKey
+    claims: Annotated[list[CoordinationSeenClaim], Field(max_length=8)]
+    notes: Annotated[list[CoordinationSeenNote], Field(max_length=8)]
+    can_wait: bool
+    claims_total: Count
+    notes_total: Count
+
+
+class SharedWorkCheckReplyOk(WireModel):
+    outcome: Literal['ok']
+    resources: Annotated[list[SharedWorkCheckReplyOkResourcesItem], Field(min_length=1, max_length=8)]
+
+
+class SharedWorkCheckReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkCheckReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkCheckReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkClaimBody(WireModel):
+    "Claim up to eight resources for this request, all or none, for one period."
+
+    request_id: RecordId
+    task_id: RecordId
+    resources: Annotated[list[ResourceKey], Field(min_length=1, max_length=8)]
+    reason: ShortText
+
+
+class SharedWorkClaimReplyOk(WireModel):
+    outcome: Literal['ok']
+    claim: CoordinationClaim
+    notes: Annotated[list[CoordinationResourceNotes], Field(max_length=8)]
+
+
+class SharedWorkClaimReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkClaimReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkClaimReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkClaimReplyClaimedConflictsItem(WireModel):
+    resource: ResourceKey
+    claims: Annotated[list[CoordinationSeenClaim], Field(max_length=8)]
+    waiting_requests: Count
+    claims_total: Count
+
+
+class SharedWorkClaimReplyClaimed(WireModel):
+    outcome: Literal['claimed']
+    conflicts: Annotated[list[SharedWorkClaimReplyClaimedConflictsItem], Field(min_length=1, max_length=8)]
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkClaimReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkClaimReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkCountBody(WireModel):
+    "The number of the person's other running requests, for the line in each turn."
+
+    task_id: RecordId
+
+
+class SharedWorkCountReplyOk(WireModel):
+    outcome: Literal['ok']
+    other_requests: Count
+    scheduled_runs: Count
+    holding_claims: Count
+    waiting_in_this_request: Count
+
+
+class SharedWorkCountReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkCountReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkExtendBody(WireModel):
+    "Add ten minutes to one of this request's claims, at most twice."
+
+    request_id: RecordId
+    task_id: RecordId
+    claim_id: RecordId
+
+
+class SharedWorkExtendReplyOk(WireModel):
+    outcome: Literal['ok']
+    claim: CoordinationClaim
+
+
+class SharedWorkExtendReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkExtendReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkExtendReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkExtendReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkExtendReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkListBody(WireModel):
+    "The asking request's own claims and waits, and the person's other running requests, a page at a time."
+
+    task_id: RecordId
+    offset: Annotated[int, Field(ge=0, le=100000)]
+    limit: Annotated[int, Field(ge=1, le=64)]
+
+
+class SharedWorkListReplyOkThisRequest(WireModel):
+    "The asking request's own live claims and waits, whichever of its tasks took them."
+
+    claims: Annotated[list[CoordinationClaim], Field(max_length=8)]
+    claims_total: Count
+    waits: Annotated[list[CoordinationOwnWait], Field(max_length=8)]
+    waits_total: Count
+
+
+class SharedWorkListReplyOkRequestsItem(WireModel):
+    root_task_id: RecordId
+    title: CoordinationRequestTitle
+    kind: Literal['chat', 'parallel_thread', 'scheduled_run', 'objective_work']
+    state: Literal['running', 'queued', 'waiting_for_person', 'waiting_for_workers', 'waiting_for_request']
+    last_activity: Union[ShortText, MISSING] = Field(default=MISSING)
+    last_activity_at: Timestamp
+    claims: Annotated[list[CoordinationClaim], Field(max_length=8)]
+    notes: Annotated[list[CoordinationNote], Field(max_length=8)]
+    claims_total: Count
+    notes_total: Count
+
+
+class SharedWorkListReplyOk(WireModel):
+    outcome: Literal['ok']
+    this_request: SharedWorkListReplyOkThisRequest
+    requests: Annotated[list[SharedWorkListReplyOkRequestsItem], Field(max_length=64)]
+    total: Count
+    next_offset: Union[Count, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkListReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkListReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkNoteBody(WireModel):
+    "Leave a note on a resource for whoever works on it next."
+
+    request_id: RecordId
+    task_id: RecordId
+    resource: ResourceKey
+    text: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+
+
+class SharedWorkNoteReplyOk(WireModel):
+    outcome: Literal['ok']
+    note_id: RecordId
+    written_at: Timestamp
+
+
+class SharedWorkNoteReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkNoteReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkNoteReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkNoteReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkNoteReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkNoteReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkReleaseBody(WireModel):
+    "End one of this request's claims now."
+
+    request_id: RecordId
+    task_id: RecordId
+    claim_id: RecordId
+
+
+class SharedWorkReleaseReplyOk(WireModel):
+    outcome: Literal['ok']
+    claim_id: RecordId
+    released_at: Timestamp
+
+
+class SharedWorkReleaseReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkReleaseReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitBodyOnResource(WireModel):
+    type: Literal['resource']
+    resource: ResourceKey
+    reason: ShortText
+
+
+class SharedWorkWaitBodyOnRequest(WireModel):
+    type: Literal['request']
+    root_task_id: RecordId
+
+
+class SharedWorkWaitBody(WireModel):
+    "Pause this request until a claimed resource or another of the person's requests is free."
+
+    request_id: RecordId
+    task_id: RecordId
+    on: Annotated[Union[SharedWorkWaitBodyOnResource, SharedWorkWaitBodyOnRequest], Field(discriminator='type')]
+
+
+class SharedWorkWaitReplyOk(WireModel):
+    outcome: Literal['ok']
+    wait_id: RecordId
+    ends_by: Timestamp
+    holder_waiting_for_person: Union[bool, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyInvalidRequest(WireModel):
+    outcome: Literal['invalid_request']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplySensitiveContent(WireModel):
+    outcome: Literal['sensitive_content']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyHoldsClaim(WireModel):
+    outcome: Literal['holds_claim']
+    claims: Annotated[list[CoordinationOwnSeenClaim], Field(min_length=1, max_length=8)]
+    claims_total: Count
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyNothingToWaitFor(WireModel):
+    outcome: Literal['nothing_to_wait_for']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyWouldLoop(WireModel):
+    outcome: Literal['would_loop']
+    reason: Literal['own_request', 'loop']
+    holding: Annotated[list[ResourceKey], Field(max_length=8)]
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+    holding_total: Count
+
+
+class SharedWorkWaitReplyRequestClosed(WireModel):
+    outcome: Literal['request_closed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SharedWorkWaitReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -7234,8 +7947,8 @@ class StagedChangesApplyReplyNeedsPersonDecision(WireModel):
 class StagedChangesApplyReplyRecordBusy(WireModel):
     outcome: Literal['record_busy']
     retry_at: Timestamp
+    claim: Union[BusyClaim, MISSING] = Field(default=MISSING)
     message: Union[ShortText, MISSING] = Field(default=MISSING)
-    note: Union[Annotated[str, StringConstraints(max_length=2000)], MISSING] = Field(default=MISSING)
 
 
 class StagedChangesApplyReplyRuntimeError(WireModel):
@@ -7626,6 +8339,7 @@ class TaskResultBody(WireModel):
     steering_seen: Union[RecordId, MISSING] = Field(default=MISSING)
     assumptions: Union[Annotated[list[Assumption], Field(max_length=20)], MISSING] = Field(default=MISSING)
     summary: Union[ShortText, MISSING] = Field(default=MISSING)
+    coordination: Union[Annotated[list[CoordinationEvent], Field(min_length=1, max_length=6)], MISSING] = Field(default=MISSING)
     outcome: Annotated[Union[TaskResultBodyOutcomeCompleted, TaskResultBodyOutcomePartial, TaskResultBodyOutcomeFailed, TaskResultBodyOutcomeCancelled, TaskResultBodyOutcomePaused, TaskResultBodyOutcomeYielded, TaskResultBodyOutcomeRejected], Field(discriminator='state')]
 
 
@@ -7732,6 +8446,13 @@ class TasksInventoryReplyOkRootsItemChildrenItem(WireModel):
     agent_type: Union[AgentType, MISSING] = Field(default=MISSING)
 
 
+class TasksInventoryReplyOkRootsItemWaitingFor(WireModel):
+    "What one of the request's tasks waits for, and until when; absent when none waits."
+
+    on: CoordinationWaitTarget
+    ends_by: Timestamp
+
+
 class TasksInventoryReplyOkRootsItem(WireModel):
     root_task_id: RecordId
     state: ProgressState
@@ -7745,11 +8466,15 @@ class TasksInventoryReplyOkRootsItem(WireModel):
     children: Annotated[list[TasksInventoryReplyOkRootsItemChildrenItem], Field(max_length=200)]
     children_total: Count
     next_child_offset: Union[Count, MISSING] = Field(default=MISSING)
+    claims: Union[Annotated[list[CoordinationClaim], Field(min_length=1, max_length=8)], MISSING] = Field(default=MISSING)
+    claims_total: Union[Count, MISSING] = Field(default=MISSING)
+    waiting_for: Union[TasksInventoryReplyOkRootsItemWaitingFor, MISSING] = Field(default=MISSING)
 
 
 class TasksInventoryReplyOkSchedulesItem(WireModel):
     schedule_id: RecordId
     name: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
+    action: ScheduleAction
     next_fire_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     enabled: bool
     objective_id: Union[RecordId, MISSING] = Field(default=MISSING)
@@ -8185,6 +8910,38 @@ class TopicsTagThreadReplyRuntimeError(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class WaitEndedBodyEndedClaimGranted(WireModel):
+    why: Literal['claim_granted']
+    claim: CoordinationClaim
+    notes: Annotated[list[CoordinationSeenNote], Field(max_length=8)]
+    notes_total: Count
+
+
+class WaitEndedBodyEndedRequestEnded(WireModel):
+    why: Literal['request_ended']
+    other_root_task_id: RecordId
+
+
+class WaitEndedBodyEndedRecordRemoved(WireModel):
+    "The record it waited for was deleted, or removed by its store after its end, so the wait ends without a grant. A record that later takes the same number is another resource."
+
+    why: Literal['record_removed']
+
+
+class WaitEndedBodyEndedLimitReached(WireModel):
+    why: Literal['limit_reached']
+    still: Literal['claimed', 'running', 'waiting_for_person']
+
+
+class WaitEndedBody(WireModel):
+    "A request's wait ended: it now holds the claim, the other request ended, the record it waited for was removed, or the wait reached its limit."
+
+    wait_id: RecordId
+    root_task_id: RecordId
+    task_id: RecordId
+    ended: Annotated[Union[WaitEndedBodyEndedClaimGranted, WaitEndedBodyEndedRequestEnded, WaitEndedBodyEndedRecordRemoved, WaitEndedBodyEndedLimitReached], Field(discriminator='why')]
+
+
 AccessDecisionBodyAdapter = TypeAdapter(AccessDecisionBody)
 AccessRequestBodyAdapter = TypeAdapter(AccessRequestBody)
 AccessResolvedBodyAdapter = TypeAdapter(AccessResolvedBody)
@@ -8351,6 +9108,28 @@ SchedulesSetWorkerBodyAdapter = TypeAdapter(SchedulesSetWorkerBody)
 SchedulesSetWorkerReplyAdapter = TypeAdapter(Annotated[Union[SchedulesSetWorkerReplyOk, SchedulesSetWorkerReplyApprovalRequired, SchedulesSetWorkerReplyNotFound, SchedulesSetWorkerReplyNotAllowed, SchedulesSetWorkerReplyChangedSinceRead, SchedulesSetWorkerReplyChangeConflict, SchedulesSetWorkerReplyRequestClosed, SchedulesSetWorkerReplyNeedsPersonDecision, SchedulesSetWorkerReplyRecordBusy, SchedulesSetWorkerReplyRuntimeError, SchedulesSetWorkerReplyInvalidRequest, SchedulesSetWorkerReplyScheduleWorkerPolicyRevisionConflict], Field(discriminator='outcome')])
 SchedulesUpdateBodyAdapter = TypeAdapter(SchedulesUpdateBody)
 SchedulesUpdateReplyAdapter = TypeAdapter(Annotated[Union[SchedulesUpdateReplyOk, SchedulesUpdateReplyApprovalRequired, SchedulesUpdateReplyNotFound, SchedulesUpdateReplyNotAllowed, SchedulesUpdateReplyChangedSinceRead, SchedulesUpdateReplyChangeConflict, SchedulesUpdateReplyRequestClosed, SchedulesUpdateReplyNeedsPersonDecision, SchedulesUpdateReplyRecordBusy, SchedulesUpdateReplyRuntimeError, SchedulesUpdateReplyInvalidRequest], Field(discriminator='outcome')])
+SessionsCloseBodyAdapter = TypeAdapter(SessionsCloseBody)
+SessionsCloseReplyAdapter = TypeAdapter(Annotated[Union[SessionsCloseReplyOk, SessionsCloseReplyNotFound, SessionsCloseReplyRuntimeError], Field(discriminator='outcome')])
+SessionsOpenBodyAdapter = TypeAdapter(SessionsOpenBody)
+SessionsOpenReplyAdapter = TypeAdapter(Annotated[Union[SessionsOpenReplyOk, SessionsOpenReplyNotAllowed, SessionsOpenReplyAlreadyPlaced, SessionsOpenReplyLimitReached, SessionsOpenReplyRuntimeError], Field(discriminator='outcome')])
+SessionsRenewBodyAdapter = TypeAdapter(SessionsRenewBody)
+SessionsRenewReplyAdapter = TypeAdapter(Annotated[Union[SessionsRenewReplyOk, SessionsRenewReplyNotFound, SessionsRenewReplyNotAllowed, SessionsRenewReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkCheckBodyAdapter = TypeAdapter(SharedWorkCheckBody)
+SharedWorkCheckReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkCheckReplyOk, SharedWorkCheckReplyNotAllowed, SharedWorkCheckReplyInvalidRequest, SharedWorkCheckReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkClaimBodyAdapter = TypeAdapter(SharedWorkClaimBody)
+SharedWorkClaimReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkClaimReplyOk, SharedWorkClaimReplyNotAllowed, SharedWorkClaimReplyInvalidRequest, SharedWorkClaimReplySensitiveContent, SharedWorkClaimReplyClaimed, SharedWorkClaimReplyRequestClosed, SharedWorkClaimReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkCountBodyAdapter = TypeAdapter(SharedWorkCountBody)
+SharedWorkCountReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkCountReplyOk, SharedWorkCountReplyNotAllowed, SharedWorkCountReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkExtendBodyAdapter = TypeAdapter(SharedWorkExtendBody)
+SharedWorkExtendReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkExtendReplyOk, SharedWorkExtendReplyNotAllowed, SharedWorkExtendReplyNotFound, SharedWorkExtendReplyLimitReached, SharedWorkExtendReplyRequestClosed, SharedWorkExtendReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkListBodyAdapter = TypeAdapter(SharedWorkListBody)
+SharedWorkListReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkListReplyOk, SharedWorkListReplyNotAllowed, SharedWorkListReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkNoteBodyAdapter = TypeAdapter(SharedWorkNoteBody)
+SharedWorkNoteReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkNoteReplyOk, SharedWorkNoteReplyNotAllowed, SharedWorkNoteReplyInvalidRequest, SharedWorkNoteReplySensitiveContent, SharedWorkNoteReplyLimitReached, SharedWorkNoteReplyRequestClosed, SharedWorkNoteReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkReleaseBodyAdapter = TypeAdapter(SharedWorkReleaseBody)
+SharedWorkReleaseReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkReleaseReplyOk, SharedWorkReleaseReplyNotFound, SharedWorkReleaseReplyRuntimeError], Field(discriminator='outcome')])
+SharedWorkWaitBodyAdapter = TypeAdapter(SharedWorkWaitBody)
+SharedWorkWaitReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkWaitReplyOk, SharedWorkWaitReplyNotAllowed, SharedWorkWaitReplyInvalidRequest, SharedWorkWaitReplySensitiveContent, SharedWorkWaitReplyNotFound, SharedWorkWaitReplyHoldsClaim, SharedWorkWaitReplyNothingToWaitFor, SharedWorkWaitReplyWouldLoop, SharedWorkWaitReplyRequestClosed, SharedWorkWaitReplyRuntimeError], Field(discriminator='outcome')])
 SkillsChangedBodyAdapter = TypeAdapter(Annotated[Union[SkillsChangedBodyInstall, SkillsChangedBodyUninstall], Field(discriminator='operation')])
 StagedChangesApplyBodyAdapter = TypeAdapter(StagedChangesApplyBody)
 StagedChangesApplyReplyAdapter = TypeAdapter(Annotated[Union[StagedChangesApplyReplyOk, StagedChangesApplyReplyFailed, StagedChangesApplyReplyWaiting, StagedChangesApplyReplyAgreementRequired, StagedChangesApplyReplyAlreadyApplied, StagedChangesApplyReplyNotFound, StagedChangesApplyReplyNotAllowed, StagedChangesApplyReplyDenied, StagedChangesApplyReplyWithdrawn, StagedChangesApplyReplyChangedSinceRead, StagedChangesApplyReplyChangeConflict, StagedChangesApplyReplyRequestClosed, StagedChangesApplyReplyNeedsPersonDecision, StagedChangesApplyReplyRecordBusy, StagedChangesApplyReplyRuntimeError, StagedChangesApplyReplyRefused], Field(discriminator='outcome')])
@@ -8395,6 +9174,7 @@ TopicsListTagsBodyAdapter = TypeAdapter(TopicsListTagsBody)
 TopicsListTagsReplyAdapter = TypeAdapter(Annotated[Union[TopicsListTagsReplyOk, TopicsListTagsReplyRuntimeError], Field(discriminator='outcome')])
 TopicsTagThreadBodyAdapter = TypeAdapter(TopicsTagThreadBody)
 TopicsTagThreadReplyAdapter = TypeAdapter(Annotated[Union[TopicsTagThreadReplyOk, TopicsTagThreadReplyNotFound, TopicsTagThreadReplyInvalidRequest, TopicsTagThreadReplyRuntimeError], Field(discriminator='outcome')])
+WaitEndedBodyAdapter = TypeAdapter(WaitEndedBody)
 AgentStateAdapter = TypeAdapter(AgentState)
 AgentSessionStateAdapter = TypeAdapter(AgentSessionState)
 AgreementStateAdapter = TypeAdapter(AgreementState)

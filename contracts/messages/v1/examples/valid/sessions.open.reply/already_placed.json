@@ -1,0 +1,33 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "sessions.open.reply",
+  "message_id": "01928f3a-7b2c-7d03-8000-000000000d03",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "host",
+    "id": "worker-host-1",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7d01-8000-000000000d01",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "already_placed",
+    "host": "worker-host-2",
+    "message": "researcher-3 runs on another host; it moves only by a handover."
+  },
+  "causation_id": "01928f3a-7b2c-7d01-8000-000000000d01",
+  "idempotency_key": "sessions.open.reply:qmtAD6PHu3tQl7GC5BTqgfjITseV0dTWp-i3NnOdKLo",
+  "body_digest": "tZLaIW82LRH7QXb9NX8RaiJqVEmr7BWNaZ5Ko3Cu33k",
+  "signature": "EEoG0w7RTzsVhUYMpp3uUknDpgvT0j7J-7oajRwDwbYE4vixbF522Z6zOivBjN0fTn8rBDo_-IBrJOJtiRDXCQ"
+}

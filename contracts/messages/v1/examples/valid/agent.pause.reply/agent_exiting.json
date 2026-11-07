@@ -20,7 +20,7 @@
     "id": "lead",
     "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.lead-host-1.pause_1",
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7002-8000-000000000002",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -30,5 +30,5 @@
   },
   "causation_id": "01928f3a-7b2c-7002-8000-000000000002",
   "body_digest": "MvJ7yp8kme3u3aSaKcKN4_KF9fqgUx0Wi1eHwGclmyY",
-  "signature": "j0eISz0wFZqN5e_xM4JsXGfOMs5NLWt5DkwO3fqIzoGPsIjFoz6v9mO3iQtEccBisf4sOv_8Wv9QEsn39BaxCA"
+  "signature": "TXco2QhIT27KCHUxwkH7uga1COXk0qedz4LmR0E0F8E2H4Bu85ggMlFieO1FOwMJl1rSjsvoeGsQ7GkzXv6IAw"
 }

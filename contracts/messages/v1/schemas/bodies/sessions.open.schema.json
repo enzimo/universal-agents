@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/sessions.open.schema.json",
+  "title": "sessions.open request",
+  "description": "A host asks the team services to place an agent on it and sign the agent's session.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The host's id for this request; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "agent": {
+      "$ref": "../common.schema.json#/$defs/agent_id"
+    },
+    "agent_type": {
+      "$ref": "../common.schema.json#/$defs/agent_type"
+    },
+    "definition_sha256": {
+      "description": "The digest of the agent definition the host will run, recorded in the placement.",
+      "$ref": "../common.schema.json#/$defs/sha256_digest"
+    }
+  },
+  "required": [
+    "request_id",
+    "agent",
+    "agent_type",
+    "definition_sha256"
+  ],
+  "additionalProperties": false
+}
