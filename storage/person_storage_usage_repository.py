@@ -133,7 +133,10 @@ class PersonStorageUsageRepository:
     def _connect(self) -> Any:
         if self.settings.postgres_dsn:
             return connect_postgres(self.settings.postgres_dsn)
-        return connect_sqlite(str(self.settings.sqlite_path), row_factory=sqlite3.Row)
+        # A usage counter written with each task; in an agent process it is
+        # flushed before the agent's next send (storage.sqlite_connection,
+        # "Flushing before sending").
+        return connect_sqlite(str(self.settings.sqlite_path), row_factory=sqlite3.Row, defer_flush=True)
 
     def record_side(
         self, team_id: str, side: StorageSide, usage: Mapping[str, Mapping[str, int]], *, measured_at: datetime,
