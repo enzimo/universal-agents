@@ -202,13 +202,12 @@ from assistant_gateway.mcp_controls import GatewayMCPControls
 from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
-from assistant_gateway.team_services_client import AccessStorePersonReferences, MessageHostTeamServices
+from assistant_gateway.team_services_client import AccessStorePersonReferences, MessageHostTeamServices, new_request_id
 from assistant_gateway.application.team_commands import (
     GatewayPersonReferences,
     GatewayTeamCommandService,
     GatewayTeamServices,
 )
-from custom_transport.protocol1.ids import new_message_id
 from assistant_gateway.ports.repositories import (
     DeliveryRepository,
     IdentityRepository,
@@ -593,7 +592,7 @@ def _team_commands(
             timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
         ),
         references=references,
-        request_ids=new_message_id,
+        request_ids=new_request_id,
         logger=logger,
     )
 
