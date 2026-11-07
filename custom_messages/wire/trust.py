@@ -562,15 +562,9 @@ class TrustStore:
         if report and document.record == HOST:
             theirs = self.other_contract(raw.get("body"))
             if theirs is not None:
-                # Authentic, but shaped by another contract: the reader decides what it means. A host
-                # still writes only its own liveness (``_check_host_record``), so the key and the body's
-                # runtime, read as received, name the signer; otherwise any host could say another runs
-                # another contract and make readers drain it.
+                # Authentic, but shaped by another contract: the reader decides what it means.
                 assert signer is not None
-                self._expect_key(document, signer.runtime)
-                body = raw.get("body")
-                if not isinstance(body, Mapping) or body.get("runtime") != signer.runtime:
-                    raise FrameRefused("invalid_body", "a host writes only its own liveness record", at="/body/runtime")
+                self._check_own_record_of_another_contract(document, raw, signer)
                 return VerifiedRecord(document=document, body=None, signer=signer, digest=digest,
                                       other_contract=True, their_contract_sha256=theirs)
         try:
@@ -826,6 +820,20 @@ class TrustStore:
                                 ("people", [entry.person for entry in body.people])):
             if len(set(ids)) != len(ids):
                 raise FrameRefused("invalid_body", f"a block list names an entry of {field_name} twice", at=f"/body/{field_name}")
+
+    def _check_own_record_of_another_contract(self, document: State, raw: Mapping[str, Any],
+                                              signer: HostCertificate) -> None:
+        """A host still writes only its own liveness (``_check_host_record``), also on another contract.
+
+        The body is not read, so the key and the body's runtime, as received, must name the
+        signer; otherwise any host could say another, the team services included, runs
+        another contract and make readers drain it.
+        """
+
+        self._expect_key(document, signer.runtime)
+        body = raw.get("body")
+        if not isinstance(body, Mapping) or body.get("runtime") != signer.runtime:
+            raise FrameRefused("invalid_body", "a host writes only its own liveness record", at="/body/runtime")
 
     def _check_host_record(self, document: State, body: Any, signer: HostCertificate) -> None:
         """A host writes only its own liveness, naming the certificate it signs with and no more sessions than it allows.
