@@ -1,8 +1,10 @@
 """The protocol 1 trust kernel on a real NATS server: signed requests and replies, refusals, records.
 
 custom_transport.protocol1.live and .state_records; the message contract's README,
-"Replies", "Refused requests", "Agent sessions" and "State records". The server here
-has no per-host permissions; tests/test_live_message_contract.py checks those.
+"Replies", "Refused requests", "Agent sessions" and "State records". Most servers here
+have no per-host permissions (tests/test_live_message_contract.py checks those); the
+reply-subject test runs on the contract's per-role users, where answering a subject the
+requester chose would act with the receiver's grants.
 """
 
 from __future__ import annotations
@@ -28,8 +30,10 @@ from custom_transport.protocol1.live import LiveHost, RequestRefused, ServiceUna
 from custom_transport.protocol1.state_records import StateRecords
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from tests import message_contract_support as fixtures
+from tests.live_nats_support import flush_fully
 from tests.own_nats_server import own_nats_server
-from tests.test_live_message_contract import nats_server
+from tests.test_live_message_contract import connect, create_buckets, nats_server, stream_config
+from tests.test_live_message_contract import isolated_broker  # noqa: F401  (the per-role broker fixture)
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 TEAM = "team_example"
@@ -55,7 +59,7 @@ async def host(stack: AsyncExitStack, url: str, who: HostIdentity) -> LiveHost:
 
     connection = await nats.connect(url, inbox_prefix=f"_INBOX.{who.runtime}".encode(), allow_reconnect=False)
     stack.push_async_callback(connection.close)
-    trust = PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"), {}, {})
+    trust = PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"))
     return LiveHost(connection, who, trust, clock=lambda: fixtures.NOW)
 
 
@@ -70,7 +74,7 @@ async def test_a_host_gets_a_session_and_then_signs_for_its_agent(broker: str) -
     async with AsyncExitStack() as stack:
         services = await host(stack, broker, identity("team-services-1", "test-services-key-1", 2))
         worker = await host(stack, broker, identity("worker-host-1", "test-worker-key-1", 3))
-        records = StateRecords(None, services.identity, services.trust)
+        records = StateRecords(None, lambda: services.identity, services.trust)
 
         async def answer(verified: VerifiedFrame) -> dict[str, Any]:
             if verified.frame.kind != "sessions.open":
@@ -188,7 +192,7 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
         js = services.nc.jetstream()
         for bucket in ("UA1_AGENTS", "UA1_PLACEMENT"):
             await js.create_key_value(bucket=bucket)
-        placements = StateRecords(js, services.identity, services.trust)
+        placements = StateRecords(js, lambda: services.identity, services.trust)
         key = f"{TEAM}.researcher-2"
         body = {"team": TEAM, "agent": "researcher-2", "agent_type": "researcher", "host": "worker-host-1", "host_epoch": 3,
                 "definition_sha256": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws", "placed_at": format_timestamp(fixtures.NOW),
@@ -200,15 +204,15 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
         with pytest.raises(KeyWrongLastSequenceError):
             await placements.put("placement", key, placements.signed("placement", key, body, sequence=3,
                                                                      issued_at=fixtures.NOW), last_revision=first)
-        reader = StateRecords(worker.nc.jetstream(), worker.identity, worker.trust)
+        reader = StateRecords(worker.nc.jetstream(), lambda: worker.identity, worker.trust)
         stored = await reader.read_report("placement", key, now=fixtures.NOW)
         assert stored is not None and stored.record.document.sequence == 2
         # A host writes its own agent's state; a reader verifies who signed it.
-        agents = StateRecords(worker.nc.jetstream(), worker.identity, worker.trust)
+        agents = StateRecords(worker.nc.jetstream(), lambda: worker.identity, worker.trust)
         state = {"team": TEAM, "agent": "researcher-2", "agent_type": "researcher", "session": "s-researcher-2-1",
                  "state": "idle", "accepting_work": True, "since": format_timestamp(fixtures.NOW)}
         await agents.put("agent", key, agents.signed("agent", key, state, sequence=1, issued_at=fixtures.NOW))
-        read = await StateRecords(js, services.identity, services.trust).read_report("agent", key, now=fixtures.NOW)
+        read = await StateRecords(js, lambda: services.identity, services.trust).read_report("agent", key, now=fixtures.NOW)
         assert read is not None and read.record.signer.runtime == "worker-host-1"
         assert await reader.read_report("agent", f"{TEAM}.nobody", now=fixtures.NOW) is None
         changes: list[tuple[str, bool]] = []
@@ -239,3 +243,76 @@ async def test_the_transport_adapter_gives_a_host_its_own_reply_inbox(broker: st
         await adapter.close()
     with pytest.raises(RuntimeError, match="not connected"):
         adapter.nats_connection
+
+
+@pytest.mark.asyncio
+async def test_a_served_address_answers_only_the_requesters_inbox_under_per_role_grants(isolated_broker) -> None:  # noqa: F811
+    """README "Answering only the requester's inbox", with the contract's generated permissions.
+
+    The team services may answer each request once anywhere (allow_responses). A worker
+    that names a JetStream API or key-value subject as its reply subject, with garbage
+    or with a properly signed request, gets no answer there: the stream and the
+    revocations record survive, the handler never runs for those requests, and the
+    worker's own request is still answered.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        services_client = await connect(stack, isolated_broker, "services")
+        worker_client = await connect(stack, isolated_broker, "worker")
+        js = admin.nc.jetstream()
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        await create_buckets(admin)
+        revocations = (fixtures.TRUST / "revocations" / "install_example.json").read_bytes()
+        certificates = await js.key_value("UA1_CERTS")
+        await certificates.put("revocations.install_example", revocations)
+        trust = PersistentTrustStore(fixtures.trust_store(), Path("/nonexistent"))
+        services = LiveHost(services_client.nc, identity("team-services-1", "test-services-key-1", 2), trust,
+                            clock=lambda: fixtures.NOW)
+        worker = LiveHost(worker_client.nc, identity("worker-host-1", "test-worker-key-1", 3), trust,
+                          clock=lambda: fixtures.NOW)
+        handled: list[str] = []
+
+        async def close(verified: VerifiedFrame) -> dict[str, Any]:
+            handled.append(verified.body.request_id)
+            return {"outcome": "ok", "ended_at": format_timestamp(fixtures.NOW)}
+
+        await services.serve("svc.team", SERVICES_RECEIVER, close)
+        await flush_fully(services_client.nc)
+        body = {"session": "s-researcher-2-1", "reason": "exited"}
+        for number, reply in enumerate(("$JS.API.STREAM.DELETE.UA1_WORK", "$KV.UA1_CERTS.revocations.install_example",
+                                        "_INBOX.lead-host-1.x")):
+            frame = worker.sign("sessions.close", {**body, "request_id": f"close_{number}"}, TO_SERVICES, team=TEAM)
+            data, headers = worker.encode(frame)
+            await worker_client.nc.publish(frame["subject"], data, headers=headers, reply=reply)
+            await worker_client.nc.publish(frame["subject"], b"not a frame", reply=reply)
+        await worker_client.nc.flush()
+        answered = await worker.request("sessions.close", {**body, "request_id": "close_own"}, TO_SERVICES, team=TEAM)
+        assert answered.body.outcome == "ok" and handled == ["close_own"]
+        assert (await js.stream_info("UA1_WORK")).config.name == "UA1_WORK"
+        assert (await certificates.get("revocations.install_example")).value == revocations
+        assert services_client.errors.empty() and worker_client.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_requests_a_caller_lets_run_side_by_side_do_not_wait_for_each_other(broker: str) -> None:
+    """One slow handler used to hold its whole address: five one-second requests took five seconds."""
+
+    async with AsyncExitStack() as stack:
+        services = await host(stack, broker, identity("team-services-1", "test-services-key-1", 2))
+        worker = await host(stack, broker, identity("worker-host-1", "test-worker-key-1", 3))
+
+        async def slow_close(_verified: VerifiedFrame) -> dict[str, Any]:
+            await asyncio.sleep(1)
+            return {"outcome": "ok", "ended_at": format_timestamp(fixtures.NOW)}
+
+        await services.serve("svc.team", SERVICES_RECEIVER, slow_close, side_by_side_kinds={"sessions.close"})
+        await flush_fully(services.nc)
+        started = time.monotonic()
+        replies = await asyncio.gather(*(
+            worker.request("sessions.close", {"request_id": f"close_{number}", "session": "s-researcher-2-1",
+                                              "reason": "exited"}, TO_SERVICES, team=TEAM)
+            for number in range(5)))
+        assert [reply.body.outcome for reply in replies] == ["ok"] * 5
+        assert time.monotonic() - started < 3
+

@@ -7,10 +7,12 @@ signed state document. Readers verify every record they read: trust records
 state reports are checked with ``TrustStore.verify``. Where a record is stored adds no
 trust, so nothing read from a bucket is used before that check.
 
-Writers take each sequence above the one they last wrote; records whose readers keep
-the highest sequence (the block list, revocations) also take at least the record's
-issue time in milliseconds, so a writer restored from a backup never writes a lower
-one (registry write rules).
+Writers take each sequence above the highest in the bucket (a placement takes the next
+one, with compare-and-set on the bucket revision); records whose readers keep the
+highest sequence (the block list, revocations) also take at least the record's issue
+time in milliseconds, so a writer restored from a backup never writes a lower one
+(registry write rules). A record read under another key than its own is refused: a
+copy of another agent's record is not this one's.
 """
 
 from __future__ import annotations
@@ -18,13 +20,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncIterator, Mapping, Optional
+from typing import Any, AsyncIterator, Callable, Mapping, Optional
 
 from nats.js.errors import KeyNotFoundError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.buckets import bucket_name
 from custom_messages.wire.kinds import PROTOCOL, STATE_RECORDS
+from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import VerifiedRecord, sign_state
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.trust_state import PersistentTrustStore
@@ -42,8 +45,10 @@ class StoredRecord:
 class StateRecords:
     """One host's reads and writes of signed records in the key-value buckets."""
 
-    def __init__(self, js: Any, identity: HostIdentity, trust: PersistentTrustStore) -> None:
+    def __init__(self, js: Any, identity: Callable[[], HostIdentity], trust: PersistentTrustStore) -> None:
         self._js = js
+        # The host's identity as it is now: a renewal or a new join changes its certificate,
+        # and every record is signed with the one its frames are signed with.
         self._identity = identity
         self._trust = trust
 
@@ -63,20 +68,21 @@ class StateRecords:
 
         spec = STATE_RECORDS[record]
         spec.body_model.validate_python(dict(body))
-        certificate = self._identity.certificate
+        identity = self._identity()
+        certificate = identity.certificate
         document: dict[str, Any] = {
             "record": record,
             "protocol": PROTOCOL,
             "key": key,
             "writer": {"type": "host", "installation": certificate.installation, "runtime": certificate.runtime,
-                       "membership_epoch": certificate.membership_epoch, "key_id": self._identity.keys.key_id},
+                       "membership_epoch": certificate.membership_epoch, "key_id": identity.keys.key_id},
             "sequence": sequence,
             "issued_at": format_timestamp(issued_at),
         }
         if expires_at is not None:
             document["expires_at"] = format_timestamp(expires_at)
         document["body"] = dict(body)
-        return sign_state(document, self._identity.keys.application_key)
+        return sign_state(document, identity.keys.application_key)
 
     async def put(self, record: str, key: str, document: Mapping[str, Any], *,
                   last_revision: Optional[int] = None) -> int:
@@ -97,12 +103,19 @@ class StateRecords:
 
     async def read_report(self, record: str, key: str, *, now: datetime,
                           held: Optional[tuple[int, str]] = None) -> Optional[StoredRecord]:
-        """Read and verify one state report (host, agent, placement, team view, block list); ``None`` when absent."""
+        """Read and verify one state report (host, agent, placement, team view, block list); ``None`` when absent.
+
+        A record stored under another key than its own is refused (``invalid_body`` at
+        ``/key``): a copy of another agent's record is not this one's.
+        """
 
         entry = await self._get(record, key)
         if entry is None:
             return None
-        return StoredRecord(int(entry.revision), self._trust.store.verify(entry.value, record=record, now=now, held=held))
+        verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        if verified.document.key != key:
+            raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
+        return StoredRecord(int(entry.revision), verified)
 
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
         """Read one trust record (certificate, revocations, session, agreement) into the trust store.
