@@ -4340,6 +4340,10 @@ freshly signed revocations record. The authority:
 
 - creates the key-value buckets and each team's dead-letter stream and consumer (it is
   the contract's topology owner; queued work streams come with queued work);
+- creates per-team buckets using `custom_messages.wire.buckets.bucket_name` and
+  every bucket's stream using `bucket_stream`. The contract disables rollup,
+  stream deletion and purge, so writing one key cannot erase the bucket. Repeated
+  setup reconciles those settings without discarding records;
 - signs its own certificate, and the revocations record every six hours (it lasts a
   day, with an ever higher sequence, so a restored authority never writes a lower one);
 - uses a record it reads from `UA1_CERTS` (the revocations record it signs again, a

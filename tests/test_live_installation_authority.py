@@ -14,15 +14,19 @@ from pathlib import Path
 
 import nats
 import pytest
+from nats.js.errors import APIError
+from nats.js.api import StorageType, StreamConfig
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.encoding import format_timestamp
+from custom_messages.wire.buckets import TEAM_PLACEHOLDER, bucket_name, bucket_stream
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
 from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_messages.wire.models import Frame
 from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1 import host_keys, joining
+from custom_transport.protocol1.contract_files import transport
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.joining import HostProfile, JoinRefused, join
@@ -109,6 +113,32 @@ def revocation_entry(certificate) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_authority_creates_per_team_buckets_with_the_contracts_write_restrictions(broker: str, tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    prepare(layout)
+    async with AsyncExitStack() as stack:
+        authority = await start_authority(stack, broker, layout)
+        teams = (TEAM, "team_other")
+        await authority.ensure_topology(iter(teams))
+        js = (await connect(stack, broker, "reader")).jetstream()
+        spec = transport()
+        for template in spec["key_value"]:
+            for team in teams if TEAM_PLACEHOLDER in template else (None,):
+                settings = bucket_stream(spec, template, team)
+                config = (await js.stream_info(settings["name"])).config
+                for field, expected in settings.items():
+                    assert getattr(config, field) == expected, (template, field)
+                await js.key_value(bucket_name(template, team))
+        bucket = await js.key_value("UA1_AGENTS")
+        await bucket.put(f"{TEAM}.agent1", b"kept")
+        with pytest.raises(APIError):
+            await js.publish(f"$KV.UA1_AGENTS.{TEAM}.agent2", b"erase all", headers={"Nats-Rollup": "all"})
+        await authority.ensure_topology(iter(teams))
+        assert (await bucket.get(f"{TEAM}.agent1")).value == b"kept"
+        assert (await js.stream_info(f"UA1_DLQ_{TEAM}")).config.max_msgs_per_subject == 1
+
+
+@pytest.mark.asyncio
 async def test_a_listed_host_joins_and_others_are_refused(broker: str, tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path / "instance")
     worker_keys = prepare(layout)
@@ -163,7 +193,7 @@ async def test_a_renewal_raises_the_epoch_and_the_authority_keeps_its_records_ac
         assert second._revocations["sequence"] > sequence
         js = worker_nc.jetstream()
         hosts = await js.stream_info("KV_UA1_HOSTS")
-        assert hosts.config.max_age == 60
+        assert hosts.config.max_age == transport()["key_value"]["UA1_HOSTS"]["per_key_ttl_seconds"]
         dead_letters = await js.consumer_info(f"UA1_DLQ_{TEAM}", f"dlq~{TEAM}")
         assert dead_letters.config.filter_subject == f"ua.v1.{TEAM}.*.dlq.notice.*"
 
@@ -355,7 +385,9 @@ async def test_an_authority_that_verified_no_revocations_record_does_not_start(b
     prepare(layout)
     async with AsyncExitStack() as stack:
         nc = await connect(stack, broker, "writer")
-        await nc.jetstream().create_key_value(bucket=CERTIFICATES_BUCKET, history=1)
+        settings = bucket_stream(transport(), CERTIFICATES_BUCKET)
+        settings["storage"] = StorageType.FILE
+        await nc.jetstream().add_stream(config=StreamConfig(**settings))
         authority = InstallationAuthority(layout, host_keys.load_authority_keys(layout),
                                           host_keys.load_host_keys(layout, AUTHORITY_RUNTIME))
         now = utc_now()
