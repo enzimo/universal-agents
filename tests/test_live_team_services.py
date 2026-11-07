@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
 import time
 from contextlib import AsyncExitStack
 from datetime import timedelta
@@ -28,9 +29,10 @@ from docker import message_hosts
 from installation_authority.expected_hosts import write_expected_hosts
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
+from team_services import process as team_services_process
 from team_services.lock import lock_key
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
-from tests.own_nats_server import own_nats_server
+from tests.own_nats_server import own_nats_server, own_nats_server_process
 from tests.test_live_message_contract import nats_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -392,7 +394,8 @@ async def test_a_closed_session_is_not_renewed_when_its_agent_is_placed_again(br
         refused = await renew_session(worker, first)
         assert refused["outcome"] == "not_allowed", refused
         assert (await renew_session(worker, second))["outcome"] == "ok"
-        # Handed over: the placement stays until the new host opens, yet the ended session is not renewed.
+        # Handed over: the placement stays (a move to another host comes with phase 3's custody windows), yet the
+        # ended session is not renewed.
         handed = await worker.live.request("sessions.close", {"request_id": "close-2", "session": second,
                                                               "reason": "handed_over"}, audience(worker), team=TEAM)
         assert handed.raw["body"]["outcome"] == "ok"
@@ -722,3 +725,360 @@ async def test_a_standby_that_takes_over_signs_with_the_certificate_the_serving_
         assert accepted.signer is not None and accepted.signer.membership_epoch == 2
         second_stop.set()
         await asyncio.wait_for(second, timeout=10)
+
+
+# --- closing, placing again, the lead role, refusals, signing placements again ------------------------
+
+
+async def close_session(started: MessageHost, session: str, reason: str = "exited") -> dict:
+    assert started.live is not None
+    reply = await started.live.request("sessions.close", {"request_id": f"close-{session}-{time.monotonic_ns()}",
+                                                          "session": session, "reason": reason},
+                                       audience(started), team=TEAM)
+    return reply.raw["body"]
+
+
+async def stored_session(reader: MessageHost, installation_id: str, session: str) -> dict:
+    entry = await (await reader.nc.jetstream().key_value("UA1_CERTS")).get(f"session.{installation_id}.{TEAM}.{session}")
+    return json.loads(entry.value)
+
+
+async def placement_of(reader: MessageHost, agent: str):
+    assert reader.records is not None
+    return await reader.records.read_report("placement", f"{TEAM}.{agent}", now=reader.clock())
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_or_late_close_changes_nothing_and_never_removes_a_newer_placement(broker: str,
+                                                                                              tmp_path: Path) -> None:
+    """README "Agent sessions": closing a session that has already ended answers ok with its recorded end and changes
+    nothing, and a session's close removes only its own placement, so no other host may take a running agent."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        other = await host(stack, broker, layout, OTHER)
+        first = (await open_session(worker, "researcher-1"))["session"]
+        installation_id, s1 = first["body"]["installation"], first["body"]["session"]
+        ended = (await close_session(worker, s1))["ended_at"]
+        s2 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+
+        # A retry of the first close, its reply lost: the recorded end, nothing signed again, the new placement kept.
+        assert await close_session(worker, s1) == {"outcome": "ok", "ended_at": ended}
+        kept = await stored_session(worker, installation_id, s1)
+        assert (kept["sequence"], kept["body"]["ends_at"]) == (2, ended)
+        assert (await renew_session(worker, s2))["outcome"] == "ok"
+        assert (await open_session(other, "researcher-1"))["outcome"] == "already_placed"
+
+        # Placed again without a close: closing the superseded session leaves the newer placement too.
+        s3 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        assert (await close_session(worker, s2))["outcome"] == "ok"
+        assert (await renew_session(worker, s3))["outcome"] == "ok"
+        assert (await open_session(other, "researcher-1"))["outcome"] == "already_placed"
+        # Its own close still removes it.
+        assert (await close_session(worker, s3))["outcome"] == "ok"
+        assert (await open_session(other, "researcher-1"))["outcome"] == "ok"
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_session_whose_agent_was_placed_again_without_a_close_is_not_renewed(broker: str, tmp_path: Path) -> None:
+    """README "Agent sessions": an open for an agent already placed on the asking host places it there again, and the
+    earlier session, naming the earlier placement, can no longer be renewed."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        s1 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        s2 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        refused = await renew_session(worker, s1)
+        assert refused["outcome"] == "not_allowed" and "earlier placement" in refused["message"]
+        assert (await renew_session(worker, s2))["outcome"] == "ok"
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_the_placement_sequence_never_goes_back_after_a_close(broker: str, tmp_path: Path) -> None:
+    """The placement's signed sequence is its fencing token: a reader that keeps the highest one it saw must accept
+    the agent's next placement, also after a close deleted the key."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        other = await host(stack, broker, layout, OTHER)
+        await open_session(worker, "researcher-1")
+        s2 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        earlier = await placement_of(other, "researcher-1")
+        assert earlier is not None
+        await close_session(worker, s2)
+        assert await placement_of(other, "researcher-1") is None
+        assert (await open_session(other, "researcher-1"))["outcome"] == "ok"
+        assert other.records is not None
+        held = (earlier.record.document.sequence, earlier.record.digest)
+        later = await other.records.read_report("placement", f"{TEAM}.researcher-1", now=other.clock(), held=held)
+        assert later is not None and later.record.document.sequence > earlier.record.document.sequence
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_placement_value_does_not_keep_the_agent_from_being_placed(broker: str, tmp_path: Path,
+                                                                                    caplog) -> None:
+    """Any process on the shared NATS login can write the key; one that holds no record counts as absent, and its
+    revision lets the placement replace it."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        writer = await connect(stack, broker, "writer")
+        await put_raw(writer, "UA1_PLACEMENT", f"{TEAM}.researcher-5", b"")
+        with caplog.at_level(logging.WARNING):
+            assert (await open_session(worker, "researcher-5"))["outcome"] == "ok"
+        assert f"key={TEAM}.researcher-5 code=empty" in caplog.text
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+LEAD = HostProfile("lead-host", (TEAM,), ("lead_host", "worker_host"), ("TeamArchitect", "researcher"), 4)
+WORKER_OF_LEAD_TYPE = HostProfile("worker-host-3", (TEAM,), ("worker_host",), ("TeamArchitect",), 1)
+
+
+@pytest.mark.asyncio
+async def test_only_the_team_leads_type_on_a_lead_host_gets_the_lead_role(broker: str, tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), LEAD, WORKER_OF_LEAD_TYPE)
+        serving = await team_services(stack, broker, layout, stop)
+        lead = await host(stack, broker, layout, LEAD)
+        worker = await host(stack, broker, layout, WORKER_OF_LEAD_TYPE)
+        assert (await open_session(lead, "lead-1", "TeamArchitect"))["session"]["body"]["agent_role"] == "lead"
+        assert (await open_session(lead, "researcher-1"))["session"]["body"]["agent_role"] == "worker"
+        assert (await open_session(worker, "lead-2", "TeamArchitect"))["session"]["body"]["agent_role"] == "worker"
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_every_refused_session_request_is_logged(broker: str, tmp_path: Path, caplog) -> None:
+    """Plan 13B.12: a session request its certificate does not allow is refused, and the refusal is logged."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        other = await host(stack, broker, layout, OTHER)
+        with caplog.at_level(logging.WARNING):
+            await open_session(worker, "researcher-1")
+            await open_session(worker, "researcher-2")
+            outcomes = [(await open_session(worker, "writer-1", "writer"))["outcome"],
+                        (await open_session(other, "researcher-1"))["outcome"],
+                        (await open_session(worker, "researcher-3"))["outcome"],
+                        (await renew_session(other, "s-nobody-1"))["outcome"]]
+        assert outcomes == ["not_allowed", "already_placed", "limit_reached", "not_found"]
+        refusals = [record.getMessage() for record in caplog.records if "event=agent_session_refused " in
+                    record.getMessage()]
+        for outcome, agent, runtime in [("not_allowed", "writer-1", WORKER.runtime),
+                                        ("already_placed", "researcher-1", OTHER.runtime),
+                                        ("limit_reached", "researcher-3", WORKER.runtime),
+                                        ("not_found", "-", OTHER.runtime)]:
+            assert any(f"outcome={outcome} team={TEAM} agent={agent} host={runtime}" in line for line in refusals), outcome
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_delete_under_a_revision_the_key_moved_past_is_reported_not_raised(broker: str, tmp_path: Path) -> None:
+    """nats-py reports a refused delete as a bad request, not as the error it raises for updates."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, WORKER)
+        worker = await host(stack, broker, layout, WORKER)
+        assert worker.records is not None
+        key = f"{TEAM}.researcher-1"
+        first = await worker.records.put("placement", key, {"note": "first"})
+        second = await worker.records.put("placement", key, {"note": "second"})
+        assert await worker.records.delete("placement", key, last_revision=first) is False
+        assert await worker.records.revision("placement", key) == second
+        assert await worker.records.delete("placement", key, last_revision=second) is True
+        assert await worker.records.revision("placement", key) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_sign_their_placements_again_after_they_renew(broker: str, tmp_path: Path,
+                                                                              monkeypatch) -> None:
+    """README "State reports outlive certificates": a reader that forgot the certificate that signed a placement
+    refuses it, so the team services write their placements again under a current certificate, and the sessions
+    that name those placements still renew."""
+
+    monkeypatch.setattr(team_services_process, "MAINTENANCE_INTERVAL", timedelta(milliseconds=200))
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        services, serving = await team_services_host(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        other = await host(stack, broker, layout, OTHER)
+        session = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        before = await placement_of(other, "researcher-1")
+        assert before is not None and before.record.signer.membership_epoch == 1
+        await services.renew()
+        for _ in range(50):
+            after = await placement_of(other, "researcher-1")
+            if after is not None and after.record.signer.membership_epoch == 2:
+                break
+            await asyncio.sleep(0.1)
+        assert after is not None and after.record.signer.membership_epoch == 2, "signed again under the new certificate"
+        assert after.revision != before.revision and after.record.body.placed_at == before.record.body.placed_at
+        assert after.record.document.sequence > before.record.document.sequence
+        # The same placement: its session still renews, and no other host may take the agent.
+        assert (await renew_session(worker, session))["outcome"] == "ok"
+        assert (await open_session(other, "researcher-1"))["outcome"] == "already_placed"
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_delete_sessions_receivers_have_forgotten(broker: str, tmp_path: Path,
+                                                                          monkeypatch) -> None:
+    """README "Trust over time": writers delete a record from UA1_CERTS once receivers forget it."""
+
+    from custom_messages.wire.trust import kept_for
+
+    monkeypatch.setattr(team_services_process, "MAINTENANCE_INTERVAL", timedelta(milliseconds=200))
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER)
+        services, serving = await team_services_host(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        current = (await open_session(worker, "researcher-1"))["session"]
+        assert services.records is not None
+        installation_id = current["body"]["installation"]
+        written = utc_now() - kept_for("agent_session") - timedelta(minutes=1)
+        old_key = f"session.{installation_id}.{TEAM}.s-researcher-9-1"
+        old = services.records.signed("agent_session", old_key, {
+            **current["body"], "session": "s-researcher-9-1", "agent": "researcher-9", "placement_revision": 1,
+            "started_at": format_timestamp(written), "ends_at": format_timestamp(written + timedelta(days=7))},
+            sequence=1, issued_at=written)
+        await services.records.put("agent_session", old_key, old)
+        certificates = await worker.nc.jetstream().key_value("UA1_CERTS")
+        for _ in range(50):
+            keys = await certificates.keys()
+            if old_key not in keys:
+                break
+            await asyncio.sleep(0.1)
+        assert old_key not in keys and current["key"] in keys
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_the_team_services_keep_their_lease_while_they_prepare_to_serve(broker: str, tmp_path: Path,
+                                                                              monkeypatch) -> None:
+    """A slow catch-up before serving, such as a due renewal waiting 30 seconds for the authority, must not let the
+    lease run out while a standby waits: both would serve. Here the lease lasts 3 seconds, the tolerance 1."""
+
+    from team_services import lock as lock_module
+
+    monkeypatch.setattr(lock_module, "LEASE", timedelta(seconds=3))
+    monkeypatch.setattr(lock_module, "RENEW_EVERY", timedelta(seconds=1))
+    monkeypatch.setattr(lock_module, "_SKEW", timedelta(seconds=1))
+    monkeypatch.setattr(lock_module, "_LAST_RENEWAL", timedelta(milliseconds=500))
+    layout = InstanceLayout.at(tmp_path / "instance")
+    first_stop, second_stop = asyncio.Event(), asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM))
+        first = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        preparing, proceed = asyncio.Event(), asyncio.Event()
+        take_newest = first.take_newest_certificate
+
+        async def slow_catch_up() -> None:
+            preparing.set()
+            await proceed.wait()
+            await take_newest()
+
+        first.take_newest_certificate = slow_catch_up  # type: ignore[method-assign]
+        first_task = asyncio.create_task(serve_team(first, TEAM, first_stop))
+        await asyncio.wait_for(preparing.wait(), timeout=30)
+        second, second_task = await team_services_host(stack, broker, layout, second_stop)
+        await asyncio.sleep(6)  # twice the lease and the tolerance
+        assert second._reported_state is None, "the standby kept waiting"
+        proceed.set()
+        for _ in range(100):
+            if first._reported_state is not None:
+                break
+            await asyncio.sleep(0.1)
+        assert (first._reported_state, second._reported_state) == ("accepting", None)
+        first_stop.set()
+        await asyncio.wait_for(first_task, timeout=10)
+        for _ in range(100):  # the clean stop released the lock: the standby serves now
+            if second._reported_state is not None:
+                break
+            await asyncio.sleep(0.1)
+        assert second._reported_state == "accepting"
+        second_stop.set()
+        await asyncio.wait_for(second_task, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_the_lock_is_kept_through_a_nats_pause_and_a_standby_waits_through_one(tmp_path: Path, caplog) -> None:
+    """Plan 13B.12, decisions 76 and 79, on a real server with the client's reconnecting defaults: renewals that time
+    out while NATS is paused are tried again within the lease, and a standby taking the lock waits through a pause."""
+
+    from team_services.lock import LOCKS_BUCKET, SingleInstanceLock
+
+    with own_nats_server_process(nats_server(), tmp_path) as (url, server):
+        first_connection, second_connection = await nats.connect(url), await nats.connect(url)
+        try:
+            await first_connection.jetstream().create_key_value(bucket=LOCKS_BUCKET)
+            first = SingleInstanceLock.on_connection(first_connection, TEAM, TEAM_SERVICES_RUNTIME, utc_now)
+            assert await first.acquire(asyncio.Event())
+            stop = asyncio.Event()
+            keeping = asyncio.create_task(first.keep(stop))
+            with caplog.at_level(logging.INFO, logger="team_services.lock"):
+                await asyncio.sleep(9)  # past the first renewal
+                server.send_signal(signal.SIGSTOP)
+                await asyncio.sleep(8)
+                server.send_signal(signal.SIGCONT)
+                await asyncio.sleep(12)
+                assert not keeping.done(), "kept through the pause"
+                held = json.loads((await (await first_connection.jetstream().key_value(LOCKS_BUCKET)).get(
+                    lock_key(TEAM))).value)
+                assert held["instance"] == first.instance
+                assert "event=team_services_lock_renew_failed" in caplog.text
+                assert "event=team_services_lock_renewed" in caplog.text
+
+                second = SingleInstanceLock.on_connection(second_connection, TEAM, TEAM_SERVICES_RUNTIME, utc_now)
+                second_stop = asyncio.Event()
+                waiting = asyncio.create_task(second.acquire(second_stop))
+                await asyncio.sleep(2)
+                server.send_signal(signal.SIGSTOP)
+                await asyncio.sleep(6)
+                server.send_signal(signal.SIGCONT)
+                await asyncio.sleep(3)
+                assert not waiting.done(), "the standby waited through the pause"
+                stop.set()
+                await keeping
+                await first.release()
+                assert await asyncio.wait_for(waiting, timeout=20) is True
+        finally:
+            await second_connection.close()
+            await first_connection.close()

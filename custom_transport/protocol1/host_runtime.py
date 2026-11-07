@@ -160,7 +160,7 @@ class MessageHost:
                              fetch_trust=self.fetch_trust)
         # One identity: records are signed with what the live host signs frames with, so a
         # renewal or a new join switches both at once.
-        self.records = StateRecords(self.nc.jetstream(), lambda: self.identity, trust, fetch_trust=self.fetch_trust)
+        self.records = StateRecords.on_connection(self.nc, lambda: self.identity, trust, fetch_trust=self.fetch_trust)
         self._started_at = now
         await self.refresh_trust()
         if report:
