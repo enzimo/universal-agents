@@ -16,8 +16,11 @@ told that a change may still be made, so they check before sending it again.
 
 Ports keep the application free of NATS: ``GatewayTeamServices`` sends one command
 (``assistant_gateway.team_services_client`` over the gateway's message host), and
-``GatewayPersonReferences`` reads a person's reference from the gateway's copy of the
-team's people in the access store.
+``GatewayPersonReferences`` gives a person's reference from the gateway's copy of the
+team's people in the access store, which the team services decide from: the gateway
+first writes that copy when it differs from its own records
+(``assistant_gateway.people_directory_sync.PeopleDirectorySync.person_ref``), so a
+person who was just demoted, disabled or added is never judged by an old copy.
 """
 
 from __future__ import annotations
@@ -37,6 +40,15 @@ class TeamServicesUnavailable(RuntimeError):
 
 class TeamServicesNoAnswer(TeamServicesUnavailable):
     """The command was sent but no answer came in time: it may still be carried out."""
+
+
+class PersonCopyNotCurrent(TeamServicesUnavailable):
+    """The team's copy of the person differs from the gateway's records and could not be written; nothing was sent."""
+
+    def __init__(self) -> None:
+        super().__init__("Your current roles could not be passed on to the team services, so the command was not "
+                         "sent. Try again in a moment; if it keeps happening, an administrator can find the reason "
+                         "in the gateway log.")
 
 
 class TeamCommandRefused(RuntimeError):
@@ -65,7 +77,8 @@ class GatewayTeamServices(Protocol):
 
 class GatewayPersonReferences(Protocol):
     def person_ref(self, person_id: str) -> str | None:
-        """The person's opaque reference, or None when the gateway has not recorded them."""
+        """The person's opaque reference, after making the team's copy of them current; None when they have
+        no standing in this team. Raises ``PersonCopyNotCurrent`` when the copy could not be made current."""
 
 
 class GatewayTeamCommandService:
@@ -85,8 +98,7 @@ class GatewayTeamCommandService:
         if reference is None:
             self._logger.warning("A person's command has no person reference to send. "
                                  "event=gateway_team_command_person_unrecorded kind=%s person=%s", kind, person_id)
-            # Not the person's fault: the gateway's copy of the people is behind (it records everyone at start).
-            raise TeamServicesUnavailable("The gateway has not recorded this person yet; try again in a moment.")
+            raise TeamServicesUnavailable("You are not a member of this team, so the command was not sent.")
         request_id = self._request_ids()
         command = {"request_id": request_id, **body}
         for attempt in range(1, SEND_ATTEMPTS + 1):

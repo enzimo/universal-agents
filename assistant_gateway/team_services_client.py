@@ -1,10 +1,9 @@
 """The gateway's connection to the team services, for the application's people's commands.
 
 ``MessageHostTeamServices`` sends one command through the gateway's protocol 1 host
-(``assistant_gateway.message_host``) and returns the verified reply's body;
-``AccessStorePersonReferences`` reads a person's opaque reference from the gateway's
-copy of the team's people (``storage.access_repository``). Both implement the ports in
-``assistant_gateway.application.team_commands``.
+(``assistant_gateway.message_host``) and returns the verified reply's body. It
+implements ``GatewayTeamServices`` in ``assistant_gateway.application.team_commands``;
+people's references come from ``assistant_gateway.people_directory_sync``.
 """
 
 from __future__ import annotations
@@ -17,8 +16,6 @@ from assistant_gateway.application.team_commands import (
     TeamServicesNoAnswer,
     TeamServicesUnavailable,
 )
-from storage.access_repository import AccessRepository
-from storage.config import StorageSettings
 
 if TYPE_CHECKING:
     from assistant_gateway.message_host import GatewayMessageHost
@@ -66,13 +63,3 @@ class MessageHostTeamServices:
             raise TeamServicesUnavailable("The team services' answer could not be checked, so it is not shown. An "
                                           "administrator can find the reason in the gateway log.") from error
         return dict(verified.raw["body"])
-
-
-class AccessStorePersonReferences:
-    def __init__(self, storage: StorageSettings, team_id: str) -> None:
-        self._storage = storage
-        self._team_id = team_id
-
-    def person_ref(self, person_id: str) -> str | None:
-        person = AccessRepository(self._storage).team_person(self._team_id, person_id)
-        return None if person is None else person.person_ref

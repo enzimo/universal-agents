@@ -202,8 +202,12 @@ from assistant_gateway.mcp_controls import GatewayMCPControls
 from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
-from assistant_gateway.team_services_client import AccessStorePersonReferences, MessageHostTeamServices
-from assistant_gateway.application.team_commands import GatewayTeamCommandService, GatewayTeamServices
+from assistant_gateway.team_services_client import MessageHostTeamServices
+from assistant_gateway.application.team_commands import (
+    GatewayPersonReferences,
+    GatewayTeamCommandService,
+    GatewayTeamServices,
+)
 from custom_transport.protocol1.ids import new_message_id
 from assistant_gateway.ports.repositories import (
     DeliveryRepository,
@@ -572,12 +576,15 @@ def _agent_presence_observer(
 
 
 def _team_commands(
-    config: GatewayInstanceConfig,
     runtime: object,
     team_services: GatewayTeamServices | None,
+    *,
+    references: GatewayPersonReferences,
 ) -> GatewayTeamCommandService:
     """People's commands that the team services answer (protocol 1, svc.team), one family
-    at a time (assistant_gateway.application.team_commands); tests pass ``team_services``."""
+    at a time (assistant_gateway.application.team_commands); tests pass ``team_services``.
+    ``references`` is the gateway's people copy writer, which makes a person's copy current
+    before their command (assistant_gateway.people_directory_sync)."""
 
     return GatewayTeamCommandService(
         team_services=team_services
@@ -585,7 +592,7 @@ def _team_commands(
             getattr(runtime, "message_host", None),
             timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
         ),
-        references=AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id),
+        references=references,
         request_ids=new_message_id,
         logger=logger,
     )
@@ -1220,7 +1227,9 @@ class UserGateway:
             sessions=self._session_service,
             manager_commands=self._manager_commands,
             submission=self._interactive_submission_service,
-            team_commands=_team_commands(config, resolved_manager_runtime, team_services),
+            team_commands=_team_commands(
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+            ),
             pinned_memory=RuntimePinnedMemoryCodec(),
             private_authorizer=self._private_authorizer,
             # Disabling, removing and restoring people (assistant_gateway.person_departure).

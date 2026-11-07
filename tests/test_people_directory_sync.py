@@ -352,3 +352,69 @@ def test_a_person_record_needs_its_reference_and_only_earlier_records_get_one_ma
     given = TeamPersonV1.from_earlier_record(json.dumps(earlier))
     kept = TeamPersonV1.from_earlier_record(given.model_dump_json())
     assert kept.person_ref == given.person_ref and given.person_id == "olive"
+
+
+class _CopyWriteFails:
+    """The access store, except that writing a person's copy fails."""
+
+    def __init__(self, access: AccessRepository) -> None:
+        self._access = access
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._access, name)
+
+    def record_person(self, person: TeamPersonV1) -> None:
+        raise RuntimeError("access store unavailable")
+
+
+def test_a_command_is_sent_only_with_a_copy_that_matches_the_gateways_records(tmp_path: Path, caplog) -> None:
+    """The team services decide people's commands from this copy, so it is made current first (review of #95)."""
+
+    store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
+    _seed(store, {"olive": ("owner", "active"), "adam": ("admin", "active"), "nina": ("member", "active")})
+    clock = _Clock()
+    directory, access = people_directory(tmp_path, store.identity_repository, team_id=TEAM, clock=clock)
+    directory.record("olive")
+    directory.record("adam")
+    olive = access.team_person(TEAM, "olive")
+
+    with caplog.at_level(logging.WARNING, logger="assistant_gateway.people_directory_sync"):
+        # A current copy is used as it is.
+        assert directory.person_ref("olive") == olive.person_ref
+        assert access.team_person(TEAM, "olive") == olive
+        assert "event=people_directory_copy_refreshed" not in caplog.text
+        # Demoted, but the copy still says administrator (its write failed): written before the command.
+        adam_ref = access.team_person(TEAM, "adam").person_ref
+        store.identity_repository.change_team_membership_role(canonical_user_id="adam", team_id=TEAM, role="member")
+        assert directory.person_ref("adam") == adam_ref
+        assert _copy(access, "adam") == (PersonStanding.ACTIVE, ("member",))
+        # Never copied at all (added while the access store could not be written): copied now.
+        nina_ref = directory.person_ref("nina")
+        assert nina_ref is not None and access.team_person(TEAM, "nina").person_ref == nina_ref
+        # Disabled since the last copy.
+        store.set_gateway_user_status("olive", "disabled")
+        assert directory.person_ref("olive") == olive.person_ref
+        assert _copy(access, "olive") == (PersonStanding.DISABLED, ())
+    assert caplog.text.count("event=people_directory_copy_refreshed") == 3
+    # Not a member of this team: no reference, nothing written.
+    _seed(store, {"zed": ("member", "active")}, team="team_2")
+    assert directory.person_ref("zed") is None and access.team_person(TEAM, "zed") is None
+
+
+def test_a_copy_that_cannot_be_made_current_stops_the_command(tmp_path: Path, caplog) -> None:
+    from assistant_gateway.application.team_commands import PersonCopyNotCurrent
+
+    store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
+    _seed(store, {"olive": ("owner", "active"), "adam": ("admin", "active")})
+    clock = _Clock()
+    writer, access = people_directory(tmp_path, store.identity_repository, team_id=TEAM, clock=clock)
+    writer.record("adam")
+    store.identity_repository.change_team_membership_role(canonical_user_id="adam", team_id=TEAM, role="member")
+    directory = PeopleDirectorySync(identity=store.identity_repository, open_store=lambda: _CopyWriteFails(access),  # type: ignore[arg-type,return-value]
+                                    team_id=TEAM, clock=clock)
+
+    with caplog.at_level(logging.ERROR, logger="assistant_gateway.people_directory_sync"):
+        with pytest.raises(PersonCopyNotCurrent, match="roles could not be passed on"):
+            directory.person_ref("adam")
+    assert _copy(access, "adam") == (PersonStanding.ACTIVE, ("admin",))  # still the old copy: nothing was sent
+    assert "event=people_directory_write_failed" in caplog.text and "person_id=adam" in caplog.text

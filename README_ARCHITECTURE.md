@@ -4592,7 +4592,12 @@ logged. The table is created when a store that uses it opens, so an older databa
 it at its first start on this version.
 
 **People's commands from the gateway** (`assistant_gateway.application.team_commands`):
-the gateway reads the person's reference from the access store, gives each command a
+the gateway reads the person's reference from the access store, after writing the
+team's copy of the person when it differs from its own records (a failed copy write is
+otherwise retried only at the person's next change or the gateway's next start, so a
+demoted administrator could still change team memory, and a person added meanwhile
+could not act at all); when that write fails, the command is not sent and the person is
+told why (`PeopleDirectorySync.person_ref`). It gives each command a
 fresh `request_id` (a UUIDv7, the contract's "Fresh ids"), and sends it through its host
 (`assistant_gateway.team_services_client`); it no longer checks memory access itself,
 since the team services decide. When no answer comes in time, it sends the same command

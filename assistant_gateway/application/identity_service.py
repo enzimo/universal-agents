@@ -52,9 +52,10 @@ _ADMIN_ONLY_INVITE = "Only an admin can create Web Chat invitations."
 # Appended to a reply when the access store's copy could not be written
 # (assistant_gateway.people_directory_sync); the change itself stands.
 SCHEDULER_NOT_TOLD = (
-    "Note: the scheduler's copy of this person could not be updated (see the "
-    "gateway log), so their scheduled runs use the previous copy until the "
-    "gateway restarts."
+    "Note: the team's copy of this person could not be updated (see the gateway "
+    "log). Their scheduled runs use the previous copy until it is written again: "
+    "the gateway tries again before their next command to the team services, and "
+    "when it restarts. Their commands are not sent until it succeeds."
 )
 # /user list [filter]: where the person stands in this team.
 _LIST_FILTERS = {
