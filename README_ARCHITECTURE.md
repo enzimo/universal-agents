@@ -834,6 +834,64 @@ conversations, memory, authorization records, gateway sessions, and execution
 attempts. Agents still coordinate through NATS rather than polling one
 another's tables.
 
+Confirmed work survives a power loss (decisions 60, 75 and 82). The runtime
+records a message before it publishes it and saves a task before it
+acknowledges the message that brought it; with SQLite's `NORMAL` a power loss
+could undo those commits while NATS still treats the message as sent or
+delivered (a crashed process loses nothing either way). So:
+
+- Every SQLite connection commits with `synchronous=FULL`
+  (`storage.sqlite_connection.SQLITE_SYNCHRONOUS`), on macOS with `fullfsync`.
+  The setting is per connection and the database path is configurable, so it
+  applies to every database the module opens. The secure tool broker's
+  credential catalog (`secure_tool_broker.credential_catalog_store`) opens its
+  file itself and calls the same `configure_sqlite_connection`. A test parses
+  every tracked module and fails when one opens SQLite without that setup,
+  read-only or in memory (`tests/test_sqlite_connection.py`).
+- An agent process flushes its own records before it sends, not in each
+  commit (decision 82). A trivial task made about 31 commits between receiving
+  its task and publishing its reply, and with `FULL` each flushed the disk once
+  or twice: about 60 flushes, a reply 0.25 s later on a local container disk,
+  and "database is locked" for other writers on a disk that takes 0.6 s per
+  flush. Only what leaves the process needs those records on the disk. So in
+  an agent process (`custom_agents.commit_flushes`, called by `strands_main`)
+  the task runtime, conversation, agent status and storage-usage stores
+  (`connect_sqlite(defer_flush=True)`) commit with `NORMAL` and note their
+  file, and the NATS adapter awaits `custom_transport.send_barrier.before_send()`
+  before every publish, dead-letter copy, object upload, queued-task
+  withdrawal, acknowledgement and ending of a message; the barrier flushes the
+  noted files' write-ahead logs. One flush of a WAL file makes every commit in
+  it durable, whichever connection wrote it, so a power loss leaves the state
+  the agent had when it last sent something: what a crash at that moment
+  leaves, which recovery already handles. One flush runs at a time, on a
+  thread of its own (Strands runs synchronous tools on asyncio's shared pool),
+  and a file stays noted until a flush that started after its last commit
+  succeeds, so a sender arriving mid-flush waits. A failed flush stops all
+  later sends and acknowledgements of the process (a retried `fsync` can report
+  success for pages it never wrote) until it is restarted. The gateway, the
+  broker and every other store keep flushing in each commit. Measured: about 100 ms per short
+  task instead of 90 ms with `NORMAL` and 330 ms with `FULL` on every commit,
+  4 to 9 flushes instead of about 60.
+- Schema setup run outside a transaction (`CREATE ... IF NOT EXISTS`,
+  `ALTER TABLE ... ADD COLUMN`) commits without a flush in every process: it
+  re-runs at every start, and stores creating their tables on first use cost
+  an agent's first task about ten flushes and made services starting together
+  on a slow disk wait on each other.
+- A task save writes its snapshot, the consumed deferred message, the
+  schedule-run admission, custody and the change ledger's request row in one
+  transaction, and the covered stores write the change ledger inside their own
+  transactions, so these tables share `dbs/task_history.db`: SQLite keeps a
+  transaction atomic within one file, not across files in WAL mode.
+- The bundled NATS server's generated configuration sets
+  `jetstream { sync_interval: always }`, so a confirmed JetStream write is on
+  the disk too (about 4 ms per confirmed message or acknowledgement on that
+  disk), and a `max_control_line` that fits the largest host credential the
+  message contract allows (`docker.nats_service.contract_server_settings`).
+- All of it needs storage that flushes when asked: a local disk, or a network
+  share that passes the request on. Slow commits and flushes are logged
+  (`sqlite_commit_slow`, `sqlite_flush_slow`). The hermetic tests commit with
+  `NORMAL` in their own process (`tests/conftest.py`).
+
 A store whose writes read before they write takes turns between writers on
 both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
 PostgreSQL the default READ COMMITTED isolation lets two transactions read the
@@ -4209,6 +4267,13 @@ signed against records that chain to the installation's authority keys.
   refusal's code and known pointer.
 - **Signed records** (`state_records`): records in the key-value buckets, signed by
   their writer, with compare-and-set for placements, and verified on every read.
+
+Protocol 1 requests, replies, refusals and key-value writes await
+`custom_transport.send_barrier.before_send()` before sending. They use the same
+flush barrier as the NATS adapter, so a power loss cannot undo an agent's local
+records after another process has acted on its message. A failed flush prevents
+the send. Hosts outside an agent process install no barrier and keep flushing
+each commit.
 
 **The installation authority** (`installation_authority`, `assistant_cli
 run-installation-authority`) vouches for the hosts. It runs no model. The launcher

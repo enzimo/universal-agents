@@ -339,7 +339,10 @@ class SqliteAgentStateRepository(_RelationalAgentStateRepository):
 
 
     def _connect(self) -> sqlite3.Connection:
-        return connect_sqlite(self._db_path, logger=self._logger)
+        # Status rows an agent rewrites every few seconds; in an agent process
+        # they are flushed before its next send (storage.sqlite_connection,
+        # "Flushing before sending").
+        return connect_sqlite(self._db_path, logger=self._logger, defer_flush=True)
 
 
 class PostgresAgentStateRepository(_RelationalAgentStateRepository):

@@ -24,6 +24,7 @@ the same id is refused as ``replayed``.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
@@ -67,7 +68,7 @@ from custom_messages.wire.values import parse_timestamp
 
 __all__ = [
     "FrameRefused", "Receiver", "ReplayKey", "ReplayLookup", "VerifiedAuthority", "VerifiedFrame",
-    "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
+    "answer_subject", "b64url", "b64url_decode", "body_digest", "body_model", "expected_idempotency_key", "format_timestamp",
     "frame_digest", "idempotency_key", "renew_key_proof_bytes", "sign_authority_token", "sign_frame",
     "sign_renew_key_proof", "signing_bytes", "verify_authority_token", "verify_frame",
 ]
@@ -111,6 +112,11 @@ ISSUED_CERTIFICATE_AT = "/body/certificate"
 # Where a sessions.open or sessions.renew reply carries the session the team services signed.
 ISSUED_SESSION_AT = "/body/session"
 _SESSIONS_OPEN, _SESSIONS_RENEW = "sessions.open", "sessions.renew"
+# A host asks for its agents' sessions for itself, never as one of its agents: the reply goes to
+# the host (README, "Agent sessions").
+_HOST_OWN_KINDS = frozenset({_SESSIONS_OPEN, _SESSIONS_RENEW, "sessions.close"})
+# What a renewal keeps of the session it renews: everything but its end and its sequence.
+_RENEWAL_KEEPS = ("agent", "agent_type", "agent_role", "runtime", "placement_revision", "started_at")
 
 
 def idempotency_key(kind: str, *parts: str | int | None) -> str:
@@ -486,6 +492,8 @@ def _verify_issuer(frame: Frame, spec: Optional[KindSpec], certificate: HostCert
             raise FrameRefused("wrong_issuer", "an installation operation speaks for its host, not an agent", at="/issuer/agent")
     elif issuer.team not in certificate.teams:
         raise FrameRefused("wrong_issuer", "the certificate does not serve the issuer's team", at="/issuer/team")
+    if spec is not None and spec.name in _HOST_OWN_KINDS and (issuer.agent is not MISSING or issuer.session is not MISSING):
+        raise FrameRefused("wrong_issuer", "a host asks for its agents' sessions for itself, not as an agent", at="/issuer/agent")
     if (issuer.agent is MISSING) != (issuer.session is MISSING):
         raise FrameRefused("wrong_issuer", "a frame names an agent and its session together", at="/issuer/session")
     if issuer.agent is not MISSING:
@@ -603,6 +611,49 @@ def reply_audience(request: Frame) -> dict[str, str]:
     return {**base, "target": HOST_TARGET, "id": issuer.runtime}
 
 
+# A sender slot or runtime id: one subject token of id characters (common.schema.json ids).
+_SLOT_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
+# A NATS subject token that is not a wildcard and holds no whitespace.
+_PLAIN_TOKEN = re.compile(r"[^\s*>]+")
+# Tokens of the subject root (ua.v1); the team token and the sender slot follow it.
+_ROOT_TOKENS = len(SUBJECT_ROOT.rstrip(".").split("."))
+
+
+def answer_subject(request_subject: str, reply_subject: Optional[str]) -> Optional[str]:
+    """The NATS subject to answer a request on, or ``None`` when the receiver must not answer (README, "Replies").
+
+    NATS ``allow_responses`` lets a receiver publish one answer to whatever reply subject
+    the request names, past the receiver's own grants. A requester could otherwise name a
+    JetStream API or key-value subject and have the answer, even an empty refusal,
+    written there with the receiver's rights (an empty message on
+    ``$JS.API.STREAM.DELETE.<stream>`` deletes the stream). So a receiver answers, with a
+    signed reply or a refusal, only on the requester's own inbox:
+    ``_INBOX.<sender slot>.<token>...``, with at least one token after the slot and no
+    wildcard, where the sender slot is the one in the subject the request arrived on
+    (``ua.v1.<team>.<slot>.`` or ``ua.v1._install.<slot>.svc``). The requester's NATS
+    publish permissions fix that slot to its own runtime id, so it can only name its
+    own inbox. A peer installation's slot (``x-<installation>``) gets no answer, since
+    request/reply stays inside one installation. A receiver that gets ``None`` drops the
+    request without answering and logs it.
+    """
+
+    if not reply_subject or not request_subject.startswith(SUBJECT_ROOT):
+        return None
+    tokens = request_subject.split(".")
+    if len(tokens) < _ROOT_TOKENS + 3:  # the team, the sender slot and at least one address token
+        return None
+    slot = tokens[_ROOT_TOKENS + 1]
+    if not _SLOT_TOKEN.fullmatch(slot) or slot.startswith(RESERVED_RUNTIME_PREFIXES):
+        return None
+    inbox = REPLY_INBOX_PREFIX.format(runtime=slot) + "."
+    if not reply_subject.startswith(inbox):
+        return None
+    rest = reply_subject[len(inbox):].split(".")
+    if not all(_PLAIN_TOKEN.fullmatch(token) for token in rest):
+        return None
+    return reply_subject
+
+
 def _verify_audience(frame: Frame, receiver: Receiver, answering: Optional[Frame] = None) -> None:
     if answering is not None:
         expected = reply_audience(answering)
@@ -644,8 +695,6 @@ def _verify_subject(raw: Mapping[str, Any], frame: Frame, spec: Optional[KindSpe
         inbox = REPLY_INBOX_PREFIX.format(runtime=audience.runtime) + "."
         if audience.runtime is MISSING or frame.causation_id is MISSING or not frame.subject.startswith(inbox):
             raise FrameRefused("subject_mismatch", "a reply names its request and the audience runtime's inbox", at="/subject")
-        if audience.target == HOST_TARGET and audience.id != audience.runtime:
-            raise FrameRefused("subject_mismatch", "a reply to a host names that host as its audience id", at="/audience/id")
     else:
         local = issuer.installation == audience.installation
         slot = issuer.runtime if local else PEER_SENDER_SLOT.format(installation=issuer.installation)
@@ -1028,8 +1077,13 @@ def _verify_issued_session(raw: Mapping[str, Any], frame: Frame, answering: Fram
             raise refuse("agent", "the session is for another agent than the one asked for")
         if issued.agent_type != asked.get("agent_type"):
             raise refuse("agent_type", "the session names another agent type than the one asked for")
-    elif issued.session != asked.get("session"):
-        raise refuse("session", "the renewal returned another session than the one it named")
+    else:
+        if issued.session != asked.get("session"):
+            raise refuse("session", "the renewal returned another session than the one it named")
+        held = trust.agent_session(issued.installation, issued.team, issued.session)
+        for field_name in _RENEWAL_KEEPS if held is not None else ():
+            if getattr(issued, field_name) != getattr(held, field_name):
+                raise refuse(field_name, "a renewal keeps every field of the session but its end")
 
 
 def _verify_joined_certificate(issued: HostCertificate, asked: Mapping[str, Any],

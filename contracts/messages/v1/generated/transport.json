@@ -179,8 +179,8 @@
         ]
       }
     },
-    "UA1_BLOCK_LIST": {
-      "description": "one block list per team, written by the team services and read by every host of the team; each record states its own expiry",
+    "UA1_BLOCK_LIST_{team}": {
+      "description": "one team's block list, written by its team services and read by its hosts; one bucket per team, since it names people's blocks and standing; each record states its own expiry",
       "per_key_ttl_seconds": 0,
       "readers": [
         "lead_host",
@@ -207,23 +207,23 @@
       ],
       "writers": {
         "edge_adapter": [
-          "host.>",
-          "revocations.*",
-          "session.>"
+          "host.{peer}.>",
+          "revocations.{peer}",
+          "session.{peer}.>"
         ],
         "installation_authority": [
-          "host.>",
-          "revocations.*",
+          "host.{installation}.>",
+          "revocations.{installation}",
           "agreement.*"
         ],
         "team_services": [
-          "session.*.{team}.*"
+          "session.{installation}.{team}.*"
         ]
       }
     },
     "UA1_HOSTS": {
-      "description": "one record per runtime host; written every 10 s, expires after at most 60 s (each record also states its expiry)",
-      "per_key_ttl_seconds": 60,
+      "description": "one record per runtime host; written every 10 s, expires after at most 30 s (each record also states its expiry)",
+      "per_key_ttl_seconds": 30,
       "readers": [
         "gateway",
         "lead_host",
@@ -258,7 +258,7 @@
       }
     },
     "UA1_LOCKS": {
-      "description": "the team services' single-instance lock, one key per team (team_services.<team>): the holder's runtime id and the lease's end, written with compare-and-set and renewed before the lease ends; a second instance refuses to serve while the lease holds",
+      "description": "the team services' single-instance lock, one key per team (team_services.<team>), its value schemas/team-services-lock.schema.json: the holder's runtime id, its process instance and its lease's end, a 30-second lease taken and renewed every 10 seconds with compare-and-set; another instance does not serve while the lease holds",
       "per_key_ttl_seconds": 0,
       "readers": [
         "team_services"
@@ -287,8 +287,8 @@
         ]
       }
     },
-    "UA1_TEAM_VIEW": {
-      "description": "the team's shared view of open work",
+    "UA1_TEAM_VIEW_{team}": {
+      "description": "one team's shared view of open work; one bucket per team, since an Objective's title is a person's own words",
       "per_key_ttl_seconds": 0,
       "readers": [
         "gateway",
@@ -302,6 +302,15 @@
         ]
       }
     }
+  },
+  "key_value_stream": {
+    "allow_direct": true,
+    "allow_rollup_hdrs": false,
+    "deny_delete": true,
+    "deny_purge": true,
+    "history": 1,
+    "max_consumers": 4096,
+    "storage": "file"
   },
   "limits": {
     "max_credential_bytes": 65536,
@@ -341,6 +350,7 @@
       "max_age_seconds": 2592060,
       "max_consumers": 16,
       "max_message_bytes": 263168,
+      "max_msgs_per_subject": 1,
       "retention": "limits",
       "storage": "file",
       "subjects": [
