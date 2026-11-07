@@ -31,7 +31,7 @@ from custom_agents.schedule_store import ScheduleStore
 from custom_agents.scheduled_run_contexts import answer_run_context_request, subscribe_run_context_routes
 from custom_agents.scheduled_runtime import _fire_claimed_schedule, enqueue_fired_scheduled_task
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
@@ -153,7 +153,7 @@ def record_people(world, *people: tuple[str, PersonStanding, tuple[str, ...]]) -
     AccessRepository(world.tasks.storage_settings).replace_people(
         TEAM,
         [
-            TeamPersonV1(team_id=TEAM, person_id=person_id, standing=standing, roles=roles, changed_at_utc=NOW)
+            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person_id, standing=standing, roles=roles, changed_at_utc=NOW)
             for person_id, standing, roles in people
         ],
         at=NOW,

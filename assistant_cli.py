@@ -47,6 +47,7 @@ from assistant_gateway.application.gateway_application import (
     GatewayDeliveryEvent,
 )
 from assistant_gateway.gateway import UserGateway
+from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.application.interactive_commands import parse_reply_command
 from assistant_gateway.interactive_apps import InteractiveAppManager
 from assistant_gateway.interactive_apps.builtin_registry import (
@@ -3863,7 +3864,13 @@ async def _run_gateway_services(
     async def output_sink(text: str) -> None:
         print(f"\n{text}\n")
 
-    gateway = UserGateway(config, output_sink=output_sink)
+    # The gateway service is the one process that runs the gateway's protocol 1 host
+    # (assistant_gateway.message_host); command-line runs open gateways without one.
+    gateway = UserGateway(
+        config,
+        output_sink=output_sink,
+        manager_runtime=NatsGatewayManagerRuntime.for_gateway_service(config),
+    )
     app_manager = InteractiveAppManager(
         config,
         gateway.application,

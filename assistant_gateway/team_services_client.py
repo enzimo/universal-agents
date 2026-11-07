@@ -10,24 +10,24 @@ copy of the team's people (``storage.access_repository``). Both implement the po
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from assistant_gateway.application.team_commands import (
     TeamCommandRefused,
     TeamServicesNoAnswer,
     TeamServicesUnavailable,
 )
-from assistant_gateway.message_host import GatewayHostUnavailable, GatewayMessageHost
-from custom_messages.wire.refusals import FrameRefused
-from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, RequestRefused, ServiceUnavailable
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
+
+if TYPE_CHECKING:
+    from assistant_gateway.message_host import GatewayMessageHost
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class MessageHostTeamServices:
-    def __init__(self, host: Optional[GatewayMessageHost], *, timeout_seconds: float,
+    def __init__(self, host: Optional["GatewayMessageHost"], *, timeout_seconds: float,
                  logger: logging.Logger = _LOGGER) -> None:
         self._host = host
         self._timeout = timeout_seconds
@@ -35,10 +35,19 @@ class MessageHostTeamServices:
 
     async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
         if self._host is None:
-            raise TeamServicesUnavailable("This gateway runs no message host: start the instance with the launcher.")
+            # Only the gateway service runs the gateway's host (assistant_gateway.message_host): command-line
+            # chats, and a gateway on an instance the launcher never prepared, cannot reach the team services.
+            raise TeamServicesUnavailable("This process cannot reach the team services: only the gateway service the "
+                                          "launcher starts sends these commands. Use Web Chat or a chat app.")
+        # Imported here, not with the module: only the gateway service runs a host, and command-line runs,
+        # which import this module too, should not load the protocol code (about half a second).
+        from assistant_gateway.message_host import GatewayHostUnavailable
+        from custom_messages.wire.refusals import FrameRefused
+        from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, RequestRefused, ServiceUnavailable
+
         try:
-            verified = await self._host.command(kind, body, person_ref=person_ref, request_id=request_id,
-                                                timeout=self._timeout)
+            # The host binds the command token to the body's request id (command_binding_id).
+            verified = await self._host.command(kind, body, person_ref=person_ref, timeout=self._timeout)
         except RequestRefused as error:
             raise TeamCommandRefused(kind, error.code) from error
         except ServiceUnavailable as error:

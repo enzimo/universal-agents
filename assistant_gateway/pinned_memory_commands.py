@@ -40,13 +40,13 @@ from custom_messages.contracts.control_v1 import (
     PinnedMemoryCommandResultPayload,
     PinnedMemoryFactPayload,
 )
-from custom_messages.wire.encoding import format_timestamp
-from custom_messages.wire.frame import body_model
-from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS, INLINE_TEXT_TYPE
 from storage.pinned_memory_repository import COREMEM_BANK, PinnedMemoryInputError
 
 # The contract's page size for memory.list.
 WIRE_PAGE_LIMIT = 100
+# The contract's text_content type for text carried in the frame (custom_messages.wire.sizes.INLINE_TEXT_TYPE);
+# the contract's models load only when a command is checked (_check_body), not when the gateway imports this.
+_INLINE_TEXT_TYPE = "inline"
 # The fields a memory.replace may change; it must name at least one (registry body rule).
 _REPLACE_FIELDS = ("fact_text", "tags", "metadata_json", "valid_from", "expires", "clear_expiry")
 # How a person knows each body field, for refusals in plain words.
@@ -132,6 +132,11 @@ class RuntimePinnedMemoryCodec:
 def _check_body(kind: str, body: dict[str, Any]) -> None:
     """Refuse in plain words a body the contract would refuse (module docstring)."""
 
+    # Imported here: command-line runs import the gateway and this module, and should not load the
+    # contract's generated models (only the gateway service sends memory commands).
+    from custom_messages.wire.frame import body_model
+    from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS
+
     text = body.get("fact_text", {}).get("text")
     if kind == "memory.create" and not str(text or "").strip():
         raise PinnedMemoryInputError("The fact's text cannot be empty.")
@@ -166,7 +171,7 @@ def _plain_refusal(error: ValidationError) -> str:
 def _fact_fields(command: PinnedMemoryCommandPayload, zone: Optional[str]) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     if command.fact_text is not None:
-        fields["fact_text"] = {"type": INLINE_TEXT_TYPE, "text": command.fact_text}
+        fields["fact_text"] = {"type": _INLINE_TEXT_TYPE, "text": command.fact_text}
     if command.tags is not None:
         fields["tags"] = list(command.tags)
     if command.metadata is not None:
@@ -185,6 +190,8 @@ def _fact_fields(command: PinnedMemoryCommandPayload, zone: Optional[str]) -> di
 
 
 def _wire_time(value: str) -> str:
+    from custom_messages.wire.encoding import format_timestamp  # loads the contract's models: see _check_body
+
     return format_timestamp(datetime.fromisoformat(value.replace("Z", "+00:00")))
 
 

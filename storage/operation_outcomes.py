@@ -39,7 +39,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
-from custom_messages.wire.kinds import RETRY_OUTCOMES
 from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import SqlDialect
 
@@ -47,8 +46,6 @@ OUTCOMES_TABLE = "protocol1_operation_outcomes"
 # The person a stored reply's command acted for (module docstring).
 OUTCOME_PERSON_COLUMN = "person_id"
 OUTCOME_RETENTION = timedelta(days=7)
-# RETRY_OUTCOMES (generated from the contract): outcomes that ask the sender to try again;
-# storing one would answer every later retry with it.
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -185,6 +182,11 @@ def save_refusal(conn: Any, dialect: SqlDialect, outcome: CommandOutcome, reply:
     that raced this one stored first, which then answers. None, storing nothing, for an
     outcome that asks for a retry.
     """
+
+    # The contract's retry_outcomes (generated): storing one would answer every later retry with it.
+    # Imported here: the memory store is imported by processes that never store an outcome (the gateway,
+    # command-line runs), and the generated contract models take half a second to load.
+    from custom_messages.wire.kinds import RETRY_OUTCOMES
 
     if reply.get("outcome") in RETRY_OUTCOMES:
         return None
