@@ -283,7 +283,11 @@ def _propose_hosted(agent: Any, server_name: str, purpose: str, tools: List[Dict
 def _list_hosted(agent: Any) -> Dict[str, Any]:
     from custom_agents.providers.mcp_hosting import MCPHostingAdministration
 
-    return {"hosted_servers": MCPHostingAdministration(_hosting_config(agent)).list_public()}
+    administration = MCPHostingAdministration(_hosting_config(agent))
+    servers = administration.list_public()
+    for server in servers:
+        server["status"] = administration.describe_state(server["hosted_server_id"])
+    return {"hosted_servers": servers}
 
 
 def _plan_hosted_change(agent: Any, hosted_server_id: str, operation: str, reason: str) -> Dict[str, Any]:

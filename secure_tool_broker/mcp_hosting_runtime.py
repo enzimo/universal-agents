@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import sys
 from typing import Any, BinaryIO
@@ -19,6 +21,27 @@ from mcp_control.hosting import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+# uvicorn's line once the sidecar listens (mcp_control.managed_server), and the
+# error it prints when the port is taken.
+_LISTENING = re.compile(r"Uvicorn running on \S+:(\d+)")
+_PORT_TAKEN = "address already in use"
+
+
+class HostedMCPStartError(RuntimeError):
+    """A hosted MCP server's sidecar did not start; the message says why and what to do."""
+
+
+class HostedMCPPortInUse(HostedMCPStartError):
+    """Another process already listens on the sidecar's port."""
+
+
+def _sidecar_output(log_path: Path, offset: int) -> str:
+    """What the sidecar of this start wrote: its log is appended to on every start."""
+
+    with log_path.open("rb") as log:
+        log.seek(offset)
+        return log.read().decode("utf-8", errors="replace")
 
 
 class MCPHostedProcessSupervisor:
@@ -61,25 +84,62 @@ class MCPHostedProcessSupervisor:
         self,
         definition: MCPHostedServerDefinitionV1,
         process: asyncio.subprocess.Process,
+        *,
+        log_path: Path,
+        offset: int,
+        timeout_seconds: float = 20.0,
     ) -> None:
-        deadline = asyncio.get_running_loop().time() + 20.0
-        while asyncio.get_running_loop().time() < deadline:
-            if process.returncode is not None:
-                raise RuntimeError(
-                    f"Managed MCP sidecar exited during startup with status {process.returncode}."
+        """Return once the sidecar this start launched says it listens on its port, while it still runs.
+
+        Another process answering on the port is not readiness. Sidecars run in
+        their own session, so one left over from an earlier broker run can keep
+        the port; this start's sidecar then stops with "address already in
+        use", and the start must say so instead of reporting that one as running.
+        """
+
+        address = f"{definition.bind_host}:{definition.port}"
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while True:
+            returncode = process.returncode
+            output = _sidecar_output(log_path, offset)
+            if returncode is not None:
+                if _PORT_TAKEN in output:
+                    raise HostedMCPPortInUse(
+                        f"The hosted MCP server {definition.server_name} cannot start: {address} is already "
+                        "in use, most likely by its sidecar left over from an earlier broker run. Stop that "
+                        "process (`ps -ef | grep mcp_control.managed_server` shows it), then start the "
+                        "server again."
+                    )
+                raise HostedMCPStartError(
+                    f"The hosted MCP server {definition.server_name} stopped while starting, with status "
+                    f"{returncode}. Its log is {log_path}."
                 )
-            try:
-                reader, writer = await asyncio.open_connection(
-                    definition.bind_host,
-                    definition.port,
-                )
-                del reader
-                writer.close()
-                await writer.wait_closed()
+            listening = _LISTENING.search(output)
+            if listening is not None and int(listening.group(1)) == definition.port:
                 return
-            except OSError:
-                await asyncio.sleep(0.1)
-        raise TimeoutError("Managed MCP sidecar did not become ready within 20 seconds.")
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(
+                    f"Managed MCP sidecar did not become ready within {timeout_seconds:g} seconds."
+                )
+            await asyncio.sleep(0.1)
+
+    def _remember_start_failure(self, definition: MCPHostedServerDefinitionV1, error: BaseException) -> None:
+        """A server set to run keeps why its sidecar did not start, for every list of hosted servers.
+
+        A server being started from stopped is not set to run yet; whoever
+        started it gets the reason in the answer instead.
+        """
+
+        if definition.lifecycle != HostedMCPLifecycle.RUNNING:
+            return
+        reason = str(error).strip() or type(error).__name__
+        self.store.record_start_failure(definition.hosted_server_id, reason, at=datetime.now(timezone.utc))
+        LOGGER.warning(
+            "A hosted MCP server set to run could not start. event=mcp_host_start_failure_recorded "
+            "hosted_server_id=%s reason=%s",
+            definition.hosted_server_id,
+            reason,
+        )
 
     async def start(self, hosted_server_id: str) -> dict[str, Any]:
         definition = self.store.require(hosted_server_id)
@@ -99,6 +159,7 @@ class MCPHostedProcessSupervisor:
                 }
             token_path = self._ensure_token(hosted_server_id)
             log_path = self._log_path(hosted_server_id)
+            offset = log_path.stat().st_size if log_path.exists() else 0
             log_handle = log_path.open("ab", buffering=0)
             log_path.chmod(0o600)
             try:
@@ -115,18 +176,22 @@ class MCPHostedProcessSupervisor:
                     stderr=asyncio.subprocess.STDOUT,
                     start_new_session=True,
                 )
-            except Exception:
+            except Exception as error:
                 log_handle.close()
+                self._remember_start_failure(definition, error)
                 raise
             self._log_handles[hosted_server_id] = log_handle
             try:
-                await self._wait_ready(definition, process)
-            except Exception:
-                process.terminate()
+                await self._wait_ready(definition, process, log_path=log_path, offset=offset)
+            except Exception as error:
+                if process.returncode is None:
+                    process.terminate()
                 await process.wait()
                 self._close_log(hosted_server_id)
+                self._remember_start_failure(definition, error)
                 raise
             self._processes[hosted_server_id] = process
+            self.store.clear_start_failure(hosted_server_id)
             LOGGER.info(
                 "Managed MCP sidecar started. event=mcp_host_sidecar_started "
                 "hosted_server_id=%s pid=%s port=%s",
@@ -144,6 +209,8 @@ class MCPHostedProcessSupervisor:
 
     async def stop(self, hosted_server_id: str) -> dict[str, Any]:
         async with self._lock:
+            # Stopped on purpose: a start that failed earlier no longer matters.
+            self.store.clear_start_failure(hosted_server_id)
             process = self._processes.pop(hosted_server_id, None)
             if process is None or process.returncode is not None:
                 self._close_log(hosted_server_id)

@@ -31,7 +31,10 @@ Sources, each producing ``StatusFindingV1`` items:
   server that sets no limit is a note;
 - people's stored-data totals that the manager stopped measuring
   (``assistant_gateway.storage_usage``), a warning: those people get no
-  storage notices meanwhile.
+  storage notices meanwhile;
+- hosted MCP servers set to run whose sidecar the broker could not start
+  (``mcp_control.hosting``, the failure the broker keeps beside each server's
+  running state), a problem: agents cannot use their tools.
 
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.
@@ -87,6 +90,7 @@ from custom_messages.contracts.status_v1 import (
     StatusReportV1,
     StatusSeverity,
 )
+from mcp_control.hosting import HostedMCPLifecycle, MCPHostedServerStore, resolve_mcp_hosting_paths
 from model_providers.endpoints import (
     EndpointKind,
     display_host,
@@ -109,6 +113,7 @@ GATEWAY_SOURCE = "gateway"
 MESSAGE_SERVER_SOURCE = "message server"
 STORAGE_SOURCE = "storage checks"
 PERSON_STORAGE_SOURCE = "stored-data totals"
+HOSTED_MCP_SOURCE = "hosted MCP servers"
 # The longest the page waits for the message server's account information.
 MESSAGE_SERVER_TIMEOUT_SECONDS = 10.0
 
@@ -164,6 +169,7 @@ class StatusPage:
         findings.extend(self._configuration_findings())
         findings.extend(await self._storage_findings(unavailable))
         findings.extend(await asyncio.to_thread(self._person_storage_findings, unavailable))
+        findings.extend(await asyncio.to_thread(self._hosted_mcp_findings, unavailable))
         return StatusReportV1(
             checked_at=self._now(), findings=tuple(_ordered(_unique(findings))), unavailable_sources=tuple(unavailable)
         )
@@ -319,6 +325,42 @@ class StatusPage:
             unavailable.append(ACCESS_STORE_SOURCE)
             return []
         return person_settings_findings(people, settings)
+
+    def _hosted_mcp_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
+        try:
+            store = MCPHostedServerStore(resolve_mcp_hosting_paths(self._config))
+            failed = [
+                (definition, failure)
+                for definition in store.list_definitions()
+                if definition.lifecycle == HostedMCPLifecycle.RUNNING
+                and (failure := store.start_failure(definition.hosted_server_id)) is not None
+            ]
+        except (OSError, ValidationError) as exc:
+            LOGGER.warning(
+                "The Status page could not read the hosted MCP servers. event=status_hosted_mcp_unreadable error=%s",
+                exc,
+            )
+            unavailable.append(HOSTED_MCP_SOURCE)
+            return []
+        return [
+            StatusFindingV1(
+                finding_id=f"hosted_mcp_server_not_started:{definition.hosted_server_id}",
+                severity=StatusSeverity.PROBLEM,
+                title=f"The hosted MCP server {definition.server_name[:100]} is set to run but could not start",
+                summary=(
+                    "Agents cannot use its tools until it starts. The broker tries again when it starts and when an "
+                    "agent uses the server's tools."
+                ),
+                action=(
+                    "Fix what the details name; for a port already in use, stop the process that holds it. Then "
+                    "stop and start the server in Settings → Runtime, or restart the container."
+                ),
+                source=BROKER_SOURCE,
+                since=failure.failed_at,
+                details=failure.reason[:2000],
+            )
+            for definition, failure in failed
+        ]
 
     def _receiver_findings(self) -> list[StatusFindingV1]:
         from custom_transport.dead_letters import stopped_receiver_finding

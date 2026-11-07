@@ -466,7 +466,8 @@ class InstanceLayout:
     @property
     def mcp_hosting_state_dir(self) -> Path:
         """Running state of hosted MCP servers: removed definitions, access
-        tokens and logs (``mcp_control.hosting``), written by the broker."""
+        tokens, logs and the last start failure of a server set to run
+        (``mcp_control.hosting``), written by the broker."""
 
         return self.runtime_dir / MCP_HOSTING_DIRNAME / MCP_HOSTING_STATE_DIRNAME
 
