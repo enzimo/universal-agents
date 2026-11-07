@@ -2,7 +2,7 @@
 
 A crashed host must show as gone about 30 seconds after its last write, as the presence
 heartbeat did, while a running host never looks gone because one write was lost. The
-upkeep loop runs here on a fake clock: its waits return at once and move the clock on.
+liveness loop runs here on a fake clock: its waits return at once and move the clock on.
 """
 
 from __future__ import annotations
@@ -51,18 +51,31 @@ def _host(now: list[datetime]) -> tuple[MessageHost, _Records]:
     return host, records
 
 
+def _fake_waits(monkeypatch, now: list[datetime]) -> list[float]:
+    """The liveness loop's waits return at once and move the clock on; the trust upkeep idles."""
+
+    waits: list[float] = []
+
+    async def stopped_within(stop: asyncio.Event, interval: timedelta) -> bool:
+        if stop.is_set():
+            return True
+        waits.append(interval.total_seconds())
+        now[0] += interval
+        await asyncio.sleep(0)
+        return stop.is_set()
+
+    async def idle(self, stop: asyncio.Event) -> None:
+        await stop.wait()
+
+    monkeypatch.setattr(host_runtime, "_stopped_within", stopped_within)
+    monkeypatch.setattr(MessageHost, "_trust_loop", idle)
+    return waits
+
+
 @pytest.mark.asyncio
 async def test_a_host_writes_its_liveness_every_10_seconds_and_each_record_lasts_30(monkeypatch) -> None:
     now = [START]
-    waits: list[float] = []
-
-    async def wait_for(awaitable, timeout):
-        awaitable.close()  # the stop event's wait, never started
-        waits.append(timeout)
-        now[0] += timedelta(seconds=timeout)
-        raise asyncio.TimeoutError
-
-    monkeypatch.setattr(host_runtime, "asyncio", SimpleNamespace(wait_for=wait_for, TimeoutError=asyncio.TimeoutError))
+    waits = _fake_waits(monkeypatch, now)
     host, records = _host(now)
     stop = asyncio.Event()
     records.after_write = lambda: len(records.written) == 4 and stop.set()
@@ -291,3 +304,186 @@ async def test_a_renewal_that_gives_up_the_agents_and_gets_no_answer_is_asked_ag
     await host.renew_if_due()
     assert len(live.bodies) == 2
     assert all(body["profile_sha256"] == profile.giving_up().digest() for body in live.bodies)
+
+
+# --- liveness never waits for the trust and certificate upkeep ------------------------------------
+
+
+def _quick_upkeep(monkeypatch) -> None:
+    """Real waits, short: liveness every 20 ms, the trust upkeep looking every 5 ms."""
+
+    monkeypatch.setattr(host_runtime, "LIVENESS_INTERVAL", timedelta(milliseconds=20))
+    monkeypatch.setattr(host_runtime, "UPKEEP_CHECK_INTERVAL", timedelta(milliseconds=5))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("renewal", ["hangs", "fails"])
+async def test_a_renewal_that_waits_or_fails_never_stops_the_liveness_writes(monkeypatch, caplog, renewal: str) -> None:
+    """A renewal waits up to 30 s for the authority, a join for more agent types holds the certificate's lock for
+    up to 120 s, and a refused renewal is asked again every pass: none of it may let the 30-second record lapse."""
+
+    _quick_upkeep(monkeypatch)
+    now = [START]
+    host, records = _host(now)
+    host._last_trust_refresh = host._last_forget = START  # only the renewal is due
+    renewals: list[int] = []
+
+    async def renew_if_due() -> None:
+        renewals.append(1)
+        if renewal == "hangs":
+            await asyncio.Event().wait()
+        raise RuntimeError("the authority refused the renewal")
+
+    host.renew_if_due = renew_if_due  # type: ignore[method-assign]
+    stop = asyncio.Event()
+    keeping = asyncio.create_task(host.keep_up(stop))
+    await asyncio.sleep(0.15)
+    stop.set()
+    await asyncio.wait_for(keeping, timeout=1)
+
+    accepting = [document for document in records.written if document["state"] == "accepting"]
+    assert renewals and len(accepting) >= 4, "liveness kept its cadence while the renewal waited or failed"
+    assert records.written[-1]["state"] == "drained"
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_host_writes_no_more_records_while_a_renewal_still_waits(monkeypatch) -> None:
+    """A team services instance that lost its lock stops its upkeep: a renewal still waiting is cut off rather than
+    waited for, and no record follows that would overwrite the one of the instance serving now."""
+
+    _quick_upkeep(monkeypatch)
+    now = [START]
+    host, records = _host(now)
+    host._last_trust_refresh = host._last_forget = START
+    waiting = asyncio.Event()
+
+    async def renew_if_due() -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    host.renew_if_due = renew_if_due  # type: ignore[method-assign]
+    stop = asyncio.Event()
+    keeping = asyncio.create_task(host.keep_up(stop, drained=lambda: False))
+    await waiting.wait()
+    stop.set()
+    written = len(records.written)
+    await asyncio.wait_for(keeping, timeout=1)  # not held up by the renewal
+    await asyncio.sleep(0.05)
+    assert len(records.written) == written
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_that_is_not_due_does_not_wait_for_the_certificates_lock() -> None:
+    """A join for more agent types may hold the certificate's lock for minutes; a renewal check that is not due
+    must not queue behind it."""
+
+    now = [START]
+    host, _records = _host(now)
+    host.renew_if_due = MessageHost.renew_if_due.__get__(host)  # type: ignore[method-assign]
+    certificate = SimpleNamespace(issued_at=START, expires_at=START + timedelta(days=30))
+    host.live = SimpleNamespace(identity=SimpleNamespace(certificate=certificate))  # type: ignore[assignment]
+    async with host._certificate_change:  # as rejoin() holds it
+        await asyncio.wait_for(host.renew_if_due(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_the_upkeep_forgets_trust_records_nothing_can_still_need(monkeypatch) -> None:
+    """README "Trust over time": a receiver calls TrustStore.forget at least daily, so its trust store stays bounded."""
+
+    _quick_upkeep(monkeypatch)
+    now = [START]
+    host, _records = _host(now)
+    host._last_trust_refresh = START
+    forgotten: list[datetime] = []
+    host.live = SimpleNamespace(trust=SimpleNamespace(store=SimpleNamespace(  # type: ignore[assignment]
+        forget=lambda moment: forgotten.append(moment) or 2)))
+    stop = asyncio.Event()
+    keeping = asyncio.create_task(host.keep_up(stop, drained=lambda: False))
+    await asyncio.sleep(0.05)
+    assert forgotten == [START], "forgotten once, then not again until FORGET_INTERVAL has passed"
+    now[0] = START + host_runtime.FORGET_INTERVAL
+    await asyncio.sleep(0.05)
+    stop.set()
+    await keeping
+    assert forgotten == [START, START + host_runtime.FORGET_INTERVAL]
+    assert host_runtime.FORGET_INTERVAL <= timedelta(days=1)
+
+
+def test_a_component_the_contract_cannot_carry_is_left_out_and_logged(caplog) -> None:
+    """One bad component, such as an id longer than the contract's 64 characters, must not make every host
+    record fail its schema check and the host disappear from every view."""
+
+    from custom_messages.wire.kinds import STATE_RECORDS
+
+    good = {"component": "Researcher-agent_1", "state": "unhealthy", "code": "session_limit_reached"}
+    bad = [{"component": "r" * 73, "state": "unhealthy", "code": "session_limit_reached"},
+           {"component": "Researcher-agent_2", "state": "broken"}]
+    host = _reporting_host([good, *bad])
+    body = host.liveness_body("accepting")
+    assert body["components"] == [good]
+    STATE_RECORDS["host"].body_model.validate_python(body)
+    assert caplog.text.count("event=protocol1_host_components_invalid") == 1
+    host.liveness_body("accepting")
+    assert caplog.text.count("event=protocol1_host_components_invalid") == 1, "logged once per new set"
+
+
+# --- looking up records a frame names ---------------------------------------------------------------
+
+
+class _LookupRecords:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.asked: list[str] = []
+
+    async def take_trust_record(self, record, key, *, now):
+        self.asked.append(key)
+        raise self.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError("nats: timeout"), OSError("connection reset")])
+async def test_a_lookup_that_fails_takes_nothing_and_is_logged(caplog, error: BaseException) -> None:
+    """A NATS failure while reading a certificate a frame names must end as the frame's own refusal, answered at
+    once, not as an error that leaves the requester waiting or ends the contract watch."""
+
+    import json
+
+    host = MessageHost(layout=None, profile=SimpleNamespace(runtime="lead-host"), nc=None, clock=lambda: START)
+    records = _LookupRecords(error)
+    host.records = records  # type: ignore[assignment]
+    host._trust = SimpleNamespace(store=SimpleNamespace(installation="install_one"))  # type: ignore[assignment]
+    frame = {"issuer": {"installation": "install_one", "runtime": "worker-host-1", "membership_epoch": 3, "team": "t",
+                        "session": "s-researcher-1-4"}}
+
+    assert await host.fetch_trust(json.dumps(frame).encode()) is False
+    assert records.asked == ["host.install_one.worker-host-1.3", "session.install_one.t.s-researcher-1-4"]
+    assert caplog.text.count("event=protocol1_trust_lookup_failed") == 2
+
+
+@pytest.mark.asyncio
+async def test_the_contract_watch_keeps_running_through_a_failed_watch(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(host_runtime, "_FOLLOW_RETRY_SECONDS", 0.0)
+    host = MessageHost(layout=None, profile=SimpleNamespace(runtime="lead-host"), nc=None, clock=lambda: START)
+    watches: list[int] = []
+    seen: list[bytes] = []
+
+    class _Watching:
+        async def watch(self, record, key):
+            watches.append(1)
+            if len(watches) == 1:
+                raise TimeoutError("nats: timeout")
+            yield key, b"record"
+            await asyncio.Event().wait()
+
+    async def contract_record(key, raw, runtime) -> None:
+        seen.append(raw)
+
+    host.records = _Watching()  # type: ignore[assignment]
+    host.live = SimpleNamespace()  # type: ignore[assignment]
+    host._contract_record = contract_record  # type: ignore[method-assign]
+    following = asyncio.create_task(host.follow_contract())
+    while not seen:
+        await asyncio.sleep(0.01)
+    following.cancel()
+    assert len(watches) == 2 and seen == [b"record"]
+    assert "event=protocol1_contract_watch_failed" in caplog.text

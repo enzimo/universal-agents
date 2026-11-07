@@ -9,10 +9,20 @@ and ask again with the same join id, as the contract says. A host renews with
 ``host.renew`` signed by the certificate it renews (``LiveHost.request``); this module
 only joins.
 
-The authority renews its own certificate while it runs and writes the new one to the
-bundle. A host that read the bundle earlier, then joins (or joins again for more agent
-types), gets a reply signed by a certificate it does not hold yet (``unknown_key``), so
-``join`` reads the bundle again once (``bundle_path``) and checks the reply again.
+The authority renews its own certificate while it runs, and stores the new one in
+``UA1_CERTS`` before it signs with it. A host whose bundle copy is older, then joins (or
+joins again for more agent types), gets a reply signed by a certificate it does not hold
+yet (``unknown_key``). ``join`` then reads that certificate from ``UA1_CERTS`` through
+the caller's lookup (``fetch_trust``, ``MessageHost.fetch_trust``: the key
+``host.<installation>.<runtime>.<membership epoch>`` the reply's issuer names), which the
+trust store checks against the bundle's authority keys, and checks the reply again, once.
+The bundle file is never read again: a host on another machine holds its own copy, made
+when it was set up.
+
+The contract's pre-join permissions (``generated/permissions/joining_host.json``) do not
+let a host that has not joined yet read ``UA1_CERTS``; every process shares one NATS login
+in this phase, so the lookup works for every host here. A host that joins again already
+holds the reader grants.
 
 A join names the contract the host runs (``contract_sha256``): its trust store's, which is
 the one its code was generated from (``custom_messages.wire.kinds.CONTRACT_SHA256``)
@@ -29,8 +39,7 @@ import logging
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
@@ -41,7 +50,6 @@ from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROT
 from custom_messages.wire.models import Frame
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import HostCertificate
-from custom_transport.protocol1.bootstrap import read_bundle
 from custom_transport.protocol1.host_keys import HostKeys
 from custom_transport.protocol1.ids import new_message_id
 from custom_transport.protocol1.live import (
@@ -160,14 +168,14 @@ def sign_join(keys: HostKeys, installation: str, profile: HostProfile, *, join_i
 async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: HostProfile, *,
                clock: Callable[[], datetime] = utc_now, deadline_seconds: float = 120.0,
                logger: logging.Logger = _LOGGER, sleep: Callable[[float], Any] = asyncio.sleep,
-               bundle_path: Optional[Path] = None) -> HostCertificate:
+               fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> HostCertificate:
     """Join the installation and return this host's certificate, kept in ``trust``.
 
     The join names the contract ``trust`` runs. Waits for an authority that is still
     starting ("no responders") and for a ``pending`` approval, up to ``deadline_seconds``;
     raises ``JoinRefused`` when the authority refuses the join and ``ServiceUnavailable``
-    when the deadline passes. ``bundle_path`` is the bootstrap bundle ``trust`` came from,
-    read again when the reply is signed by an authority certificate ``trust`` lacks.
+    when the deadline passes. ``fetch_trust`` reads a certificate the reply names that
+    ``trust`` lacks, such as the authority's renewed one, from ``UA1_CERTS`` (module docstring).
     """
 
     installation = trust.store.installation
@@ -194,7 +202,7 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
         raise_if_refused("host.join", frame["subject"], message, logger)
         request = Frame.model_validate(frame)
         now = clock()
-        reply = _verified_reply(message, request, trust, now, replay, bundle_path, logger)
+        reply = await _verified_reply(message, request, trust, now, replay, fetch_trust)
         body = reply.raw["body"]
         outcome = body["outcome"]
         if outcome == "ok":
@@ -216,9 +224,9 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
         raise JoinRefused(outcome, str(body.get("message", "")), body.get("accepted_contract_sha256"))
 
 
-def _verified_reply(message: Any, request: Frame, trust: PersistentTrustStore, now: datetime,
-                    replay: LiveReplayRecord, bundle_path: Optional[Path], logger: logging.Logger) -> Any:
-    """The authority's reply to ``request``, verified; the bundle is read again once for a certificate ``trust`` lacks."""
+async def _verified_reply(message: Any, request: Frame, trust: PersistentTrustStore, now: datetime,
+                          replay: LiveReplayRecord, fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]]) -> Any:
+    """The authority's reply to ``request``, verified; checked again once after reading a certificate ``trust`` lacks."""
 
     named = reply_audience(request)
 
@@ -232,30 +240,6 @@ def _verified_reply(message: Any, request: Frame, trust: PersistentTrustStore, n
     try:
         return verified()
     except FrameRefused as refused:
-        if refused.code != "unknown_key" or bundle_path is None \
-                or not _take_bundle_certificates(trust, bundle_path, now, logger):
+        if refused.code != "unknown_key" or fetch_trust is None or not await fetch_trust(message.data):
             raise
         return verified()
-
-
-def _take_bundle_certificates(trust: PersistentTrustStore, bundle_path: Path, now: datetime,
-                              logger: logging.Logger) -> bool:
-    """Take the certificates of the bundle at ``bundle_path`` that ``trust`` lacks; whether it took any.
-
-    Only certificates: the reply needs the authority's certificate, and the host reads the
-    current revocations record as it always does. Each is verified against the authority keys.
-    """
-
-    taken = False
-    for record in read_bundle(bundle_path).records:
-        if record.get("record") != "certificate":
-            continue
-        try:
-            taken = trust.add(json.dumps(record).encode(), now=now) or taken
-        except FrameRefused as refused:
-            logger.warning("A bootstrap certificate does not verify and is skipped. event=bootstrap_record_refused "
-                           "key=%s code=%s at=%s", record.get("key"), refused.code, refused.at)
-    if taken:
-        logger.info("Read the authority's renewed certificate from the bootstrap bundle. "
-                    "event=protocol1_bundle_certificates_taken path=%s", bundle_path)
-    return taken

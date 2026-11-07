@@ -7,6 +7,8 @@ over time", "State records"):
 - **keep a current revocations record**: read the authority's newest one from
   ``UA1_CERTS`` at start and every half hour (the authority signs one every six hours
   and each lasts a day), so the host never refuses other hosts' frames for lack of one;
+- **forget** the trust records nothing can still need, at least daily
+  (``TrustStore.forget``, README "Trust over time"), so its trust store stays bounded;
 - **renew** its certificate when two thirds of its life are gone;
 - **take the newest certificate** when another process runs as the same host
   (``take_newest_certificate``): every team services instance is host ``team-services``,
@@ -18,16 +20,25 @@ over time", "State records"):
 - **report liveness**: write its own host record every 10 seconds, each lasting 30, so a
   host that stops shows as gone within 30 seconds of its last write, as the presence
   heartbeat did, and one or two lost writes do not make a running host look gone.
-  Nothing moves because of that. The record lists the parts of the host that are not
-  healthy (``components``, each with a code saying why), such as an agent whose session
-  the team services refused; the gateway shows them as Status page findings (plan 13B.5).
-  The host is then ``degraded``: it still serves everything else. When they change, the
-  host writes its record again at once (``report_now``) rather than at the next interval;
+  Nothing moves because of that. Liveness has a loop of its own: the trust and
+  certificate upkeep, whose requests to the authority may wait 30 seconds or fail for
+  days, runs beside it and never delays or skips a write. The record lists the parts of
+  the host that are not healthy (``components``, each with a code saying why), such as an
+  agent whose session the team services refused; the gateway shows them as Status page
+  findings (plan 13B.5). Each is checked against the contract first, and one it cannot
+  carry is left out and logged, so a bad component never stops the record. The host is
+  then ``degraded``: it still serves everything else. When they change, the host writes
+  its record again at once (``report_now``) rather than at the next interval;
+- **look up unknown records**: a frame or record that names a certificate or session the
+  host does not hold yet is checked again after reading that record from ``UA1_CERTS``
+  (``fetch_trust``), joins included: a join reply signed by the authority's renewed
+  certificate is checked that way. A lookup that fails is logged and counts as nothing
+  new, so the frame is refused as it was;
 - **notice another contract** (README "Versions"). While the label is a pre-release, hosts
   of one installation refuse a peer whose contract digest differs. A host learns that it
-  runs another contract than the installation from the team services' host record, which
-  it reads when it starts and whenever it changes (``follow_contract``), or from a
-  ``protocol_mismatch`` answer to its join or renewal. It logs both digests once and tells
+  runs another contract than the installation from the team services' host record (signed
+  by the team services, ``follow_contract``), which it reads when it starts and whenever
+  it changes, or from a ``protocol_mismatch`` answer to its join or renewal. It logs both digests once and tells
   its listeners (``on_other_contract``), which drain its work; its record then says
   ``draining`` (``drain``) and, once it holds nothing, ``drained`` (``finish_drain``). From
   then on it renews only to give up its agents (``HostProfile.giving_up``): a renewal for
@@ -47,9 +58,11 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 import rfc8785
+from pydantic import ValidationError
 
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
+from custom_messages.wire.models import HostStateComponentsItem
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import HostCertificate
 from custom_transport.protocol1.bootstrap import read_bundle
@@ -63,7 +76,7 @@ from custom_transport.protocol1.joining import (
     join,
 )
 from custom_transport.protocol1.live import LiveHost, utc_now
-from custom_transport.protocol1.state_records import StateRecords
+from custom_transport.protocol1.state_records import StateRecords, rising_sequence
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
@@ -72,10 +85,17 @@ from runtime_settings.instance_layout import InstanceLayout
 LIVENESS_INTERVAL = timedelta(seconds=10)
 LIVENESS_LIFETIME = timedelta(seconds=30)
 TRUST_REFRESH_INTERVAL = timedelta(minutes=30)
+# How often a host forgets trust records nothing can still need (README "Trust over time": at least daily).
+FORGET_INTERVAL = timedelta(hours=6)
+# How often the trust and certificate upkeep looks whether something is due.
+UPKEEP_CHECK_INTERVAL = timedelta(seconds=10)
+# How long the team services' host record is watched again after the watch failed.
+_FOLLOW_RETRY_SECONDS = 5.0
 # The most components a host record lists (the contract's host record, ``components``).
 HOST_COMPONENTS_MAX = 16
-# The team services' host id: their host record names the contract the installation runs (``follow_contract``).
+# The team services' host id and role: their host record names the contract the installation runs (``follow_contract``).
 TEAM_SERVICES_RUNTIME = "team-services"
+TEAM_SERVICES_ROLE = "team_services"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -127,6 +147,11 @@ class MessageHost:
     _reported_state: Optional[str] = None
     _reporting: asyncio.Lock = field(default_factory=asyncio.Lock)
     _last_trust_refresh: Optional[datetime] = None
+    _last_forget: Optional[datetime] = None
+    # The trust store the host checks with, from its first join on; join replies are checked with it too.
+    _trust: Optional[PersistentTrustStore] = None
+    # The components the last record left out, so each new set of them is logged once.
+    _components_left_out: tuple[str, ...] = ()
     # Held while the certificate changes (a renewal, a new join), so one never overwrites the other's.
     _certificate_change: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -150,17 +175,20 @@ class MessageHost:
                                           self.layout.host_trust_dir(self.profile.runtime), now)
         # The contract the host's join names, and against which it reads other hosts' records.
         trust.store.contract_sha256 = self.contract_sha256
+        self._trust = trust
+        # One identity: records are signed with what the live host signs frames with, so a
+        # renewal or a new join switches both at once. The records exist before the join, whose
+        # reply may name a certificate the host reads from UA1_CERTS (fetch_trust).
+        self.records = StateRecords.on_connection(self.nc, lambda: self.identity, trust, fetch_trust=self.fetch_trust)
         try:
-            certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger)
+            certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
+                                     fetch_trust=self.fetch_trust)
         except JoinRefused as refused:
             if refused.outcome == "protocol_mismatch":
                 self.learned_other_contract(refused.accepted_contract_sha256, "join")
             raise
         self.live = LiveHost(self.nc, HostIdentity(keys, certificate), trust, clock=self.clock, logger=self.logger,
                              fetch_trust=self.fetch_trust)
-        # One identity: records are signed with what the live host signs frames with, so a
-        # renewal or a new join switches both at once.
-        self.records = StateRecords.on_connection(self.nc, lambda: self.identity, trust, fetch_trust=self.fetch_trust)
         self._started_at = now
         await self.refresh_trust()
         if report:
@@ -176,7 +204,7 @@ class MessageHost:
         nothing.
         """
 
-        assert self.records is not None
+        assert self.records is not None and self._trust is not None, "start() first"
         try:
             document = json.loads(data)
             issuer = document["issuer"] if "issuer" in document else document["writer"]
@@ -186,14 +214,25 @@ class MessageHost:
             team, epoch = str(issuer.get("team", "")), int(issuer["membership_epoch"])
         except (ValueError, KeyError, TypeError, AttributeError):
             return False
-        if installation != self.identity.installation:
+        if installation != self._trust.store.installation:
             return False
         now = self.clock()
-        taken = await self.records.take_trust_record("certificate", f"host.{installation}.{runtime}.{epoch}", now=now)
+        wanted = [("certificate", f"host.{installation}.{runtime}.{epoch}")]
         session = issuer.get("session")
         if isinstance(session, str):
-            taken = await self.records.take_trust_record("agent_session", f"session.{installation}.{team}.{session}",
-                                                         now=now) or taken
+            wanted.append(("agent_session", f"session.{installation}.{team}.{session}"))
+        taken = False
+        for record, key in wanted:
+            try:
+                taken = await self.records.take_trust_record(record, key, now=now) or taken
+            except FrameRefused as refused:
+                self.logger.warning("A record named by a frame or record does not verify and is not taken. "
+                                    "event=protocol1_trust_lookup_refused runtime=%s key=%s code=%s",
+                                    self.profile.runtime, key, refused.code)
+            except Exception as error:  # noqa: BLE001 - a lookup that fails takes nothing; the caller refuses as before
+                self.logger.warning("A record named by a frame or record could not be read. "
+                                    "event=protocol1_trust_lookup_failed runtime=%s key=%s error=%s: %s",
+                                    self.profile.runtime, key, type(error).__name__, error)
         return taken
 
     async def refresh_trust(self) -> None:
@@ -243,11 +282,27 @@ class MessageHost:
         """
 
         try:
-            return [dict(item) for item in self.components()][:HOST_COMPONENTS_MAX]
+            listed = [dict(item) for item in self.components()]
         except Exception:
             self.logger.exception("The host's components could not be read; its record lists none. "
                                   "event=protocol1_host_components_failed runtime=%s", self.profile.runtime)
             return []
+        kept: list[dict[str, str]] = []
+        left_out: list[str] = []
+        for item in listed:
+            try:
+                HostStateComponentsItem.model_validate(item)
+            except ValidationError:
+                left_out.append(str(item.get("component", "?"))[:80])
+                continue
+            kept.append(item)
+        if tuple(left_out) != self._components_left_out:
+            self._components_left_out = tuple(left_out)
+            if left_out:
+                self.logger.warning("Host components the contract cannot carry are left out of the host record. "
+                                    "event=protocol1_host_components_invalid runtime=%s components=%s",
+                                    self.profile.runtime, ",".join(left_out))
+        return kept[:HOST_COMPONENTS_MAX]
 
     async def publish_liveness(self, state: str = "accepting") -> None:
         """Write this host's own record, which expires after ``LIVENESS_LIFETIME`` unless written again."""
@@ -267,7 +322,7 @@ class MessageHost:
         assert self.records is not None
         now = self.clock()
         # A sequence above every earlier one, also across restarts: at least the time in milliseconds.
-        self._liveness_sequence = max(self._liveness_sequence + 1, int(now.timestamp() * 1000))
+        self._liveness_sequence = rising_sequence(self._liveness_sequence, now)
         runtime = self.profile.runtime
         document = self.records.signed("host", runtime, self.liveness_body(state), sequence=self._liveness_sequence,
                                        issued_at=now, expires_at=now + LIVENESS_LIFETIME)
@@ -277,20 +332,24 @@ class MessageHost:
     async def renew_if_due(self) -> None:
         """Renew the certificate once two thirds of its life are gone; on another contract, only once drained."""
 
+        if not self._renewal_due():
+            return  # checked before the certificate's lock, which a join for more types may hold for minutes
         async with self._certificate_change:
-            if self.state == "drained" and not self._give_up_answered:
-                await self._renew()  # the renewal that gives up its agents, until it is answered
-                return
-            certificate = self.identity.certificate
-            life = certificate.expires_at - certificate.issued_at
-            if self.clock() < certificate.issued_at + life * 2 / 3:
-                return
-            if self.installation_contract is not None and self.state != "drained":
-                # Only a renewal that gives up every agent is answered (module docstring).
-                self.logger.debug("A host on another contract renews only once it drained. runtime=%s",
-                                  self.profile.runtime)
-                return
-            await self._renew()
+            if self._renewal_due():
+                await self._renew()
+
+    def _renewal_due(self) -> bool:
+        if self.state == "drained":
+            return not self._give_up_answered  # the renewal that gives up its agents, until it is answered
+        certificate = self.identity.certificate
+        life = certificate.expires_at - certificate.issued_at
+        if self.clock() < certificate.issued_at + life * 2 / 3:
+            return False
+        if self.installation_contract is not None:
+            # Only a renewal that gives up every agent is answered (module docstring).
+            self.logger.debug("A host on another contract renews only once it drained. runtime=%s", self.profile.runtime)
+            return False
+        return True
 
     async def take_newest_certificate(self) -> None:
         """Sign with this host's newest certificate, which another process of the same host may hold; renew it if due.
@@ -407,7 +466,7 @@ class MessageHost:
             profile = replace(self.profile, agent_types=tuple(sorted(asked)))
             try:
                 certificate = await join(self.nc, self.identity.keys, self.live.trust, profile, clock=self.clock,
-                                         logger=self.logger)
+                                         logger=self.logger, fetch_trust=self.fetch_trust)
             except JoinRefused as refused:
                 self.logger.warning("The authority did not grant more agent types; the host keeps its certificate. "
                                     "event=protocol1_rejoin_refused runtime=%s outcome=%s agent_types=%s message=%s",
@@ -466,32 +525,52 @@ class MessageHost:
     async def follow_contract(self, runtime: str = TEAM_SERVICES_RUNTIME) -> None:
         """Read ``runtime``'s host record (the team services') when it starts and whenever it changes; runs until cancelled.
 
-        A record that names another digest than this host's means the installation runs
-        another contract (``learned_other_contract``). A record that does not verify says
-        nothing about it and is logged.
+        A record that the team services signed and that names another digest than this
+        host's means the installation runs another contract (``learned_other_contract``).
+        A record that does not verify, or that another host signed (every process shares one
+        NATS login in this phase, so any can write the key), says nothing about it and is
+        logged. A watch that fails is started again a few seconds later.
         """
 
         assert self.records is not None and self.live is not None, "start() first"
-        async for key, raw in self.records.watch("host", runtime):
-            if raw is None:
-                continue
+        while True:
             try:
-                try:
-                    record = self.live.trust.store.verify(raw, record="host", now=self.clock())
-                except FrameRefused as refused:
-                    if refused.code != "unknown_key" or not await self.fetch_trust(raw):
-                        raise
-                    record = self.live.trust.store.verify(raw, record="host", now=self.clock())
+                async for key, raw in self.records.watch("host", runtime):
+                    if raw is not None:
+                        await self._contract_record(key, raw, runtime)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - the watch keeps running through a NATS failure
+                self.logger.warning("Watching the team services' host record failed; watching again. "
+                                    "event=protocol1_contract_watch_failed runtime=%s error=%s: %s",
+                                    self.profile.runtime, type(error).__name__, error)
+            await asyncio.sleep(_FOLLOW_RETRY_SECONDS)
+
+    async def _contract_record(self, key: str, raw: bytes, runtime: str) -> None:
+        """Learn the installation's contract from one version of ``runtime``'s host record (``follow_contract``)."""
+
+        assert self.live is not None
+        try:
+            try:
+                record = self.live.trust.store.verify(raw, record="host", now=self.clock())
             except FrameRefused as refused:
-                if refused.code != self._contract_record_refused:  # each new reason once, not at every write
-                    self._contract_record_refused = refused.code
-                    self.logger.info("A host record did not verify; it says nothing about the installation's "
-                                     "contract. event=protocol1_contract_record_refused runtime=%s key=%s code=%s",
-                                     self.profile.runtime, key, refused.code)
-                continue
-            self._contract_record_refused = None
-            if record.other_contract:
-                self.learned_other_contract(record.their_contract_sha256, "team_services_record")
+                if refused.code != "unknown_key" or not await self.fetch_trust(raw):
+                    raise
+                record = self.live.trust.store.verify(raw, record="host", now=self.clock())
+            signer = record.signer
+            if record.document.key != runtime or signer is None or signer.runtime != runtime \
+                    or TEAM_SERVICES_ROLE not in signer.roles:
+                raise FrameRefused("wrong_issuer", f"only {runtime} itself writes its host record", at="/writer")
+        except FrameRefused as refused:
+            if refused.code != self._contract_record_refused:  # each new reason once, not at every write
+                self._contract_record_refused = refused.code
+                self.logger.info("A host record did not verify; it says nothing about the installation's "
+                                 "contract. event=protocol1_contract_record_refused runtime=%s key=%s code=%s",
+                                 self.profile.runtime, key, refused.code)
+            return
+        self._contract_record_refused = None
+        if record.other_contract:
+            self.learned_other_contract(record.their_contract_sha256, "team_services_record")
 
     async def drain(self) -> None:
         """Say ``draining`` in the host record now: the host takes no new work and finishes or hands back what it holds."""
@@ -519,26 +598,63 @@ class MessageHost:
                                     exc_info=True)
 
     async def keep_up(self, stop: asyncio.Event, *, drained: Callable[[], bool] = lambda: True) -> None:
-        """Liveness every 10 seconds, trust every half hour and renewal when due, until ``stop`` is set.
+        """Liveness every 10 seconds, and beside it trust, forgetting and renewal when due, until ``stop`` is set.
 
-        The last record says the host drained, unless ``drained()`` says otherwise: a team
+        The two run apart (module docstring): a renewal that waits for the authority or a
+        join that holds the certificate's lock never delays a liveness write. Once ``stop``
+        is set no liveness write goes out, and a trust step still waiting (a renewal may wait
+        30 seconds) is cancelled rather than waited for, so a stopping process releases what
+        it holds at once; a renewal cut off that way is asked again with the same id. The
+        last record says the host drained, unless ``drained()`` says otherwise: a team
         services instance that lost its lock leaves the record to the one serving now.
         """
 
-        while not stop.is_set():
+        trust = asyncio.create_task(self._trust_loop(stop))
+        try:
+            await self._liveness_loop(stop)
+        finally:
+            trust.cancel()
+            await asyncio.gather(trust, return_exceptions=True)
+        if drained():
+            await self.publish_liveness("drained")
+
+    async def _liveness_loop(self, stop: asyncio.Event) -> None:
+        while not await _stopped_within(stop, LIVENESS_INTERVAL):
             try:
-                await asyncio.wait_for(stop.wait(), timeout=LIVENESS_INTERVAL.total_seconds())
-            except asyncio.TimeoutError:
-                pass
-            if stop.is_set():
-                break
-            try:
-                if self._last_trust_refresh is None or self.clock() - self._last_trust_refresh >= TRUST_REFRESH_INTERVAL:
-                    await self.refresh_trust()
-                await self.renew_if_due()
                 await self.publish_liveness(self.state)
+            except Exception:
+                self.logger.exception("The host record could not be written; trying again at the next interval. "
+                                      "event=protocol1_host_liveness_failed runtime=%s", self.profile.runtime)
+
+    async def _trust_loop(self, stop: asyncio.Event) -> None:
+        while not await _stopped_within(stop, UPKEEP_CHECK_INTERVAL):
+            try:
+                now = self.clock()
+                if self._last_trust_refresh is None or now - self._last_trust_refresh >= TRUST_REFRESH_INTERVAL:
+                    await self.refresh_trust()
+                if self._last_forget is None or now - self._last_forget >= FORGET_INTERVAL:
+                    self._forget(now)
+                await self.renew_if_due()
             except Exception:
                 self.logger.exception("A host upkeep step failed; trying again. event=protocol1_host_upkeep_failed "
                                       "runtime=%s", self.profile.runtime)
-        if drained():
-            await self.publish_liveness("drained")
+
+    def _forget(self, now: datetime) -> None:
+        """Forget the trust records nothing can still need (README "Trust over time", at least daily)."""
+
+        assert self.live is not None
+        self._last_forget = now
+        forgotten = self.live.trust.store.forget(now)
+        if forgotten:
+            self.logger.info("Forgot trust records nothing can still need. event=protocol1_trust_forgotten runtime=%s "
+                             "records=%s", self.profile.runtime, forgotten)
+
+
+async def _stopped_within(stop: asyncio.Event, interval: timedelta) -> bool:
+    """Wait ``interval`` or until ``stop``; whether ``stop`` is set."""
+
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=interval.total_seconds())
+    except asyncio.TimeoutError:
+        pass
+    return stop.is_set()

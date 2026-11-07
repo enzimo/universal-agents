@@ -20,6 +20,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from custom_messages.wire.encoding import format_timestamp
+from custom_messages.wire.kinds import PROTOCOL
 from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1.host_keys import ensure_host_keys, load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
@@ -986,6 +987,50 @@ async def test_the_team_services_delete_sessions_receivers_have_forgotten(broker
                 break
             await asyncio.sleep(0.1)
         assert old_key not in keys and current["key"] in keys
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+
+def forged_host_record(attacker: MessageHost, victim: str) -> bytes:
+    """A host record under ``victim``'s key, naming another contract, signed with the attacker's own key."""
+
+    identity = attacker.identity
+    certificate = identity.certificate
+    now = attacker.clock()
+    body = {**attacker.liveness_body("accepting"), "runtime": victim, "contract_sha256": OTHER_CONTRACT}
+    document = {"record": "host", "protocol": PROTOCOL, "key": victim,
+                "writer": {"type": "host", "installation": certificate.installation, "runtime": certificate.runtime,
+                           "membership_epoch": certificate.membership_epoch, "key_id": identity.keys.key_id},
+                "sequence": int(now.timestamp() * 1000) + 10_000_000, "issued_at": format_timestamp(now),
+                "expires_at": format_timestamp(now + timedelta(seconds=30)), "body": body}
+    return json.dumps(sign_state(document, identity.keys.application_key)).encode()
+
+
+@pytest.mark.asyncio
+async def test_a_host_cannot_say_another_host_runs_another_contract(broker: str, tmp_path: Path) -> None:
+    """A host writes only its own liveness: a record another host signed under its key, or under the team services',
+    neither keeps it from being placed nor makes the hosts that follow the team services drain."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
+        serving = await team_services(stack, broker, layout, stop)
+        worker = await host(stack, broker, layout, WORKER)
+        attacker = await host(stack, broker, layout, OTHER)
+        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        hosts_bucket = await attacker.nc.jetstream().key_value("UA1_HOSTS")
+        await hosts_bucket.put(WORKER.runtime, forged_host_record(attacker, WORKER.runtime))
+        assert (await open_session(worker, "researcher-2"))["outcome"] == "ok"
+
+        learned: list[str] = []
+        worker.on_other_contract(learned.append)
+        following = asyncio.create_task(worker.follow_contract())
+        await asyncio.sleep(0.5)
+        await hosts_bucket.put(TEAM_SERVICES_RUNTIME, forged_host_record(attacker, TEAM_SERVICES_RUNTIME))
+        await asyncio.sleep(1.0)
+        following.cancel()
+        assert learned == [] and worker.installation_contract is None
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
 

@@ -499,9 +499,12 @@ class InstallationAuthority:
     async def _renew_own_certificate(self, now: datetime) -> None:
         """Replace the authority's own certificate and sign with the new one from now on.
 
-        It goes to ``UA1_CERTS``, where running hosts read a certificate a frame names and
-        they do not hold yet, and to the bootstrap bundle, which joining hosts read. The
-        old one still signs for the overlap (5 minutes), so replies on their way stay valid.
+        It goes to ``UA1_CERTS`` before it signs anything: a host reads a certificate a frame
+        names and it does not hold yet from there, a joining host too (``joining.join``,
+        ``fetch_trust``), since its own copy of the bootstrap bundle, on another machine made
+        when it was set up, never learns of the new one. The bundle on this machine is written
+        again for hosts that start later. The old one still signs for the overlap (5
+        minutes), so replies on their way stay valid.
         """
 
         assert self.live is not None, "start() first"

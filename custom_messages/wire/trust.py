@@ -562,8 +562,15 @@ class TrustStore:
         if report and document.record == HOST:
             theirs = self.other_contract(raw.get("body"))
             if theirs is not None:
-                # Authentic, but shaped by another contract: the reader decides what it means.
+                # Authentic, but shaped by another contract: the reader decides what it means. A host
+                # still writes only its own liveness (``_check_host_record``), so the key and the body's
+                # runtime, read as received, name the signer; otherwise any host could say another runs
+                # another contract and make readers drain it.
                 assert signer is not None
+                self._expect_key(document, signer.runtime)
+                body = raw.get("body")
+                if not isinstance(body, Mapping) or body.get("runtime") != signer.runtime:
+                    raise FrameRefused("invalid_body", "a host writes only its own liveness record", at="/body/runtime")
                 return VerifiedRecord(document=document, body=None, signer=signer, digest=digest,
                                       other_contract=True, their_contract_sha256=theirs)
         try:
