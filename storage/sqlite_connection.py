@@ -132,10 +132,14 @@ DEFERRED_FLUSH_SYNCHRONOUS = "NORMAL"
 # Set once by an agent process (defer_flushes_until_sent); never in the gateway,
 # the broker or any other process, whose stores keep SQLITE_SYNCHRONOUS.
 _FLUSHES_DEFERRED = False
-# Database files (real paths) with commits not yet flushed, and the files whose
-# folder this process already flushed (a new WAL file's entry in its folder).
-_UNFLUSHED: set[str] = set()
+# Database files (real paths) with commits not yet flushed, each with a count
+# that grows with every noted commit, and the files whose folder this process
+# already flushed (a new WAL file's entry in its folder). One flush runs at a
+# time (_FLUSH_LOCK), so a sender arriving during another sender's flush waits
+# for it rather than finding nothing noted and sending first.
+_UNFLUSHED: dict[str, int] = {}
 _UNFLUSHED_LOCK = threading.Lock()
+_FLUSH_LOCK = threading.Lock()
 _FOLDER_FLUSHED: set[str] = set()
 # A statement's first word that writes nothing (module helper _writes).
 _NON_WRITING_STATEMENTS = frozenset(
@@ -503,7 +507,7 @@ def flushes_deferred() -> bool:
 
 def _note_unflushed_commit(path: str) -> None:
     with _UNFLUSHED_LOCK:
-        _UNFLUSHED.add(path)
+        _UNFLUSHED[path] = _UNFLUSHED.get(path, 0) + 1
 
 
 def has_unflushed_commits() -> bool:
@@ -516,40 +520,44 @@ def flush_unflushed_commits(*, logger: logging.Logger | None = None) -> None:
     """Put every deferred commit of this process on the disk before the caller sends.
 
     Flushes each noted database's WAL file, and its folder the first time, so
-    a new WAL file's entry survives too. A file that could not be flushed is
-    noted again and the error is raised: the caller must not send, so its
-    message stays unacknowledged or its outbox retries.
+    a new WAL file's entry survives too. A file stays noted until its flush
+    succeeds and no commit was noted for it while that flush ran; one flush
+    runs at a time, so a caller that arrives during another flush waits for
+    it and then flushes what it did not cover. A failed flush raises: the
+    caller must not send, so its message stays unacknowledged or its outbox
+    retries (``custom_agents.commit_flushes`` then stops all sending).
     """
 
-    with _UNFLUSHED_LOCK:
-        paths = sorted(_UNFLUSHED)
-        _UNFLUSHED.clear()
-    if not paths:
-        return
-    started = time.perf_counter()
-    remaining = list(paths)
-    try:
-        while remaining:
-            path = remaining[0]
-            _flush_file(f"{path}-wal")
-            if path not in _FOLDER_FLUSHED:
-                _flush_folder(os.path.dirname(path))
-                _FOLDER_FLUSHED.add(path)
-            remaining.pop(0)
-    except BaseException as error:
+    with _FLUSH_LOCK:
         with _UNFLUSHED_LOCK:
-            _UNFLUSHED.update(remaining)
-        (logger or _LOGGER).error(
-            "Could not flush SQLite commits to disk; nothing is sent until they are. "
-            "event=sqlite_flush_failed database=%s error_type=%s error=%s",
-            remaining[0],
-            type(error).__name__,
-            error,
-            extra={"component": "sqlite_connection", "storage_target": remaining[0]},
-        )
-        raise
-    finally:
-        _log_if_slow(paths[0], "flush", time.perf_counter() - started, statement=" ".join(paths), logger=logger)
+            pending = dict(_UNFLUSHED)
+        if not pending:
+            return
+        started = time.perf_counter()
+        path = ""
+        try:
+            for path, generation in sorted(pending.items()):
+                _flush_file(f"{path}-wal")
+                if path not in _FOLDER_FLUSHED:
+                    _flush_folder(os.path.dirname(path), logger=logger)
+                    _FOLDER_FLUSHED.add(path)
+                with _UNFLUSHED_LOCK:
+                    if _UNFLUSHED.get(path) == generation:
+                        del _UNFLUSHED[path]
+        except BaseException as error:
+            (logger or _LOGGER).error(
+                "Could not flush SQLite commits to disk; nothing is sent until they are. "
+                "event=sqlite_flush_failed database=%s error_type=%s error=%s",
+                path,
+                type(error).__name__,
+                error,
+                extra={"component": "sqlite_connection", "storage_target": path},
+            )
+            raise
+        finally:
+            _log_if_slow(
+                min(pending), "flush", time.perf_counter() - started, statement=" ".join(sorted(pending)), logger=logger
+            )
 
 
 def _on_macos() -> bool:
@@ -562,10 +570,15 @@ def _flush_descriptor(fd: int) -> None:
     if _on_macos():
         import fcntl
 
-        # Named only on macOS, so looked up there rather than spelled out.
-        fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC"))
-    else:
-        os.fsync(fd)
+        try:
+            # Named only on macOS, so looked up there rather than spelled out.
+            fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC"))
+            return
+        except OSError:
+            # Some volumes (network shares, some external disks) refuse it;
+            # SQLite then falls back to fsync as well.
+            pass
+    os.fsync(fd)
 
 
 def _flush_file(path: str) -> None:
@@ -581,14 +594,25 @@ def _flush_file(path: str) -> None:
         os.close(fd)
 
 
-def _flush_folder(path: str) -> None:
+def _flush_folder(path: str, *, logger: logging.Logger | None = None) -> None:
+    """Flush a folder's entries once; like SQLite, a folder that cannot be flushed is only reported."""
+
     if os.name == "nt":
         return  # Windows cannot open a folder to flush it; its file flush covers the entry.
-    fd = os.open(path or ".", os.O_RDONLY)
     try:
-        _flush_descriptor(fd)
-    finally:
-        os.close(fd)
+        fd = os.open(path or ".", os.O_RDONLY)
+        try:
+            _flush_descriptor(fd)
+        finally:
+            os.close(fd)
+    except OSError as error:
+        (logger or _LOGGER).warning(
+            "Could not flush a database folder; the database's own flush still ran. "
+            "event=sqlite_folder_flush_failed folder=%s error=%s",
+            path,
+            error,
+            extra={"component": "sqlite_connection", "storage_target": path},
+        )
 
 
 # A subcommand such as ``run-secure-tool-broker``. Other arguments are left

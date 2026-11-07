@@ -863,8 +863,13 @@ delivered (a crashed process loses nothing either way). So:
   noted files' write-ahead logs. One flush of a WAL file makes every commit in
   it durable, whichever connection wrote it, so a power loss leaves the state
   the agent had when it last sent something: what a crash at that moment
-  leaves, which recovery already handles. The gateway, the broker and every
-  other store keep flushing in each commit. Measured: about 100 ms per short
+  leaves, which recovery already handles. One flush runs at a time, on a
+  thread of its own (Strands runs synchronous tools on asyncio's shared pool),
+  and a file stays noted until a flush that started after its last commit
+  succeeds, so a sender arriving mid-flush waits. A failed flush stops all
+  later sends and acknowledgements of the process (a retried `fsync` can report
+  success for pages it never wrote) until it is restarted. The gateway, the
+  broker and every other store keep flushing in each commit. Measured: about 100 ms per short
   task instead of 90 ms with `NORMAL` and 330 ms with `FULL` on every commit,
   4 to 9 flushes instead of about 60.
 - Schema setup run outside a transaction (`CREATE ... IF NOT EXISTS`,

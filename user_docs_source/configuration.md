@@ -922,7 +922,11 @@ What it costs, measured on a local container disk where one flush takes about
 
 On slower storage these grow with the time one flush takes. A commit or flush
 that takes longer than a second is logged (`sqlite_commit_slow`,
-`sqlite_flush_slow`).
+`sqlite_flush_slow`). If the disk refuses a flush, the agent stops sending and
+acknowledging messages and logs `sqlite_flush_failed_sending_stopped`: a retry
+could wrongly report success. Fix the disk and restart the runtime; agents then
+recover from what is on the disk, and NATS delivers again what they had not
+acknowledged.
 
 ## Worker pools
 

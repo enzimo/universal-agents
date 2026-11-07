@@ -616,7 +616,7 @@ def deferring_process(monkeypatch):
 
     flushed: list[str] = []
     monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", True)
-    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", set())
+    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", {})
     monkeypatch.setattr(sqlite_connection, "_FOLDER_FLUSHED", set())
     real_flush = sqlite_connection._flush_descriptor
 
@@ -720,6 +720,63 @@ def test_schema_setup_commits_without_a_flush_and_data_still_with_one(tmp_path, 
     ]
     data_and_transaction = statements[6:]
     assert not any(s.startswith("PRAGMA synchronous=") for s in data_and_transaction)
+
+
+def test_a_sender_arriving_during_a_flush_waits_for_it(tmp_path, deferring_process, monkeypatch):
+    """A second sender must not find the file un-noted while the first sender's flush still runs."""
+
+    path = os.path.realpath(str(tmp_path / "agent.db"))
+    Path(f"{path}-wal").write_bytes(b"frames")
+    sqlite_connection._note_unflushed_commit(path)
+    inside, release = threading.Event(), threading.Event()
+    flushes: list[str] = []
+
+    def slow_flush(fd):
+        flushes.append("flush")
+        if len(flushes) == 1:
+            inside.set()
+            release.wait(5)
+
+    monkeypatch.setattr(sqlite_connection, "_flush_descriptor", slow_flush)
+    monkeypatch.setattr(sqlite_connection, "_FOLDER_FLUSHED", {path})
+    first = threading.Thread(target=sqlite_connection.flush_unflushed_commits)
+    first.start()
+    assert inside.wait(5)
+    assert sqlite_connection.has_unflushed_commits(), "still noted while its flush runs"
+    sqlite_connection._note_unflushed_commit(path)  # a commit lands during that flush
+    second_done = threading.Event()
+    second = threading.Thread(target=lambda: (sqlite_connection.flush_unflushed_commits(), second_done.set()))
+    second.start()
+    assert not second_done.wait(0.2), "the second sender waits for the running flush"
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert second_done.is_set()
+    assert flushes == ["flush", "flush"], "the commit that landed during the first flush is flushed again"
+    assert not sqlite_connection.has_unflushed_commits()
+
+
+def test_on_macos_a_volume_that_refuses_the_full_flush_gets_fsync(monkeypatch):
+    import fcntl
+
+    calls: list[str] = []
+    monkeypatch.setattr(sqlite_connection, "_on_macos", lambda: True)
+    monkeypatch.setattr(fcntl, "F_FULLFSYNC", 51, raising=False)
+
+    def refusing(fd, command):
+        calls.append("F_FULLFSYNC")
+        raise OSError(45, "Operation not supported")
+
+    monkeypatch.setattr(fcntl, "fcntl", refusing)
+    monkeypatch.setattr(os, "fsync", lambda fd: calls.append("fsync"))
+    sqlite_connection._flush_descriptor(0)
+    assert calls == ["F_FULLFSYNC", "fsync"]
+
+
+def test_a_folder_that_cannot_be_flushed_is_reported_not_fatal(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger=sqlite_connection.__name__):
+        sqlite_connection._flush_folder(str(tmp_path / "missing"))
+    assert "event=sqlite_folder_flush_failed" in caplog.text
 
 
 def test_a_slow_commit_is_logged(tmp_path, monkeypatch, caplog):

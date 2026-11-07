@@ -189,7 +189,8 @@ def test_a_second_different_barrier_is_refused(monkeypatch):
 def fresh_process(monkeypatch):
     monkeypatch.setattr(send_barrier, "_BEFORE_SEND", None)
     monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", False)
-    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", set())
+    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", {})
+    monkeypatch.setattr(commit_flushes, "_FAILED", None)
 
 
 def test_an_agent_process_flushes_before_sending(fresh_process):
@@ -211,7 +212,8 @@ async def test_the_flush_runs_off_the_event_loop_and_only_when_needed(fresh_proc
 
     sqlite_connection._note_unflushed_commit("/instance/dbs/task_history.db")
     await commit_flushes._flush_before_send()
-    assert len(threads) == 1 and threads[0] != threading.current_thread().name
+    # Its own thread, not asyncio's shared pool, which synchronous tools fill.
+    assert len(threads) == 1 and threads[0].startswith("sqlite-flush")
 
 
 def test_a_clean_exit_flushes_what_was_recorded_after_the_last_send(fresh_process, monkeypatch, caplog):
@@ -229,3 +231,47 @@ def test_a_clean_exit_flushes_what_was_recorded_after_the_last_send(fresh_proces
     with caplog.at_level(logging.WARNING, logger="test.exit"):
         commit_flushes.flush_commits_at_exit(logging.getLogger("test.exit"))
     assert "event=sqlite_flush_at_exit_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_after_a_failed_flush_the_process_sends_nothing_more(fresh_process, monkeypatch, caplog):
+    """A retried fsync can report success for pages it never wrote, so a failure is final."""
+
+    attempts: list[bool] = []
+
+    def failing(**_):
+        attempts.append(True)
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(sqlite_connection, "flush_unflushed_commits", failing)
+    sqlite_connection._note_unflushed_commit("/instance/dbs/task_history.db")
+    with caplog.at_level(logging.CRITICAL, logger=commit_flushes.__name__):
+        with pytest.raises(OSError):
+            await commit_flushes._flush_before_send()
+    assert "event=sqlite_flush_failed_sending_stopped" in caplog.text
+
+    with pytest.raises(commit_flushes.CommitFlushFailed):
+        await commit_flushes._flush_before_send()
+    assert attempts == [True], "never retried"
+    with caplog.at_level(logging.WARNING, logger="test.exit"):
+        commit_flushes.flush_commits_at_exit(logging.getLogger("test.exit"))
+    assert "event=sqlite_flush_at_exit_skipped" in caplog.text and attempts == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_message_ends_after_its_last_failed_try_only_once_the_barrier_passed(events, monkeypatch):
+    from custom_transport.nats_pull import ENDED, RETURNED, return_or_end
+
+    message = _Message(events)
+    message.metadata.num_delivered = 5
+    assert await return_or_end(message, max_deliver=5) == ENDED
+    assert events == ["barrier", "msg.term"]
+
+    async def failing_barrier() -> None:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(send_barrier, "_BEFORE_SEND", failing_barrier)
+    events.clear()
+    assert await return_or_end(message, max_deliver=5) == RETURNED
+    assert events == ["msg.nak"], "kept in its stream rather than ended"
+

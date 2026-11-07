@@ -314,7 +314,7 @@ async def test_an_agent_flushes_its_records_before_it_replies(tmp_path, monkeypa
     database = os.path.realpath(str(tmp_path / "nats-agent.db"))
     events: list[tuple[str, str]] = []
     monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", True)
-    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", set())
+    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", {})
     monkeypatch.setattr(sqlite_connection, "_FOLDER_FLUSHED", set())
     note = sqlite_connection._note_unflushed_commit
     monkeypatch.setattr(
