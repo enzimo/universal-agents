@@ -1338,7 +1338,10 @@ async def _handle_task_request(
     owner_person_id = await asyncio.to_thread(verified_meta_person_id, self, normalized_meta)
     if task_request.parent_task_id is None:
         try:
-            normalized_meta = ensure_task_conversation_context(
+            # Its writes block, more so on a slow disk, so they run in a thread,
+            # not on the loop that handles the agent's messages.
+            normalized_meta = await asyncio.to_thread(
+                ensure_task_conversation_context,
                 conversation_store=self._conversation_store,
                 team_id=self.team_id,
                 owner_agent_id=self.id,
@@ -1395,7 +1398,9 @@ async def _handle_task_request(
     if task_request.parent_task_id is None and getattr(
         normalized_meta, "conversation_id", None
     ):
-        record_task_conversation_history(
+        # A task-manager change, so on its lane like every other one, not on the loop.
+        await self.task_manager.operations_runtime.run(
+            record_task_conversation_history,
             task_manager=self.task_manager,
             task_id=task_request.task_id,
             conversation_id=normalized_meta.conversation_id,
