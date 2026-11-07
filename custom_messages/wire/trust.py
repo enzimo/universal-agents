@@ -342,6 +342,15 @@ class TrustStore:
         replaced_at = self._replacements.get((certificate.installation, certificate.runtime, certificate.certificate_id))
         return certificate if replaced_at is None else replace(certificate, replaced_at=replaced_at)
 
+    def held_record(self, record: str, key: str) -> Optional[tuple[int, str]]:
+        """The sequence and digest of the newest trust record held under ``key``, if any.
+
+        A host's liveness record names its certificate by this digest (README, "State records").
+        """
+
+        held = self._sequences.get((record, key))
+        return None if held is None else (held.sequence, held.digest)
+
     def agent_session(self, installation: str, team: str, session: str) -> Optional[AgentSession]:
         return self._sessions.get((installation, team, session))
 

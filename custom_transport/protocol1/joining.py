@@ -20,9 +20,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
@@ -50,6 +51,20 @@ from custom_transport.send_barrier import before_send
 # The installation authority's service id, which joins and renewals name as their audience.
 AUTHORITY_SERVICE_ID = "authority"
 _LOGGER = logging.getLogger(__name__)
+
+
+# The contract's agent_type: until grouped queues, at most 24 characters (plan decision 56).
+AGENT_TYPE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$")
+
+
+def certificate_agent_types(agent_types: Iterable[str], logger: logging.Logger) -> frozenset[str]:
+    """The agent types a certificate can name; a type it cannot is left out, with a warning."""
+
+    allowed = frozenset(agent_type for agent_type in agent_types if AGENT_TYPE_PATTERN.match(agent_type))
+    for left_out in sorted(set(agent_types) - allowed):
+        logger.warning("An agent type is too long or has characters a host certificate cannot carry; its agents "
+                       "get no protocol 1 session. event=protocol1_agent_type_not_certifiable agent_type=%s", left_out)
+    return allowed
 
 
 @dataclass(frozen=True)
