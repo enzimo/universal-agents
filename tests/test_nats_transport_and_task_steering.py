@@ -489,8 +489,11 @@ async def test_proactive_steering_for_waiting_parent_forwards_to_pending_subtask
         append_history_entry=MagicMock(),
     )
 
-    async def send_operational_message(envelope: MessageEnvelope) -> None:
-        sent.append(envelope)
+    routed: list[str] = []
+
+    async def send_message(*, message: MessageEnvelope, routing_key: str) -> None:
+        sent.append(message)
+        routed.append(routing_key)
 
     agent = SimpleNamespace(
         id="manager",
@@ -503,9 +506,18 @@ async def test_proactive_steering_for_waiting_parent_forwards_to_pending_subtask
         _processed_task_steering_ids=set(),
         _agent_id_by_name={},
         named_agent_type_queue_map={"WebResearchAgent": "team_303_WebResearchAgent"},
-        _send_operational_message=send_operational_message,
-        _logger=SimpleNamespace(warning=lambda *args, **kwargs: None),
+        team_comms=SimpleNamespace(send_message=send_message),
+        _logger=SimpleNamespace(warning=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None,
+                                exception=lambda *args, **kwargs: None),
     )
+
+    # The worker holding the delegated subtask, from its record (plan decision 59).
+    from custom_agents import task_steering_runtime
+
+    async def holders(_agent):
+        return {child_task_id: "worker_7"}
+
+    task_steering_runtime._delegated_task_holders, original_holders = holders, task_steering_runtime._delegated_task_holders
     steering = TaskSteering(
         steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
         target_task_id=parent_task_id,
@@ -517,19 +529,22 @@ async def test_proactive_steering_for_waiting_parent_forwards_to_pending_subtask
         replied_message=RepliedMessage(author="assistant", text="Soup recipes found: 3."),
     )
 
-    await handle_task_steering_message(
-        agent,
-        steering,
-        MessageHeader(
-            from_agent_id="gateway", to_routing_path=RoutingType.ALL_AGENTS_ROUTE
-        ),
-        MessageMeta(
-            msg_correlation_id="corr_steering",
-            conversation_id="conversation_1",
-            requester_type=RequesterType.USER_REQUESTER,
-            is_response_requested=False,
-        ),
-    )
+    try:
+        await handle_task_steering_message(
+            agent,
+            steering,
+            MessageHeader(
+                from_agent_id="gateway", to_routing_path=RoutingType.ALL_AGENTS_ROUTE
+            ),
+            MessageMeta(
+                msg_correlation_id="corr_steering",
+                conversation_id="conversation_1",
+                requester_type=RequesterType.USER_REQUESTER,
+                is_response_requested=False,
+            ),
+        )
+    finally:
+        task_steering_runtime._delegated_task_holders = original_holders
 
     assert agent._pending_proactive_task_steering[parent_task_id] == [steering]
     assert len(sent) == 1
@@ -541,7 +556,10 @@ async def test_proactive_steering_for_waiting_parent_forwards_to_pending_subtask
     assert forwarded.msg_content.replied_message == steering.replied_message
     assert forwarded.msg_meta.to_named_agent_type == "WebResearchAgent"
     assert forwarded.msg_meta.is_response_requested is False
-    assert forwarded.msg_header.to_routing_path == RoutingType.ALL_AGENTS_ROUTE
+    # To the holder's own control mailbox, durably; it reads it while it works.
+    assert forwarded.msg_header.to_routing_path == "worker_7" and routed == ["worker_7"]
+    assert NatsSubjectMapper(team_id="team_303").route_subject("worker_7", envelope=forwarded) == (
+        NatsSubjectMapper(team_id="team_303").agent_control_subject("worker_7"))
 
 
 @pytest.mark.asyncio

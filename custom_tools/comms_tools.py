@@ -7,7 +7,6 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_transport.base import TransportPublishOptions
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
@@ -42,7 +41,6 @@ class TeamComms(BaseModel):
     nats_max_deliver: int = Field(default=TRANSPORT_DEFAULTS.max_deliver.value)
     nats_duplicate_window_seconds: float = Field(default=TRANSPORT_DEFAULTS.duplicate_window_seconds.value)
     nats_work_max_age_seconds: Optional[float] = Field(default=TRANSPORT_DEFAULTS.work_max_age_seconds.value)
-    nats_presence_max_age_seconds: Optional[float] = Field(default=TRANSPORT_DEFAULTS.presence_max_age_seconds.value)
     nats_process_consumer_inactive_threshold_seconds: float = Field(
         default=TRANSPORT_DEFAULTS.process_consumer_inactive_threshold_seconds.value,
         gt=0,
@@ -69,7 +67,6 @@ class TeamComms(BaseModel):
         nats_max_deliver: int = TRANSPORT_DEFAULTS.max_deliver.value,
         nats_duplicate_window_seconds: float = TRANSPORT_DEFAULTS.duplicate_window_seconds.value,
         nats_work_max_age_seconds: Optional[float] = TRANSPORT_DEFAULTS.work_max_age_seconds.value,
-        nats_presence_max_age_seconds: Optional[float] = TRANSPORT_DEFAULTS.presence_max_age_seconds.value,
         nats_process_consumer_inactive_threshold_seconds: float = (
             TRANSPORT_DEFAULTS.process_consumer_inactive_threshold_seconds.value
         ),
@@ -92,7 +89,6 @@ class TeamComms(BaseModel):
             nats_duplicate_window_seconds or TRANSPORT_DEFAULTS.duplicate_window_seconds.value
         )
         self.nats_work_max_age_seconds = nats_work_max_age_seconds
-        self.nats_presence_max_age_seconds = nats_presence_max_age_seconds
         self.nats_process_consumer_inactive_threshold_seconds = float(
             nats_process_consumer_inactive_threshold_seconds
         )
@@ -123,7 +119,6 @@ class TeamComms(BaseModel):
                     max_deliver=self.nats_max_deliver,
                     duplicate_window_seconds=self.nats_duplicate_window_seconds,
                     work_max_age_seconds=self.nats_work_max_age_seconds,
-                    presence_max_age_seconds=self.nats_presence_max_age_seconds,
                     process_consumer_inactive_threshold_seconds=(
                         self.nats_process_consumer_inactive_threshold_seconds
                     ),
@@ -178,28 +173,3 @@ class TeamComms(BaseModel):
 
         return await self._ensure_nats_adapter().delete_work_message(sequence)
 
-    async def broadcast_message(
-        self,
-        message: MessageEnvelope,
-        team_id: str,
-        broadcast_exchange: Optional[str] = None,
-    ) -> None:
-        _ = broadcast_exchange
-        try:
-            adapter = self._ensure_nats_adapter(team_id)
-            is_presence = isinstance(message.msg_content, AgentStatus)
-            await adapter.publish(
-                envelope=message,
-                routing_key=str(message.msg_header.to_routing_path or ""),
-                options=TransportPublishOptions(
-                    durable=is_presence,
-                    broadcast=not is_presence,
-                    presence=is_presence,
-                    # Presence retention belongs to its stream. A shorter
-                    # message TTL would discard still-retained replay data.
-                    ttl_seconds=None if is_presence else 180.0,
-                    idempotency_key=message.msg_header.idempotency_key or message.msg_header.message_id,
-                ),
-            )
-        except Exception:
-            self._logger.exception("Failed to publish NATS broadcast message.")

@@ -765,9 +765,9 @@ under their own rules.
 
 Schedules continue to use the shared database claim path. The startup service
 counts only workers registered in the local process; a remote NATS listener cannot
-suppress a needed local start. NATS carries worker
-presence, notices that an access request was decided, and the chat messages about
-stuck schedules. The scheduler does
+suppress a needed local start. NATS carries each worker's signed record of
+whether it is live and busy, notices that an access request was decided, and the
+chat messages about stuck schedules. The scheduler does
 not publish a second copy of the scheduled payload to a worker queue.
 
 A worker renews its launch lease on every scheduler pass. If it cannot renew for

@@ -300,7 +300,7 @@ async def test_filesystem_skill_added_mid_invocation_is_immediately_activatable(
 
 
 @pytest.mark.asyncio
-async def test_managed_skill_mutation_eagerly_reloads_presence_capabilities(
+async def test_managed_skill_mutation_eagerly_reloads_the_agents_skills(
     tmp_path,
 ) -> None:
     for name in ("prototype", "runtime-operations"):
@@ -319,11 +319,7 @@ async def test_managed_skill_mutation_eagerly_reloads_presence_capabilities(
     refresh_skills_plugin(plugin, skills_dir=str(tmp_path), force=True)
     assert plugin.get_available_skills(sdk_agent) == []
 
-    published_statuses: list[bool] = []
     refreshed_state: list[bool] = []
-
-    async def publish_presence(*, is_exiting: bool) -> None:
-        published_statuses.append(is_exiting)
 
     runtime = SimpleNamespace(
         _strands_agent=sdk_agent,
@@ -332,7 +328,6 @@ async def test_managed_skill_mutation_eagerly_reloads_presence_capabilities(
         _refresh_self_agent_state=AsyncMock(
             side_effect=lambda: refreshed_state.append(True)
         ),
-        _publish_presence_status=publish_presence,
         team_id="team_skills",
         _runtime_loop=object(),
         _logger=__import__("logging").getLogger(__name__),
@@ -355,5 +350,5 @@ async def test_managed_skill_mutation_eagerly_reloads_presence_capabilities(
     assert {skill.name for skill in plugin.get_available_skills(sdk_agent)} == {
         "runtime-operations"
     }
+    # The agent's own state is refreshed; the gateway reads the skills with agent.status.
     assert refreshed_state == [True]
-    assert published_statuses == [False]

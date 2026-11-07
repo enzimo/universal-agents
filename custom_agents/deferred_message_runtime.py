@@ -28,7 +28,6 @@ from custom_messages.contracts.task_v1 import (
     TaskSteering,
 )
 from custom_messages.enums import MessageMetaType
-from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
 from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 from storage.runtime_state_repository import DeferredMessageSnapshotRow, RuntimeStateRepository
@@ -556,7 +555,6 @@ def requires_execution_slot(envelope: MessageEnvelope) -> bool:
             ControlInstruction,
             AgentStatus,
             *GATEWAY_MANAGER_CONTROL_TYPES,
-            ManagedSkillCatalogChangedV1,
             TaskProgressStatus,
             TaskStatus,
             TaskSteering,

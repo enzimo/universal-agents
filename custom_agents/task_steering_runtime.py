@@ -423,17 +423,43 @@ async def _record_guidance_history(
     return entry is not None
 
 
+async def _delegated_task_holders(agent: Any) -> dict[str, str]:
+    """The worker holding each of this agent's open delegated tasks, by task id (empty if unreadable)."""
+
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    try:
+        records = await agent.task_manager.operations_runtime.run(
+            delegated_tasks(agent).list_open, str(agent.team_id), str(agent.id)
+        )
+    except Exception:
+        agent._logger.exception("Could not read delegated-task records; guidance reaches subtasks asked by name only. "
+                                "event=delegated_task_records_unreadable agent_id=%s", agent.id)
+        return {}
+    return {record.task_id: record.holder_agent_id for record in records if getattr(record, "holder_agent_id", None)}
+
+
 async def _forward_proactive_guidance_to_pending_subtasks(
     agent: Any,
     task_id: str,
     steering: TaskSteering,
     msg_meta: MessageMeta,
 ) -> int:
+    """Pass the lead's guidance on to the workers holding the task's delegated subtasks.
+
+    Each goes to the holder's own control mailbox (``agent.<id>.control``), durably, which the
+    worker reads while it works (plan decision 59: the old queued mailbox until phase 3, where
+    it becomes ``task.steer``). The holder comes from the delegated-task record, or for a
+    subtask asked of an agent by name, from the team's directory. A subtask no worker has
+    taken yet gets none: nothing would read it until then. Until message contract step 7d
+    this went to every agent on the operational subject, and the holder picked it out.
+    """
+
     get_pending_subtasks = getattr(agent.task_manager, "get_pending_subtasks", None)
-    send_operational_message = getattr(agent, "_send_operational_message", None)
-    if not callable(get_pending_subtasks) or not callable(send_operational_message):
+    if not callable(get_pending_subtasks):
         return 0
 
+    holders = await _delegated_task_holders(agent)
     forwarded_count = 0
     for subtask_info in (
         await agent.task_manager.operations_runtime.run(get_pending_subtasks, task_id)
@@ -446,6 +472,14 @@ async def _forward_proactive_guidance_to_pending_subtasks(
         target_named_agent_type = getattr(subtask_meta, "to_named_agent_type", None)
         target_agent_name = getattr(subtask_meta, "to_agent_name", None)
         if not target_named_agent_type and not target_agent_name:
+            continue
+        holder_id = holders.get(subtask.task_id) or (
+            agent._agent_id_by_name.get(target_agent_name) if target_agent_name else None
+        )
+        if not holder_id:
+            agent._logger.info("[%s] No worker holds a delegated subtask yet; guidance is not passed on to it. "
+                               "event=task_steering_forward_no_holder task_id=%s subtask_id=%s",
+                               agent.id, task_id, subtask.task_id)
             continue
 
         forwarded = TaskSteering(
@@ -474,7 +508,7 @@ async def _forward_proactive_guidance_to_pending_subtasks(
             msg_content=forwarded,
             msg_header=MessageHeader(
                 from_agent_id=agent.id,
-                to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
+                to_routing_path=holder_id,
                 response_routing_key=None,
                 agent_signature="",
                 idempotency_key=forwarded.idempotency_key or forwarded.steering_id,
@@ -490,7 +524,7 @@ async def _forward_proactive_guidance_to_pending_subtasks(
                 request_timezone=getattr(msg_meta, "request_timezone", None),
             ),
         )
-        await send_operational_message(envelope)
+        await agent.team_comms.send_message(message=envelope, routing_key=holder_id)
         forwarded_count += 1
 
     if forwarded_count:

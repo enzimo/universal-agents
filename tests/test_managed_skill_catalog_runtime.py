@@ -87,7 +87,6 @@ async def _specialist_runtime(
     )
     sdk_agent = _LocalSkillAgent()
     await plugin.init_agent(sdk_agent)  # type: ignore[arg-type]
-    published_presence: list[tuple[str, ...]] = []
     refreshed_state: list[bool] = []
 
     runtime = SimpleNamespace(
@@ -111,7 +110,6 @@ async def _specialist_runtime(
         _refresh_self_agent_state=AsyncMock(
             side_effect=lambda: refreshed_state.append(True)
         ),
-        _published_presence=published_presence,
         _refreshed_state=refreshed_state,
     )
 
@@ -124,12 +122,7 @@ async def _specialist_runtime(
             previous_fingerprint=runtime._skills_fingerprint,
         )
 
-    async def publish_presence(*, is_exiting: bool) -> None:
-        assert is_exiting is False
-        published_presence.append(tuple(list_agent_skill_names(plugin, sdk_agent)))
-
     runtime._refresh_skills_plugins = refresh
-    runtime._publish_presence_status = publish_presence
     refresh(force=False)
     await plugin.init_agent(sdk_agent)  # type: ignore[arg-type]
     return runtime, plugin
@@ -208,7 +201,7 @@ def _write_attestation(runtime: SimpleNamespace, skill_name: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_install_notification_refreshes_idle_specialist_and_presence(
+async def test_install_notification_refreshes_an_idle_specialist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, config_path = _instance(tmp_path)
@@ -246,11 +239,9 @@ async def test_install_notification_refreshes_idle_specialist_and_presence(
         "base",
         "grill-me",
     ]
-    assert specialist._published_presence == [("base", "grill-me")]
 
     # The same change again changes nothing.
     await skills_changed(specialist, _event(body))
-    assert specialist._published_presence == [("base", "grill-me")]
 
 
 @pytest.mark.asyncio
@@ -418,6 +409,6 @@ async def test_a_new_lane_agent_leaves_running_turns_their_skills_and_changes_re
 
     # A skill added meanwhile reaches the lane's running agent, not only the main one.
     _write_skill(config.layout.skills_dir, "added")
-    await refresh_agent_skill_catalog(runtime, force=False, publish_presence=False, reason="test")
+    await refresh_agent_skill_catalog(runtime, force=False, reason="test")
     assert list_agent_skill_names(plugin, lane_agent) == ["added", "base"]
     assert list_agent_skill_names(plugin, runtime._strands_agent) == ["added", "base"]

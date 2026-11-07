@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskAnswer
-from custom_messages.enums import ControlType, MessageMetaType, RoutingType
+from custom_messages.enums import MessageMetaType
 from custom_transport.base import TransportPublishOptions
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
@@ -108,7 +108,7 @@ class LiveNatsQueue:
 
 
 async def delete_team_streams(team_id: str, *, transport: TransportSettings | None = None) -> None:
-    """Delete the streams named for a live test's own team (work, dead letters, presence) when it ends.
+    """Delete the streams named for a live test's own team (its work and dead letters) when it ends.
 
     Each such test runs a team id of its own with a random part, so the streams whose names
     start with that team's stream prefix are its own, also on a shared server, and another
@@ -291,57 +291,29 @@ def persist_final_answer(
     logger.info(f"Stored final answer artifacts in {result_dir}")
 
 async def discover_manager_id(client: LiveNatsClient, team_id: str, user_queue: LiveNatsQueue) -> str:
-    """Discovers the TeamArchitect's ID by sending an operational status request."""
-    logger.info(f"Discovering TeamArchitect ID for team '{team_id}'...")
+    """The team lead's agent id, from the agents' own status rows in the team's database.
 
-    status_msg = AgentStatus(
-        self_id="user_client",
-        status_type=MessageMetaType.REQUEST,
-        info_type=ControlType.STATUS_REQUEST_BASIC,
-        named_agent_type="user_client",
-        is_paused=False,
-        is_executing=False,
-        has_execution_capacity=True,
-        is_busy=False,
-        name="user_client",
-        agent_role="user_client"
-    )
+    Agents no longer answer a status request on the operational subject (message contract
+    step 7d): who is live comes from the team's signed agent records, and every agent keeps
+    its own row in ``agent_states``, the lead's marked as the lead. ``client`` and
+    ``user_queue`` are kept for the callers' signature.
+    """
 
-    envelope = _ensure_response_metadata(MessageEnvelope(
-        msg_content=status_msg,
-        msg_meta=MessageMeta(from_agent_name="user", to_named_agent_type=None),
-        msg_header=MessageHeader(
-            from_agent_id="user_client",
-            to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-            response_routing_key=user_queue.name,
-            agent_signature=""
-        )
-    ))
+    from custom_agents.agent_state_store import AgentStateStore
 
-    try:
-        await client.publish(RoutingType.ALL_AGENTS_ROUTE, envelope, operational=True, durable=False)
-        logger.info("Published operational presence request over NATS")
-    except Exception as e:
-        logger.error(f"Failed to publish status request (is the team running?): {e}")
-        sys.exit(1)
-
-    logger.info("Waiting for answers from team to find TeamArchitect...")
-    manager_id = None
-
-    try:
-        deadline = asyncio.get_running_loop().time() + 20.0
-        while asyncio.get_running_loop().time() < deadline:
-            env = await user_queue.get(timeout=max(0.1, deadline - asyncio.get_running_loop().time()))
-            if isinstance(env.msg_content, AgentStatus) and env.msg_content.named_agent_type == "TeamArchitect":
-                manager_id = env.msg_content.self_id
-                logger.info(f"Found TeamArchitect with ID: {manager_id}")
-                break
-    except asyncio.TimeoutError:
-        logger.error("Timed out waiting for TeamArchitect to respond.")
-        sys.exit(1)
-
-    return manager_id
-
+    del client, user_queue
+    store = AgentStateStore(db_path=get_live_test_task_history_db_path())
+    deadline = asyncio.get_running_loop().time() + 20.0
+    while asyncio.get_running_loop().time() < deadline:
+        leads = [row for row in store.get_all()
+                 if row.team_id == team_id and row.is_team_lead and not row.is_exiting]
+        if leads:
+            lead = max(leads, key=lambda row: str(row.last_seen_at or ""))
+            logger.info("Found the team lead with ID: %s", lead.self_id)
+            return str(lead.self_id)
+        await asyncio.sleep(0.5)
+    logger.error("No live team lead in the team's status rows (is the team running?)")
+    sys.exit(1)
 async def main():
     parser = argparse.ArgumentParser(description="Live NATS Test Client")
     parser.add_argument("--template", required=True, help="Path to JSON template file")

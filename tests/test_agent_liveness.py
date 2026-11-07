@@ -241,7 +241,7 @@ def exiting_agent(team, agent_id, *, is_lead):
         _pending_work_timers=set(),
         _owned_tasks=set(),
         _local_schedule_task=None,
-        _presence_task=None,
+        _self_refresh_task=None,
         _scheduler_task=None,
     )
     agent.get_self_status = lambda is_exiting=False, **_: status(agent_id, exiting=is_exiting, agent_type="TeamArchitect")
@@ -252,7 +252,7 @@ def exiting_agent(team, agent_id, *, is_lead):
 
 
 async def run_exit_cleanup(agent, monkeypatch):
-    monkeypatch.setattr("custom_agents.strands_agent._publish_exit_presence", AsyncMock())
+    monkeypatch.setattr("custom_agents.strands_agent._stop_local_team_members", AsyncMock())
     await UniversalAgent._cleanup_nats_runtime_on_exit(agent, AsyncMock())
 
 

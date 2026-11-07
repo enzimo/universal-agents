@@ -601,7 +601,9 @@ def build_parser() -> argparse.ArgumentParser:
         '--host-runtime',
         type=str,
         default=None,
-        help="This process's protocol 1 host id (the launcher sets it; without it the process runs no host)",
+        help=("This process's protocol 1 host id (the launcher sets it). Without it the process runs no host, so "
+              "its agents hold no session: other agents and the gateway do not see them, and a run with several "
+              "agents needs the launcher"),
     )
     parser.add_argument(
         '--model-provider',
@@ -937,7 +939,6 @@ def run_with_args(args: argparse.Namespace) -> None:
                 'max_deliver': agent_runtime_settings.get('nats_max_deliver'),
                 'duplicate_window_seconds': agent_runtime_settings.get('nats_duplicate_window_seconds'),
                 'work_max_age_seconds': agent_runtime_settings.get('nats_work_max_age_seconds'),
-                'presence_max_age_seconds': agent_runtime_settings.get('nats_presence_max_age_seconds'),
                 'process_consumer_inactive_threshold_seconds': agent_runtime_settings.get(
                     'nats_process_consumer_inactive_threshold_seconds'
                 ),

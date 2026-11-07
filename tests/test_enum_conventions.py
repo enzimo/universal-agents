@@ -10,6 +10,8 @@ forms (see CONTRIBUTING.md, "String enums").
 
 from __future__ import annotations
 
+import pytest
+
 import ast
 import subprocess
 from pathlib import Path
@@ -72,11 +74,13 @@ def test_string_enum_text_is_its_value():
     assert "{}".format(MessageMetaType.REQUEST) == "request"
 
 
-def test_the_all_agents_route_maps_to_broadcast_as_member_or_value():
+def test_the_all_agents_route_has_no_mailbox_as_member_or_value():
+    """Nothing is broadcast to every agent's mailbox (message contract step 7d)."""
+
     mapper = NatsSubjectMapper(team_id="team_t")
-    expected = mapper.broadcast_subject()
-    assert mapper.route_subject(RoutingType.ALL_AGENTS_ROUTE) == expected
-    assert mapper.route_subject("++<all>++") == expected
+    for route in (RoutingType.ALL_AGENTS_ROUTE, "++<all>++"):
+        with pytest.raises(ValueError, match="no all-agents mailbox"):
+            mapper.route_subject(route)
 
 
 def test_the_routing_header_carries_the_route_value():

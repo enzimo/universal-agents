@@ -62,7 +62,7 @@ from custom_agents.deferred_message_runtime import (
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
 from custom_agents.custody_loss import install_custody_listeners
-from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
+from custom_agents.liveness_observation import LivenessObservation, SELF_REFRESH_SECONDS
 from custom_agents.agent_liveness import own_process_identity
 from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost
 from custom_agents.runtime_paths import (
@@ -340,7 +340,6 @@ from custom_messages.enums import (
     SystemScheduleKind,
     RecoverablePauseTrigger,
 )
-from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 from custom_messages.system_schedules import (
     AFTER_ACTION_REPORT_REVIEW_SCHEDULE_NAME_PREFIX,
     PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX,
@@ -479,8 +478,8 @@ async def _subscribe_manager_control_route(
     await subscribe_run_context_routes(agent, adapter, mapper)
 
 
-async def _publish_exit_presence(agent: Any) -> None:
-    """Stop local team members before publishing the lead's final presence."""
+async def _stop_local_team_members(agent: Any) -> None:
+    """The team lead stops the workers it runs as threads before it leaves."""
 
     if agent.is_team_lead and agent.team_id and agent._local_team_runtime is not None:
         await asyncio.to_thread(
@@ -489,7 +488,6 @@ async def _publish_exit_presence(agent: Any) -> None:
             agent.id,
             5.0,
         )
-    await agent._publish_presence_status(is_exiting=True)
 
 
 class UniversalAgent(BaseModel):
@@ -567,9 +565,6 @@ class UniversalAgent(BaseModel):
     nats_work_max_age_seconds: Optional[float] = Field(
         default=TRANSPORT_DEFAULTS.work_max_age_seconds.value
     )
-    nats_presence_max_age_seconds: Optional[float] = Field(
-        default=TRANSPORT_DEFAULTS.presence_max_age_seconds.value
-    )
     nats_process_consumer_inactive_threshold_seconds: float = Field(
         default=TRANSPORT_DEFAULTS.process_consumer_inactive_threshold_seconds.value,
         gt=0,
@@ -591,30 +586,6 @@ class UniversalAgent(BaseModel):
     default_request_timezone: Optional[str] = Field(
         default_factory=lambda: os.getenv("DEFAULT_REQUEST_TIMEZONE"),
         description="Optional IANA timezone used for top-level requests that omit request_timezone.",
-    )
-
-    # Broadcast processing configuration
-    broadcast_history_length: int = Field(
-        default=AGENT_DEFAULTS.broadcast_history_length.value,
-        description="Number of presence broadcasts to buffer in the exchange.",
-    )
-    max_broadcast_age_ms: int = Field(
-        default=AGENT_DEFAULTS.max_broadcast_age_ms.value,
-        description="Discard broadcast messages older than this threshold (in milliseconds).",
-    )
-    process_broadcasts: Optional[bool] = Field(
-        default=None,
-        description="Whether to consume broadcasts. Defaults to True for Team Leads and False for others.",
-    )
-    delete_fanout_on_exit: bool = Field(
-        default_factory=lambda: (
-            os.getenv(
-                "FANOUT_DELETE_ON_EXIT",
-                str(AGENT_DEFAULTS.delete_fanout_on_exit.value).lower(),
-            ).lower()
-            in ("true", "1", "yes")
-        ),
-        description="Whether the team lead should delete the fanout exchange on exit. Defaults to False (exchange persists). Set FANOUT_DELETE_ON_EXIT=true to enable.",
     )
 
     # Communication utilities
@@ -1123,7 +1094,7 @@ class UniversalAgent(BaseModel):
     _local_schedule_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     _worker_launch: Any = PrivateAttr(default=None)
     _worker_ready: bool = PrivateAttr(default=False)
-    _presence_task: Optional[asyncio.Task] = PrivateAttr(default=None)
+    _self_refresh_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     _liveness_observation: LivenessObservation = PrivateAttr(default_factory=LivenessObservation)
     _scheduler_wake: Optional[asyncio.Event] = PrivateAttr(default=None)
     _agent_id_by_name: Dict[str, str] = PrivateAttr(default_factory=dict)
@@ -1280,27 +1251,13 @@ class UniversalAgent(BaseModel):
                 await self._announce_execution_state()
 
     async def _announce_execution_state(self) -> None:
-        """Record and broadcast that this agent started or finished work.
+        """Record that this agent started or finished work.
 
-        The heartbeat alone reports a change up to NATS_PRESENCE_HEARTBEAT_SECONDS
-        late; Web Chat's activity mesh lights an agent while it works, so the
-        change is broadcast as it happens. A failed broadcast never affects the
-        work; the next heartbeat repeats the state.
+        Its signed record follows at once (``custom_agents.agent_host``), so Web Chat's
+        activity mesh lights the agent while it works, and its own status row is refreshed.
         """
 
         await self._refresh_self_agent_state()
-        try:
-            await self._publish_presence_status(is_exiting=False)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._logger.warning(
-                "Could not broadcast the agent's working state; the next heartbeat repeats it. "
-                "event=agent_execution_presence_failed agent_id=%s is_executing=%s error_type=%s",
-                self.id,
-                self.is_executing,
-                type(exc).__name__,
-            )
 
     def __init__(self, **kwargs):
         """
@@ -1482,7 +1439,6 @@ class UniversalAgent(BaseModel):
             nats_max_deliver=self.nats_max_deliver,
             nats_duplicate_window_seconds=self.nats_duplicate_window_seconds,
             nats_work_max_age_seconds=self.nats_work_max_age_seconds,
-            nats_presence_max_age_seconds=self.nats_presence_max_age_seconds,
             nats_process_consumer_inactive_threshold_seconds=(
                 self.nats_process_consumer_inactive_threshold_seconds
             ),
@@ -4089,18 +4045,11 @@ class UniversalAgent(BaseModel):
 
     @staticmethod
     def _is_operational_content(content: ContentType) -> bool:
-        return isinstance(
-            content,
-            (
-                AgentStatus,
-                ControlInstruction,
-                ManagedSkillCatalogChangedV1,
-                ManagerRuntimeWorkCommand,
-                TaskProgressStatus,
-                TaskStatus,
-                TaskSteering,
-            ),
-        )
+        """What still travels on the operational subject until phase 3 (plan decision 68): the gateway's task
+        progress, its parent-task status probe and thread guidance, with their replies. Agents ask each other
+        on their own addresses (``custom_agents.live_controls``)."""
+
+        return isinstance(content, (TaskProgressStatus, TaskStatus, TaskSteering))
 
     def _operational_target_matches(
         self,
@@ -4158,21 +4107,7 @@ class UniversalAgent(BaseModel):
             ):
                 return True
             return bool(target_agent_id or target_named_agent_type or target_agent_name)
-        if isinstance(msg_content, ControlInstruction) and msg_content.target_task_id:
-            if target_agent_id or target_agent_name or target_named_agent_type:
-                return True
-            return (
-                self.task_manager.get_task_info(msg_content.target_task_id) is not None
-            )
-        return bool(
-            target_agent_id
-            or target_agent_name
-            or target_named_agent_type
-            or isinstance(
-                msg_content,
-                (AgentStatus, ManagedSkillCatalogChangedV1),
-            )
-        )
+        return bool(target_agent_id or target_agent_name or target_named_agent_type)
 
     async def _send_operational_message(self, message: MessageEnvelope) -> None:
         if not self.team_id:
@@ -4719,7 +4654,7 @@ class UniversalAgent(BaseModel):
         if (
             isinstance(
                 msg_content,
-                (AgentStatus, AgentCreationRequest, ManagedSkillCatalogChangedV1),
+                (AgentStatus, AgentCreationRequest),
             )
             and msg_content.team_id
             and msg_content.team_id != "NO_TEAM"
@@ -4887,10 +4822,9 @@ class UniversalAgent(BaseModel):
             ] = f"{self.team_id}_{self.user_queue_postfix}"
 
             if self.team_id:
-                await self._publish_presence_status(is_exiting=False)
-                self._presence_task = asyncio.create_task(
-                    self._presence_heartbeat_loop(),
-                    name=f"{self.id}:presence_heartbeat",
+                self._self_refresh_task = asyncio.create_task(
+                    self._self_refresh_loop(),
+                    name=f"{self.id}:self_refresh",
                 )
 
             if self.is_team_lead:
@@ -4974,11 +4908,11 @@ class UniversalAgent(BaseModel):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._local_schedule_task
             self._local_schedule_task = None
-        if self._presence_task and not self._presence_task.done():
-            self._presence_task.cancel()
+        if self._self_refresh_task and not self._self_refresh_task.done():
+            self._self_refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._presence_task
-            self._presence_task = None
+                await self._self_refresh_task
+            self._self_refresh_task = None
 
         if self._scheduler_task and not self._scheduler_task.done():
             self._scheduler_task.cancel()
@@ -4987,10 +4921,10 @@ class UniversalAgent(BaseModel):
 
         if self.team_id:
             try:
-                await _publish_exit_presence(self)
+                await _stop_local_team_members(self)
             except Exception as exc:
                 self._logger.warning(
-                    "[%s] Failed to publish NATS exit presence: %s", self.id, exc
+                    "[%s] Failed to stop the team's local workers: %s", self.id, exc
                 )
 
         # Its protocol 1 session closes while the connection is still up.
@@ -5001,47 +4935,36 @@ class UniversalAgent(BaseModel):
 
         # Every agent, the lead included, writes only its own status row as it
         # stops. Once the exit flag is set every refresh already marks the row
-        # exiting, and the exit presence went out above; this last write comes
+        # exiting, and its record said "exiting" as it detached; this last write comes
         # after deliveries settled, so the row ends exiting whatever ran before.
         # The lead used to delete the whole team's rows here, so startup agents
         # that keep running through a manager-only restart looked gone; old rows
         # are now removed by agent_liveness.prune_departed_agent_rows.
         await self._refresh_self_agent_state(is_exiting=True)
 
-    async def _publish_presence_status(self, *, is_exiting: bool) -> None:
-        if not self.team_id:
-            return
-        message = MessageEnvelope(
-            msg_content=self.get_self_status(is_exiting=is_exiting),
-            msg_meta=MessageMeta(from_agent_name=self.name, to_named_agent_type=None),
-            msg_header=MessageHeader(
-                from_agent_id=self.id,
-                to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-                agent_signature="",
-            ),
-        )
-        await self.team_comms.broadcast_message(
-            message=message,
-            team_id=self.team_id,
-        )
+    async def _self_refresh_loop(self) -> None:
+        """Every ``SELF_REFRESH_SECONDS``: check the skill catalog and refresh this agent's own status row.
 
-    async def _presence_heartbeat_loop(self) -> None:
+        The row's time is the heartbeat the liveness rules read (``custom_agents.agent_liveness``);
+        the catalog check picks up a skill change whose event this agent missed. Who is live is
+        told by the signed records; nothing is broadcast.
+        """
+
         while not self._should_exit.is_set():
-            await asyncio.sleep(NATS_PRESENCE_HEARTBEAT_SECONDS)
+            await asyncio.sleep(SELF_REFRESH_SECONDS)
             if self._should_exit.is_set():
                 return
             try:
                 await repair_agent_skill_catalog(
                     self,
-                    reason="presence_heartbeat",
+                    reason="self_refresh",
                 )
-                await self._publish_presence_status(is_exiting=False)
                 await self._refresh_self_agent_state()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._logger.warning(
-                    "[%s] Failed to publish NATS presence heartbeat: %s", self.id, exc
+                    "[%s] The agent's own refresh failed: %s event=agent_self_refresh_failed", self.id, exc
                 )
 
     async def connect(self):
@@ -5073,7 +4996,6 @@ class UniversalAgent(BaseModel):
             return
 
         effective_to_routing_path = msg_header.to_routing_path or delivery.logical_route
-        is_for_all = effective_to_routing_path == RoutingType.ALL_AGENTS_ROUTE.value
         is_for_me = (
             effective_to_routing_path == self.id or delivery.logical_route == self.id
         )
@@ -5089,37 +5011,9 @@ class UniversalAgent(BaseModel):
             and self.is_team_lead
         )
 
-        if is_for_all and self._should_apply_stale_broadcast_filter(msg_envelope):
-            if msg_header.timestamp:
-                try:
-                    msg_time = datetime.fromisoformat(msg_header.timestamp)
-                    if msg_time.tzinfo is None:
-                        msg_time = msg_time.replace(tzinfo=timezone.utc)
-                    age_ms = (
-                        datetime.now(timezone.utc) - msg_time
-                    ).total_seconds() * 1000.0
-                    if age_ms > self.max_broadcast_age_ms:
-                        await delivery.ack()
-                        return
-                except Exception as exc:
-                    self._logger.warning(
-                        "[%s] Failed to parse NATS broadcast timestamp: %s",
-                        self.id,
-                        exc,
-                    )
-
+        # Nothing is broadcast to every agent's mailbox any more (message contract step 7d):
+        # a delivery is this agent's, its type's, or the lead's.
         should_process = is_for_me or is_for_my_type or is_for_team_lead
-        if is_for_all and isinstance(
-            msg_content,
-            (
-                AgentStatus,
-                ControlInstruction,
-                ManagerRuntimeWorkCommand,
-                TaskProgressStatus,
-                TaskSteering,
-            ),
-        ):
-            should_process = True
         if not should_process:
             self._logger.warning(
                 "NATS delivery does not target this agent. "
@@ -5495,14 +5389,6 @@ class UniversalAgent(BaseModel):
             # The team's directory comes from its agents' records (custom_agents.team_directory).
             self._logger.debug("[%s] Ignored an agent status reply. event=agent_status_reply_ignored from_agent_id=%s",
                                self.id, getattr(msg_header, "from_agent_id", None))
-
-    def _should_apply_stale_broadcast_filter(
-        self, msg_envelope: MessageEnvelope
-    ) -> bool:
-        # Presence replays the last snapshot after a restart, which can take
-        # longer than the broadcast age limit. Keep the sender's last_seen_at;
-        # agent_liveness decides freshness from that time and process evidence.
-        return not isinstance(getattr(msg_envelope, "msg_content", None), AgentStatus)
 
     async def handle_control_message(
         self,

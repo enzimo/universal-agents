@@ -294,3 +294,18 @@ def test_choosing_environment_secrets_writes_no_team_env(tmp_path: Path) -> None
     assert saved["launch"]["secrets_source"] == "environment"
     assert not saved["launch"].get("env_file_path")
     assert not (target / "team.env").exists()
+
+
+def test_a_version_8_export_drops_the_retired_presence_setting_and_keeps_the_rest() -> None:
+    """The presence stream left in message contract step 7d; an older export's value for it is dropped."""
+
+    from team_transfer.sections import SectionDocumentV1, upgrade_records
+    from team_transfer.settings import SettingsSection
+
+    records = [
+        {"path": ["transport", "presence_max_age_seconds"], "value": 900.0},
+        {"path": ["transport", "work_max_age_seconds"], "value": 86400.0},
+    ]
+    document = SectionDocumentV1.model_validate({"section": "settings", "schema_version": 8, "records": records})
+
+    assert upgrade_records(document, SettingsSection.schema_version) == [records[1]]

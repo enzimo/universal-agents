@@ -91,7 +91,7 @@
     {
       "filename": "GatewayInstanceConfig.schema.json",
       "model": "GatewayInstanceConfig",
-      "sha256": "19b6eb08691a93e16faa821c1596b8a4dbe89db9fcc1f51773bcf48fb6e82783"
+      "sha256": "46a4303bea36c4729e20dae1be7cd795a03974b7f5e975904f2d9904de8fcb26"
     },
     {
       "filename": "AgentCatalogDocument.schema.json",
@@ -216,7 +216,7 @@
         "GatewayInstanceConfig"
       ],
       "record_model": "SettingV1",
-      "schema_version": 8
+      "schema_version": 9
     },
     {
       "name": "operator_secrets",
