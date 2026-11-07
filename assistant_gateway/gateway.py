@@ -204,6 +204,7 @@ from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from assistant_gateway.team_services_client import AccessStorePersonReferences, MessageHostTeamServices
 from assistant_gateway.application.team_commands import GatewayTeamCommandService, GatewayTeamServices
+from custom_transport.protocol1.ids import new_message_id
 from assistant_gateway.ports.repositories import (
     DeliveryRepository,
     IdentityRepository,
@@ -574,8 +575,6 @@ def _team_commands(
     config: GatewayInstanceConfig,
     runtime: object,
     team_services: GatewayTeamServices | None,
-    *,
-    id_generator: GatewayIdGenerator,
 ) -> GatewayTeamCommandService:
     """People's commands that the team services answer (protocol 1, svc.team), one family
     at a time (assistant_gateway.application.team_commands); tests pass ``team_services``."""
@@ -587,7 +586,7 @@ def _team_commands(
             timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
         ),
         references=AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id),
-        id_generator=id_generator,
+        request_ids=new_message_id,
         logger=logger,
     )
 
@@ -1221,9 +1220,7 @@ class UserGateway:
             sessions=self._session_service,
             manager_commands=self._manager_commands,
             submission=self._interactive_submission_service,
-            team_commands=_team_commands(
-                config, resolved_manager_runtime, team_services, id_generator=self._id_generator
-            ),
+            team_commands=_team_commands(config, resolved_manager_runtime, team_services),
             pinned_memory=RuntimePinnedMemoryCodec(),
             private_authorizer=self._private_authorizer,
             # Disabling, removing and restoring people (assistant_gateway.person_departure).

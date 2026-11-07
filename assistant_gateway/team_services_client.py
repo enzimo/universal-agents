@@ -12,10 +12,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
+from assistant_gateway.application.team_commands import (
+    TeamCommandRefused,
+    TeamServicesNoAnswer,
+    TeamServicesUnavailable,
+)
 from assistant_gateway.message_host import GatewayHostUnavailable, GatewayMessageHost
 from custom_messages.wire.refusals import FrameRefused
-from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, RequestRefused, ServiceUnavailable
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
 
@@ -37,12 +41,21 @@ class MessageHostTeamServices:
                                                 timeout=self._timeout)
         except RequestRefused as error:
             raise TeamCommandRefused(kind, error.code) from error
-        except (GatewayHostUnavailable, ServiceUnavailable) as error:
-            raise TeamServicesUnavailable(f"The team services did not answer: {error}") from error
+        except ServiceUnavailable as error:
+            if error.reason == NO_ANSWER_IN_TIME:
+                raise TeamServicesNoAnswer("The team services did not answer in time.") from error
+            raise TeamServicesUnavailable("The team services are not running right now. Try again in a moment; "
+                                          "if it keeps happening, an administrator can check them.") from error
+        except GatewayHostUnavailable as error:
+            self._logger.warning("A person's command could not be sent. event=gateway_team_command_not_sent kind=%s "
+                                 "request_id=%s reason=%s", kind, request_id, error)
+            raise TeamServicesUnavailable("The gateway is still connecting to the team services. Try again in a "
+                                          "moment.") from error
         except FrameRefused as error:
             self._logger.error("The team services' reply was refused. event=gateway_team_reply_refused kind=%s "
                                "request_id=%s reason=%s", kind, request_id, error)
-            raise TeamServicesUnavailable("The team services' reply could not be checked.") from error
+            raise TeamServicesUnavailable("The team services' answer could not be checked, so it is not shown. An "
+                                          "administrator can find the reason in the gateway log.") from error
         return dict(verified.raw["body"])
 
 

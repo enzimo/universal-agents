@@ -57,7 +57,8 @@ def test_an_ok_reply_becomes_the_view_the_gateway_renders() -> None:
     result = CODEC.result(command, {"outcome": "ok", "facts": [fact], "total": 3, "next_offset": 1},
                           team_id="team_one", person_id="Ada Admin")
     assert result.scope.canonical_user_id == "Ada Admin" and result.scope.team_id is None
-    assert (result.total, result.returned, result.range) == (3, 1, [1, 2])
+    # Asked for positions 1-2, got one fact (the reply had to stop early): the view names what it shows.
+    assert (result.total, result.returned, result.range) == (3, 1, [1, 1])
     assert result.facts[0].record_digest == "b" * 64 and result.facts[0].canonical_user_id == "Ada Admin"
     rendered = CODEC.render(result, timezone_name="UTC")
     assert "1 of 3 active facts" in rendered and "#1: Likes tea." in rendered and "tags=drinks" in rendered
