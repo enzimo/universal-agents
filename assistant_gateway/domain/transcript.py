@@ -1,8 +1,9 @@
 """Gateway-owned presentation transcript records.
 
 The records in this module deliberately contain no SQL, HTTP, Pydantic, or
-browser concepts.  They are the stable persistence-neutral contract that a
-future gateway implementation in another language must reproduce.
+browser concepts.  They are the stable, persistence-neutral records the
+transcript service and the stores share, so either side can change how it
+works without changing them.
 """
 
 from __future__ import annotations

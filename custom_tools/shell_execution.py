@@ -2,8 +2,8 @@
 
 This module deliberately depends only on the Python standard library.  Agent
 SDK integration, workspace policy, credential policy, and OpenShell routing
-belong in the caller.  Keeping the process boundary small and typed makes it
-straightforward to replace with a Rust implementation later.
+belong in the caller.  Keeping the process boundary small and typed lets it be
+tested and reasoned about on its own, without an agent or its policies.
 """
 
 from __future__ import annotations
