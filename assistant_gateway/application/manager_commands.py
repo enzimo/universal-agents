@@ -13,15 +13,12 @@ from assistant_gateway.application.ports import (
     GatewayPrivateResourceAuthorizer,
 )
 from assistant_gateway.application.private_resources import (
-    PRIVATE_ACTION_CREATE,
     PRIVATE_ACTION_DELETE,
     PRIVATE_ACTION_READ,
     PRIVATE_ACTION_UPDATE,
     RESOURCE_CONVERSATION,
     RESOURCE_OBJECTIVE,
     RESOURCE_SCHEDULE,
-    RESOURCE_TEAM_MEMORY,
-    RESOURCE_USER_MEMORY,
     RESOURCE_TASK,
 )
 from assistant_gateway.application.request_context import (
@@ -32,7 +29,6 @@ from assistant_gateway.application.request_context import (
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.control_v1 import (
     ManagerKnowledgeCommand,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
     PersonStandingCommandV1,
@@ -45,7 +41,6 @@ from custom_messages.enums import RequesterType
 
 GatewayManagerCommand = (
     ManagerScheduleCommand
-    | ManagerMemoryCommand
     | ManagerKnowledgeCommand
     | ManagerRuntimeWorkCommand
     | ManagerTopicCommand
@@ -83,7 +78,7 @@ class _PrivateResourceTarget:
     resource_type: str
     resource_id: str
     action: str
-    # False for records every team member shares (team memory, team knowledge pages).
+    # False for records every team member shares (team knowledge pages).
     owned_by_person: bool = True
 
 
@@ -266,29 +261,6 @@ class GatewayManagerCommandService:
                 resource_id=knowledge.resource_id,
                 action=knowledge.action,
                 owned_by_person=knowledge.owner_person_id is not None,
-            )
-        if isinstance(command, ManagerMemoryCommand):
-            memory_command = command.command
-            return _PrivateResourceTarget(
-                owned_by_person=memory_command.bank != "coremem",
-                resource_type=(
-                    RESOURCE_TEAM_MEMORY
-                    if memory_command.bank == "coremem"
-                    else RESOURCE_USER_MEMORY
-                ),
-                resource_id=(
-                    f"{memory_command.bank}:"
-                    f"{memory_command.memory_id or memory_command.event_id or 'collection'}"
-                ),
-                action=(
-                    PRIVATE_ACTION_READ
-                    if memory_command.action in {"list", "show"}
-                    else PRIVATE_ACTION_CREATE
-                    if memory_command.action == "create"
-                    else PRIVATE_ACTION_DELETE
-                    if memory_command.action == "delete"
-                    else PRIVATE_ACTION_UPDATE
-                ),
             )
         if isinstance(command, ManagerRuntimeWorkCommand):
             if command.action in {"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"}:

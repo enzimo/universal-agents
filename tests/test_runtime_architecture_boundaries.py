@@ -992,3 +992,24 @@ def test_turns_call_strands_only_through_invoke_with_tool_stop() -> None:
                 callers.add(path.relative_to(REPO_ROOT).as_posix())
     assert callers - _INVOCATIONS_WITHOUT_TOOL_STOP == set()
     assert callers == _INVOCATIONS_WITHOUT_TOOL_STOP
+
+
+# Plan 13B.10: a gateway command a 0.9 gateway queued before an in-place upgrade is read
+# only so the team lead can tell the person it was not carried out. Only the contract and
+# the lead's handler name it, so no gateway or agent code can build one and send it.
+_RETIRED_GATEWAY_COMMAND_NAMES = ("RetiredGatewayCommand", "RETIRED_GATEWAY_COMMAND_NAMES")
+_RETIRED_GATEWAY_COMMAND_READERS = {
+    "custom_messages/contracts/control_v1.py",
+    "custom_messages/contracts/envelope_v1.py",
+    "custom_agents/retired_gateway_commands.py",
+    "custom_agents/strands_agent.py",
+}
+
+
+def test_only_the_team_lead_reads_retired_gateway_commands_and_nothing_sends_them() -> None:
+    naming = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _production_python_files()
+        if any(name in path.read_text(encoding="utf-8") for name in _RETIRED_GATEWAY_COMMAND_NAMES)
+    }
+    assert naming == _RETIRED_GATEWAY_COMMAND_READERS

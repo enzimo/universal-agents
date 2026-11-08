@@ -9,7 +9,7 @@ from assistant_gateway.application.manager_client import (
     GatewayManagerClient,
     GatewayManagerClientSettings,
 )
-from custom_messages.contracts.control_v1 import AgentStatus, ManagerMemoryCommand, PinnedMemoryCommandPayload, SystemStatusMessage
+from custom_messages.contracts.control_v1 import AgentStatus, ManagerTopicCommand, SystemStatusMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -123,17 +123,14 @@ def _system_envelope(correlation_id: str) -> MessageEnvelope:
     )
 
 
-def _memory_response(correlation_id: str) -> MessageEnvelope:
+def _topic_response(correlation_id: str) -> MessageEnvelope:
     return MessageEnvelope(
-        msg_content=ManagerMemoryCommand(
-            command_id="manager_memory_response",
+        msg_content=ManagerTopicCommand(
+            command_id="manager_topic_response",
             command_type=MessageMetaType.RESPONSE,
-            command=PinnedMemoryCommandPayload(
-                bank="usermem",
-                action="list",
-            ),
+            action="list_tags",
             success=True,
-            rendered_result="No memories found.",
+            message="No tags yet.",
         ),
         msg_header=MessageHeader(from_agent_id="manager_1"),
         msg_meta=MessageMeta(
@@ -191,7 +188,7 @@ def _client(
 
 
 @pytest.mark.asyncio
-async def test_manager_client_drops_late_memory_control_response(
+async def test_manager_client_drops_late_manager_control_response(
     caplog,
 ) -> None:
     unsolicited: list[MessageEnvelope] = []
@@ -201,7 +198,7 @@ async def test_manager_client_drops_late_memory_control_response(
         logging.WARNING,
         logger="test.gateway.manager_client",
     ):
-        await client.handle_response(_memory_response("corr_memory_expired"))
+        await client.handle_response(_topic_response("corr_topic_expired"))
 
     assert unsolicited == []
     assert "event=gateway_unmatched_manager_control_response_dropped" in caplog.text

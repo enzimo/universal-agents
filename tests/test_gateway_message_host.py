@@ -321,11 +321,13 @@ def test_command_line_gateways_load_no_host_code() -> None:
     import subprocess
     import sys
 
+    # The contract's generated models too: people's memory commands load them only when one is sent.
     code = ("import sys, assistant_gateway.gateway, assistant_gateway.nats_manager_runtime; "
-            "print('assistant_gateway.message_host' in sys.modules)")
+            "print([name for name in ('assistant_gateway.message_host', 'custom_messages.wire.models') "
+            "if name in sys.modules])")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
                             cwd=Path(__file__).resolve().parents[1])
-    assert result.stdout.strip() == "False"
+    assert result.stdout.strip() == "[]"
 
 
 @pytest.mark.asyncio

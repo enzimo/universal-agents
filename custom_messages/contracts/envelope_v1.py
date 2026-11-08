@@ -6,11 +6,11 @@ from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.control_v1 import ControlInstruction
 from custom_messages.contracts.control_v1 import Instruction
 from custom_messages.contracts.control_v1 import ManagerKnowledgeCommand
-from custom_messages.contracts.control_v1 import ManagerMemoryCommand
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.control_v1 import ManagerTopicCommand
 from custom_messages.contracts.control_v1 import NoOpMessage
 from custom_messages.contracts.control_v1 import PersonStandingCommandV1
+from custom_messages.contracts.control_v1 import RetiredGatewayCommand
 from custom_messages.contracts.control_v1 import SystemStatusMessage
 from custom_messages.contracts.delegated_work_v1 import DelegatedTaskClaimedV1
 from custom_messages.contracts.credentials_v1 import ToolSetupRequestV1
@@ -56,13 +56,14 @@ ContentType = Annotated[
         DeliveryReceipt,
         Instruction,  # Used directly? Or always via ControlPayload? Let's assume via ControlPayload
         ManagerKnowledgeCommand,
-        ManagerMemoryCommand,
         ManagerRuntimeWorkCommand,
         ManagerScheduleCommand,
         ManagerTopicCommand,
         ManagedSkillCatalogChangedV1,
         NoOpMessage,
         PersonStandingCommandV1,
+        # Read only to answer a command queued before an in-place upgrade (control_v1).
+        RetiredGatewayCommand,
         ScheduledMessage,
         ScheduledRunContextReplyV1,
         ScheduledRunContextRequestV1,
@@ -93,13 +94,17 @@ ContentType = Annotated[
 # Requests only the gateway sends to the manager's control route. Transport
 # routing, the gateway's reply matching, the manager's admission rules and the
 # agent-forgery guard (custom_tools.providers.communication) all use this one list.
+# ``RetiredGatewayCommand`` is what a 0.9 gateway sent there and no gateway sends
+# now: it stays on the list so the lead answers it at once, also while busy or
+# paused, so agents cannot send one, and so a 0.9 lead's late reply to one is
+# dropped by the gateway like any unmatched control reply.
 GATEWAY_MANAGER_CONTROL_TYPES = (
     ManagerKnowledgeCommand,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
     ManagerScheduleCommand,
     ManagerTopicCommand,
     PersonStandingCommandV1,
+    RetiredGatewayCommand,
 )
 
 # Messages only agent runtimes exchange to get a scheduled run its signed task

@@ -53,7 +53,6 @@ from custom_agents.conversation_store import ConversationStore
 from custom_agents.heartbeat_store import HeartbeatStore, extract_active_heartbeat_tasks
 from custom_agents.manager_bootstrap_runtime import migrate_legacy_heartbeat_markdown
 from custom_agents.manager_control_runtime import (
-    handle_manager_memory_command,
     handle_manager_topic_command,
 )
 from custom_agents.provider_error_runtime import PROVIDER_TIMEOUT_USER_MESSAGE
@@ -62,8 +61,8 @@ from custom_agents.team_composition import TEAM_COMPOSITION_SCHEMA_VERSION
 from custom_messages.contracts.control_v1 import (
     AgentStatus,
     ControlInstruction,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
+    ManagerTopicCommand,
     PinnedMemoryCommandPayload,
     SystemStatusMessage,
 )
@@ -110,6 +109,7 @@ from storage.conversation_repository import SqliteConversationRepository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from storage.knowledge_repository import create_knowledge_repository
 from custom_agents.knowledge_command_runtime import handle_manager_knowledge_command
+from tests.team_services_support import InProcessTeamServices
 
 
 async def handle_interactive_session_command(*, gateway, **request):
@@ -253,14 +253,7 @@ def _attach_in_process_manager_control(
             ),
         )
         header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway")
-        if command.message_class == "ManagerMemoryCommand":
-            await handle_manager_memory_command(
-                manager,
-                command=command,
-                msg_header=header,
-                msg_meta=meta,
-            )
-        elif command.message_class == "ManagerKnowledgeCommand":
+        if command.message_class == "ManagerKnowledgeCommand":
             await handle_manager_knowledge_command(
                 manager,
                 command=command,
@@ -4018,8 +4011,8 @@ async def test_coremem_command_manages_team_scoped_memory(tmp_path: Path, gatewa
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=InProcessTeamServices(config),
     )
-    _attach_in_process_manager_control(gateway, config)
     await _link_bootstrap_admin_channel(
         gateway,
         config,
@@ -4104,26 +4097,25 @@ async def test_coremem_command_manages_team_scoped_memory(tmp_path: Path, gatewa
     assert blocked is not None
     assert "Use /user first" in blocked
     assert member_create is not None
-    assert "team_admin_required" in member_create
+    assert "Only administrators change team memory." in member_create
     assert created is not None
     assert "Core memory saved: coremem #1" in created
     assert "event pin_mem_evt_" in created
     assert listed is not None
     assert "Team always runs smoke tests before deploy" in listed
     assert member_delete is not None
-    assert "team_admin_required" in member_delete
+    assert "Only administrators change team memory." in member_delete
     assert deleted is not None
     assert "Core memory deleted: coremem #1" in deleted
 
 
 @pytest.mark.asyncio
-async def test_settings_memory_operation_reaches_the_manager_as_the_signed_person(
+async def test_settings_memory_operation_reaches_the_team_services_as_the_signed_person(
     tmp_path: Path, gateway_signed_commands: None
 ):
-    """The Settings memory path runs end to end: the gateway checks its person,
-    signs it onto the command and computes the actions it may offer."""
+    """The Settings memory path runs end to end: the gateway names its person by reference,
+    the team services act for them, and the gateway computes the actions it may offer."""
 
-    from custom_messages.contracts.control_v1 import PinnedMemoryCommandPayload
 
     config = _build_test_config(tmp_path)
     bootstrap_instance(config)
@@ -4131,8 +4123,8 @@ async def test_settings_memory_operation_reaches_the_manager_as_the_signed_perso
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=InProcessTeamServices(config),
     )
-    _attach_in_process_manager_control(gateway, config)
     await _link_bootstrap_admin_channel(
         gateway,
         config,
@@ -4158,6 +4150,113 @@ async def test_settings_memory_operation_reaches_the_manager_as_the_signed_perso
     assert result.result.fact.fact_text == "Prefers morning summaries."
     assert result.can_create is True
     assert result.available_actions
+
+
+class _FailingTeamServices:
+    """A team services port that fails inside the gateway, as a defect there would."""
+
+    def __init__(self) -> None:
+        self.sent = 0
+
+    async def command(self, kind: str, body: dict, *, person_ref: str, request_id: str) -> dict:
+        self.sent += 1
+        raise RuntimeError("socket state corrupted at 0x7f3a")
+
+
+@pytest.mark.asyncio
+async def test_a_memory_command_the_gateway_cannot_send_is_answered_in_a_plain_sentence(
+    tmp_path: Path, gateway_signed_commands: None, caplog
+):
+    config = _build_test_config(tmp_path)
+    bootstrap_instance(config)
+    failing = _FailingTeamServices()
+    gateway = UserGateway(
+        config,
+        output_sink=None,
+        state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=failing,
+    )
+    await _link_bootstrap_admin_channel(
+        gateway, config, channel_name="telegram", user_id="tg_memory_admin", chat_id="chat_memory"
+    )
+
+    async def chat(text: str) -> str | None:
+        _, _, reply = await handle_interactive_session_command(
+            raw_text=text,
+            gateway=gateway,
+            current_session_key=None,
+            channel_name="telegram",
+            user_id="tg_memory_admin",
+            chat_id="chat_memory",
+        )
+        return reply
+
+    empty = await chat("/usermem add")
+    with caplog.at_level(logging.ERROR):
+        failed = await chat('/usermem add "Prefers short answers."')
+
+    assert empty == "The fact's text cannot be empty."
+    assert failing.sent == 1  # the empty fact never left the gateway
+    assert failed == (
+        "The memory command failed because of an error in the gateway. An administrator can find it in the "
+        "gateway log."
+    )
+    assert "0x7f3a" not in failed
+    assert "event=gateway_memory_command_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_times_a_person_writes_reach_the_team_services_in_utc_from_their_own_zone(
+    tmp_path: Path, gateway_signed_commands: None
+):
+    """The chat and the Settings page read a written time in the person's own zone, not the instance's."""
+
+    config = _build_test_config(tmp_path)
+    config.user.timezone = "UTC"  # the instance's default zone
+    config.save()
+    bootstrap_instance(config)
+    state_store = GatewayStateStore(str(tmp_path / "state.db"))
+    # The first administrator lives in Chicago; the gateway keeps a recorded person's own zone when it starts.
+    state_store.create_gateway_user(
+        canonical_user_id=config.user.canonical_user_id,
+        display_name=config.user.display_name,
+        timezone="America/Chicago",
+    )
+    team_services = InProcessTeamServices(config)
+    gateway = UserGateway(config, output_sink=None, state_store=state_store, team_services=team_services)
+    await _link_bootstrap_admin_channel(
+        gateway, config, channel_name="telegram", user_id="tg_zone_admin", chat_id="chat_zone"
+    )
+    person = gateway.state_store.get_gateway_user(config.user.canonical_user_id)
+    assert person is not None and person.timezone == "America/Chicago"
+
+    _, _, saved = await handle_interactive_session_command(
+        raw_text='/usermem add "Office closed" from=2026-11-05T09:00',
+        gateway=gateway,
+        current_session_key=None,
+        channel_name="telegram",
+        user_id="tg_zone_admin",
+        chat_id="chat_zone",
+    )
+    operations = gateway._command_operations
+    await operations.execute_pinned_memory_operation(
+        command=PinnedMemoryCommandPayload(
+            bank="usermem", action="create", fact_text="Dentist.", valid_from_utc="2026-11-05T09:00"
+        ),
+        session_key=operations._settings.default_session_key,
+        channel_name="telegram",
+        user_id="tg_zone_admin",
+        chat_id="chat_zone",
+        thread_id=None,
+        canonical_user_id=config.user.canonical_user_id,
+    )
+
+    assert saved is not None and "User memory saved" in saved
+    # 09:00 in Chicago on 5 November 2026 (standard time, UTC-6) is 15:00 UTC.
+    assert [body["valid_from"] for kind, body, _ in team_services.sent if kind == "memory.create"] == [
+        "2026-11-05T15:00:00.000Z",
+        "2026-11-05T15:00:00.000Z",
+    ]
 
 
 @pytest.mark.asyncio
@@ -4217,8 +4316,8 @@ async def test_usermem_command_requires_registration_and_isolates_by_canonical_u
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=InProcessTeamServices(config),
     )
-    _attach_in_process_manager_control(gateway, config)
     await _link_bootstrap_admin_channel(
         gateway,
         config,
@@ -4890,22 +4989,19 @@ def test_delivery_presentation_humanizes_raw_tool_setup_result(status: str, mess
 
 def test_delivery_presentation_rejects_manager_control_envelopes() -> None:
     envelope = MessageEnvelope(
-        msg_content=ManagerMemoryCommand(
+        msg_content=ManagerTopicCommand(
             command_type=MessageMetaType.RESPONSE,
-            command=PinnedMemoryCommandPayload(
-                bank="usermem",
-                action="list",
-            ),
+            action="list_tags",
             success=True,
         ),
         msg_header=MessageHeader(from_agent_id="manager_1234"),
-        msg_meta=MessageMeta(msg_correlation_id="corr_memory_response"),
+        msg_meta=MessageMeta(msg_correlation_id="corr_topic_response"),
     )
 
     assert not GatewayDeliveryPresentation.supports_user_delivery(envelope.msg_content)
     with pytest.raises(
         ValueError,
-        match="Unsupported gateway delivery content type: ManagerMemoryCommand",
+        match="Unsupported gateway delivery content type: ManagerTopicCommand",
     ):
         GatewayDeliveryPresentation.render_envelope(envelope)
 
@@ -5887,18 +5983,15 @@ async def test_gateway_drops_unsupported_unsolicited_manager_control(
     )
     session = gateway.application.start_new_session()
     envelope = MessageEnvelope(
-        msg_content=ManagerMemoryCommand(
-            command_id="manager_memory_late",
+        msg_content=ManagerTopicCommand(
+            command_id="manager_topic_late",
             command_type=MessageMetaType.RESPONSE,
-            command=PinnedMemoryCommandPayload(
-                bank="usermem",
-                action="list",
-            ),
+            action="list_tags",
             success=True,
-            rendered_result="No memories found.",
+            message="No tags yet.",
         ),
         msg_meta=MessageMeta(
-            msg_correlation_id="corr_memory_late",
+            msg_correlation_id="corr_topic_late",
             conversation_id=session.conversation_id,
             gateway_context=GatewayContext(
                 canonical_user_id=config.user.canonical_user_id,

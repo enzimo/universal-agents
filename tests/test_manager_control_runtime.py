@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from tests.memory_support import SYSTEM_CHANGE_WRITER
 from tests.task_work_support import TurnHost
 from custom_agents.task_operation_runtime import TaskOperationRuntime
 
@@ -20,14 +19,8 @@ from custom_agents.conversation_store import ConversationStore
 from custom_agents.manager_bootstrap_runtime import run_manager_bootstrap
 from custom_agents.manager_control_runtime import (
     build_task_progress_response,
-    handle_manager_memory_command,
     handle_manager_runtime_work_command,
     handle_manager_schedule_command,
-)
-from custom_agents.pinned_memory_runtime import (
-    PinnedMemoryCommand,
-    PinnedMemoryRequestContext,
-    PinnedMemoryService,
 )
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.task_manager import TaskManager
@@ -35,9 +28,7 @@ from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from custom_messages.contracts.access_v2 import PersonStanding
 from custom_messages.contracts.control_v1 import (
     ControlInstruction,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
-    PinnedMemoryCommandPayload,
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.transport_codec import decode_envelope, encode_envelope
@@ -66,7 +57,6 @@ from custom_messages.enums import (
 from custom_messages.contracts.common_v1 import contract_sha256
 from custom_tools.schedule_inspection import ScheduleView, list_schedule_payloads
 from storage.pinned_memory_repository import (
-    USERMEM_BANK,
     create_pinned_memory_repository,
 )
 from storage.config import resolve_storage_settings
@@ -301,147 +291,6 @@ def test_legacy_ownerless_schedule_stays_unassigned_through_startup_and_firing(
     conversations = world.worker._conversation_store
     assert conversations.get_turn_by_task_id(run.task.task_id)["owner_canonical_user_id"] is None
     assert conversations.list_conversations(owner_canonical_user_id=scheduled_runs.ANN) == []
-
-
-@pytest.mark.asyncio
-async def test_manager_memory_command_is_owner_scoped_and_returns_over_nats_contract(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    comms = _CaptureComms()
-    agent = _bootstrap_agent(config)
-    agent.team_comms = comms
-    command = ManagerMemoryCommand(
-        command=PinnedMemoryCommandPayload(
-            bank="usermem",
-            action="create",
-            fact_text="Owner-only preference.",
-        ),
-    )
-    meta = MessageMeta(
-        msg_correlation_id="corr_1",
-        conversation_id="conv_1",
-        gateway_context=_signed(
-            GatewayContext(canonical_user_id="Owner", session_key="session_1"),
-            team_id=config.gateway.team_id,
-            roles=["admin"],
-        ),
-    )
-    await handle_manager_memory_command(
-        agent,
-        command=command,
-        msg_header=MessageHeader(
-            from_agent_id="gateway", response_routing_key="gateway"
-        ),
-        msg_meta=meta,
-    )
-
-    response = comms.messages[-1].msg_content
-    assert isinstance(response, ManagerMemoryCommand)
-    assert response.success is True
-    assert response.result is not None
-    assert response.result.fact is not None
-    assert response.result.fact.fact_text == "Owner-only preference."
-    assert len(response.result.fact.record_digest) == 64
-    assert "metadata" not in response.result.fact.model_dump()
-    assert "created_by_id" not in response.result.fact.model_dump()
-    assert "User memory saved" in response.rendered_result
-    service = PinnedMemoryService(agent._pinned_memory_repository)
-    other = service.execute(
-        PinnedMemoryCommand(bank=USERMEM_BANK, action="list"),
-        context=PinnedMemoryRequestContext(
-            writer=SYSTEM_CHANGE_WRITER,
-            team_id=config.gateway.team_id, canonical_user_id="Other"
-        ),
-    )
-    assert other["facts"] == []
-
-
-@pytest.mark.asyncio
-async def test_manager_memory_command_allows_team_read_but_requires_admin_for_mutation(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    comms = _CaptureComms()
-    agent = _bootstrap_agent(config)
-    agent.team_comms = comms
-    header = MessageHeader(
-        from_agent_id="gateway",
-        response_routing_key="gateway",
-    )
-
-    async def invoke(
-        *,
-        canonical_user_id: str,
-        roles: list[str],
-        payload: PinnedMemoryCommandPayload,
-    ) -> ManagerMemoryCommand:
-        request = ManagerMemoryCommand(command=payload)
-        await handle_manager_memory_command(
-            agent,
-            command=request,
-            msg_header=header,
-            msg_meta=MessageMeta(
-                gateway_context=_signed(
-                    GatewayContext(
-                        canonical_user_id=canonical_user_id,
-                        session_key=f"session_{canonical_user_id}",
-                    ),
-                    team_id=config.gateway.team_id,
-                    roles=roles,
-                )
-            ),
-        )
-        response = comms.messages[-1].msg_content
-        assert isinstance(response, ManagerMemoryCommand)
-        return response
-
-    denied_create = await invoke(
-        canonical_user_id="Member",
-        roles=["member"],
-        payload=PinnedMemoryCommandPayload(
-            bank="coremem",
-            action="create",
-            fact_text="Team deploys after smoke tests.",
-        ),
-    )
-    created = await invoke(
-        canonical_user_id="Admin",
-        roles=["admin"],
-        payload=PinnedMemoryCommandPayload(
-            bank="coremem",
-            action="create",
-            fact_text="Team deploys after smoke tests.",
-        ),
-    )
-    listed = await invoke(
-        canonical_user_id="Member",
-        roles=["member"],
-        payload=PinnedMemoryCommandPayload(bank="coremem", action="list"),
-    )
-    denied_delete = await invoke(
-        canonical_user_id="Member",
-        roles=["member"],
-        payload=PinnedMemoryCommandPayload(
-            bank="coremem",
-            action="delete",
-            memory_id=1,
-        ),
-    )
-
-    assert denied_create.success is False
-    assert denied_create.error_code == "authorization_denied"
-    assert denied_create.rendered_result == "team_admin_required"
-    assert created.success is True
-    assert created.result is not None and created.result.fact is not None
-    assert listed.success is True
-    assert listed.result is not None
-    assert [fact.fact_text for fact in listed.result.facts] == [
-        "Team deploys after smoke tests."
-    ]
-    assert denied_delete.success is False
-    assert denied_delete.error_code == "authorization_denied"
-    assert denied_delete.rendered_result == "team_admin_required"
 
 
 @pytest.mark.asyncio

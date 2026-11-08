@@ -14,6 +14,7 @@ from custom_messages.records.objectives import ObjectiveSuccessCriterion
 from enum import StrEnum
 from id_generation import new_id
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 from typing import Any
 from typing import Dict
@@ -541,11 +542,10 @@ class PinnedMemoryScopePayload(BaseModel):
 
 
 class PinnedMemoryFactPayload(BaseModel):
-    """An active pinned-memory fact as manager-control replies show it.
+    """An active pinned-memory fact as the gateway's memory controls show it.
 
-    Built from named fields (``custom_agents.pinned_memory_runtime``:
-    ``public_pinned_memory_fact`` then ``pinned_memory_reply``). Where a fact
-    came from (source chat, session, conversation, task, creator) and its
+    Built from a ``memory.*`` reply's fact (``assistant_gateway.pinned_memory_commands``).
+    Where a fact came from (source chat, session, conversation, task, creator) and its
     internal UUID never leave storage: a Signal chat id is a phone number.
     Free-form metadata is left out of replies too; agent tools show it.
     """
@@ -564,7 +564,7 @@ class PinnedMemoryFactPayload(BaseModel):
 
 
 class PinnedMemoryCommandResultPayload(BaseModel):
-    """Typed action result returned by the manager's pinned-memory owner."""
+    """A memory command's result as the gateway renders it, built from the team services' typed reply."""
 
     ok: bool
     bank: Literal["coremem", "usermem"]
@@ -586,10 +586,20 @@ class PinnedMemoryCommandResultPayload(BaseModel):
 
 
 PINNED_MEMORY_SORT_NEWEST = "newest"
+# The memory service's sort names, as the message contract's memory.list names them
+# (the team services and the gateway convert with it, in each direction).
+PINNED_MEMORY_WIRE_SORTS = {
+    "memory_id": "memory_id",
+    PINNED_MEMORY_SORT_NEWEST: "newest",
+    "valid_from_utc": "valid_from",
+    "invalid_after_utc": "expires",
+}
+# What a person writes as an expiry to clear it; the memory service takes it as "no expiry".
+PINNED_MEMORY_CLEAR_EXPIRY = "never"
 
 
 class PinnedMemoryCommandPayload(BaseModel):
-    """Transport form of a parsed pinned-memory command."""
+    """A parsed pinned-memory command in the gateway (chat grammar or Settings), before it becomes a ``memory.*`` body."""
 
     bank: Literal["coremem", "usermem"]
     action: Literal["list", "show", "create", "replace", "delete", "undo"]
@@ -611,29 +621,6 @@ class PinnedMemoryCommandPayload(BaseModel):
     )
 
 
-class ManagerMemoryCommand(BaseModel):
-    """Durable gateway-to-manager pinned-memory command."""
-
-    message_class: Literal["ManagerMemoryCommand"] = "ManagerMemoryCommand"
-    command_id: str = Field(default_factory=lambda: new_id("manager_memory"))
-    command_type: MessageMetaType = MessageMetaType.REQUEST
-    command: PinnedMemoryCommandPayload
-    success: Optional[bool] = None
-    rendered_result: str = ""
-    result: Optional[PinnedMemoryCommandResultPayload] = None
-    error_code: Optional[
-        Literal[
-            "authorization_denied",
-            "conflict",
-            "invalid_request",
-            "runtime_error",
-        ]
-    ] = None
-
-    def get_id(self) -> str:
-        return self.command_id
-
-
 class ManagerTopicCommand(BaseModel):
     """Durable gateway-to-manager conversation-topic command."""
 
@@ -650,6 +637,42 @@ class ManagerTopicCommand(BaseModel):
     thread_matches: List[Dict[str, Any]] = Field(default_factory=list)
     applied_tags: List[str] = Field(default_factory=list)
     message: str = ""
+
+    def get_id(self) -> str:
+        return self.command_id
+
+
+# The one list of retired gateway commands: durable commands a 0.9 gateway put in the
+# team lead's control queue whose handling phase 2 moved to protocol 1 request/reply at
+# the team services (plan 13B.10). A command queued just before an in-place upgrade may
+# still be waiting when 0.10 starts; without a model for it the lead could not read it,
+# so it was redelivered, set aside as a dead letter and the person never heard back.
+# A family that moves the same way adds its old class name to the ``Literal`` and what
+# people call the command to the mapping below it, in the same change.
+RetiredGatewayCommandClass = Literal["ManagerMemoryCommand"]
+# What people called each retired command, for the refusal they are sent.
+RETIRED_GATEWAY_COMMAND_NAMES: Dict[str, str] = {
+    "ManagerMemoryCommand": "memory command",
+}
+
+
+class RetiredGatewayCommand(BaseModel):
+    """A gateway command from before the upgrade whose handler is gone (``RetiredGatewayCommandClass``).
+
+    The team lead reads it only to tell the person it was not carried out
+    (``custom_agents.retired_gateway_commands``); it never carries it out, so the
+    old fields (the memory command, its result) are accepted and ignored. Nothing
+    sends one: ``message_class`` has no default, and only the contract and the
+    lead's handler may name this model (tests/test_runtime_architecture_boundaries.py).
+    Remove it, with its handler, when the upgrade steps from 0.9 are removed once
+    0.11 ships (README_ARCHITECTURE.md, "Upgrading an instance in place").
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    message_class: RetiredGatewayCommandClass
+    command_id: str
+    command_type: MessageMetaType = MessageMetaType.REQUEST
 
     def get_id(self) -> str:
         return self.command_id

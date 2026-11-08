@@ -1083,8 +1083,9 @@ knowledge base), plus task history:
   validity, tags, metadata, the importer key trusted imports use, timestamps,
   revision digest). The reserved `metadata.imported_from` record also stays in
   storage; tool and review views and context hydration keep ordinary skill
-  metadata, including onboarding progress. The Settings
-  memory controls get the same view without metadata (`pinned_memory_reply`).
+  metadata, including onboarding progress. People's memory commands and the
+  Settings memory controls get the same view without metadata
+  (`team_services.memory.wire_fact`).
   A Signal chat id is a phone number, so it never reaches a model or a reply.
   Several requests can change the same memory, and a model's change can arrive
   long after it read the fact (`storage/pinned_memory_repository.py`):
@@ -4062,6 +4063,17 @@ the desktop app never offers an older version.
   statements do, so an instance kept in its own schema works. The default
   keeps older rows correct, as the change ledger's `*` does (see "Upgrading in
   place from 0.9" above).
+- **Gateway commands queued at the upgrade.** A durable gateway command whose
+  handler a release removed can still wait in the team lead's control queue when
+  the new release starts. Its class stays readable as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`, one list of retired classes), and the
+  lead tells the person in their chat that it was not carried out and should be
+  sent again (`custom_agents.retired_gateway_commands`; "people's memory
+  commands" under "Message hosts and their trust"), instead of setting it aside
+  as a dead letter that nobody answers. A response of the old type would not
+  reach anyone, because the gateway that waited for it restarted with the
+  upgrade. The model, its handler and the list go with the other upgrade steps
+  from 0.9.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
@@ -4454,7 +4466,9 @@ serves serves nothing. A lock value no instance can have written (an empty one, 
 ending later than a whole lease from now plus the clock tolerance: another process on the
 shared login, or a holder whose clock ran ahead) is taken over once the key's revision stayed
 unchanged for a lease (`team_services_lock_invalid`), since a live holder renews every 10
-seconds. A stop releases the lock even when
+seconds. A stop first stops taking requests and waits, at most 30 seconds, for the ones
+being handled to finish and be answered, so no change commits after the lock is released.
+It releases the lock even when
 unsubscribing or writing the last host record failed, after that record, so the next
 instance does not wait out the lease. Every instance runs as one host with one
 certificate, so an instance that takes the lock first signs with the host's newest
@@ -4509,10 +4523,95 @@ They serve the team's address (`svc.team`) and answer, so far:
   A host whose record names another contract digest gets no new placement (`sessions.open`
   answers `not_allowed`, logged with both digests as `agent_session_refused_other_contract`);
   its sessions are still renewed and closed, so it keeps receiving control messages for the
-  tasks it holds while it finishes or hands them back.
+  tasks it holds while it finishes or hands them back;
+- people's memory commands, `memory.list`, `.show`, `.create`, `.replace`, `.delete` and
+  `.undo` (`team_services.memory`), which the gateway sent the team lead's process as a
+  durable `ManagerMemoryCommand` until phase 2. They run the same memory service on the
+  same database, with the team lead's memory settings (its agent type's overrides
+  included, `assistant_gateway.runtime_config.lead_memory_config`), in a worker thread so
+  the lock and upkeep keep running. Memory commands run side by side (at most 16 at once,
+  `LiveHost.serve`): the store's write lock and the stored outcomes order them, and a slow
+  database must not hold up the session renewals queued behind them. The person comes
+  only from the command's authority token: a token presented by another host than the one
+  that signed it is refused `bad_authority` (contract "Who may present a token"); its
+  person reference is read back from the gateway's copy of the team's people
+  (`team_services.people`, `PeopleDirectory.person_by_ref`), and a person who is unknown,
+  disabled or removed, or a sender that is not a gateway, is answered `not_allowed`.
+  Agents' own memory operations (root task tokens) are not answered here yet; agents
+  still use their tools in their own process. The same ownership rule decides as before
+  (`access_control.ownership`). A person's command no longer records the chat it came
+  from with the fact's events. Replies fit the contract's limits (README "Reply size"): a
+  list returns as many facts as fit in one frame and says where to continue. Fact text
+  travels inline, at most 32,768 characters, until phase 3's blob references; a longer
+  fact (only agents and imports write one) is never cut or skipped, as plan decision 77
+  has it for knowledge: showing it explains why it cannot be shown, a list page ends just
+  before it (or explains it and where to continue), a change whose reply would carry it
+  is refused, and an undo that restores it answers without it. Only a command's own
+  mistakes are `invalid_request` (`PinnedMemoryInputError`); any other failure is logged
+  and answered `runtime_error`.
+  A memory command a 0.9 gateway queued in the team lead's control queue just before an
+  in-place upgrade is still read by the 0.10 lead, as a `RetiredGatewayCommand`
+  (`custom_messages.contracts.control_v1`), so it is no longer set aside as a dead letter
+  with no answer to the person (plan 13B.10). The lead never carries it out
+  (`custom_agents.retired_gateway_commands`). It sends the person the gateway signed for
+  a chat message in the chat the command came from: "Your memory command was sent before
+  the team was upgraded, so nothing was changed. Please send it again." It does not send
+  the old reply, because the restarted gateway drops a manager control reply nobody waits
+  for. A command without a valid gateway signature, one that names someone other than
+  the signed person, or one with no chat to answer in tells nobody
+  (`event=retired_gateway_command_unanswered`, with the reason, the command's class and
+  id); each answer is logged as `event=retired_gateway_command_answered`. A 0.9 lead's
+  reply that was still waiting on the gateway's reply route is read the same way and
+  dropped like any reply nobody waits for
+  (`event=gateway_unmatched_manager_control_response_dropped`), rather than set aside. The
+  retired classes are one list in the contract; a family that moves to the team services
+  later adds its old class name there.
 
 Every other operation is answered `unsupported` at once; today's team operations still
-run in the team lead's process and move here one at a time.
+run in the team lead's process and move here one family at a time.
+
+**Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
+in the manager database): a change command is carried out once however often it is
+retried. The store that makes the change checks for a stored reply under its write
+lock, before changing anything, and stores the reply under the team and the command's
+retry key (the frame's idempotency key) in the same transaction as the change
+(`CommandOutcome`, passed to the memory store's writes). A repeat is looked up first, so
+it gets its stored reply even if its body would no longer pass the checks. Every final
+refusal is stored too, in a transaction of its own (a refused person, refused access, a
+wrong command, a change the store refused), except outcomes that ask for a retry
+(`runtime_error`, `record_busy` and others); a refusal that cannot be stored is answered
+`runtime_error` instead, so the command is decided again rather than answered
+differently later. Each reply records the person the command acted for: the retry key
+comes from the sender's request id alone, so another person's command under a reused id
+is refused and never shown that reply, and removing a person deletes the replies of
+their commands with their task records (`storage.person_departure_repository`), since a
+reply can quote their memory. Replies are kept seven days, the longest life of an
+authority token, and deleted when a new one is stored and by the team services' upkeep;
+a repeated key with another body gets the stored reply, and both body digests are
+logged. The table is created when a store that uses it opens, so an older database gets
+it at its first start on this version.
+
+**People's commands from the gateway** (`assistant_gateway.application.team_commands`):
+the gateway reads the person's reference from the access store, after writing the
+team's copy of the person when it differs from its own records (a failed copy write is
+otherwise retried only at the person's next change or the gateway's next start, so a
+demoted administrator could still change team memory, and a person added meanwhile
+could not act at all); when that write fails, the command is not sent and the person is
+told why (`PeopleDirectorySync.person_ref`). It gives each command a
+fresh `request_id` (a UUIDv7, the contract's "Fresh ids"), and sends it through its host
+(`assistant_gateway.team_services_client`); it no longer checks memory access itself,
+since the team services decide. When no answer comes in time, it sends the same command
+once more under the same request id, so a slow change is answered from its stored reply
+and never carried out twice; after that the person is told the change may still be made.
+Refusals, unavailable team services and gateway errors reach people as plain sentences,
+and a body the contract would refuse (an empty or over-long fact, a replace that changes
+nothing, too many tags) is refused before it is sent. For memory,
+`assistant_gateway.pinned_memory_commands.RuntimePinnedMemoryCodec` keeps the chat
+grammar and rendering: times a person writes are read in their own time zone before
+sending (the contract carries UTC times), `never` clears an expiry, a list asks for at
+most 100 facts, and the typed reply becomes the view the Settings page and the chat
+renderer use. A gateway started without the launcher runs no host, so its memory
+commands say the team services cannot be reached.
 
 They also look after their own records every half hour (`SessionService.maintain`): after
 they renew, they write each placement an earlier certificate of theirs signed again under

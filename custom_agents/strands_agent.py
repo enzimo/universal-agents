@@ -129,7 +129,6 @@ from custom_agents.internal_improvement_runtime import (
     publish_internal_improvement_schedule_ensure,
 )
 from custom_agents.manager_control_runtime import (
-    handle_manager_memory_command,
     handle_manager_runtime_work_command,
     handle_manager_schedule_command,
     handle_manager_topic_command,
@@ -288,10 +287,10 @@ from custom_messages.contracts.control_v1 import (
     AgentStatusMap,
     ControlInstruction,
     ManagerKnowledgeCommand,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
     ManagerTopicCommand,
     PersonStandingCommandV1,
+    RetiredGatewayCommand,
 )
 from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionRequest,
@@ -4031,13 +4030,6 @@ class UniversalAgent(BaseModel):
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )
-        elif isinstance(msg_content, ManagerMemoryCommand):
-            await handle_manager_memory_command(
-                self,
-                command=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
         elif isinstance(msg_content, ManagerKnowledgeCommand):
             from custom_agents.knowledge_command_runtime import handle_manager_knowledge_command
 
@@ -4058,6 +4050,17 @@ class UniversalAgent(BaseModel):
             )
         elif isinstance(msg_content, ManagerTopicCommand):
             await handle_manager_topic_command(
+                self,
+                command=msg_content,
+                msg_header=msg_header,
+                msg_meta=msg_meta,
+            )
+        elif isinstance(msg_content, RetiredGatewayCommand):
+            # A 0.9 gateway's command queued before an in-place upgrade: the person is
+            # told it was not carried out (custom_agents.retired_gateway_commands).
+            from custom_agents.retired_gateway_commands import answer_retired_gateway_command
+
+            await answer_retired_gateway_command(
                 self,
                 command=msg_content,
                 msg_header=msg_header,

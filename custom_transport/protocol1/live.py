@@ -87,6 +87,11 @@ MAX_OPEN_REQUESTS = 64
 MAX_SIDE_BY_SIDE = 16
 
 
+# ServiceUnavailable.reason: nobody serves the address, or a receiver did not answer in time
+# (it may still be handling the request).
+NO_RESPONDERS, NO_ANSWER_IN_TIME = "no responders", "no answer in time"
+
+
 class ServiceUnavailable(RuntimeError):
     """No receiver answered: nobody serves the address ("no responders"), or no answer came in time."""
 
@@ -285,7 +290,7 @@ class LiveHost:
         try:
             message = await self.nc.request(frame["subject"], data, timeout=wait, headers=headers)
         except (NoRespondersError, NatsTimeoutError) as error:
-            reason = "no responders" if isinstance(error, NoRespondersError) else "no answer in time"
+            reason = NO_RESPONDERS if isinstance(error, NoRespondersError) else NO_ANSWER_IN_TIME
             self.logger.warning("A request got no answer. event=protocol1_request_unanswered kind=%s subject=%s reason=%s",
                                 kind, frame["subject"], reason)
             raise ServiceUnavailable(kind, frame["subject"], reason) from error
@@ -421,6 +426,14 @@ class LiveHost:
             body = await served.handler(verified)
         except Unsupported:
             await self._refuse(answer_to, FrameRefused(UNSUPPORTED, at="/kind"))
+            return
+        except FrameRefused as refused:
+            # A check only the handler can make, such as who may present a token (README "Who may
+            # present a token"): the request is refused like one verify_frame refused.
+            self.logger.warning("A request was refused by its handler. event=protocol1_handler_refused kind=%s "
+                                "message_id=%s code=%s at=%s detail=%s", frame.kind, frame.message_id, refused.code,
+                                refused.known_at, refused.detail)
+            await self._refuse(answer_to, refused)
             return
         except Exception:
             self.logger.exception("A request's handler failed. event=protocol1_handler_failed kind=%s message_id=%s",
