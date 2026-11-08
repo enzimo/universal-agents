@@ -181,6 +181,29 @@ def test_runtime_install_job_uses_a_clean_environment_and_only_runtime_lock() ->
     assert ".ci-runtime/bin/python scripts/verify_runtime_install.py" in commands
 
 
+def test_image_builds_tests_and_small_checks_have_separate_linux_lanes() -> None:
+    jobs = _workflow("tests.yml")["jobs"]
+    expected = {"docs-image-build": "ua-heavy", "runtime-install": "ua-light",
+                "photon-sidecar": "ua-light", "fast": "ua-test",
+                "nats-live": "ua-test", "postgres-live": "ua-test"}
+    for name, lane in expected.items():
+        assert lane in jobs[name]["runs-on"]
+        assert "ua-build" not in jobs[name]["runs-on"]
+    commands = "\n".join(step.get("run", "") for step in jobs["docs-image-build"]["steps"])
+    assert "UA_CI_IMAGE_CACHE_VERSION" in commands
+    assert "image_cache.py" in commands
+    assert "--target user-docs-builder" in commands
+    assert "--target rust-tools-builder" in commands
+    assert "docker buildx build" not in commands
+
+
+def test_waiting_manifest_cannot_occupy_the_source_release_producers_only_lane() -> None:
+    manifest = _workflow("publish-container.yml")["jobs"]["publish-manifest"]
+    source = _workflow("publish-release.yml")["jobs"]["publish-release"]
+    lanes = {"ua-heavy", "ua-test", "ua-light"}
+    assert set(manifest["runs-on"]) & lanes != set(source["runs-on"]) & lanes
+
+
 def test_jobs_require_their_documented_runners_and_bounded_execution() -> None:
     for path in WORKFLOW_ROOT.glob("*.yml"):
         for name, job in _workflow(path.name)["jobs"].items():
