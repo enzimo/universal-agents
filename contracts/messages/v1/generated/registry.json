@@ -738,7 +738,8 @@
       "reply": {
         "body": "bodies/debug.dump.reply.schema.json",
         "errors": [
-          "not_allowed"
+          "not_allowed",
+          "runtime_error"
         ]
       },
       "routing": "team",

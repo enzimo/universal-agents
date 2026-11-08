@@ -79,6 +79,7 @@ async def test_a_process_on_another_contract_drains_its_agents_and_gives_them_up
     process, host, requests, agents = _draining_process([
         lambda body: {"outcome": "ok", "session": _session("a1", "s-a1-1")},
         lambda body: {"outcome": "ok", "session": _session("a2", "s-a2-1")},
+        {"outcome": "ok"}, {"outcome": "ok"},
     ])
     await process._open(_hosted("a1"))
     await process._open(_hosted("a2"))
@@ -104,12 +105,13 @@ async def test_a_process_on_another_contract_drains_its_agents_and_gives_them_up
         # a1 still holds a task: nothing is given up yet.
         await asyncio.sleep(0.05)
         assert host.steps == ["draining"] and not [kind for kind, _ in requests.asked if kind == "sessions.close"]
+        requests.answers = [{"outcome": "ok"}, {"outcome": "ok"}]
         agents.holding = set()
         await _until(lambda: host.steps == ["draining", "drained"])
 
     closes = [body for kind, body in requests.asked if kind == "sessions.close"]
-    assert [(body["session"], body["reason"]) for body in closes] == [("s-a1-1", "handed_over"),
-                                                                     ("s-a2-1", "handed_over")]
+    assert [(body["session"], body["reason"]) for body in closes] == [("s-a1-1", "exited"),
+                                                                     ("s-a2-1", "exited")]
     assert process.agents == {}  # given up; a3 never held a session
     assert len(_events(caplog, "agent_host_drained")) == 1
     process._other_contract(THEIRS)  # learning it again drains nothing again
@@ -151,3 +153,27 @@ async def test_a_process_whose_join_is_refused_for_another_contract_does_not_ask
     assert [agent for agent, _reason in agents.drained] == ["a1"]
     assert len(_events(caplog, "agent_host_drained")) == 1
     assert "a1" in process.agents  # no session to give up: it never joined
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("record write failed"), asyncio.CancelledError()])
+async def test_a_drain_step_failure_is_logged_and_retried(failure, caplog) -> None:
+    process, host, requests, agents = _draining_process([])
+    process.agents["a1"] = _hosted("a1")
+    attempts = []
+
+    async def fail_once():
+        attempts.append(1)
+        if len(attempts) == 1:
+            assert [agent for agent, reason in agents.drained] == ["a1"]
+            raise failure
+        host.steps.append("draining")
+
+    host.drain = fail_once
+    with caplog.at_level(logging.WARNING):
+        process._other_contract(THEIRS)
+        await asyncio.wait_for(process._draining, timeout=5)
+    assert len(attempts) == 2
+    assert [agent for agent, reason in agents.drained] == ["a1"]
+    assert host.steps == ["draining", "drained"]
+    assert "trying again" in caplog.text

@@ -232,10 +232,26 @@ class LongTextCounts:
     earlier_revisions: int
     pending_contributions: int
     open_notes: int
+    # Pages whose texts each fit but which, with their open notes, are about too large for one reply.
+    too_large_pages: int = 0
 
     @property
     def total(self) -> int:
-        return self.pages + self.earlier_revisions + self.pending_contributions + self.open_notes
+        return (self.pages + self.earlier_revisions + self.pending_contributions + self.open_notes
+                + self.too_large_pages)
+
+
+@dataclass(frozen=True)
+class ConfirmedChange:
+    """What a person's write or note stored, with the review kinds the person confirmed.
+
+    The knowledge service hands this to a command's stored receipt
+    (``storage.operation_outcomes.CommandOutcome.reply_for``) inside the change's
+    transaction, so a reply built from the receipt later names the same kinds.
+    """
+
+    result: Any  # the KnowledgePage or KnowledgeNote the store returned
+    review_kinds: tuple[str, ...]
 
 
 @dataclass(frozen=True)

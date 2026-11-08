@@ -5,8 +5,24 @@ A new host has no certificate, so it signs ``host.join`` with the key it present
 signed certificate, which the host checks against the authority keys of its bootstrap
 bundle (``verify_frame`` does, with the reply's request) and keeps in its trust store.
 A local host is approved at once when the launcher listed it; ``pending`` makes it wait
-and ask again with the same join id, as the contract says. Renewals use ``renew`` with
-the certificate that signs them.
+and ask again with the same join id, as the contract says. A host renews with
+``host.renew`` signed by the certificate it renews (``LiveHost.request``); this module
+only joins.
+
+The authority renews its own certificate while it runs, and stores the new one in
+``UA1_CERTS`` before it signs with it. A host whose bundle copy is older, then joins (or
+joins again for more agent types), gets a reply signed by a certificate it does not hold
+yet (``unknown_key``). ``join`` then reads that certificate from ``UA1_CERTS`` through
+the caller's lookup (``fetch_trust``, ``MessageHost.fetch_trust``: the key
+``host.<installation>.<runtime>.<membership epoch>`` the reply's issuer names), which the
+trust store checks against the bundle's authority keys, and checks the reply again, once.
+The bundle file is never read again: a host on another machine holds its own copy, made
+when it was set up.
+
+The contract's pre-join permissions (``generated/permissions/joining_host.json``) do not
+let a host that has not joined yet read ``UA1_CERTS``; every process shares one NATS login
+in this phase, so the lookup works for every host here. A host that joins again already
+holds the reader grants.
 
 A join names the contract the host runs (``contract_sha256``): its trust store's, which is
 the one its code was generated from (``custom_messages.wire.kinds.CONTRACT_SHA256``)
@@ -23,7 +39,7 @@ import logging
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 import rfc8785
 from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
@@ -32,6 +48,7 @@ from custom_messages.wire.encoding import b64url
 from custom_messages.wire.frame import Receiver, reply_audience, sign_frame, verify_frame
 from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
 from custom_messages.wire.models import Frame
+from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import HostCertificate
 from custom_transport.protocol1.host_keys import HostKeys
 from custom_transport.protocol1.ids import new_message_id
@@ -83,7 +100,7 @@ class HostProfile:
     def digest(self) -> str:
         """``profile_sha256``: the unpadded base64url SHA-256 of the profile's RFC 8785 JSON."""
 
-        profile = {"runtime": self.runtime, "teams": sorted(self.teams), "roles": sorted(self.roles),
+        profile: dict[str, Any] = {"runtime": self.runtime, "teams": sorted(self.teams), "roles": sorted(self.roles),
                    "agent_types": sorted(self.agent_types), "session_limit": self.session_limit,
                    "connection_class": self.connection_class}
         return b64url(hashlib.sha256(rfc8785.dumps(profile)).digest())
@@ -150,13 +167,15 @@ def sign_join(keys: HostKeys, installation: str, profile: HostProfile, *, join_i
 
 async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: HostProfile, *,
                clock: Callable[[], datetime] = utc_now, deadline_seconds: float = 120.0,
-               logger: logging.Logger = _LOGGER, sleep: Callable[[float], Any] = asyncio.sleep) -> HostCertificate:
+               logger: logging.Logger = _LOGGER, sleep: Callable[[float], Any] = asyncio.sleep,
+               fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> HostCertificate:
     """Join the installation and return this host's certificate, kept in ``trust``.
 
     The join names the contract ``trust`` runs. Waits for an authority that is still
     starting ("no responders") and for a ``pending`` approval, up to ``deadline_seconds``;
     raises ``JoinRefused`` when the authority refuses the join and ``ServiceUnavailable``
-    when the deadline passes.
+    when the deadline passes. ``fetch_trust`` reads a certificate the reply names that
+    ``trust`` lacks, such as the authority's renewed one, from ``UA1_CERTS`` (module docstring).
     """
 
     installation = trust.store.installation
@@ -182,13 +201,8 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
             continue
         raise_if_refused("host.join", frame["subject"], message, logger)
         request = Frame.model_validate(frame)
-        named = reply_audience(request)
         now = clock()
-        reply = verify_frame(message.data, trust=trust.store,
-                             receiver=Receiver(named["installation"], named["team"], named["target"], named["id"],
-                                               named["runtime"]),
-                             arrived_on=message.subject, now=now, replay=replay.lookup,
-                             headers=answer_headers(message), answering=request)
+        reply = await _verified_reply(message, request, trust, now, replay, fetch_trust)
         body = reply.raw["body"]
         outcome = body["outcome"]
         if outcome == "ok":
@@ -208,3 +222,24 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
             await sleep(wait)
             continue
         raise JoinRefused(outcome, str(body.get("message", "")), body.get("accepted_contract_sha256"))
+
+
+async def _verified_reply(message: Any, request: Frame, trust: PersistentTrustStore, now: datetime,
+                          replay: LiveReplayRecord, fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]]) -> Any:
+    """The authority's reply to ``request``, verified; checked again once after reading a certificate ``trust`` lacks."""
+
+    named = reply_audience(request)
+
+    def verified() -> Any:
+        return verify_frame(message.data, trust=trust.store,
+                            receiver=Receiver(named["installation"], named["team"], named["target"], named["id"],
+                                              named["runtime"]),
+                            arrived_on=message.subject, now=now, replay=replay.lookup,
+                            headers=answer_headers(message), answering=request)
+
+    try:
+        return verified()
+    except FrameRefused as refused:
+        if refused.code != "unknown_key" or fetch_trust is None or not await fetch_trust(message.data):
+            raise
+        return verified()

@@ -7,7 +7,7 @@ malformed; tests/test_live_agent_hosts.py relays through real hosts.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -22,18 +22,32 @@ NOW = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
 
 
 def _placed(agent: str, agent_type: str) -> StoredRecord:
-    return StoredRecord(3, SimpleNamespace(body=SimpleNamespace(agent=agent, agent_type=agent_type, host="lead")))  # type: ignore[arg-type]
+    return StoredRecord(3, SimpleNamespace(body=SimpleNamespace(agent=agent, agent_type=agent_type, host="lead", placed_at="2026-11-06T09:00:00.000Z")))  # type: ignore[arg-type]
 
 
 def _relays(stored: dict[str, Any]) -> tuple[Relays, list[tuple[str, dict[str, Any]]]]:
     sent: list[tuple[str, dict[str, Any]]] = []
 
     async def read_report(record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+        if record == "host":
+            return StoredRecord(1, SimpleNamespace(other_contract=False, body=SimpleNamespace(state="accepting")))
         assert record == "placement"
         found = stored.get(key)
         if isinstance(found, Exception):
             raise found
         return found
+
+    sessions = {key.rsplit(".", 1)[-1]: SimpleNamespace(
+        agent=key.rsplit(".", 1)[-1], runtime="lead",
+        agent_type="TeamArchitect",
+        agent_role="worker" if key.endswith("worker_1") else "lead", started_at=NOW,
+        ends_at=NOW + timedelta(days=1)) for key in stored}
+
+    async def keys(record, prefix):
+        return [prefix + key for key in sessions]
+
+    async def take(record, key, **kwargs):
+        return True
 
     class _Bucket:
         async def keys(self) -> list[str]:
@@ -45,12 +59,13 @@ def _relays(stored: dict[str, Any]) -> tuple[Relays, list[tuple[str, dict[str, A
 
     class _Live:
         identity = SimpleNamespace(installation="install_one")
+        trust = SimpleNamespace(store=SimpleNamespace(agent_session=lambda installation, team, session: sessions.get(session)))
 
         async def request(self, kind: str, body: dict[str, Any], audience: dict[str, Any], **_: Any) -> Any:
             sent.append((audience["id"], body))
             return SimpleNamespace(raw={"body": {"outcome": "ok", "enabled": True}})
 
-    host = SimpleNamespace(live=_Live(), records=SimpleNamespace(read_report=read_report), clock=lambda: NOW,
+    host = SimpleNamespace(live=_Live(), records=SimpleNamespace(read_report=read_report, keys=keys, take_trust_record=take), clock=lambda: NOW,
                            nc=SimpleNamespace(jetstream=lambda: _JetStream()))
     return Relays(host, TEAM, "TeamArchitect", logging.getLogger("test.relays")), sent  # type: ignore[arg-type]
 
@@ -72,7 +87,7 @@ async def test_the_leads_context_dump_setting_goes_only_to_the_lead_the_team_ser
         reply = await relays.handle(_frame("debug.dump", {"request_id": "r1", "enabled": True}))
     assert reply == {"outcome": "ok", "enabled": True} and [agent for agent, _ in sent] == ["lead_1"]
     assert "event=team_services_record_refused record=placement key=team_one.forged code=bad_signature" in caplog.text
-    assert "event=team_relay_placement_unreadable key=team_one.broken" in caplog.text
+    assert "event=team_relay_placement_unreadable key=session.install_one.team_one.broken" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -83,3 +98,30 @@ async def test_a_command_for_an_agent_whose_placement_does_not_verify_is_answere
                                                           "limit": 20}))
     assert reply == {"outcome": "runtime_error", "message": AGENT_UNAVAILABLE_TEXT} and sent == []
     assert "code=wrong_issuer" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,expected", [
+    ("slow", "did not answer in time"),
+    ("refused", "could not handle this request"),
+    ("handler_failed", "may have finished"),
+    ("invalid_reply", "may have finished"),
+])
+async def test_relay_failures_explain_the_outcome_without_protocol_codes(failure, expected):
+    from custom_transport.protocol1.live import ServiceUnavailable, RequestRefused, NO_ANSWER_IN_TIME
+    relays, sent = _relays({f"{TEAM}.worker_1": _placed("worker_1", "Researcher")})
+
+    async def request(*args, **kwargs):
+        assert kwargs["timeout"] < 15
+        if failure == "slow":
+            raise ServiceUnavailable("tasks.remove", "agent", NO_ANSWER_IN_TIME)
+        if failure == "invalid_reply":
+            raise FrameRefused("bad_signature", at="/signature")
+        if failure == "handler_failed":
+            raise RequestRefused("tasks.remove", "handler_failed", "/body")
+        raise RequestRefused("tasks.remove", "wrong_authority", "/authority")
+
+    relays._host.live.request = request
+    reply = await relays.handle(_frame("tasks.remove", {"agent": "worker_1"}))
+    assert reply["outcome"] == "runtime_error" and expected in reply["message"]
+    assert "wrong_authority" not in reply["message"]

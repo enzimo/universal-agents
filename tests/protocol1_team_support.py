@@ -50,16 +50,17 @@ async def _remove_what_the_team_left(nc, installation: str, team: str) -> None:
     """
 
     jetstream = nc.jetstream()
-    owned = {"UA1_CERTS": (f"host.{installation}.>", f"revocations.{installation}", f"session.{installation}.{team}.>"),
-             "UA1_AGENTS": (f"{team}.>",), "UA1_PLACEMENT": (f"{team}.>",),
+    owned = {"UA1_CERTS": (f"host.{installation}.", f"revocations.{installation}", f"session.{installation}.{team}."),
+             "UA1_AGENTS": (f"{team}.",), "UA1_PLACEMENT": (f"{team}.",),
              "UA1_LOCKS": (f"team_services.{team}",)}
     for name, filters in owned.items():
         with contextlib.suppress(NotFoundError, NoKeysError):
             bucket = await jetstream.key_value(name)
             # The contract forbids purging bucket streams. Delete only this
             # test's keys with ordinary markers, which keep other teams intact.
-            for key in await bucket.keys(filters=list(filters)):
-                await bucket.delete(key)
+            for key in await bucket.keys():
+                if any(key.startswith(prefix) if prefix.endswith(".") else key == prefix for prefix in filters):
+                    await bucket.delete(key)
     for stream in (f"KV_UA1_TEAM_VIEW_{team}", f"KV_UA1_BLOCK_LIST_{team}", f"UA1_DLQ_{team}"):
         with contextlib.suppress(NotFoundError):
             await jetstream.delete_stream(stream)

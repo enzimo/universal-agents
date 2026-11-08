@@ -12,6 +12,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Callable, Optional
 
 import pytest
@@ -26,7 +27,15 @@ from nats.js.errors import (
 )
 
 from team_services import lock as lock_module
-from team_services.lock import LEASE, RENEW_EVERY, RETRY_EVERY, LockLost, SingleInstanceLock, lock_key
+from team_services.lock import (
+    LEASE,
+    RENEW_EVERY,
+    RETRY_EVERY,
+    LockConnectionClosed,
+    LockLost,
+    SingleInstanceLock,
+    lock_key,
+)
 
 START = datetime(2026, 11, 5, 9, 0, tzinfo=timezone.utc)
 TEAM = "team_one"
@@ -170,12 +179,13 @@ async def test_renewals_failing_until_the_lease_ends_stop_the_instance_with_a_cl
     with caplog.at_level(logging.INFO), pytest.raises(LockLost, match="ran out without a successful renewal"):
         await held.keep(asyncio.Event())
 
-    # Every attempt fell inside the lease and was logged; the instance stopped as the lease ended,
-    # before any standby could take over (the lease's end plus the clock tolerance).
+    # Every attempt fell inside the lease and was logged, then one last compare-and-set at the lease's
+    # end failed too; the instance stopped as the lease ended, before any standby could take over (the
+    # lease's end plus the clock tolerance).
     attempts = caplog.text.count("event=team_services_lock_renew_failed")
-    assert attempts == bucket.updates and attempts >= 5
+    assert attempts + 1 == bucket.updates and attempts >= 5
     assert "event=team_services_lock_lease_ended" in caplog.text
-    assert f"failed_attempts={attempts}" in caplog.text
+    assert f"failed_attempts={attempts + 1}" in caplog.text
     assert now[0] == lease_end
     assert "event=team_services_lock_lost" not in caplog.text
 
@@ -328,3 +338,89 @@ async def test_a_failure_that_trying_again_cannot_cure_is_not_tried_again(world,
 
     assert bucket.creates == 1 and now[0] == START
     assert "event=team_services_lock_acquire_failed" not in caplog.text
+
+
+# --- a lease that only looks ended, a value nobody can have written, a closed connection --------------
+
+
+@pytest.mark.asyncio
+async def test_a_lease_that_looks_ended_after_the_machine_slept_is_renewed_when_nobody_else_took_the_lock(
+    world, caplog
+) -> None:
+    """A laptop's sleep stops the event loop's timers while the wall clock runs on, so the first renewal after waking
+    finds the lease ended. The key still names this instance at the revision it wrote, so nobody served meanwhile."""
+
+    now, bucket, held = world
+    assert await held.try_acquire() is None
+    now[0] += timedelta(seconds=60)  # slept: the wall clock ran on, the loop's timers did not
+    with caplog.at_level(logging.INFO):
+        await _keep_until(held, bucket, updates=2)
+    assert "event=team_services_lock_lease_resumed" in caplog.text
+    assert "event=team_services_lock_lease_ended" not in caplog.text
+    assert _holder(bucket)["instance"] == held.instance and held.lease_ends_at > now[0]
+
+
+@pytest.mark.asyncio
+async def test_a_lease_that_ended_while_another_instance_took_the_lock_stays_lost(world, caplog) -> None:
+    now, bucket, held = world
+    assert await held.try_acquire() is None
+    other = SingleInstanceLock(_JetStream(bucket), TEAM, "team-services", lambda: now[0])
+    now[0] += LEASE + timedelta(seconds=9)  # past the lease and the clock tolerance
+    assert await other.try_acquire() is None
+    with caplog.at_level(logging.INFO), pytest.raises(LockLost):
+        await held.keep(asyncio.Event())
+    assert _holder(bucket)["instance"] == other.instance
+    assert "event=team_services_lock_lease_resumed" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [
+    b"",
+    json.dumps({"runtime": "team-services", "instance": "elsewhere", "lease_ends_at": "2100-01-01T00:00:00.000Z"}).encode(),
+], ids=["empty", "lease_far_ahead"])
+async def test_a_lock_value_no_instance_can_have_written_is_taken_over_once_unchanged_for_a_lease(
+    world, monkeypatch, caplog, value: bytes
+) -> None:
+    """Another process on the shared NATS login, or a holder whose clock ran ahead, must not keep every instance
+    waiting for ever: with nobody renewing, the key's revision stays put."""
+
+    now, bucket, held = world
+    waits = [0]
+
+    async def wait_or_stop(stop: asyncio.Event, seconds: float) -> None:
+        waits[0] += 1
+        if waits[0] > 50:
+            stop.set()  # without the rule this would wait for ever
+        now[0] += timedelta(seconds=max(seconds, 0.0))
+
+    monkeypatch.setattr(lock_module, "_wait_or_stop", wait_or_stop)
+    bucket._write(lock_key(TEAM), value)
+    with caplog.at_level(logging.WARNING):
+        assert await held.acquire(asyncio.Event()) is True
+    assert _holder(bucket)["instance"] == held.instance
+    assert now[0] - START >= LEASE, "taken over only after the value stayed unchanged for a lease"
+    assert caplog.text.count("event=team_services_lock_invalid") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_closed_nats_connection_stops_the_instance_at_once(world, caplog) -> None:
+    """nats-py never reconnects a closed client; waiting out the lease would only hide why the team stops."""
+
+    now, bucket, held = world
+    assert await held.try_acquire() is None
+    held.nc = SimpleNamespace(is_closed=True)
+    stop = asyncio.Event()
+    bucket.failure = lambda number: stop.set()  # any renewal attempt would end the test
+    with caplog.at_level(logging.ERROR), pytest.raises(LockConnectionClosed):
+        await held.keep(stop)
+    assert bucket.updates == 0 and "event=team_services_nats_closed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_renewal_that_finds_the_connection_closed_stops_the_instance_at_once(world) -> None:
+    now, bucket, held = world
+    assert await held.try_acquire() is None
+    bucket.failure = lambda number: ConnectionClosedError()
+    with pytest.raises(LockConnectionClosed):
+        await held.keep(asyncio.Event())
+    assert bucket.updates == 1

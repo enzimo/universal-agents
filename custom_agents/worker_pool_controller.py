@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
-from custom_agents.contract_drain import is_contract_draining
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.worker_pool_limits import PoolLimit, team_limit, type_limit, worker_pool_repository
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import (

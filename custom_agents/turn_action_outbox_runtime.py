@@ -154,6 +154,11 @@ async def _incoming_task_info(self: Any, incoming_content: ContentType) -> TaskI
 def _validate_manager_mediated_worker_delegation(self, action: TurnAction) -> None:
     if not isinstance(action, DelegateTaskAction):
         return
+    from custom_agents.contract_drain_state import is_contract_draining
+
+    if is_contract_draining(self):
+        raise RuntimeError("This process is finishing work on another message contract and cannot delegate new tasks. "
+                           "Finish locally or report that this work needs the restarted team.")
     if getattr(self, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE:
         return
     if (

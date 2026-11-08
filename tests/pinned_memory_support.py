@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from custom_agents.pinned_memory_transfer import run_memory_command
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from storage.access_repository import AccessRepository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 
@@ -34,7 +34,7 @@ def record_people(config: Any, team_id: str, standing: dict[str, PersonStanding]
     AccessRepository(config.manager_storage_settings).replace_people(
         team_id,
         [
-            TeamPersonV1(team_id=team_id, person_id=person, standing=value, changed_at_utc=now)
+            TeamPersonV1(person_ref=new_person_ref(), team_id=team_id, person_id=person, standing=value, changed_at_utc=now)
             for person, value in standing.items()
         ],
         at=now,
