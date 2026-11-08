@@ -55,6 +55,8 @@ FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-memory-c
 KNOWLEDGE_FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-knowledge-command.json"
 # Topic command serialized with v0.9.11's own ManagerTopicCommand model.
 TOPIC_FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-topic-command.json"
+# Pause command serialized with v0.9.11's ManagerScheduleCommand model.
+SCHEDULE_FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-schedule-command.json"
 PERSON = "Owner"
 LEAD_ID = "manager_1234"
 REFUSAL = "Your memory command was sent before the team was upgraded, so nothing was changed. Please send it again."
@@ -226,6 +228,20 @@ async def test_a_topic_command_queued_before_the_upgrade_is_answered(world) -> N
         "so nothing was changed. Please send it again."
     )
     assert notice.msg_header.idempotency_key == "retired_gateway_command:manager_topic_41c2a7b9"
+
+
+@pytest.mark.asyncio
+async def test_a_schedule_command_queued_before_the_upgrade_is_answered_without_changing_a_schedule(world) -> None:
+    envelope = await _lead_handles(world, _queued_0_9_command(world, fixture=SCHEDULE_FIXTURE))
+    assert isinstance(envelope.msg_content, RetiredGatewayCommand)
+    assert envelope.msg_content.message_class == "ManagerScheduleCommand"
+    assert requires_execution_slot(envelope) is False
+    (_, notice), = world.lead.team_comms.sent
+    assert notice.msg_content.text == (
+        "Your schedule command was not carried out\n\nYour schedule command was sent before the team was upgraded, "
+        "so nothing was changed. Please send it again."
+    )
+    assert notice.msg_header.idempotency_key == "retired_gateway_command:mgr_sched_41c2a7b9"
 
 
 @pytest.mark.asyncio

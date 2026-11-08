@@ -1,0 +1,62 @@
+{
+  "message_class": "MessageEnvelope",
+  "msg_content": {
+    "message_class": "ManagerScheduleCommand",
+    "command_id": "mgr_sched_41c2a7b9",
+    "command_type": "request",
+    "action": "pause",
+    "schedule_id": "sched_example",
+    "session_key": null,
+    "paused_until": "2030-01-01T00:00:00+00:00",
+    "expected_record_digest": null,
+    "success": null,
+    "schedules": [],
+    "worker_assignments": {},
+    "message": ""
+  },
+  "msg_header": {
+    "agent_signature": "",
+    "from_agent_id": "gateway.main.responses",
+    "idempotency_key": "mgr_sched_41c2a7b9",
+    "message_class": "MessageHeader",
+    "message_id": "msg_41c2a7b9",
+    "outbox_action_id": null,
+    "response_routing_key": "gateway.main.responses",
+    "timestamp": "2026-11-01T09:30:00+00:00",
+    "to_routing_path": "manager_1"
+  },
+  "msg_meta": {
+    "conversation_id": "conv_owner_cli",
+    "followup_to_task_id": null,
+    "from_agent_name": "main_gateway",
+    "gateway_context": {
+      "canonical_user_id": "Owner",
+      "channel_name": "cli",
+      "chat_id": "owner-chat",
+      "delivery_mode": "manager_control",
+      "gateway_instance_name": null,
+      "heartbeat_source_id": null,
+      "message_class": "GatewayContext",
+      "original_message_id": null,
+      "parallel_thread": false,
+      "schedule_owner_agent_id": null,
+      "schedule_run": null,
+      "scheduled_job_id": null,
+      "session_key": "cli:owner",
+      "task_context": null,
+      "thread_id": null,
+      "user_id": "owner"
+    },
+    "is_response_requested": true,
+    "manager_escalation": null,
+    "message_class": "MessageMeta",
+    "msg_correlation_id": "corr_0f3c2a9b",
+    "objective_id": null,
+    "objective_work_session_id": null,
+    "redispatch_notice": null,
+    "request_timezone": "America/Chicago",
+    "requester_type": "user_req",
+    "to_agent_name": null,
+    "to_named_agent_type": null
+  }
+}

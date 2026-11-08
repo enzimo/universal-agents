@@ -3030,19 +3030,19 @@ The tool stages the exact change (`system_schedule` on the platform tool
 authorization off), and `apply_change` rebuilds the change from the stored
 request, checks that the schedule and the change are unchanged, and issues the
 permit in the approval's mode. Objective tools issue `held_access` permits for
-the Objective's own work-session schedule; gateway commands on schedules the
+the Objective's own work-session schedule; people's commands on schedules the
 runtime manages need a person who could approve such a change, decided by the
-manager with the person and roles from the command's gateway-signed context
-(`manager_control_runtime._may_change_system_schedules`, the same rule as the
-gateway's `PersonChangeCheck`, which the gateway keeps for showing controls).
-The manager awaits this storage and Cedar lookup on its bounded
-`TaskOperationRuntime` lane before checking the record digest or changing the
-schedule. A slow lookup leaves the event loop responsive; a cancelled command
-joins the lookup and stops before mutation.
-Every gateway-to-manager command (schedules, task and objective
-controls, person standing) names its person only through that signed context
-(`manager_control_runtime.verified_command_person`); the commands carry no
-person, roles or authority flag. Until 2026-10-07 the manager trusted a person
+team services with the person from the command token and their current roles
+from the people copy (`team_services.schedules.SystemScheduleCheck`, the
+gateway's own `PersonChangeCheck`, which the gateway also uses for showing
+controls). The decision runs in the team services' worker thread before the
+store checks the listed version and the permit, so a change made meanwhile is
+still caught in the write.
+The gateway-to-manager commands still in the team lead's process (task and
+objective controls, person standing) name their person only through the
+gateway-signed context (`manager_control_runtime.verified_command_person`), and
+the team services' commands only through the command token; neither carries a
+person, roles or an authority flag. Until 2026-10-07 the manager trusted a person
 and roles written in the command body, checked only against an unsigned copy,
 and a "may change system schedules" flag the gateway set. Scheduled
 workers get their tools like any agent type: `prepare_scheduled_job_access`
@@ -4614,6 +4614,51 @@ They serve the team's address (`svc.team`) and answer, so far:
   from lists with `event=topic_tags_omitted`, without logging the tag text. A queued
   0.9 `ManagerTopicCommand` is retired like memory and knowledge commands: the person
   is told nothing was carried out and to send it again.
+- people's schedule lists and controls, `schedules.list`, `.pause`, `.resume`, `.disable`
+  and `.remove` (`team_services.schedules`, the durable `ManagerScheduleCommand` until
+  phase 2), on the same schedule store and with the same rules
+  (`custom_agents.person_schedule_controls`). A person sees and changes only the
+  schedules they own. A system schedule changes only for people who could approve a
+  `system_schedule` change: the gateway's own rule (`PersonChangeCheck`, wrapped as
+  `team_services.schedules.SystemScheduleCheck`) with the person's current roles from the
+  people copy. A change names the version the person listed (`seen_version`, the
+  listing digest); the store checks it and the change's permit in its write
+  transaction, and stores the reply, with the new version, in that same transaction.
+  PostgreSQL locks the command's retry key before its schedule, so even concurrent
+  reuse of one request id with different schedule ids cannot make two changes.
+  A changed listing digest answers `changed_since_read`. A permit mismatch with an
+  unchanged listing digest answers `not_allowed` with a warning in the log, including
+  when a regular run advanced the next fire time during the permission check.
+  Storage failures answer `runtime_error` without storing a refusal; a lost commit
+  acknowledgement is answered from the stored outcome. A chat's own list names the chat by its
+  delivery reference (below). Creating schedules stays on the queued path until phase 3.
+  The team lead's scheduler wakes at once for its own changes; a change made here reaches
+  it at its next pass, within a minute.
+  Lists read a snapshot without pruning, restrict rows to the person's team and
+  ownership, and page by schedule id so scheduler advances do not move rows between
+  pages. Each reply fits the contract's byte limit and returns `next_offset` when
+  more rows remain. Long names are shortened only in the view, with a warning.
+  Run-note settings and state are included within the schema and frame limits;
+  oversized structured notes are omitted with a warning and remain stored unchanged.
+  An invalid saved optional time is omitted with a warning; `invalid_time_fields`
+  keeps an invalid pause's Resume control available without inventing a timestamp.
+  New pause writes reject invalid or zone-less stored times.
+  A queued 0.9 `ManagerScheduleCommand` is retired like the other command families:
+  the lead tells the person it was not carried out and asks them to send it again.
+
+**Delivery references** (`custom_transport.protocol1.delivery_refs`): a schedule list for
+one chat names that chat as `dr_` and a keyed hash (HMAC-SHA256) of the gateway's session
+key, so frames never carry session keys, chat ids or account ids (a Signal chat id is a
+phone number). The launcher creates the key in the trust folder
+(`InstanceLayout.trust_delivery_ref_key_path`, mode 0600) before any host starts, and the
+gateway and the team services read it, so both compute the same reference; the team
+services compare it with the reference of each schedule's stored session. An unkeyed hash
+would let anyone holding a frame test a guessed chat id. Without the key (a gateway or
+team services started without the launcher) a chat's own list is refused with a logged
+warning, and a person's list across chats still works.
+
+Every other operation is answered `unsupported` at once; today's team operations still
+run in the team lead's process and move here one family at a time.
 
 - people's task lists and removals, `tasks.list`, `.list_finished`, `.remove` and `.purge`,
   and the team lead's context dump setting, `debug.dump` (`team_services.relays`): the agent
@@ -4805,8 +4850,14 @@ nothing, too many tags) is refused before it is sent. For memory,
 grammar and rendering: times a person writes are read in their own time zone before
 sending (the contract carries UTC times), `never` clears an expiry, a list asks for at
 most 100 facts, and the typed reply becomes the view the Settings page and the chat
-renderer use. A gateway started without the launcher runs no host, so its memory
-commands say the team services cannot be reached.
+renderer use. For schedules (`assistant_gateway.application.schedule_management`), the
+Schedules page sends the version it listed; a chat or CLI command names only the schedule,
+so the gateway lists the person's schedules first and acts on the version it finds. A
+typed pause time uses the person's time zone unless it includes an offset; a daylight
+saving gap or ambiguous time requires an explicit offset. Invalid input and service
+failures are shown as explanations, never an empty list or a generic missing schedule.
+A gateway started without the launcher runs no host, so its memory and schedule commands say
+the team services cannot be reached.
 
 They also look after their own records every half hour (`SessionService.maintain`): after
 they renew, they write each placement an earlier certificate of theirs signed again under

@@ -202,7 +202,12 @@ from assistant_gateway.mcp_controls import GatewayMCPControls
 from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
-from assistant_gateway.team_services_client import AccessStorePersonReferences, MessageHostTeamServices, new_request_id
+from assistant_gateway.team_services_client import (
+    AccessStorePersonReferences,
+    MessageHostTeamServices,
+    gateway_delivery_refs,
+    new_request_id,
+)
 from assistant_gateway.application.team_commands import (
     GatewayPersonReferences,
     GatewayTeamCommandService,
@@ -937,7 +942,10 @@ class UserGateway:
             request_context=self._request_context_service,
             delivery=self._delivery_service,
             manager=self._manager_client,
-            manager_commands=self._manager_commands,
+            team_commands=_team_commands(
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+            ),
+            delivery_refs=gateway_delivery_refs(config),
             id_generator=self._id_generator,
             # The schedule, MCP and procedure controls share one check of who
             # may make platform changes directly (PersonChangeCheck).

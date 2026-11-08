@@ -322,25 +322,16 @@ class GatewayRuntimeApplication:
         )
         result: list[GatewayScheduledJob] = []
         for schedule in schedules:
-            context = (
-                schedule.payload_meta.gateway_context if schedule.payload_meta else None
-            )
-            scheduled_job_id = (
-                context.scheduled_job_id
-                if context is not None and context.scheduled_job_id
-                else schedule.schedule_id
-            )
+            # A schedule the gateway made uses its schedule id as its job id (GatewayScheduleApplication.add).
             result.append(
                 GatewayScheduledJob(
-                    scheduled_job_id=scheduled_job_id,
+                    scheduled_job_id=schedule.schedule_id,
                     next_fire_at=schedule.next_fire_at,
-                    task_summary=(
-                        schedule.payload.problem_statement or ""
-                    ).splitlines()[-1],
+                    task_summary=schedule.instruction_preview,
                     schedule_name=schedule.schedule_name,
                     enabled=schedule.enabled,
                     paused_until=schedule.paused_until,
-                    session_key=context.session_key if context is not None else None,
+                    session_key=schedule.session_key,
                 )
             )
         return result

@@ -608,12 +608,15 @@ class PinnedMemoryCommandPayload(BaseModel):
 # so it was redelivered, set aside as a dead letter and the person never heard back.
 # A family that moves the same way adds its old class name to the ``Literal`` and what
 # people call the command to the mapping below it, in the same change.
-RetiredGatewayCommandClass = Literal["ManagerMemoryCommand", "ManagerKnowledgeCommand", "ManagerTopicCommand"]
+RetiredGatewayCommandClass = Literal[
+    "ManagerMemoryCommand", "ManagerKnowledgeCommand", "ManagerTopicCommand", "ManagerScheduleCommand",
+]
 # What people called each retired command, for the refusal they are sent.
 RETIRED_GATEWAY_COMMAND_NAMES: Dict[str, str] = {
     "ManagerMemoryCommand": "memory command",
     "ManagerKnowledgeCommand": "Knowledge page request",
     "ManagerTopicCommand": "topic command",
+    "ManagerScheduleCommand": "schedule command",
 }
 
 

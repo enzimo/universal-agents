@@ -68,6 +68,7 @@ from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from default_values import STORAGE_DEFAULTS
 from id_generation import new_id
 from storage.config import StorageSettings, resolve_storage_settings
+from storage.operation_outcomes import CommandOutcome, OutcomeAlreadyStored
 from storage.schedule_repository import UNFINISHED_RUNS, RowWrite, create_schedule_repository
 
 if TYPE_CHECKING:
@@ -1025,6 +1026,12 @@ class ScheduleStore:
             )
             return None
 
+    @property
+    def command_outcomes(self) -> Any:
+        """Where people's schedule commands keep their outcomes (``team_services.outcomes.OutcomeStore``)."""
+
+        return self._repository
+
     def remove(
         self,
         schedule_id: str,
@@ -1032,6 +1039,7 @@ class ScheduleStore:
         system_mutation_permit: Optional[ScheduleMutationPermit] = None,
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> bool:
         """Delete a schedule; False when there is none (or storage failed, logged).
 
@@ -1053,7 +1061,7 @@ class ScheduleStore:
             )
             return RowWrite(delete=True, result=True)
 
-        deleted = self._write_or_log(schedule_id, decide, action="remove")
+        deleted = self._write_or_log(schedule_id, decide, action="remove", command_outcome=command_outcome)
         if deleted:
             self._logger.info(f"Schedule {schedule_id} removed.")
             self._end_schedule_access(schedule_id)
@@ -1061,14 +1069,23 @@ class ScheduleStore:
             self._logger.warning(f"Schedule {schedule_id} not found for removal.")
         return deleted
 
-    def _write_or_log(self, schedule_id: str, decide: Callable[[Optional[dict[str, Any]]], RowWrite], *, action: str) -> bool:
-        """Run a control change; refusals propagate, a storage failure is logged and reads as not changed."""
+    def _write_or_log(self, schedule_id: str, decide: Callable[[Optional[dict[str, Any]]], RowWrite], *, action: str,
+                      command_outcome: Optional[CommandOutcome] = None) -> bool:
+        """Run a control change; refusals propagate, a storage failure is logged and reads as not changed.
+
+        ``command_outcome`` (a person's command from the team services) stores the command's reply
+        with the change; a command already answered propagates ``OutcomeAlreadyStored``.
+        """
 
         try:
-            return bool(self._repository.write_locked(schedule_id, decide).result)
-        except (SystemScheduleMutationDenied, ScheduleWriteConflict):
+            return bool(self._repository.write_locked(schedule_id, decide, command_outcome=command_outcome).result)
+        except (SystemScheduleMutationDenied, ScheduleWriteConflict, OutcomeAlreadyStored):
             raise
         except Exception:
+            if command_outcome is not None:
+                # Commands must distinguish an absent row from failed storage. CommandOnce
+                # also re-reads the outcome after a lost commit acknowledgement.
+                raise
             self._logger.exception(
                 "A schedule change failed in storage. event=schedule_write_failed schedule_id=%s action=%s",
                 schedule_id,
@@ -1470,11 +1487,26 @@ class ScheduleStore:
 
     def get_scheduled_message(self, schedule_id: str) -> Optional["ScheduledMessage"]:
         try:
-            row = self._row(schedule_id)
-            return _row_message(row, self._logger) if row is not None else None
+            return self.read_scheduled_message(schedule_id)
         except Exception as e:
             self._logger.error(f"Failed to load scheduled message {schedule_id}: {e}")
             return None
+
+    def read_scheduled_message(self, schedule_id: str) -> Optional["ScheduledMessage"]:
+        """Read one schedule; only an absent row is None. Command callers must see storage errors."""
+
+        row = self._row(schedule_id)
+        return _row_message(row, self._logger) if row is not None else None
+
+    def list_scheduled_messages(self, *, team_id: str) -> list["ScheduledMessage"]:
+        """A read-only snapshot for one team's commands, without pruning or a second read per row.
+
+        Storage and decoding failures propagate. Ordering by id keeps ordinary scheduler
+        advances from moving rows between offset pages.
+        """
+
+        rows = (row for row in self.all_rows() if row.get("claim_team_id") == team_id)
+        return [_row_message(row, self._logger) for row in sorted(rows, key=lambda row: row["schedule_id"])]
 
     def _row(self, schedule_id: str) -> Optional[dict[str, Any]]:
         """One schedule row by its column names (``get_schedule_row`` returns them in ``SCHEDULE_ROW_FIELDS`` order)."""
@@ -1599,6 +1631,7 @@ class ScheduleStore:
         system_mutation_permit: Optional[ScheduleMutationPermit] = None,
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> bool:
         """Turn a schedule on or off (``_change_controls``)."""
 
@@ -1609,6 +1642,7 @@ class ScheduleStore:
             permit=system_mutation_permit,
             request_binding=system_mutation_request_binding,
             expected_record_digest=expected_record_digest,
+            command_outcome=command_outcome,
         )
 
     def set_paused_until(
@@ -1620,9 +1654,14 @@ class ScheduleStore:
         system_mutation_permit: Optional[ScheduleMutationPermit] = None,
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> bool:
         """Pause a schedule until a time, or clear its pause (``_change_controls``)."""
 
+        if paused_until is not None:
+            moment = datetime.fromisoformat(paused_until.replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                raise ValueError("A schedule pause time must include its UTC offset.")
         return self._change_controls(
             schedule_id,
             {"paused_until": paused_until},
@@ -1630,6 +1669,7 @@ class ScheduleStore:
             permit=system_mutation_permit,
             request_binding=system_mutation_request_binding,
             expected_record_digest=expected_record_digest,
+            command_outcome=command_outcome,
         )
 
     def resume(
@@ -1639,6 +1679,7 @@ class ScheduleStore:
         system_mutation_permit: Optional[ScheduleMutationPermit] = None,
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
         expected_record_digest: Optional[str] = None,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> bool:
         """Clear a schedule's pause and turn it on, as one change with one permit (``_change_controls``)."""
 
@@ -1649,6 +1690,7 @@ class ScheduleStore:
             permit=system_mutation_permit,
             request_binding=system_mutation_request_binding,
             expected_record_digest=expected_record_digest,
+            command_outcome=command_outcome,
         )
 
     def _change_controls(
@@ -1660,6 +1702,7 @@ class ScheduleStore:
         permit: Optional[ScheduleMutationPermit],
         request_binding: Optional[dict[str, Any]],
         expected_record_digest: Optional[str],
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> bool:
         """Change ``enabled`` and ``paused_until`` on the schedule as it is now; False when there is none.
 
@@ -1676,20 +1719,21 @@ class ScheduleStore:
                 return RowWrite(result=False)
             current = _row_message(row, self._logger)
             _require_record_digest(current, expected_record_digest)
+            candidate = current.model_copy(deep=True, update=changes)
             require_schedule_mutation_permit(
                 current,
                 operation=operation,
                 permit=permit,
-                candidate=current.model_copy(deep=True, update=changes),
+                candidate=candidate,
                 request_binding=request_binding,
             )
             stored = _stored_message(row).model_copy(update=changes)
             columns = {**changes, "schedule_json": stored.model_dump_json()}
             if "enabled" in columns:
                 columns["enabled"] = 1 if columns["enabled"] else 0
-            return RowWrite(columns=columns, result=True)
+            return RowWrite(columns=columns, result=True, listed_digest=schedule_record_digest(candidate))
 
-        changed = self._write_or_log(schedule_id, decide, action=operation.value)
+        changed = self._write_or_log(schedule_id, decide, action=operation.value, command_outcome=command_outcome)
         if changed:
             self._logger.info("Schedule %s %s: %s", schedule_id, operation.value, changes)
         else:

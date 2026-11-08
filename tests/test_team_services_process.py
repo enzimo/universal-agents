@@ -25,6 +25,21 @@ NOW = datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc)
 
 
 @pytest.mark.asyncio
+async def test_operation_resources_close_after_serving_also_when_startup_fails(monkeypatch) -> None:
+    events = []
+
+    async def failed(*args):
+        events.append("serve")
+        raise RuntimeError("startup failed")
+
+    monkeypatch.setattr(process, "_serve_team", failed)
+    family = OperationFamily({}, close=lambda: events.append("close"))
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await process.serve_team(SimpleNamespace(logger=logging.getLogger("test")), "team_one", asyncio.Event(), [family])
+    assert events == ["serve", "close"]
+
+
+@pytest.mark.asyncio
 async def test_a_takeover_reads_the_newest_certificate_and_the_current_revocations_before_serving() -> None:
     """A standby may wait for days: the serving instance may have renewed their certificate, and the revocations
     record the standby read when it started lasts a day."""

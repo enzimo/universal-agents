@@ -22,7 +22,6 @@ from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.routing_v1 import MessageHeader
 from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.schedule_v1 import AutomationMessage
-from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.scheduled_run_context_v1 import ScheduledRunContextReplyV1
 from custom_messages.contracts.scheduled_run_context_v1 import ScheduledRunContextRequestV1
@@ -54,7 +53,6 @@ ContentType = Annotated[
         DeliveryReceipt,
         Instruction,  # Used directly? Or always via ControlPayload? Let's assume via ControlPayload
         ManagerRuntimeWorkCommand,
-        ManagerScheduleCommand,
         ManagedSkillCatalogChangedV1,
         NoOpMessage,
         PersonStandingCommandV1,
@@ -96,7 +94,6 @@ ContentType = Annotated[
 # dropped by the gateway like any unmatched control reply.
 GATEWAY_MANAGER_CONTROL_TYPES = (
     ManagerRuntimeWorkCommand,
-    ManagerScheduleCommand,
     PersonStandingCommandV1,
     RetiredGatewayCommand,
 )

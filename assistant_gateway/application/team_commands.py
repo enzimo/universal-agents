@@ -36,7 +36,7 @@ _READ_KINDS = frozenset({
     "memory.list", "memory.show", "topics.list_tags", "topics.find_threads",
     "knowledge.list", "knowledge.read", "knowledge.history", "knowledge.list_contributions",
     "knowledge.count_contributions", "knowledge.read_contribution",
-    "tasks.list", "tasks.list_finished",
+    "tasks.list", "tasks.list_finished", "schedules.list",
 })
 
 

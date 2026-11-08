@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from live_nats_client import LiveNatsClient, nats_transport_config_from_env, resolve_live_transport_settings
+from live_nats_client import LiveNatsClient, nats_transport_config_from_env
 
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
@@ -34,7 +34,10 @@ from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import forget_task_context_keys, use_gateway_key
-from tests.test_retired_gateway_commands import FIXTURE, KNOWLEDGE_FIXTURE, TOPIC_FIXTURE, _queued_0_9_command
+from tests.test_retired_gateway_commands import (
+    FIXTURE, KNOWLEDGE_FIXTURE, TOPIC_FIXTURE, SCHEDULE_FIXTURE, _queued_0_9_command,
+)
+from tests.test_live_team_services import broker  # noqa: F401 - isolated NATS fixture
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
@@ -53,21 +56,22 @@ QUEUED_COMMANDS = {
     "memory": (FIXTURE, "memory command", ("cli", "owner-chat", "cli:owner")),
     "knowledge": (KNOWLEDGE_FIXTURE, "Knowledge page request", ("website", "web-chat", "website:web-chat:owner")),
     "topics": (TOPIC_FIXTURE, "topic command", ("cli", "owner-chat", "cli:owner")),
+    "schedules": (SCHEDULE_FIXTURE, "schedule command", ("cli", "owner-chat", "cli:owner")),
 }
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", sorted(QUEUED_COMMANDS))
 async def test_a_queued_0_9_command_is_answered_in_the_persons_chat_over_nats(tmp_path, monkeypatch, caplog,
-                                                                               family: str):
+                                                                               family: str, broker: str):  # noqa: F811
     use_gateway_key(monkeypatch)
     try:
-        await _answered_over_nats(tmp_path, caplog, *QUEUED_COMMANDS[family])
+        await _answered_over_nats(tmp_path, caplog, *QUEUED_COMMANDS[family], broker_url=broker)
     finally:
         forget_task_context_keys()
 
 
-async def _answered_over_nats(tmp_path, caplog, fixture, name: str, chat: tuple[str, str, str]) -> None:
+async def _answered_over_nats(tmp_path, caplog, fixture, name: str, chat: tuple[str, str, str], *, broker_url: str) -> None:
     team_id, lead_id = new_id("live_retired"), new_id("manager")
     config = GatewayInstanceConfig.create(
         instance_name="live_retired", instance_root=str(tmp_path / "instance"),
@@ -75,7 +79,8 @@ async def _answered_over_nats(tmp_path, caplog, fixture, name: str, chat: tuple[
         manager_agent_id=lead_id, manager_storage_sqlite_path=str(tmp_path / "manager.db"),
         state_storage_sqlite_path=str(tmp_path / "gateway.db"), named_agent_type="TeamArchitect",
     )
-    config.transport = resolve_live_transport_settings()
+    config.transport.nats_servers = [broker_url]
+    config.transport.nats_url = broker_url
     config.delivery.quiet_hours.enabled = False
     delivered: list[Any] = []
     state_store = GatewayStateStore(str(tmp_path / "gateway.db"))

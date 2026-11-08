@@ -2410,121 +2410,6 @@
       "title": "ManagerRuntimeWorkCommand",
       "type": "object"
     },
-    "ManagerScheduleCommand": {
-      "description": "Durable gateway-to-manager schedule query or mutation.",
-      "properties": {
-        "action": {
-          "enum": [
-            "list",
-            "pause",
-            "resume",
-            "disable",
-            "remove"
-          ],
-          "title": "Action",
-          "type": "string"
-        },
-        "command_id": {
-          "title": "Command Id",
-          "type": "string"
-        },
-        "command_type": {
-          "$ref": "#/$defs/MessageMetaType",
-          "default": "request"
-        },
-        "expected_record_digest": {
-          "anyOf": [
-            {
-              "pattern": "^[0-9a-f]{64}$",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Expected Record Digest"
-        },
-        "message": {
-          "default": "",
-          "title": "Message",
-          "type": "string"
-        },
-        "message_class": {
-          "const": "ManagerScheduleCommand",
-          "default": "ManagerScheduleCommand",
-          "title": "Message Class",
-          "type": "string"
-        },
-        "paused_until": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Paused Until"
-        },
-        "schedule_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Schedule Id"
-        },
-        "schedules": {
-          "items": {
-            "$ref": "#/$defs/ScheduledMessage"
-          },
-          "title": "Schedules",
-          "type": "array"
-        },
-        "session_key": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Session Key"
-        },
-        "success": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Success"
-        },
-        "worker_assignments": {
-          "additionalProperties": {
-            "$ref": "#/$defs/ScheduleWorkerAssignmentV1"
-          },
-          "title": "Worker Assignments",
-          "type": "object"
-        }
-      },
-      "required": [
-        "action"
-      ],
-      "title": "ManagerScheduleCommand",
-      "type": "object"
-    },
     "MessageHeader": {
       "additionalProperties": true,
       "description": "Contains standard routing and identification metadata for a message.\n\nAttributes:\n    from_agent_id (Optional[str]):\n        Optional identifier of the agent originating the message. Useful for tracking message origin\n        and facilitating direct responses. Defaults to None if the message isn't directly associated with an agent.\n\n    to_routing_path (Optional[Union[str, RoutingType]]):\n        Optional identifier of the agent intended to receive the message, or a special routing type.\n        Used for routing messages to specific agents or groups within the system.\n        Special routing types include: '++<all>++', '++<self>++', '++<null>++'.\n        Defaults to None if the message is not targeted at a specific agent.\n\n    response_routing_key (Optional[Union[str, RoutingType]]):\n        Optional routing key (e.g., queue name) or a special routing type where a response to this message should be sent.\n        Defaults to None if no specific response routing is required.\n\n    timestamp (str):\n        Timestamp indicating when the message was created, automatically generated using the\n        ISO 8601 format. Provides a standardized time reference for all messages.\n\n    message_id (str):\n        Unique identifier for the message, automatically generated with a semantic prefix\n        and a 12-character lowercase hexadecimal suffix. Ensures message\n        uniqueness and facilitates tracking.\n\n    agent_signature (Optional[str]):\n        Optional signature of the agent's private key applied to the message_id of this message (for security).",
@@ -3286,7 +3171,8 @@
           "enum": [
             "ManagerMemoryCommand",
             "ManagerKnowledgeCommand",
-            "ManagerTopicCommand"
+            "ManagerTopicCommand",
+            "ManagerScheduleCommand"
           ],
           "title": "Message Class",
           "type": "string"
@@ -4185,109 +4071,6 @@
         }
       },
       "title": "ScheduleTaskMemory",
-      "type": "object"
-    },
-    "ScheduleWorkerAssignmentV1": {
-      "additionalProperties": false,
-      "description": "Manager-projected assignment, separate from canonical schedule mutation data.\n\nAutomatic creation describes saved default or TeamLead startup permission,\nnot proof that a worker is running or has tool access.",
-      "properties": {
-        "agent_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Agent Id"
-        },
-        "agent_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Agent Type"
-        },
-        "automatic_creation": {
-          "enum": [
-            "not_configured",
-            "enabled",
-            "disabled",
-            "default_policy"
-          ],
-          "title": "Automatic Creation",
-          "type": "string"
-        },
-        "desired_agent_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Desired Agent Type"
-        },
-        "not_running_explanation": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Not Running Explanation"
-        },
-        "not_running_since": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Not Running Since"
-        },
-        "reassignment_pending": {
-          "default": false,
-          "title": "Reassignment Pending",
-          "type": "boolean"
-        },
-        "review_agent_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Review Agent Type"
-        },
-        "upgrade_required": {
-          "default": false,
-          "title": "Upgrade Required",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "agent_type",
-        "agent_id",
-        "automatic_creation"
-      ],
-      "title": "ScheduleWorkerAssignmentV1",
       "type": "object"
     },
     "ScheduledMessage": {
@@ -7831,7 +7614,7 @@
           "ManagerKnowledgeCommand": "#/$defs/RetiredGatewayCommand",
           "ManagerMemoryCommand": "#/$defs/RetiredGatewayCommand",
           "ManagerRuntimeWorkCommand": "#/$defs/ManagerRuntimeWorkCommand",
-          "ManagerScheduleCommand": "#/$defs/ManagerScheduleCommand",
+          "ManagerScheduleCommand": "#/$defs/RetiredGatewayCommand",
           "ManagerTopicCommand": "#/$defs/RetiredGatewayCommand",
           "NoOpMessage": "#/$defs/NoOpMessage",
           "PersonStandingCommandV1": "#/$defs/PersonStandingCommandV1",
@@ -7885,9 +7668,6 @@
         },
         {
           "$ref": "#/$defs/ManagerRuntimeWorkCommand"
-        },
-        {
-          "$ref": "#/$defs/ManagerScheduleCommand"
         },
         {
           "$ref": "#/$defs/ManagedSkillCatalogChangedV1"

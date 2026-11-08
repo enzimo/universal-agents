@@ -44,12 +44,15 @@ from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
 from runtime_settings.knowledge import knowledge_settings
+from custom_agents.schedule_store import ScheduleStore
+from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
 from team_services.relays import Relays
+from team_services.schedules import ScheduleOperations, SystemScheduleCheck
 from team_services.topics import TopicOperations
 from custom_agents.conversation_store import ConversationStore
 from assistant_gateway.runtime_config import lead_memory_config
@@ -82,6 +85,21 @@ def transport_config(config: GatewayInstanceConfig) -> NatsTransportConfig:
 
 async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
                      families: Sequence[OperationFamily] = ()) -> None:
+    """Serve while holding the team's lock, then close family resources after requests finish."""
+
+    try:
+        await _serve_team(host, team, stop, families)
+    finally:
+        for family in families:
+            if family.close is not None:
+                try:
+                    await asyncio.to_thread(family.close)
+                except Exception:
+                    host.logger.exception("A team operation family could not close. event=team_family_close_failed")
+
+
+async def _serve_team(host: MessageHost, team: str, stop: asyncio.Event,
+                      families: Sequence[OperationFamily]) -> None:
     """Hold the lock, serve the team's address and keep the host and the lock up until ``stop``.
 
     ``families`` are the handlers of people's commands (``team_operations``).
@@ -207,7 +225,21 @@ def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]
     conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
                                       artifacts_dir=config.layout.conversation_artifacts_dir)
     topics = TopicOperations(conversations, people, clock, _LOGGER)
-    return [memory.family(), knowledge.family(), topics.family()]
+    schedules = ScheduleOperations(ScheduleStore(storage_settings=storage, default_cron_timezone=config.user.timezone),
+                                   people, _delivery_refs(config),
+                                   SystemScheduleCheck(config, people), clock, _LOGGER)
+    return [memory.family(), knowledge.family(), topics.family(), schedules.family()]
+
+
+def _delivery_refs(config: GatewayInstanceConfig) -> DeliveryRefs | None:
+    """The instance's delivery reference key, which the launcher creates; without it chat lists are refused."""
+
+    try:
+        return DeliveryRefs.load(config.layout, config.manager.team_id)
+    except Exception:
+        _LOGGER.warning("The delivery reference key cannot be read; a chat's own schedule list is refused until the "
+                        "launcher creates it. event=team_services_delivery_ref_key_missing")
+        return None
 
 
 async def run_team_services(config: GatewayInstanceConfig) -> None:

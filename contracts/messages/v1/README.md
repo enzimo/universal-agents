@@ -1976,6 +1976,11 @@ The assignment keeps `automatic_creation` as `not_configured`, `enabled`, `disab
 schedule. Automatic creation says whether startup is allowed; it does not prove that a
 worker started or has access. The reply's `next_offset` appears only when more rows remain.
 
+When a saved optional time cannot be decoded, the row omits that timestamp and names
+the field in `invalid_time_fields`. The worker explanation describes the problem.
+An invalid `paused_until` still offers Resume to clear the pause, and Remove. Listing
+never repairs the stored record. New pause commands require a valid timestamp.
+
 `schedules.get` reads one exact `schedule_id`. It maps the existing
 `list_scheduled_jobs(schedule_id=...)` detail read to `fn:schedule_runs`, action
 `list_scheduled_jobs`, level `read`. It is not a new runtime tool. Gateway reads use

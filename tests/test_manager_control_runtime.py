@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import sqlite3
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -20,7 +19,6 @@ from custom_agents.manager_bootstrap_runtime import run_manager_bootstrap
 from custom_agents.manager_control_runtime import (
     build_task_progress_response,
     handle_manager_runtime_work_command,
-    handle_manager_schedule_command,
 )
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.task_manager import TaskManager
@@ -31,19 +29,13 @@ from custom_messages.contracts.control_v1 import (
     ManagerRuntimeWorkCommand,
 )
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
     MessageHeader,
     MessageMeta,
 )
 from custom_messages.contracts.schedule_v1 import (
-    SCHEDULE_CHANGED_SINCE_LISTED,
-    SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED,
-    SYSTEM_SCHEDULE_CHANGE_REFUSED,
-    ManagerScheduleCommand,
     ScheduledMessage,
-    schedule_listing_digest,
 )
 from custom_messages.contracts.task_v1 import Task, TaskProgressStatus
 from custom_messages.enums import (
@@ -68,7 +60,6 @@ from tests.broker_access_support import (
     forget_task_context_keys,
 )
 from custom_agents import manager_control_runtime
-from tests.change_approval_support import CEDAR_BINARY, needs_cedar
 from tests import scheduled_run_support as scheduled_runs
 
 
@@ -291,258 +282,6 @@ def test_legacy_ownerless_schedule_stays_unassigned_through_startup_and_firing(
     conversations = world.worker._conversation_store
     assert conversations.get_turn_by_task_id(run.task.task_id)["owner_canonical_user_id"] is None
     assert conversations.list_conversations(owner_canonical_user_id=scheduled_runs.ANN) == []
-
-
-@pytest.mark.asyncio
-async def test_authenticated_gateway_can_remove_owned_system_schedule(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config = _config(tmp_path)
-    comms = _CaptureComms()
-    agent = _bootstrap_agent(config)
-    store = ScheduleStore(storage_settings=config.manager_storage_settings)
-    owner = config.user.canonical_user_id
-    store.add(
-        ScheduledMessage(
-            schedule_id="hb_sched_manager_control",
-            schedule_name="heartbeat:manager-control",
-            management_class=ScheduleManagementClass.SYSTEM,
-            system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
-            claim_team_id=config.gateway.team_id,
-            payload=Task(
-                task_type=MessageMetaType.REQUEST,
-                problem_statement="Launch heartbeat work.",
-            ),
-            payload_meta=MessageMeta(
-                gateway_context=GatewayContext(
-                    canonical_user_id=owner,
-                    session_key="session_owner",
-                )
-            ),
-            interval_ms=60_000,
-        )
-    )
-    agent.team_comms = comms
-    agent._ensure_schedule_store = lambda: store
-    agent._scheduler_wake = SimpleNamespace(set=lambda: None)
-    header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway")
-    # The manager decides with the verified roles who may change schedules the
-    # runtime manages (the real decision is tested in
-    # test_gateway_system_schedule_controls); administrators here.
-    monkeypatch.setattr(
-        manager_control_runtime,
-        "_may_change_system_schedules",
-        lambda _agent, person: "admin" in person.roles,
-    )
-    meta = MessageMeta(
-        gateway_context=_signed(
-            GatewayContext(canonical_user_id=owner, session_key="session_owner"),
-            team_id=config.gateway.team_id,
-            roles=["member"],
-        )
-    )
-    # The signed person is a member, not an administrator: the manager refuses,
-    # even though the person owns the schedule and the record is current.
-    current = store.get_scheduled_message("hb_sched_manager_control")
-    refused_command = ManagerScheduleCommand(
-        action="remove",
-        schedule_id="hb_sched_manager_control",
-        expected_record_digest=schedule_listing_digest(current),
-    )
-    await handle_manager_schedule_command(
-        agent, command=refused_command, msg_header=header, msg_meta=meta
-    )
-    refused = comms.messages[-1].msg_content
-    assert refused.success is False
-    assert refused.message == SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED
-    assert store.get_scheduled_message("hb_sched_manager_control") is not None
-
-    command = ManagerScheduleCommand(
-        action="remove",
-        schedule_id="hb_sched_manager_control",
-        expected_record_digest="b" * 64,
-    )
-    admin_meta = MessageMeta(
-        gateway_context=_signed(
-            GatewayContext(canonical_user_id=owner, session_key="session_owner"),
-            team_id=config.gateway.team_id,
-            roles=["admin"],
-        )
-    )
-    await handle_manager_schedule_command(
-        agent,
-        command=command,
-        msg_header=MessageHeader(
-            from_agent_id="gateway",
-            response_routing_key="gateway",
-        ),
-        msg_meta=admin_meta,
-    )
-
-    stale_response = comms.messages[-1].msg_content
-    assert isinstance(stale_response, ManagerScheduleCommand)
-    assert stale_response.success is False
-    assert stale_response.message == "schedule_changed"
-    unchanged = store.get_scheduled_message("hb_sched_manager_control")
-    assert unchanged is not None
-    command.expected_record_digest = schedule_listing_digest(unchanged)
-    await handle_manager_schedule_command(
-        agent,
-        command=command,
-        msg_header=MessageHeader(
-            from_agent_id="gateway",
-            response_routing_key="gateway",
-        ),
-        msg_meta=admin_meta,
-    )
-
-    response = comms.messages[-1].msg_content
-    assert isinstance(response, ManagerScheduleCommand)
-    assert response.success is True
-    assert response.message == "schedule_removed"
-    assert store.get_scheduled_message("hb_sched_manager_control") is None
-
-
-@needs_cedar
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("authorization_enabled", "roles", "interruption", "allowed"),
-    [
-        (True, ["admin"], None, True),
-        (True, ["member"], None, False),
-        (False, ["member"], None, True),
-        (True, ["admin"], "cancel", True),
-        (True, ["admin"], "schedule_changed", True),
-        (True, ["admin"], "permit_refused", True),
-        (True, ["admin"], "decision_failed", True),
-    ],
-)
-async def test_slow_schedule_permission_keeps_loop_responsive_and_precedes_mutation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    authorization_enabled: bool,
-    roles: list[str],
-    interruption: str | None,
-    allowed: bool,
-) -> None:
-    from custom_agents.access_runtime import _runtime_access, runtime_access
-
-    config = _config(tmp_path)
-    agent = _bootstrap_agent(config)
-    agent.authorization_config = {
-        "enabled": authorization_enabled,
-        "cedar_binary_path": str(CEDAR_BINARY),
-    }
-    store = ScheduleStore(storage_settings=config.manager_storage_settings)
-    owner = config.user.canonical_user_id
-    schedule = ScheduledMessage(
-        schedule_id="slow_permission_schedule",
-        management_class=ScheduleManagementClass.SYSTEM,
-        system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
-        claim_team_id=config.gateway.team_id,
-        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Heartbeat"),
-        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id=owner)),
-        interval_ms=60_000,
-    )
-    store.add(schedule)
-    agent.team_comms = _CaptureComms()
-    agent._ensure_schedule_store = lambda: store
-    agent._scheduler_wake = SimpleNamespace(set=lambda: None)
-    person = manager_control_runtime.CommandPerson(owner, config.gateway.team_id, tuple(roles))
-    decision = manager_control_runtime._may_change_system_schedules
-    entered = threading.Event()
-    release = threading.Event()
-
-    def slow_decision(live_agent, verified_person):
-        # Keep the real Cedar decision; hold its start to simulate slow storage
-        # or evaluation and prove no mutation can precede its answer.
-        assert live_agent is agent
-        assert verified_person == person
-        entered.set()
-        assert release.wait(timeout=2), "Permission lookup blocked the manager loop"
-        if interruption == "decision_failed":
-            raise RuntimeError("Permission evaluator failed")
-        return decision(live_agent, verified_person)
-
-    task = None
-    _runtime_access.cache_clear()
-    try:
-        assert decision(agent, person) is allowed
-        monkeypatch.setattr(manager_control_runtime, "_may_change_system_schedules", slow_decision)
-        task = asyncio.create_task(
-            handle_manager_schedule_command(
-                agent,
-                command=ManagerScheduleCommand(
-                    action="remove",
-                    schedule_id=schedule.schedule_id,
-                    # Without a listed digest, only the store's permit check sees the change.
-                    expected_record_digest=(
-                        None if interruption == "permit_refused" else schedule_listing_digest(schedule)
-                    ),
-                ),
-                msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
-                msg_meta=MessageMeta(gateway_context=_signed(
-                    GatewayContext(canonical_user_id=owner),
-                    team_id=config.gateway.team_id,
-                    roles=roles,
-                )),
-            )
-        )
-        assert await asyncio.to_thread(entered.wait, 3)
-        # Reaching this callback while the decision is held proves the loop
-        # can continue handling timers and other incoming commands.
-        assert not task.done()
-        assert store.get_scheduled_message(schedule.schedule_id) is not None
-        assert not agent.team_comms.messages
-        if interruption == "cancel":
-            task.cancel()
-            await asyncio.sleep(0)
-            assert not task.done(), "Cancellation must join the in-flight lookup"
-        elif interruption in ("schedule_changed", "permit_refused"):
-            candidate = schedule.model_copy(update={"paused_until": "2030-01-01T00:00:00+00:00"})
-            operation = manager_control_runtime.ScheduleMutationOperation.PAUSE
-            permit = manager_control_runtime._authenticated_gateway_schedule_permit(
-                schedule, principal=person, operation=operation, candidate=candidate
-            )
-            store.set_paused_until(
-                schedule.schedule_id, candidate.paused_until,
-                operation=operation, system_mutation_permit=permit,
-            )
-        release.set()
-        if interruption == "cancel":
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            assert store.get_scheduled_message(schedule.schedule_id) is not None
-            assert not agent.team_comms.messages
-        elif interruption in ("schedule_changed", "permit_refused"):
-            # The listed schedule and the permit are checked in the store's
-            # write transaction: the person is told why and nothing is removed.
-            await task
-            response = agent.team_comms.messages[-1].msg_content
-            expected = SCHEDULE_CHANGED_SINCE_LISTED if interruption == "schedule_changed" else SYSTEM_SCHEDULE_CHANGE_REFUSED
-            assert (response.success, response.message) == (False, expected)
-            assert store.get_scheduled_message(schedule.schedule_id).paused_until == candidate.paused_until
-        elif interruption == "decision_failed":
-            with pytest.raises(RuntimeError, match="Permission evaluator failed"):
-                await task
-            assert store.get_scheduled_message(schedule.schedule_id) is not None
-            assert not agent.team_comms.messages
-        else:
-            await task
-            response = agent.team_comms.messages[-1].msg_content
-            assert response.success is allowed
-            assert response.message == (
-                "schedule_removed" if allowed else SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED
-            )
-            assert (store.get_scheduled_message(schedule.schedule_id) is None) is allowed
-    finally:
-        release.set()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        access = runtime_access(agent)
-        if access.service is not None:
-            access.service.cedar.close()
-        _runtime_access.cache_clear()
 
 
 @pytest.mark.asyncio
@@ -1156,116 +895,6 @@ async def test_objective_deletion_that_was_not_saved_is_not_reported_done(
     assert stored.status == ObjectiveStatus.DELETED
     assert stored.deleted_at is not None
     assert "Future execution is disabled" in stored.deletion_summary
-
-
-class _GatewayToManager:
-    """The gateway's manager commands, delivered to the real manager handler with a gateway-signed context."""
-
-    def __init__(self, agent: SimpleNamespace, comms: _CaptureComms) -> None:
-        self.agent = agent
-        self.comms = comms
-
-    async def request(self, request):
-        person = request.person
-        await handle_manager_schedule_command(
-            self.agent,
-            command=request.command,
-            msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
-            msg_meta=MessageMeta(
-                gateway_context=_signed(
-                    GatewayContext(canonical_user_id=person.canonical_user_id, session_key=request.session.session_key),
-                    team_id=person.team_id,
-                    roles=list(person.roles),
-                )
-            ),
-        )
-        return decode_envelope(encode_envelope(self.comms.messages[-1])).msg_content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("command", ["/pause schedule {id} 2030-01-01T00:00:00+00:00", "/disable schedule {id}"])
-async def test_chat_schedule_commands_reach_the_stores_digest_check(tmp_path: Path, command: str) -> None:
-    """Chat and CLI schedule commands hashed the whole record, so the store refused every one (2026-10-17)."""
-    from assistant_gateway.application.commands.context import GatewayActorContext
-    from assistant_gateway.application.commands.manager_control import ManagerControlCommandRequest
-    from assistant_gateway.application.manager_control_command_service import GatewayManagerControlCommandService
-    from assistant_gateway.application.request_context import GatewayCommandPerson
-    from assistant_gateway.application.schedule_management import GatewayScheduleApplication, GatewayScheduleSettings
-    from assistant_gateway.domain.sessions import SessionRecord
-
-    config = _config(tmp_path)
-    agent = _bootstrap_agent(config)
-    comms = _CaptureComms()
-    agent.team_comms = comms
-    store = ScheduleStore(storage_settings=config.manager_storage_settings)
-    agent._ensure_schedule_store = lambda: store
-    agent._scheduler_wake = SimpleNamespace(set=lambda: None)
-    owner, team = config.user.canonical_user_id, config.gateway.team_id
-    schedule = ScheduledMessage(
-        schedule_id="sched_chat_control",
-        management_class=ScheduleManagementClass.USER,
-        claim_team_id=team,
-        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check the feed"),
-        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id=owner, session_key="session_owner")),
-        interval_ms=60_000,
-        repeat_count=None,
-    )
-    store.add(schedule)
-    session = SessionRecord(
-        session_key="session_owner",
-        session_alias=None,
-        conversation_id="conversation_owner",
-        last_task_id=None,
-        manager_agent_id="manager_1",
-        channel_name="telegram",
-        user_id=owner,
-        chat_id="42",
-        thread_id=None,
-        status="active",
-        created_at="2026-10-17T00:00:00+00:00",
-        updated_at="2026-10-17T00:00:00+00:00",
-        owner_canonical_user_id=owner,
-    )
-    schedules = GatewayScheduleApplication(
-        settings=GatewayScheduleSettings(
-            instance_name="manager_control",
-            response_route="gateway",
-            user_display_name="Owner",
-            request_timezone="UTC",
-            default_session_key="session_owner",
-            default_owner_canonical_user_id=owner,
-            manager_unavailable_text="unavailable",
-        ),
-        sessions=SimpleNamespace(resolve_session=lambda **_kwargs: session),
-        request_context=SimpleNamespace(
-            canonical_user_id=lambda route: owner,
-            manager_principal=lambda route: GatewayCommandPerson(canonical_user_id=owner, team_id=team, roles=("member",)),
-            users_enabled=True,
-        ),
-        delivery=SimpleNamespace(remove_scheduled_target=lambda schedule_id: None),
-        manager=SimpleNamespace(manager_id="manager_1"),
-        manager_commands=_GatewayToManager(agent, comms),  # type: ignore[arg-type]
-        id_generator=SimpleNamespace(),  # type: ignore[arg-type]
-    )
-    service = GatewayManagerControlCommandService(SimpleNamespace(), schedules=schedules)  # type: ignore[arg-type]
-
-    result = await service.execute(
-        ManagerControlCommandRequest(
-            command=command.format(id=schedule.schedule_id),
-            current_session_key="session_owner",
-            actor=GatewayActorContext(channel_name="telegram", user_id=owner, chat_id="42", canonical_user_id=owner),
-        )
-    )
-
-    saved = store.get_scheduled_message(schedule.schedule_id)
-    response = comms.messages[-1].msg_content
-    assert (response.success, response.message) != (False, SCHEDULE_CHANGED_SINCE_LISTED)
-    if command.startswith("/pause"):
-        assert result.text == f"Schedule {schedule.schedule_id} paused."
-        assert saved.paused_until == "2030-01-01T00:00:00+00:00"
-    else:
-        assert result.text == f"Schedule {schedule.schedule_id} disabled."
-        assert saved.enabled is False
 
 
 # -- each Objective control is one task operation on the stored record ---------------

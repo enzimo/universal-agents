@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from assistant_gateway.message_host import GatewayMessageHost
     from storage.access_repository import AccessRepository
     from storage.config import StorageSettings
+    from custom_transport.protocol1.delivery_refs import DeliveryRefs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,7 +98,20 @@ class AccessStorePersonReferences:
         return None if person is None else person.person_id
 
     def _store(self) -> "AccessRepository":
-        # Imported when first used, as the message host is: command-line runs import this module too.
+        # Command-line runs import this module too, without starting a message host.
         from storage.access_repository import AccessRepository
 
         return AccessRepository(self._storage)
+
+
+def gateway_delivery_refs(config: Any) -> Optional["DeliveryRefs"]:
+    """The instance's delivery reference key, which the launcher creates; None (logged) without it."""
+
+    from custom_transport.protocol1.delivery_refs import DeliveryRefs
+
+    try:
+        return DeliveryRefs.load(config.layout, config.manager.team_id)
+    except Exception:
+        _LOGGER.warning("The delivery reference key cannot be read; a chat's own schedule list is unavailable until "
+                        "the launcher creates it. event=gateway_delivery_ref_key_missing")
+        return None

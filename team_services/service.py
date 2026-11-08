@@ -31,6 +31,8 @@ class OperationFamily:
     handlers: Mapping[str, Handler]
     side_by_side: frozenset[str] = field(default_factory=frozenset)
     upkeep: Optional[Upkeep] = None
+    # Called by the process after requests drain, before its connection closes.
+    close: Optional[Callable[[], None]] = None
 
 
 class TeamServices:
