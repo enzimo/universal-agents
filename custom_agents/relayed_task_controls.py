@@ -20,12 +20,14 @@ These handlers run on the agent's own event loop (``custom_agents.agent_host``).
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
+from custom_agents.runtime_task_controls import TaskControlCommand
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES, encoded_size
 
 _LOGGER = logging.getLogger(__name__)
 _MESSAGE_MAX = 500
@@ -74,7 +76,7 @@ def _timestamp(value: Optional[str]) -> Optional[str]:
     return format_timestamp(moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc))
 
 
-async def _task_control(agent: Any, action: str, body: dict[str, Any], person: Any) -> ManagerRuntimeWorkCommand:
+async def _task_control(agent: Any, action: str, body: dict[str, Any], person: Any) -> TaskControlCommand:
     from custom_agents.manager_control_runtime import (
         _cancel_runtime_work_roots,
         _runtime_work_root_summary,
@@ -82,7 +84,7 @@ async def _task_control(agent: Any, action: str, body: dict[str, Any], person: A
     )
     from custom_agents.runtime_task_controls import apply_task_control
 
-    command = ManagerRuntimeWorkCommand(
+    command = TaskControlCommand(
         action=action, scope="user", target_task_id=body.get("task_id"),
         inventory_digest=body.get("seen_queue_digest"), task_offset=int(body.get("offset", 0)),
         task_limit=min(TASKS_PAGE_MAX, int(body.get("limit", TASKS_PAGE_MAX))),
@@ -122,10 +124,7 @@ async def tasks_list(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
                              "queued_count": int(response.queued_task_count or 0),
                              "current_count": int(response.current_task_count or 0),
                              "queue_digest": str(response.inventory_digest)}
-    following = int(body["offset"]) + len(tasks)
-    if tasks and following < reply["total"]:
-        reply["next_offset"] = following
-    return reply
+    return _page_reply(reply, int(body["offset"]))
 
 
 async def tasks_list_finished(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
@@ -137,7 +136,7 @@ async def tasks_list_finished(agent: Any, verified: VerifiedFrame) -> dict[str, 
     if person is None:
         return _message("not_allowed", reason)
     body = verified.raw["body"]
-    command = ManagerRuntimeWorkCommand(action="list_finished_tasks", scope="user", task_offset=int(body["offset"]),
+    command = TaskControlCommand(action="list_finished_tasks", scope="user", task_offset=int(body["offset"]),
                                         task_limit=min(TASKS_PAGE_MAX, int(body["limit"])))
     finished, total = await agent.task_manager.operations_runtime.run(
         partial(finished_task_inventory, agent, person=person), command)
@@ -155,9 +154,24 @@ async def tasks_list_finished(agent: Any, verified: VerifiedFrame) -> dict[str, 
             row["owner_agent_name"] = item.owner_agent_name
         tasks.append(row)
     reply: dict[str, Any] = {"outcome": "ok", "tasks": tasks, "total": int(total)}
-    following = int(body["offset"]) + len(tasks)
-    if tasks and following < reply["total"]:
-        reply["next_offset"] = following
+    return _page_reply(reply, int(body["offset"]))
+
+
+def _page_reply(reply: dict[str, Any], offset: int) -> dict[str, Any]:
+    """Return whole rows that fit the signed frame, with an offset for the next request."""
+    rows = reply["tasks"]
+    while rows:
+        following = offset + len(rows)
+        if following < reply["total"]:
+            reply["next_offset"] = following
+        else:
+            reply.pop("next_offset", None)
+        if encoded_size(reply) <= REPLY_BODY_MAX_BYTES:
+            return reply
+        rows.pop()
+    if reply["total"] > offset:
+        return _message("runtime_error", "A task is too large to show here. Ask the agent to inspect its history.")
+    reply.pop("next_offset", None)
     return reply
 
 
@@ -201,10 +215,44 @@ async def debug_dump(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
     return {"outcome": "ok", "enabled": bool(applied["enabled"]), "mode": str(applied["mode"])}
 
 
+def _once(handler: Any) -> Any:
+    async def answer(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
+        from storage.operation_outcomes import CommandOutcome, OutcomeKeyTaken, is_receipt
+        from storage.relayed_command_outcomes import RelayedCommandOutcomes
+        from team_services.outcomes import AnswerUnknown
+
+        person, reason = relayed_person(agent, verified)
+        if person is None:
+            return _message("not_allowed", reason)
+        store = getattr(agent, "_relayed_command_outcomes", None)
+        if store is None:
+            store = await asyncio.to_thread(RelayedCommandOutcomes, agent.task_manager.storage_settings)
+            agent._relayed_command_outcomes = store
+        outcome = CommandOutcome(team_id=str(agent.team_id), person_id=person.canonical_user_id,
+                                 retry_key=verified.raw["idempotency_key"], kind=verified.frame.kind,
+                                 body_digest=verified.raw["body_digest"], now=datetime.now(timezone.utc),
+                                 reply_for=lambda reply: reply)
+        try:
+            previous = await asyncio.to_thread(store.admit, outcome)
+        except OutcomeKeyTaken:
+            return _message("not_allowed", "This request id was already used. Send the command again.")
+        if previous is not None:
+            if is_receipt(previous):
+                _LOGGER.warning("A relayed command's result is still unknown; it is not carried out again. "
+                                "event=relayed_command_outcome_unknown agent=%s kind=%s retry_key=%s",
+                                agent.id, outcome.kind, outcome.retry_key)
+                raise AnswerUnknown("The command may have finished. Refresh to check its result.")
+            return previous
+        reply = await handler(agent, verified)
+        return await asyncio.to_thread(store.complete, outcome, reply)
+
+    return answer
+
+
 RELAYED_HANDLERS = {
     "tasks.list": tasks_list,
     "tasks.list_finished": tasks_list_finished,
-    "tasks.remove": tasks_remove,
-    "tasks.purge": tasks_purge,
-    "debug.dump": debug_dump,
+    "tasks.remove": _once(tasks_remove),
+    "tasks.purge": _once(tasks_purge),
+    "debug.dump": _once(debug_dump),
 }

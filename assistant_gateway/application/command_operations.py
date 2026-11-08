@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 from dataclasses import dataclass
@@ -35,7 +36,11 @@ from assistant_gateway.application.session_service import (
     with_parallel_mark_notice,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from assistant_gateway.application.team_commands import GatewayTeamCommandService
+from assistant_gateway.application.team_commands import (
+    GatewayTeamCommandService,
+    TeamCommandRefused,
+    TeamServicesUnavailable,
+)
 from custom_messages.contracts.control_v1 import (
     PinnedMemoryCommandPayload,
     PinnedMemoryCommandResultPayload,
@@ -125,6 +130,7 @@ class GatewayCommandOperationsApplication:
         self._team_commands = team_commands
         self._pinned_memory = pinned_memory
         self._private_authorizer = private_authorizer
+        self._logger = logging.getLogger(__name__)
 
     def canonical_user_id_for_context(
         self,
@@ -644,8 +650,17 @@ class GatewayCommandOperationsApplication:
             return refused.message
         except PermissionError:
             return "Use /user first to register this channel before managing pinned memory."
-        except Exception as exc:
-            return f"Pinned memory command failed: {exc}"
+        except (TeamServicesUnavailable, TeamCommandRefused, ValueError) as exc:
+            # Written for the person: the team services' state, or what was wrong with the command.
+            return str(exc)
+        except Exception:
+            self._logger.exception(
+                "A memory command failed in the gateway. event=gateway_memory_command_failed bank=%s", bank
+            )
+            return (
+                "The memory command failed because of an error in the gateway. An administrator can find it "
+                "in the gateway log."
+            )
 
     async def execute_pinned_memory_operation(
         self,

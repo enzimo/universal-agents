@@ -87,3 +87,14 @@ async def test_a_draining_lead_starts_no_replacement_for_a_dead_workers_work(lea
     # Once a lead on the installation's contract runs, it takes the work over.
     del lead._contract_drain
     assert await take_over_orphaned_work(lead, clock=200.0) == 1
+
+
+def test_a_draining_lead_cannot_create_a_delegation_that_its_pool_will_never_start(lead):
+    from custom_agents.turn_action_outbox_runtime import _validate_manager_mediated_worker_delegation
+    from tests.test_turn_action_outbox import _delegation
+
+    lead.named_agent_type = "TeamArchitect"
+    _validate_manager_mediated_worker_delegation(lead, _delegation("Do some work"))
+    _drain(lead)
+    with pytest.raises(RuntimeError, match="cannot delegate new tasks"):
+        _validate_manager_mediated_worker_delegation(lead, _delegation("Do some work"))

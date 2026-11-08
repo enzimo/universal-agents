@@ -71,9 +71,9 @@ async def test_an_agent_leaves_the_queues_its_type_shares_and_keeps_what_it_hold
     agent = _agent(infos=(_info("t1", ProgressState.ACCEPTED),), queue=("t1",))
     with caplog.at_level(logging.WARNING):
         await drain_agent(agent, REASON)
-        await drain_agent(agent, REASON)  # once
+        await drain_agent(agent, REASON)  # also catches subscriptions completed during the first drain
     assert is_contract_draining(agent)
-    assert agent.adapter.left == [NAMED_WORKER_CONSUMER_ROLE, contract_drain.TEAM_LEAD_CONSUMER_ROLE]
+    assert agent.adapter.left == [NAMED_WORKER_CONSUMER_ROLE, contract_drain.TEAM_LEAD_CONSUMER_ROLE] * 2
     assert caplog.text.count("event=agent_contract_drain_started") == 1 and "pool_worker=False" in caplog.text
     # Its own tasks still start here; nothing hands them back.
     assert await may_start_next_task(agent) is True

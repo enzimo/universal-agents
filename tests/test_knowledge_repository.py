@@ -328,6 +328,31 @@ def test_texts_longer_than_web_chat_shows_are_counted_by_characters(store):
     assert store.count_long_texts(team_id="team_nobody", longer_than=limit).total == 0
 
 
+def test_pages_too_large_for_one_reply_are_counted_by_their_text_and_open_notes_in_bytes(store):
+    """The Status page's estimate (custom_agents.long_knowledge): a page's text plus its open notes, in bytes.
+
+    A page already counted for a text longer than ``longer_than`` characters is not counted again.
+    """
+
+    svc = service(store, max_body_chars=500_000, max_note_chars=50_000, writes_per_agent_per_hour=1000,
+                  new_pages_per_work=100)
+    system = agent("sys")
+    svc.write(system, "team/small", draft("s" * 400, title="Small"))
+    svc.add_note(system, "team/small", "n" * 400)
+    svc.write(system, "team/noted", draft("é" * 300, title="Noted"))  # 600 bytes
+    svc.add_note(system, "team/noted", "ü" * 250)  # 500 bytes more, open
+    svc.write(system, "team/resolved", draft("r" * 700, title="Resolved"))
+    resolved = svc.add_note(system, "team/resolved", "d" * 700).note
+    svc.resolve_note(system, resolved.note_id, merged=False)
+    svc.write(system, "team/wide", draft("界" * 400, title="Wide"))  # 1,200 bytes, 400 characters
+    svc.write(system, "team/long", draft("l" * 1500, title="Long"))  # longer than 1,000 characters: a long page
+
+    counts = store.count_long_texts(team_id=TEAM, longer_than=1000, larger_than_bytes=1000)
+
+    assert (counts.pages, counts.too_large_pages) == (1, 2)
+    assert store.count_long_texts(team_id=TEAM, longer_than=1000).too_large_pages == 0
+
+
 def test_contribution_pagination_and_count_share_owner_team_status_and_page_filters(store):
     svc = service(store)
     alice = person("alice")

@@ -62,5 +62,64 @@ async def test_the_context_dump_is_the_team_leads_setting(agent) -> None:
     assert applied == {"outcome": "ok", "enabled": True, "mode": "always"}
     assert agent.applied == [{"enabled": True, "mode": "always", "source": "person:owner"}]
     agent.is_team_lead = False
-    refused = await _ask(agent, "debug.dump", body, relayed_frame(TEAM, "debug.dump", body, person_ref=OWNER))
+    refused = await _ask(agent, "debug.dump", body, relayed_frame(TEAM, "debug.dump", body, person_ref=OWNER,
+                                                                request_id="other-command"))
     assert refused["outcome"] == "not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_finished_history_pages_fit_encoded_frames_without_skipping_multibyte_results(agent, tmp_path) -> None:
+    from custom_agents.task_manager import TaskManager
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType
+    from tests.team_services_support import checked_reply
+    from custom_messages.wire.sizes import encoded_size, REPLY_BODY_MAX_BYTES
+
+    manager = TaskManager(storage_settings=agent.task_manager.storage_settings)
+    agent.task_manager = manager
+    for i in range(12):
+        manager.task_archive_repository.save_completed_task(
+            archive_id=f"finished-{i:02}", task_id=f"task-{i}", owner_agent_id="stopped",
+            owner_agent_name="Worker", team_id=TEAM, owner_canonical_user_id="owner", status="completed",
+            task_json=Task(task_id=f"task-{i}", task_type=MessageMetaType.RESPONSE,
+                           problem_statement="😀" * 2000, answer="😀" * 12000).model_dump_json())
+    offset, ids, sizes = 0, [], []
+    while offset < 12:
+        body = {"agent": agent.id, "offset": offset, "limit": 10}
+        reply = checked_reply("tasks.list_finished", await RELAYED_HANDLERS["tasks.list_finished"](
+            agent, relayed_frame(TEAM, "tasks.list_finished", body, person_ref=OWNER)))
+        assert reply["tasks"]
+        ids.extend(row["task_id"] for row in reply["tasks"])
+        sizes.append(encoded_size(reply))
+        assert all(row["answer"] == "😀" * 12000 for row in reply["tasks"])
+        offset = reply.get("next_offset", 12)
+    assert len(ids) == len(set(ids)) == 12
+    assert len(sizes) >= 3 and max(sizes) <= REPLY_BODY_MAX_BYTES
+
+
+@pytest.mark.asyncio
+async def test_repeating_an_older_context_dump_command_never_overrides_a_newer_one(agent) -> None:
+    on = relayed_frame(TEAM, "debug.dump", {"enabled": True, "mode": "always"}, person_ref=OWNER, request_id="turn-on")
+    off = relayed_frame(TEAM, "debug.dump", {"enabled": False, "mode": "always"}, person_ref=OWNER, request_id="turn-off")
+    first = await RELAYED_HANDLERS["debug.dump"](agent, on)
+    await RELAYED_HANDLERS["debug.dump"](agent, off)
+    del agent._relayed_command_outcomes  # reopen from storage, as after process recovery
+    repeated = await RELAYED_HANDLERS["debug.dump"](agent, on)
+    assert first == repeated == {"outcome": "ok", "enabled": True, "mode": "always"}
+    assert [change["enabled"] for change in agent.applied] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_command_without_a_final_reply_is_not_run_twice(agent, monkeypatch) -> None:
+    from storage.relayed_command_outcomes import RelayedCommandOutcomes
+    from team_services.outcomes import AnswerUnknown
+
+    frame = relayed_frame(TEAM, "debug.dump", {"enabled": True, "mode": "always"}, person_ref=OWNER, request_id="lost-answer")
+    real_complete = RelayedCommandOutcomes.complete
+    monkeypatch.setattr(RelayedCommandOutcomes, "complete", lambda *args: (_ for _ in ()).throw(RuntimeError("commit failed")))
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await RELAYED_HANDLERS["debug.dump"](agent, frame)
+    monkeypatch.setattr(RelayedCommandOutcomes, "complete", real_complete)
+    with pytest.raises(AnswerUnknown):
+        await RELAYED_HANDLERS["debug.dump"](agent, frame)
+    assert len(agent.applied) == 1

@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tests.task_work_support import TurnHost
-from custom_agents.manager_control_runtime import handle_manager_runtime_work_command
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.routing_v1 import (
@@ -18,7 +17,7 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_agents.manager_control_runtime import CommandPerson
-from test_manager_control_runtime import _CaptureComms, _gateway_signing_keys, _signed  # noqa: F401
+from test_manager_control_runtime import _CaptureComms
 
 
 @pytest.fixture(params=[True, False], ids=["lead", "worker"])
@@ -27,6 +26,13 @@ def agent(tmp_path, request):
         db_path=str(tmp_path / "tasks.db"), max_queued_top_level_tasks=50
     )
     manager.set_owner_identity("lead", "Lead", "team", "TeamArchitect")
+    from storage.access_repository import AccessRepository
+    from custom_messages.contracts.access_v2 import TeamPersonV1, PersonStanding
+    from datetime import datetime, timezone
+
+    AccessRepository(manager.storage_settings).record_person(TeamPersonV1(
+        team_id="team", person_id="owner", person_ref="p-OwnerOwnerOwnerOwnerOw", roles=("member",),
+        standing=PersonStanding.ACTIVE, changed_at_utc=datetime.now(timezone.utc)))
     return TurnHost(
         id="lead",
         name="Lead",
@@ -72,46 +78,27 @@ def final_replies(agent) -> list[str]:
 
 
 async def command(agent, action="list_tasks", **kwargs):
-    """The agent's task controls for the owner, as a relayed command runs them (custom_agents.relayed_task_controls)."""
+    """Run the production handler/helper; do not copy its inventory implementation."""
+    from custom_agents.relayed_task_controls import _task_control, tasks_list_finished
+    from tests.team_services_support import relayed_frame, checked_reply
 
-    from functools import partial
-
-    from custom_agents.manager_control_runtime import (
-        _cancel_runtime_work_roots,
-        _runtime_work_root_summary,
-        _runtime_work_roots,
-    )
-    from custom_agents.runtime_task_controls import apply_task_control, finished_task_inventory
-
-    request = ManagerRuntimeWorkCommand(action=action, scope="user", **kwargs)
-    response = request.model_copy(deep=True)
-    response.roots, response.cancellation_receipts = [], []
-    person = CommandPerson(canonical_user_id="owner", team_id="team", roles=("member",))
+    body = {"offset": kwargs.get("task_offset", 0), "limit": kwargs.get("task_limit", 20)}
     if action == "list_finished_tasks":
-        response.finished_tasks, response.task_total = await agent.task_manager.operations_runtime.run(
-            partial(finished_task_inventory, agent, person=person), request)
-        response.success = True
-        return response
-    await apply_task_control(agent, request, response, person=person, list_roots=_runtime_work_roots,
-                             summarize_root=_runtime_work_root_summary, cancel_roots=_cancel_runtime_work_roots)
-    return response
+        reply = checked_reply("tasks.list_finished", await tasks_list_finished(agent, relayed_frame(
+            "team", "tasks.list_finished", {"agent": agent.id, **body}, person_ref="p-OwnerOwnerOwnerOwnerOw")))
+        return SimpleNamespace(success=reply["outcome"] == "ok", task_total=reply["total"],
+                               finished_tasks=[SimpleNamespace(**row) for row in reply["tasks"]])
+    body.update(seen_queue_digest=kwargs.get("inventory_digest"), task_id=kwargs.get("target_task_id"))
+    return await _task_control(agent, action, body, CommandPerson(
+        canonical_user_id="owner", team_id="team", roles=("member",)))
 
 
-@pytest.mark.asyncio
-async def test_task_list_actions_on_the_old_queued_path_are_refused(agent):
-    """People's task lists and removals come relayed by the team services; the queued message is refused."""
+def test_removed_task_actions_are_not_durable_manager_commands():
+    from pydantic import ValidationError
 
-    request = ManagerRuntimeWorkCommand(action="list_tasks", scope="user")
-    await handle_manager_runtime_work_command(
-        agent,
-        command=request,
-        msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
-        msg_meta=MessageMeta(
-            gateway_context=_signed(GatewayContext(canonical_user_id="owner"), team_id="team", roles=["member"])
-        ),
-    )
-    response = agent.team_comms.messages[-1].msg_content
-    assert (response.success, response.message) == (False, "relayed_by_team_services")
+    for action in ("list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"):
+        with pytest.raises(ValidationError):
+            ManagerRuntimeWorkCommand(action=action, scope="user")
 
 
 @pytest.mark.asyncio
@@ -258,8 +245,9 @@ async def test_cancelled_task_cannot_start_between_queue_selection_and_terminali
 
     add(agent, "selected")
     assert agent.task_manager.get_next_task_to_process() == "selected"
-    request = ManagerRuntimeWorkCommand(
-        action="purge_tasks", scope="user", )
+    from custom_agents.runtime_task_controls import TaskControlCommand
+
+    request = TaskControlCommand(action="purge_tasks")
     assert await agent.task_manager.operations_runtime.run(
         partial(_reserve_queued_cancellation, agent.task_manager), "selected", request,
         CommandPerson(canonical_user_id="owner", team_id="team", roles=("member",)),

@@ -53,8 +53,8 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Optional
 
-# The consumer role of the team lead's own queue (``UniversalAgent._connect_nats``).
-TEAM_LEAD_CONSUMER_ROLE = "team_lead"
+from custom_transport.nats_adapter import TEAM_LEAD_CONSUMER_ROLE
+
 # How often a pool worker checks whether its running turns ended before it winds down.
 TURN_POLL_SECONDS = 1.0
 _LOGGER = logging.getLogger(__name__)
@@ -85,12 +85,16 @@ def is_pool_worker(agent: Any) -> bool:
 async def drain_agent(agent: Any, reason: str) -> None:
     """Drain one agent (module docstring); on its own loop, once. Returns when it took no more new work."""
 
-    if is_contract_draining(agent):
-        return
+    state = getattr(agent, "_contract_drain", None)
     worker = is_pool_worker(agent)
-    state = ContractDrain(reason=reason, started_at=datetime.now(timezone.utc), holds_back_unstarted=worker)
-    agent._contract_drain = state
-    state.left_queues = await _leave_shared_queues(agent)
+    first = state is None
+    if first:
+        state = ContractDrain(reason=reason, started_at=datetime.now(timezone.utc), holds_back_unstarted=worker)
+        agent._contract_drain = state
+    # Startup may have been subscribing when the drain began; a repeat leaves those queues too.
+    state.left_queues += await _leave_shared_queues(agent)
+    if not first:
+        return
     agent._logger.warning(
         "This agent's process runs another message contract than its installation: it takes no new work and "
         "finishes or hands back what it holds. event=agent_contract_drain_started agent_id=%s pool_worker=%s "

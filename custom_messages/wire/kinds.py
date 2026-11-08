@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = 'ca43b9f60d6d299a16378e6f1fc60deeb05c4b5a34fa27caaed8da7368056df1'
+CONTRACT_SHA256 = '46296ceb5bb6e5ca47dfbc0149b636b606be1460e4b271884c5ddf3953621d86'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -453,7 +453,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/body/request_id',),
         body_model=models.DebugDumpBodyAdapter,
         reply_model=models.DebugDumpReplyAdapter,
-        reply_errors=('not_allowed',),
+        reply_errors=('not_allowed', 'runtime_error'),
         senders=('gateway', 'team_services'),
         senders_by_target={'team_services': ('gateway',), 'agent': ('team_services',)},
         receivers=('team_services', 'lead_host', 'worker_host'),
@@ -471,7 +471,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'enabled': None, 'mode': None, 'agent': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'enabled': None, 'mode': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'enabled': None, 'mode': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'delivery.receipt': KindSpec(

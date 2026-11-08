@@ -725,7 +725,7 @@ class KnowledgeEditorAgent(WireModel):
 
 class KnowledgeEditorPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeEditorSystem(WireModel):
@@ -1637,6 +1637,11 @@ class DebugDumpReplyOk(WireModel):
 
 class DebugDumpReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class DebugDumpReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -2625,7 +2630,7 @@ class KnowledgeHistoryReplyOkRevisionsItemUpdatedByAgent(WireModel):
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedByPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedBySystem(WireModel):
@@ -8964,7 +8969,7 @@ CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)
 CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyCustodyWindowOpen, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest, CustodyDecideReplyNotAllowed], Field(discriminator='outcome')])
 CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)
 DebugDumpBodyAdapter = TypeAdapter(DebugDumpBody)
-DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed], Field(discriminator='outcome')])
+DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed, DebugDumpReplyRuntimeError], Field(discriminator='outcome')])
 DeliveryReceiptBodyAdapter = TypeAdapter(DeliveryReceiptBody)
 DeliveryRefusedBodyAdapter = TypeAdapter(DeliveryRefusedBody)
 DlqNoticeBodyAdapter = TypeAdapter(DlqNoticeBody)

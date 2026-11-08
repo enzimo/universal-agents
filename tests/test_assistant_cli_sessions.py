@@ -1557,7 +1557,9 @@ async def test_run_gateway_services_treats_cancelled_idle_wait_as_clean_shutdown
     )
 
     class FakeGateway:
-        def __init__(self, config, output_sink):
+        def __init__(self, config, output_sink, manager_runtime):
+            # The gateway service runs the gateway's protocol 1 host (assistant_gateway.message_host).
+            assert manager_runtime is sentinel.gateway_service_runtime
             nonlocal gateway_instance
             assert config is config_fixture
             assert output_sink is not None
@@ -1635,6 +1637,10 @@ async def test_run_gateway_services_treats_cancelled_idle_wait_as_clean_shutdown
         lambda *args, **kwargs: config_fixture,
     )
     monkeypatch.setattr("assistant_cli.UserGateway", FakeGateway)
+    monkeypatch.setattr(
+        "assistant_cli.NatsGatewayManagerRuntime.for_gateway_service",
+        lambda config: sentinel.gateway_service_runtime,
+    )
     monkeypatch.setattr("assistant_cli.InteractiveAppManager", FakeAppManager)
     monkeypatch.setattr("assistant_cli.asyncio.Event", lambda: _CancelledEvent())
 
@@ -1664,7 +1670,9 @@ async def test_run_gateway_services_emits_headless_startup_notice_via_gateway(
     )
 
     class FakeGateway:
-        def __init__(self, config, output_sink):
+        def __init__(self, config, output_sink, manager_runtime):
+            # The gateway service runs the gateway's protocol 1 host (assistant_gateway.message_host).
+            assert manager_runtime is sentinel.gateway_service_runtime
             nonlocal gateway_instance
             assert config is config_fixture
             assert output_sink is not None
@@ -1738,6 +1746,10 @@ async def test_run_gateway_services_emits_headless_startup_notice_via_gateway(
         lambda *args, **kwargs: config_fixture,
     )
     monkeypatch.setattr("assistant_cli.UserGateway", FakeGateway)
+    monkeypatch.setattr(
+        "assistant_cli.NatsGatewayManagerRuntime.for_gateway_service",
+        lambda config: sentinel.gateway_service_runtime,
+    )
     monkeypatch.setattr("assistant_cli.InteractiveAppManager", FakeAppManager)
     monkeypatch.setattr("assistant_cli.asyncio.Event", lambda: _CancelledEvent())
     monkeypatch.setenv(
@@ -1774,7 +1786,9 @@ async def test_run_gateway_services_keeps_gateway_running_when_apps_do_not_start
     )
 
     class FakeGateway:
-        def __init__(self, config, output_sink):
+        def __init__(self, config, output_sink, manager_runtime):
+            # The gateway service runs the gateway's protocol 1 host (assistant_gateway.message_host).
+            assert manager_runtime is sentinel.gateway_service_runtime
             nonlocal gateway_instance
             assert config is config_fixture
             assert output_sink is not None
@@ -1832,6 +1846,10 @@ async def test_run_gateway_services_keeps_gateway_running_when_apps_do_not_start
         lambda *args, **kwargs: config_fixture,
     )
     monkeypatch.setattr("assistant_cli.UserGateway", FakeGateway)
+    monkeypatch.setattr(
+        "assistant_cli.NatsGatewayManagerRuntime.for_gateway_service",
+        lambda config: sentinel.gateway_service_runtime,
+    )
     monkeypatch.setattr("assistant_cli.InteractiveAppManager", FakeAppManager)
     monkeypatch.setattr("assistant_cli.asyncio.Event", lambda: _CancelledEvent())
 

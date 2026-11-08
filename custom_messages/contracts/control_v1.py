@@ -14,6 +14,7 @@ from custom_messages.records.objectives import ObjectiveSuccessCriterion
 from enum import StrEnum
 from id_generation import new_id
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
 from typing import Any
 from typing import Dict
@@ -491,10 +492,6 @@ class ManagerRuntimeWorkCommand(BaseModel):
     action: Literal[
         "inventory",
         "cancel",
-        "list_tasks",
-        "list_finished_tasks",
-        "remove_task",
-        "purge_tasks",
         "list_objectives",
         "pause_objective",
         "resume_objective",
@@ -522,7 +519,6 @@ class ManagerRuntimeWorkCommand(BaseModel):
     message: str = ""
     objective_status: Optional[ObjectiveStatus] = None
     roots: List[RuntimeWorkSummary] = Field(default_factory=list)
-    finished_tasks: List[FinishedTaskSummary] = Field(default_factory=list)
     schedules: List[RuntimeWorkScheduleSummary] = Field(default_factory=list)
     objectives: List[RuntimeObjectiveSummary] = Field(default_factory=list)
     cancellation_receipts: List[RuntimeWorkCancellationReceipt] = Field(
@@ -585,6 +581,16 @@ class PinnedMemoryCommandResultPayload(BaseModel):
 
 
 PINNED_MEMORY_SORT_NEWEST = "newest"
+# The memory service's sort names, as the message contract's memory.list names them
+# (the team services and the gateway convert with it, in each direction).
+PINNED_MEMORY_WIRE_SORTS = {
+    "memory_id": "memory_id",
+    PINNED_MEMORY_SORT_NEWEST: "newest",
+    "valid_from_utc": "valid_from",
+    "invalid_after_utc": "expires",
+}
+# What a person writes as an expiry to clear it; the memory service takes it as "no expiry".
+PINNED_MEMORY_CLEAR_EXPIRY = "never"
 
 
 class PinnedMemoryCommandPayload(BaseModel):
@@ -608,6 +614,44 @@ class PinnedMemoryCommandPayload(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+
+
+# The one list of retired gateway commands: durable commands a 0.9 gateway put in the
+# team lead's control queue whose handling phase 2 moved to protocol 1 request/reply at
+# the team services (plan 13B.10). A command queued just before an in-place upgrade may
+# still be waiting when 0.10 starts; without a model for it the lead could not read it,
+# so it was redelivered, set aside as a dead letter and the person never heard back.
+# A family that moves the same way adds its old class name to the ``Literal`` and what
+# people call the command to the mapping below it, in the same change.
+RetiredGatewayCommandClass = Literal["ManagerMemoryCommand", "ManagerKnowledgeCommand", "ManagerTopicCommand"]
+# What people called each retired command, for the refusal they are sent.
+RETIRED_GATEWAY_COMMAND_NAMES: Dict[str, str] = {
+    "ManagerMemoryCommand": "memory command",
+    "ManagerKnowledgeCommand": "Knowledge page request",
+    "ManagerTopicCommand": "topic command",
+}
+
+
+class RetiredGatewayCommand(BaseModel):
+    """A gateway command from before the upgrade whose handler is gone (``RetiredGatewayCommandClass``).
+
+    The team lead reads it only to tell the person it was not carried out
+    (``custom_agents.retired_gateway_commands``); it never carries it out, so the
+    old fields (the memory or knowledge command, its result) are accepted and ignored. Nothing
+    sends one: ``message_class`` has no default, and only the contract and the
+    lead's handler may name this model (tests/test_runtime_architecture_boundaries.py).
+    Remove it, with its handler, when the upgrade steps from 0.9 are removed once
+    0.11 ships (README_ARCHITECTURE.md, "Upgrading an instance in place").
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    message_class: RetiredGatewayCommandClass
+    command_id: str
+    command_type: MessageMetaType = MessageMetaType.REQUEST
+
+    def get_id(self) -> str:
+        return self.command_id
 
 
 class KnowledgeCommandAction(StrEnum):
@@ -650,13 +694,18 @@ KNOWLEDGE_CONTRIBUTION_ACTIONS = frozenset(
     }
 )
 KNOWLEDGE_PAGE_SIZE = 20
+# The message contract's bounds the browser's values must keep (knowledge.list ``offset``; JSON's safe integers).
+KNOWLEDGE_OFFSET_MAX = 100_000
+KNOWLEDGE_REVISION_MAX = 2**53 - 1
 KnowledgeSpaceName = Literal["team", "personal"]
 
 
 class KnowledgeCommandPayload(BaseModel):
-    """One Knowledge page request. It names no person: the manager acts for the
-    gateway-signed person only (``verified_command_person``), and ``personal``
-    always means that person's own pages."""
+    """One Knowledge page request from the browser. It names no person: the gateway
+    sends it to the team services for the signed-in person
+    (``assistant_gateway.application.knowledge_pages``), and ``personal`` always means
+    that person's own pages. Its bounds are the message contract's, so a request the
+    browser may make is one the gateway can send."""
 
     action: KnowledgeCommandAction
     space: KnowledgeSpaceName = "team"
@@ -665,12 +714,12 @@ class KnowledgeCommandPayload(BaseModel):
     # The page's name within the space (``github-release-process``); empty for lists and new pages.
     page: str = Field(default="", max_length=240)
     query: str = Field(default="", max_length=400)
-    offset: int = Field(default=0, ge=0)
+    offset: int = Field(default=0, ge=0, le=KNOWLEDGE_OFFSET_MAX)
     limit: int = Field(default=KNOWLEDGE_PAGE_SIZE, ge=1, le=KNOWLEDGE_PAGE_SIZE)
     # read: an earlier revision to show; revert: the revision to restore.
-    revision: int = Field(default=0, ge=0)
+    revision: int = Field(default=0, ge=0, le=KNOWLEDGE_REVISION_MAX)
     # The revision the person's change is based on (0 creates a page).
-    base_revision: int = Field(default=0, ge=0)
+    base_revision: int = Field(default=0, ge=0, le=KNOWLEDGE_REVISION_MAX)
     title: str = Field(default="", max_length=1000)
     # Omitted keeps the existing summary; an explicit empty string clears it.
     summary: Optional[str] = Field(default=None, max_length=4000)
@@ -685,14 +734,13 @@ class KnowledgeCommandPayload(BaseModel):
 
 
 class KnowledgeEditorPayload(BaseModel):
-    """Who made a change. ``person_id`` is set by the manager only for a
-    person's own edit in Web Chat; before answering the browser the gateway
-    writes ``label`` (an agent type, "You" or the person's name) and clears the
-    id, so the browser never sees person ids."""
+    """Who made a change, as the browser shows it: ``label`` is an agent type, "You"
+    or the person's name, which the gateway writes from the team services' editor
+    (``assistant_gateway.application.knowledge_pages``). It carries no person id or
+    reference."""
 
     kind: Literal["agent", "person", "system"]
     agent_type: str = ""
-    person_id: str = ""
     label: str = ""
 
 

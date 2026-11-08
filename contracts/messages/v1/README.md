@@ -1545,7 +1545,9 @@ records the merged name that was followed. When reading an earlier revision,
 summary, tags and content come from that revision. History rows carry each
 revision's title, status, change kind, change summary, creation time and editor.
 The gateway keeps today's editor-name rewrite before sending records to the
-browser; person references are never browser display names.
+browser; person references are never browser display names. A person editor
+without a reference is a person the team's people records no longer hold, such
+as someone who left the team; the gateway shows "A team member".
 
 Every detailed page uses `type: inline` with those fields, or `type: blob`
 with an `application/json` reference to the complete inline page. This applies
@@ -2505,6 +2507,16 @@ registry entry lists ("Idempotency keys").
 - **Stored with the change.** The receiver of a change operation stores the final outcome
   under the team and the retry key, in the same transaction as the change, before it
   replies. A repeat of the key gets the stored reply and changes nothing.
+- **Or a receipt, when the reply shows records after the change.** A reply that shows
+  records as readers see them once the change is committed (a knowledge page with its
+  backlinks, open notes and proposals) cannot be built inside the change's transaction.
+  Its receiver may store a receipt instead: what the change did, by record id, and what
+  the requester confirmed (a knowledge write's review kinds), never the records' text. It
+  builds the reply from the receipt after the commit, for the first try and every repeat
+  alike, so a repeat gets the same outcome for the same records, shown as they are then.
+  When that reply cannot be built, the change is already made: the receiver answers the
+  request `handler_failed` ("Refused requests"), never with an outcome that says nothing
+  changed.
 - **Kept 7 days.** The receiver keeps an outcome for at least 7 days, the longest
   lifetime of an authority token (`authority_token_max_seconds`).
 - **Reads store nothing.** A read is keyed by `/message_id`, so every frame is a new read

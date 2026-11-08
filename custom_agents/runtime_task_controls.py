@@ -16,7 +16,10 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from custom_messages.contracts.common_v1 import contract_sha256
-from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
+from pydantic import BaseModel, Field
+from typing import Literal
+from id_generation import new_id
+from custom_messages.contracts.control_v1 import RuntimeWorkSummary, RuntimeWorkCancellationReceipt
 from custom_messages.contracts.control_v1 import FinishedTaskSummary
 
 QUEUE_PAUSE_EVENT = "task_queue_explicit_pause"
@@ -24,6 +27,30 @@ QUEUE_PAUSE_EVENT = "task_queue_explicit_pause"
 
 if TYPE_CHECKING:
     from custom_agents.manager_control_runtime import CommandPerson
+
+# The reply contract allows at most this many cancellation receipts.
+TASK_PURGE_MAX = 100
+
+
+class TaskControlCommand(BaseModel):
+    """An internal task operation on the agent's loop; never a durable message."""
+    command_id: str = Field(default_factory=lambda: new_id("task_control"))
+    action: Literal["list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"]
+    scope: Literal["user"] = "user"
+    target_task_id: str | None = None
+    inventory_digest: str | None = None
+    task_offset: int = Field(default=0, ge=0)
+    task_limit: int = Field(default=20, ge=1, le=20)
+    reason: str = "Task removal requested by its authenticated owner."
+    roots: list[RuntimeWorkSummary] = Field(default_factory=list)
+    cancellation_receipts: list[RuntimeWorkCancellationReceipt] = Field(default_factory=list)
+    finished_tasks: list[FinishedTaskSummary] = Field(default_factory=list)
+    task_total: int = 0
+    queued_task_count: int = 0
+    current_task_count: int = 0
+    success: bool | None = None
+    message: str = ""
+
 
 def has_explicit_queue_pause(manager: Any, task_id: str) -> bool:
     """A trusted queue pause applies only to its exact state transition."""
@@ -40,7 +67,7 @@ def has_explicit_queue_pause(manager: Any, task_id: str) -> bool:
     )
 
 
-def finished_task_inventory(agent: Any, command: ManagerRuntimeWorkCommand, *, person: "CommandPerson") -> tuple[list[FinishedTaskSummary], int]:
+def finished_task_inventory(agent: Any, command: TaskControlCommand, *, person: "CommandPerson") -> tuple[list[FinishedTaskSummary], int]:
     rows, total = agent.task_manager.task_archive_repository.list_finished_tasks(
         team_id=agent.team_id, owner_canonical_user_id=person.canonical_user_id,
         offset=command.task_offset, limit=command.task_limit,
@@ -91,7 +118,7 @@ def _queue_snapshot(manager: Any, roots: list[Any]) -> list[dict[str, Any]]:
     )
 
 
-def _authorize_removal(root: Any, command: ManagerRuntimeWorkCommand, *, person: "CommandPerson") -> None:
+def _authorize_removal(root: Any, command: TaskControlCommand, *, person: "CommandPerson") -> None:
     decision = private_access(
         person_id=person.canonical_user_id,
         owner_id=root.owner_person_id,  # recorded at admission (TaskInfo)
@@ -106,7 +133,7 @@ def _authorize_removal(root: Any, command: ManagerRuntimeWorkCommand, *, person:
 
 
 def _reserve_queued_cancellation(
-    manager: Any, root_id: str, command: ManagerRuntimeWorkCommand, person: "CommandPerson"
+    manager: Any, root_id: str, command: TaskControlCommand, person: "CommandPerson"
 ) -> bool:
     """Check current execution and persist its barrier in one serialized operation.
 
@@ -135,8 +162,8 @@ def _reserve_queued_cancellation(
 
 async def _inventory(
     agent: Any,
-    command: ManagerRuntimeWorkCommand,
-    response: ManagerRuntimeWorkCommand,
+    command: TaskControlCommand,
+    response: TaskControlCommand,
     *,
     person: "CommandPerson",
     list_roots: Callable[..., Awaitable[list[Any]]],
@@ -171,8 +198,8 @@ async def _inventory(
 
 async def apply_task_control(
     agent: Any,
-    command: ManagerRuntimeWorkCommand,
-    response: ManagerRuntimeWorkCommand,
+    command: TaskControlCommand,
+    response: TaskControlCommand,
     *,
     person: "CommandPerson",
     list_roots: Callable[..., Awaitable[list[Any]]],
@@ -212,6 +239,8 @@ async def apply_task_control(
         response.message = "This task is no longer available. Refresh the task list."
         return
     for root in selected:
+        if len(response.cancellation_receipts) >= TASK_PURGE_MAX:
+            break
         _authorize_removal(root, command, person=person)
         if (
             command.action == "purge_tasks"
@@ -233,7 +262,7 @@ async def apply_task_control(
     await inventory()
 
 
-def _cancellation_message(response: ManagerRuntimeWorkCommand) -> str:
+def _cancellation_message(response: TaskControlCommand) -> str:
     if not response.success:
         return "Some cancellations could not be confirmed. Refresh and inspect the results."
     count = len(response.cancellation_receipts)
