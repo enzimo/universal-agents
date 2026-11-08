@@ -203,3 +203,18 @@ def test_simultaneous_copies_store_one_reply(team: Team, monkeypatch) -> None:
     assert results == [{"outcome": "ok", "applied_tags": ["taxes"]}] * 2
     with team.store._repository._connect() as conn:
         assert conn.execute("SELECT COUNT(*) AS count FROM protocol1_operation_outcomes").fetchone()["count"] == 1
+
+
+def test_a_retry_that_cannot_read_its_outcome_does_not_claim_the_change_failed(team: Team, monkeypatch) -> None:
+    team.thread("conv_ada", "ada", "Taxes")
+    body = {"conversation_id": "conv_ada", "tags": ["taxes"], "private": True}
+    assert team.ask("topics.tag_thread", body)["outcome"] == "ok"
+    def unavailable(outcome):
+        raise OSError("stored outcomes unavailable")
+    monkeypatch.setattr(team.store, "stored_command_outcome", unavailable)
+    reply = team.ask("topics.tag_thread", body)
+    assert reply["outcome"] == "runtime_error"
+    assert "Check the thread's tags" in reply["message"]
+    assert "nothing was changed" not in reply["message"]
+    assert "could not be stored" not in reply["message"]
+    assert [row["tag"] for row in team.store.list_thread_tags("conv_ada")] == ["taxes"]

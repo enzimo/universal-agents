@@ -79,7 +79,8 @@ class TopicOperations:
             once = CommandOnce(
                 self._conversations, outcome, reply_from_receipt=lambda reply: reply,
                 key_taken=lambda error: _message("invalid_request", str(error)),
-                not_stored=_message("runtime_error", "The topic command could not be stored. Try again in a moment."),
+                not_stored=_message("runtime_error", "The topic command could not be answered. "
+                                    "Check the thread's tags before sending it again."),
                 logger=self._logger,
             )
             stored = once.stored_reply()
