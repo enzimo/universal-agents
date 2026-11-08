@@ -85,9 +85,6 @@ class GatewayPersonReferences(Protocol):
         """The person's opaque reference, after making the team's copy of them current; None when they have
         no standing in this team. Raises ``PersonCopyNotCurrent`` when the copy could not be made current."""
 
-    def person_id(self, person_ref: str) -> str | None:
-        """Who a reference in a reply names, or None when no recorded person has it."""
-
 
 class GatewayTeamCommandService:
     """Send one person's command to the team services and return the reply body."""

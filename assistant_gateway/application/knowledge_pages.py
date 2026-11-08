@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from pydantic import ValidationError
 
@@ -33,7 +33,7 @@ from assistant_gateway.application.knowledge_wire import (
     review_flags,
 )
 from assistant_gateway.application.route_context import GatewayRouteContextV1
-from assistant_gateway.application.team_commands import GatewayPersonReferences, GatewayTeamCommandService
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from custom_messages.contracts.control_v1 import (
     KnowledgeCommandAction,
     KnowledgeCommandPayload,
@@ -58,6 +58,16 @@ CONTINUED_ROWS = {
     KnowledgeCommandAction.LIST_CONTRIBUTIONS: "contributions",
     KnowledgeCommandAction.HISTORY: "revisions",
 }
+
+
+class KnowledgeEditorReferences(Protocol):
+    """Reads the gateway's copy of the team's people to name editors; never writes it."""
+
+    def person_ref(self, person_id: str) -> str | None:
+        """The person's opaque reference, or None when the copy does not hold them."""
+
+    def person_id(self, person_ref: str) -> str | None:
+        """Who a reference in a reply names, or None when no recorded person has it."""
 
 
 class GatewayKnowledgeRefused(Exception):
@@ -87,7 +97,7 @@ class GatewayKnowledgePages:
         self,
         *,
         team_commands: GatewayTeamCommandService,
-        references: GatewayPersonReferences,
+        references: KnowledgeEditorReferences,
         display_name: Callable[[str], str],
         enabled: bool,
     ) -> None:
