@@ -24,6 +24,7 @@ from custom_messages.wire.sizes import encoded_size
 from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from custom_transport.protocol1.host_runtime import MessageHost
 from runtime_settings.instance_layout import InstanceLayout
+from storage.schedule_repository import RowWrite
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 from team_services.schedules import ScheduleOperations
 from tests.people_directory_support import access_store_at
@@ -54,6 +55,8 @@ async def test_signed_schedule_paging_and_controls(broker: str, tmp_path: Path) 
                 payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="ada", session_key="private-chat")),
                 schedule_memory=ScheduleTaskMemory(),
             ))
+        # A stored pause accepted by the old gateway remains listable and diagnosable on the wire.
+        store._repository.write_locked("sched_1", lambda row: RowWrite(columns={"paused_until": "tomorrow"}))
         refs = DeliveryRefs.load(layout, TEAM)
         host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         schedules = ScheduleOperations(store, PeopleDirectory(access, TEAM), refs, lambda person: False,
@@ -81,6 +84,7 @@ async def test_signed_schedule_paging_and_controls(broker: str, tmp_path: Path) 
             offset = reply["next_offset"]
         assert [row["schedule_id"] for row in rows] == [f"sched_{n}" for n in range(8)]
         assert len(rows[0]["name"]) == 16_384 and "run_notes" in rows[0]
+        assert rows[1]["invalid_time_fields"] == ["paused_until"]
         client = MessageHostTeamServices(gateway, timeout_seconds=10)
 
         async def command(action, seen, request_id, **extra):

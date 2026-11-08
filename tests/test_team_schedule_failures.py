@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from threading import Barrier, Event
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,6 +14,8 @@ from assistant_gateway.application.commands.context import GatewayActorContext
 from assistant_gateway.application.commands.manager_control import ManagerControlCommandRequest
 from assistant_gateway.application.manager_control_command_service import GatewayManagerControlCommandService
 from assistant_gateway.application.schedule_management import ScheduleControlRefused
+from assistant_gateway.application.route_context import GatewayRouteContextV1
+from assistant_gateway.application.website_services import WebsiteOperationsApplication
 from assistant_gateway.application.team_commands import TeamServicesUnavailable
 from assistant_gateway.config import GatewayInstanceConfig
 from access_control.people_directory import PeopleDirectory
@@ -140,7 +143,7 @@ def test_a_scheduler_advance_during_a_system_decision_is_a_logged_permit_refusal
     assert team.version("hb_sched_olu") == seen
     assert reply["outcome"] == "not_allowed"
     assert "event=team_schedule_change_refused" in caplog.text
-    assert "permit" in reply["message"] and "digest" not in reply["message"]
+    assert "Refresh and try again" in reply["message"] and "digest" not in reply["message"]
     assert team.store.read_scheduled_message("hb_sched_olu").enabled is True
 
 
@@ -172,7 +175,8 @@ def test_list_pages_fit_in_a_frame_with_unicode_and_oversized_names(team: Team, 
     assert "event=team_schedule_text_shortened" in caplog.text
 
 
-def test_a_saved_invalid_pause_can_be_listed_and_resumed_without_repairing_storage_on_read(team: Team, caplog) -> None:
+@pytest.mark.asyncio
+async def test_a_saved_invalid_pause_can_be_listed_and_resumed_without_repairing_storage_on_read(team: Team, caplog) -> None:
     team.add("sched_a", "ada")
     team.store._repository.write_locked("sched_a", lambda row: RowWrite(columns={"paused_until": "tomorrow"}))
     with caplog.at_level(logging.WARNING):
@@ -180,8 +184,48 @@ def test_a_saved_invalid_pause_can_be_listed_and_resumed_without_repairing_stora
     assert "paused_until" not in row
     assert team.store.read_scheduled_message("sched_a").paused_until == "tomorrow"
     assert "event=team_schedule_invalid_time" in caplog.text
+    gateway = _gateway(team)
+    website = WebsiteOperationsApplication(team=None, mcp=None, event_output=None, operational_controls=None,
+                                           schedules=gateway, memory_operations=None, workspace_browser=None,
+                                           team_commands=None)
+    card, = (await website.list_web_chat_schedules(
+        GatewayRouteContextV1(session_key="session_ada_a", canonical_user_id="ada"),
+    )).schedules
+    assert card.available_actions == ("resume", "remove")
     assert team.ask("schedules.resume", {"schedule_id": "sched_a", "seen_version": row["seen_version"]})["outcome"] == "ok"
     assert team.store.read_scheduled_message("sched_a").paused_until is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancellations", [1, 2, 3])
+async def test_every_cancellation_joins_an_already_started_write(team: Team, monkeypatch, cancellations: int) -> None:
+    team.add("sched_a", "ada")
+    body = {"schedule_id": "sched_a", "seen_version": team.version("sched_a")}
+    frame = stand_in_frame(TEAM, "schedules.disable", {"request_id": "cmd-cancel-write", **body},
+                           person_ref=reference_of("ada"), request_id="cmd-cancel-write")
+    entered, release = Event(), Event()
+    original = team.store._repository.write_locked
+
+    def held_write(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(team.store._repository, "write_locked", held_write)
+    handling = asyncio.create_task(team.operations.handle(frame))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        for _ in range(cancellations):
+            handling.cancel()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert not handling.done(), "the handler ended while its write could still commit"
+    finally:
+        release.set()
+        await asyncio.gather(handling, return_exceptions=True)
+    assert handling.cancelled()
+    assert team.store.read_scheduled_message("sched_a").enabled is False
+    assert team.ask("schedules.disable", body, request_id="cmd-cancel-write")["outcome"] == "ok"
 
 
 def test_a_command_never_lists_or_changes_another_teams_schedule(team: Team) -> None:
@@ -217,7 +261,7 @@ async def test_invalid_pause_text_is_answered_before_a_command_is_sent_and_local
     gateway = _gateway(team)
     with pytest.raises(ScheduleControlRefused, match="Use a pause time"):
         await gateway.pause("sched_a", paused_until="tomorrow")
-    gateway._request_context.requester_presentation_for_session = lambda *args: type("Presentation", (), {"timezone": "America/Chicago"})()
+    gateway._request_context.requester_presentation_for_session = lambda *args: SimpleNamespace(timezone="America/Chicago")
     assert await gateway.pause("sched_a", paused_until="2030-01-01T09:30:00")
     assert team.store.read_scheduled_message("sched_a").paused_until == "2030-01-01T15:30:00.000Z"
 

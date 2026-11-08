@@ -92,6 +92,7 @@ class GatewayScheduleView:
     instruction_preview: str
     seen_version: str
     worker: dict[str, Any]
+    invalid_time_fields: tuple[str, ...] = ()
     # The chat the list was asked for; None for a person's list across chats.
     session_key: str | None = None
 
@@ -103,7 +104,8 @@ class GatewayScheduleView:
             system_schedule_kind=row.get("system_schedule_kind"), objective_id=row.get("objective_id"),
             enabled=bool(row["enabled"]), paused_until=row.get("paused_until"), next_fire_at=row.get("next_fire_at"),
             instruction_preview=str(row.get("instruction_preview") or ""), seen_version=row["seen_version"],
-            worker=dict(row["worker"]), session_key=session_key,
+            worker=dict(row["worker"]), invalid_time_fields=tuple(row.get("invalid_time_fields", ())),
+            session_key=session_key,
         )
 
 

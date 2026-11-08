@@ -4640,8 +4640,9 @@ They serve the team's address (`svc.team`) and answer, so far:
   more rows remain. Long names are shortened only in the view, with a warning.
   Run-note settings and state are included within the schema and frame limits;
   oversized structured notes are omitted with a warning and remain stored unchanged.
-  An invalid saved optional time is omitted with a warning so the schedule can still
-  be resumed or removed. New pause writes reject invalid or zone-less stored times.
+  An invalid saved optional time is omitted with a warning; `invalid_time_fields`
+  keeps an invalid pause's Resume control available without inventing a timestamp.
+  New pause writes reject invalid or zone-less stored times.
   A queued 0.9 `ManagerScheduleCommand` is retired like the other command families:
   the lead tells the person it was not carried out and asks them to send it again.
 

@@ -92,14 +92,20 @@ class ScheduleOperations:
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
         cancelled = Event()
         running = asyncio.create_task(asyncio.to_thread(self.answer, verified, cancelled=cancelled))
+        cancellation = None
+        # Retain the same worker through overlapping stop and shutdown requests.
+        # Its write must finish before the host counts this handler as drained.
+        while not running.done():
+            try:
+                await asyncio.shield(running)
+            except asyncio.CancelledError as error:
+                cancelled.set()
+                cancellation = error
         try:
-            return await asyncio.shield(running)
-        except asyncio.CancelledError:
-            # Join synchronous work before the host releases its lock or closes Cedar.
-            # A cancellation during the permission lookup stops before the write.
-            cancelled.set()
-            await asyncio.shield(running)
-            raise
+            return running.result()
+        finally:
+            if cancellation is not None:
+                raise cancellation
 
     def answer(self, verified: VerifiedFrame, *, cancelled: Optional[Event] = None) -> dict[str, Any]:
         action = verified.frame.kind.removeprefix("schedules.")
@@ -227,6 +233,7 @@ class ScheduleOperations:
                 if parsed is not None:
                     row[wire] = parsed
                 else:
+                    row.setdefault("invalid_time_fields", []).append(field)
                     worker["not_running_explanation"] = {
                         "type": "inline", "text": "A saved schedule time is invalid. Resume the schedule to clear "
                         "an invalid pause, or remove it and create it again.",
@@ -335,7 +342,7 @@ class ScheduleOperations:
             ):
                 return _message("not_found", NOT_FOUND_TEXT)
             if isinstance(error, SystemScheduleMutationDenied) and schedule_record_digest(current) == body["seen_version"]:
-                return _message("not_allowed", "The schedule's change permit no longer matches. Refresh and try again.")
+                return _message("not_allowed", "The schedule changed while this command was checked. Refresh and try again.")
             return {"outcome": "changed_since_read", "current_version": schedule_record_digest(current),
                     "message": CHANGED_TEXT}
         if isinstance(error, PermissionError):
