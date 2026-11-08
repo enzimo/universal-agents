@@ -132,6 +132,7 @@ def test_commands_carry_no_person_or_authority_fields() -> None:
         KnowledgeCommandPayload,
         ManagerRuntimeWorkCommand,
         PersonStandingCommandV1,
+        RetiredGatewayCommand,
     )
     from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 
@@ -142,6 +143,7 @@ def test_commands_carry_no_person_or_authority_fields() -> None:
         ManagerRuntimeWorkCommand,
         ManagerScheduleCommand,
         PersonStandingCommandV1,
+        RetiredGatewayCommand,
     ):
         assert "principal" not in model.model_fields, model.__name__
     assert "may_change_system_schedules" not in ManagerScheduleCommand.model_fields

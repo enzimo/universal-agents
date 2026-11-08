@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -323,6 +324,42 @@ def test_the_version_survives_a_restart_and_a_custody_recovery(settings) -> None
     assert objective_version(adopted) == read
     restarted.change_objective("objective_1", owner_agent_id=SCOPE, change=_setter(title="Still mine"), expected_version=read)
     assert restarted.get_objective("objective_1", owner_agent_id=SCOPE).title == "Still mine"
+
+
+def test_a_stored_objective_missing_its_owner_column_gets_it_back_from_its_record(settings, caplog) -> None:
+    """The canonical-owner backfill reads each row by position: PostgreSQL rows are mappings, not tuples."""
+
+    from storage.postgres_connection import connect_postgres
+
+    repo = _repository(settings)
+    repo.insert_objective(
+        ObjectiveRecord(
+            objective_id="objective_1", title="Mine", desired_outcome="Done.", why="Asked.",
+            horizon=ObjectiveHorizon.FINITE, owner_agent_id=SCOPE, owner_canonical_user_id="person_a",
+            team_id="team_1",
+        )
+    )
+    clear = "UPDATE objectives SET owner_canonical_user_id = NULL"
+    read = "SELECT owner_canonical_user_id FROM objectives"
+    if settings.postgres_dsn:
+        with connect_postgres(settings.postgres_dsn) as conn:
+            conn.execute(clear)
+            conn.commit()
+    else:
+        with sqlite3.connect(str(settings.sqlite_path)) as conn:
+            conn.execute(clear)
+
+    with caplog.at_level(logging.WARNING):
+        _repository(settings)
+
+    assert "event=objective_owner_backfill_row_invalid" not in caplog.text
+    assert "event=objective_owner_backfill_completed rows=1" in caplog.text
+    if settings.postgres_dsn:
+        with connect_postgres(settings.postgres_dsn) as conn:
+            assert [row[0] for row in conn.execute(read).fetchall()] == ["person_a"]
+    else:
+        with sqlite3.connect(str(settings.sqlite_path)) as conn:
+            assert [row[0] for row in conn.execute(read).fetchall()] == ["person_a"]
 
 
 def test_listing_returns_the_same_version_as_reading(settings) -> None:

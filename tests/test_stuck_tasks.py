@@ -38,6 +38,7 @@ from custom_messages.contracts.access_v2 import (
     TargetKind,
     TargetRefV1,
     TeamPersonV1,
+    new_person_ref,
 )
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
@@ -150,7 +151,7 @@ def record_people(lead, *people):
     AccessRepository(lead.task_manager.storage_settings).replace_people(
         "team",
         [
-            TeamPersonV1(team_id="team", person_id=person_id, standing=PersonStanding.ACTIVE, roles=roles,
+            TeamPersonV1(person_ref=new_person_ref(), team_id="team", person_id=person_id, standing=PersonStanding.ACTIVE, roles=roles,
                          changed_at_utc=datetime.now(timezone.utc))
             for person_id, roles in people
         ],

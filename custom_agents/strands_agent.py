@@ -287,6 +287,7 @@ from custom_messages.contracts.control_v1 import (
     ControlInstruction,
     ManagerRuntimeWorkCommand,
     PersonStandingCommandV1,
+    RetiredGatewayCommand,
 )
 from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionRequest,
@@ -4030,6 +4031,17 @@ class UniversalAgent(BaseModel):
             from custom_agents.person_departure_runtime import handle_person_standing_command
 
             await handle_person_standing_command(
+                self,
+                command=msg_content,
+                msg_header=msg_header,
+                msg_meta=msg_meta,
+            )
+        elif isinstance(msg_content, RetiredGatewayCommand):
+            # A 0.9 gateway's command queued before an in-place upgrade: the person is
+            # told it was not carried out (custom_agents.retired_gateway_commands).
+            from custom_agents.retired_gateway_commands import answer_retired_gateway_command
+
+            await answer_retired_gateway_command(
                 self,
                 command=msg_content,
                 msg_header=msg_header,

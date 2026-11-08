@@ -1,15 +1,24 @@
 """The team services as a process the launcher supervises (``assistant_cli run-team-services``).
 
 It runs as host ``team-services``: it joins the installation, waits for the team's
-single-instance lock, signs with the host's newest certificate (every instance runs as this
-one host, and the serving instance may have renewed their certificate while this one waited,
-``MessageHost.take_newest_certificate``), serves the team's address, then writes its host
-record, and keeps its host upkeep (liveness, trust, renewal) and the lock's lease until it is
-stopped. Stopping releases the lock even when unsubscribing or writing the last host record
+single-instance lock, and keeps the lock's lease from the moment it holds it. Before it
+serves it signs with the host's newest certificate (every instance runs as this one host,
+and the serving instance may have renewed their certificate while this one waited,
+``MessageHost.take_newest_certificate``) and reads the current revocations record (a
+standby may have waited longer than the one it read at start lasts). Then it serves the
+team's address, writes its host record, and keeps its host upkeep (liveness, trust,
+renewal), its own records' upkeep (``SessionService.maintain``: placements signed again
+under the current certificate, forgotten sessions deleted) and the lock's lease until it
+is stopped.
+
+Stopping first stops taking requests and lets the ones being handled finish and be
+answered (at most ``DRAIN_SECONDS``), so a change is never committed after the lock is
+released. It releases the lock even when unsubscribing or writing the last host record
 failed, so the next instance does not wait out the lease. Losing the lock (another
-instance holds it, or its lease ran out without a successful renewal) stops the process
-with an error, so the launcher stops the team rather than letting two instances serve. A
-renewal that only failed, such as NATS not answering for a few seconds, is tried again
+instance holds it, or its lease ran out without a successful renewal), also while it
+prepares to serve, stops the process with exit code 1, so the launcher stops the team
+rather than letting two instances serve; so does a NATS connection that closed for good.
+A renewal that only failed, such as NATS not answering for a few seconds, is tried again
 while the lease lasts and does not stop anything. An attempt to take the lock that failed
 that way is tried again too, until it succeeds or the process is stopped
 (``team_services.lock``).
@@ -22,32 +31,37 @@ import contextlib
 import logging
 import signal
 from datetime import datetime
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from access_control.people_directory import PeopleDirectory
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.frame import Receiver
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
-from custom_transport.protocol1.host_runtime import TEAM_SERVICES_RUNTIME, MessageHost
+from custom_transport.protocol1.host_runtime import TEAM_SERVICES_RUNTIME, TRUST_REFRESH_INTERVAL, MessageHost
 from custom_transport.protocol1.joining import HostProfile
 from custom_transport.protocol1.live import LiveHost
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
 from runtime_settings.knowledge import knowledge_settings
-from custom_agents.conversation_store import ConversationStore
 from storage.knowledge_repository import create_knowledge_repository
-from storage.operation_outcomes import OperationOutcomeStore
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
 from team_services.topics import TopicOperations
-from team_services.service import Handler, TeamServices
+from custom_agents.conversation_store import ConversationStore
+from assistant_gateway.runtime_config import lead_memory_config
+from team_services.service import OperationFamily, TeamServices, Upkeep
 from team_services.serving import mark_serving
 from team_services.sessions import SessionService
 
 TEAM_SERVICES_ROLES = ("team_services",)
+# How often the team services look after their own records (SessionService.maintain) and each family's.
+MAINTENANCE_INTERVAL = TRUST_REFRESH_INTERVAL
+# How long stopping waits for the requests being handled: the longest a team operation's request lasts
+# (the registry's expiry_seconds for memory commands); a handler still running then is logged.
+DRAIN_SECONDS = 30.0
 _LOGGER = logging.getLogger("team_services")
 
 
@@ -66,7 +80,7 @@ def transport_config(config: GatewayInstanceConfig) -> NatsTransportConfig:
 
 
 async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
-                     families: Sequence[Mapping[str, Handler]] = ()) -> None:
+                     families: Sequence[OperationFamily] = ()) -> None:
     """Hold the lock, serve the team's address and keep the host and the lock up until ``stop``.
 
     ``families`` are the handlers of people's commands (``team_operations``).
@@ -76,31 +90,52 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
     # lock and serves (plan 13B.4): a standby never looks like the serving instance, and the
     # record appearing means the team services answer.
     live = await host.start(report=False)
-    lock = SingleInstanceLock(host.nc.jetstream(), team, TEAM_SERVICES_RUNTIME, host.clock, host.logger)
+    lock = SingleInstanceLock.on_connection(host.nc, team, TEAM_SERVICES_RUNTIME, host.clock, host.logger)
     if not await lock.acquire(stop):
         return
+    # The lease is kept from now on, through the preparation before serving: a slow catch-up must not let
+    # it run out while a standby waits (module docstring).
+    keeper = asyncio.create_task(lock.keep(stop))
     try:
-        await _serve_holding_lock(host, live, lock, team, stop, families)
+        await _serve_holding_lock(host, live, lock, keeper, team, stop, families)
     finally:
+        if not keeper.done():
+            keeper.cancel()
+        await asyncio.gather(keeper, return_exceptions=True)
         # Released whatever happened while serving or stopping, so the next instance (a restart of every
         # service) takes over at once instead of waiting out the lease; an error raised there is still raised.
         await lock.release()
 
 
-async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock, team: str,
-                              stop: asyncio.Event, families: Sequence[Mapping[str, Handler]]) -> None:
+async def _prepare(host: MessageHost) -> None:
     # All instances share one host certificate, and a standby may have waited long enough for the serving
-    # instance to renew it: sign with the newest before serving or writing anything.
+    # instance to renew it, and for the revocations record it read at start to end.
     await host.take_newest_certificate()
+    await host.refresh_trust()
+
+
+async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock,
+                              keeper: asyncio.Task[None], team: str, stop: asyncio.Event,
+                              families: Sequence[OperationFamily]) -> None:
+    preparing = asyncio.create_task(_prepare(host))
+    await asyncio.wait({preparing, keeper}, return_when=asyncio.FIRST_COMPLETED)
+    if keeper.done():
+        # The lock was lost (or the process stopped) before serving: serve nothing.
+        preparing.cancel()
+        await asyncio.gather(preparing, return_exceptions=True)
+        await keeper
+        return
+    await preparing
     assert host.records is not None  # start() made them
-    sessions = SessionService(host.nc.jetstream(), host.records, live.trust, live.identity.installation, host.clock,
-                              host.logger)
+    sessions = SessionService(host.records, live.trust, live.identity.installation, host.clock, host.logger)
     services = TeamServices(sessions, families)
     subscription = await live.serve("svc.team", Receiver(live.identity.installation, team, "team_services", team,
-                                                         TEAM_SERVICES_RUNTIME), services.handle)
+                                                         TEAM_SERVICES_RUNTIME), services.handle,
+                                    side_by_side_kinds=services.side_by_side)
     await host.nc.flush()
     lost = False
     upkeep: Optional[asyncio.Task[None]] = None
+    maintenance: Optional[asyncio.Task[None]] = None
     try:
         await host.publish_liveness("accepting")
         host.logger.info("The team services are serving. event=team_services_ready team=%s operations=%s", team,
@@ -108,36 +143,70 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
         # The launcher waits for this (team_services.serving): it comes with the host record, once they serve.
         mark_serving(host.layout, lock.instance, host.clock())
         upkeep = asyncio.create_task(host.keep_up(stop, drained=lambda: not lost))
-        await lock.keep(stop)
+        maintenance = asyncio.create_task(_maintain(sessions, services.upkeep, team, stop, host.logger))
+        await keeper
     except LockLost:
         lost = True  # another instance may serve now and write the record; this one writes no more
         raise
     finally:
         try:
             await subscription.unsubscribe()
+            # Requests already being handled finish and are answered before the lock is released: a change the
+            # store commits after that could otherwise race the next instance, and its requester would see no answer.
+            await _drain(live, host.logger)
         finally:
             # The upkeep ends and writes its last record (drained) even when unsubscribing failed, and before
             # the caller releases the lock, so it never overwrites the record of the instance that takes over.
             stop.set()
+            if maintenance is not None:
+                maintenance.cancel()
+                await asyncio.gather(maintenance, return_exceptions=True)
             if upkeep is not None:
                 await upkeep
 
 
-def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]) -> list[Mapping[str, Handler]]:
+async def _drain(live: LiveHost, logger: logging.Logger) -> None:
+    """Wait for the requests being handled, at most ``DRAIN_SECONDS``; what is still running then is logged."""
+
+    try:
+        await asyncio.wait_for(live.drain(), timeout=DRAIN_SECONDS)
+    except asyncio.TimeoutError:
+        logger.error("Requests were still being handled when the team services stopped serving. "
+                     "event=team_services_drain_timed_out seconds=%s", DRAIN_SECONDS)
+
+
+async def _maintain(sessions: SessionService, upkeep: Sequence[Upkeep], team: str, stop: asyncio.Event,
+                    logger: logging.Logger) -> None:
+    """``SessionService.maintain`` and each family's upkeep now and every ``MAINTENANCE_INTERVAL`` until ``stop``;
+    a failed pass is logged."""
+
+    while not stop.is_set():
+        for step in (lambda: sessions.maintain(team), *upkeep):
+            try:
+                await step()
+            except Exception:
+                logger.exception("The team services could not look after their records; trying again later. "
+                                 "event=team_services_maintenance_failed team=%s", team)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=MAINTENANCE_INTERVAL.total_seconds())
+
+
+def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]) -> list[OperationFamily]:
     """The families of people's commands this process answers, on the team's database."""
 
     storage = config.manager_storage_settings
     people = PeopleDirectory(AccessRepository(storage), config.manager.team_id)
     memory_store = create_pinned_memory_repository(storage, logger=_LOGGER)
-    memory = MemoryOperations(memory_store, people, dict(config.agent.memory), clock, _LOGGER)
+    memory = MemoryOperations(memory_store, people, lead_memory_config(config), clock, _LOGGER)
+    # The team's knowledge settings: agent types cannot override them.
     settings = knowledge_settings(config.agent.knowledge)
     # With the knowledge base off no store is opened, and its commands are answered feature_off.
     knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None
     knowledge = KnowledgeOperations(knowledge_store, people, settings, clock, _LOGGER, personal_memory=memory_store)
     conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
                                       artifacts_dir=config.layout.conversation_artifacts_dir)
-    topics = TopicOperations(conversations, OperationOutcomeStore(storage, logger=_LOGGER), people, clock, _LOGGER)
-    return [memory.handlers(), knowledge.handlers(), topics.handlers()]
+    topics = TopicOperations(conversations, people, clock, _LOGGER)
+    return [memory.family(), knowledge.family(), topics.family()]
 
 
 async def run_team_services(config: GatewayInstanceConfig) -> None:
@@ -151,6 +220,10 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
         await serve_team(host, team, stop, team_operations(config, host.clock))
+    except LockLost as lost:
+        # Exit code 1 for the launcher's supervisor, which stops the team (module docstring).
+        _LOGGER.error("The team services stop. event=team_services_stopped reason=%s", lost)
+        raise SystemExit(1) from None
     finally:
         with contextlib.suppress(Exception):
             await adapter.close()

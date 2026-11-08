@@ -27,6 +27,7 @@ from default_values import AGENT_DEFAULTS
 from custom_agents.memory_plugins.config import bank_agent_write_tools_enabled, normalize_memory_config
 from custom_agents.pinned_memory_metadata import public_pinned_memory_metadata
 from custom_messages.contracts.control_v1 import (
+    PINNED_MEMORY_CLEAR_EXPIRY,
     PINNED_MEMORY_SORT_NEWEST,
     PinnedMemoryFactPayload,
 )
@@ -37,6 +38,7 @@ from storage.pinned_memory_repository import (
     COREMEM_BANK,
     USERMEM_BANK,
     PinnedMemoryFactRow,
+    PinnedMemoryInputError,
     PinnedMemoryNotFoundError,
     PinnedMemoryRepository,
     pinned_memory_record_digest,
@@ -46,6 +48,8 @@ from time_presentation import format_user_timestamp
 
 
 PINNED_MEMORY_BANKS = {COREMEM_BANK, USERMEM_BANK}
+# The team's bank, for gateway code that must not import the store (assistant_gateway.pinned_memory_commands).
+PINNED_MEMORY_TEAM_BANK = COREMEM_BANK
 # The command origin of agents' memory tools: they need agent write access to
 # the bank, and their replace and delete must name the fact version they read.
 AGENT_TOOL_COMMAND_ORIGIN = "agent_tool"
@@ -166,11 +170,11 @@ class PinnedMemoryService:
             return self.list(bank=bank, context=context, sort=command.sort, range_start=command.range_start, range_end=command.range_end)
         if command.action == "show":
             if command.memory_id is None:
-                raise ValueError(f"{bank} show requires a memory id.")
+                raise PinnedMemoryInputError(f"{bank} show requires a memory id.")
             return self.show(bank=bank, context=context, memory_id=command.memory_id)
         if command.action == "create":
             if not command.fact_text:
-                raise ValueError(f"{bank} create requires fact_text.")
+                raise PinnedMemoryInputError(f"{bank} create requires fact_text.")
             return self.create(
                 bank=bank,
                 context=context,
@@ -185,7 +189,7 @@ class PinnedMemoryService:
             )
         if command.action == "replace":
             if command.memory_id is None:
-                raise ValueError(f"{bank} replace requires a memory id.")
+                raise PinnedMemoryInputError(f"{bank} replace requires a memory id.")
             return self.replace(
                 bank=bank,
                 context=context,
@@ -201,7 +205,7 @@ class PinnedMemoryService:
             )
         if command.action == "delete":
             if command.memory_id is None:
-                raise ValueError(f"{bank} delete requires a memory id.")
+                raise PinnedMemoryInputError(f"{bank} delete requires a memory id.")
             return self.delete(
                 bank=bank,
                 context=context,
@@ -211,9 +215,9 @@ class PinnedMemoryService:
             )
         if command.action == "undo":
             if not command.event_id:
-                raise ValueError(f"{bank} undo requires a memory event id.")
+                raise PinnedMemoryInputError(f"{bank} undo requires a memory event id.")
             return self.undo(bank=bank, context=context, event_id=command.event_id, command_outcome=command_outcome)
-        raise ValueError(f"Unsupported {bank} action: {command.action}")
+        raise PinnedMemoryInputError(f"Unsupported {bank} action: {command.action}")
 
     def list(
         self,
@@ -428,11 +432,11 @@ class PinnedMemoryService:
         if event is None:
             raise PinnedMemoryNotFoundError(f"{bank} event {event_id!r} was not found.")
         if event.bank != bank:
-            raise ValueError(f"Event {event_id!r} belongs to {event.bank}, not {bank}.")
+            raise PinnedMemoryInputError(f"Event {event_id!r} belongs to {event.bank}, not {bank}.")
         if bank == COREMEM_BANK and event.team_id != scope["team_id"]:
-            raise ValueError(f"Event {event_id!r} does not belong to this team.")
+            raise PinnedMemoryInputError(f"Event {event_id!r} does not belong to this team.")
         if bank == USERMEM_BANK and event.canonical_user_id != scope["canonical_user_id"]:
-            raise ValueError(f"Event {event_id!r} does not belong to this user.")
+            raise PinnedMemoryInputError(f"Event {event_id!r} does not belong to this user.")
         result = self.repository.undo_memory_event(
             event_id,
             source=context.source.payload(),
@@ -469,7 +473,7 @@ class PinnedMemoryService:
             return
         if bank_agent_write_tools_enabled(self.config, bank):
             return
-        raise ValueError(
+        raise PinnedMemoryInputError(
             f"{bank} {action} is disabled for agent tools by "
             f"agent.memory.{bank}.agent_write_tools_enabled=false. Use the /{bank} command instead."
         )
@@ -505,11 +509,11 @@ class PinnedMemoryService:
         if bank == COREMEM_BANK:
             team_id = str(context.team_id or "").strip()
             if not team_id:
-                raise ValueError("coremem requires a team_id.")
+                raise PinnedMemoryInputError("coremem requires a team_id.")
             return {"team_id": team_id}
         canonical_user_id = str(context.canonical_user_id or "").strip()
         if not canonical_user_id:
-            raise ValueError("usermem requires a registered canonical user id. Use /user first.")
+            raise PinnedMemoryInputError("usermem requires a registered canonical user id. Use /user first.")
         return {"canonical_user_id": canonical_user_id}
 
     def _list_rows(self, *, bank: str, scope: dict[str, str], sort: str) -> list[PinnedMemoryFactRow]:
@@ -527,7 +531,7 @@ class PinnedMemoryService:
 
         version = str(digest or "").strip() or None
         if version is None and self.command_origin == AGENT_TOOL_COMMAND_ORIGIN and action in _VERSIONED_ACTIONS:
-            raise ValueError(
+            raise PinnedMemoryInputError(
                 f"{bank} {action} needs the record_digest of the fact as you read it; list {bank} to get it."
             )
         return version
@@ -616,7 +620,7 @@ def parse_pinned_memory_command(command_text: str, *, bank: str) -> PinnedMemory
                 ),
                 timezone_name=str(options.get("tz") or options.get("timezone") or "").strip() or None,
             )
-        raise ValueError(f"Unknown {bank} id-first action {id_first_action!r}. Use show, replace, or delete.")
+        raise PinnedMemoryInputError(f"Unknown {bank} id-first action {id_first_action!r}. Use show, replace, or delete.")
     action = {
         "add": "create",
         "create": "create",
@@ -635,7 +639,7 @@ def parse_pinned_memory_command(command_text: str, *, bank: str) -> PinnedMemory
         "undo": "undo",
     }.get(raw_action)
     if action is None:
-        raise ValueError(f"Unknown {bank} action {raw_action!r}. Use list, add, replace, or delete.")
+        raise PinnedMemoryInputError(f"Unknown {bank} action {raw_action!r}. Use list, add, replace, or delete.")
     args = parts[1:]
     options = _parse_options(args)
     if action == "list":
@@ -649,21 +653,21 @@ def parse_pinned_memory_command(command_text: str, *, bank: str) -> PinnedMemory
         )
     if action == "show":
         if not args or not str(args[0]).isdigit():
-            raise ValueError(f"Usage: /{bank} show <id>")
+            raise PinnedMemoryInputError(f"Usage: /{bank} show <id>")
         return PinnedMemoryCommand(bank=bank, action=action, memory_id=int(args[0]))
     if action == "delete":
         if not args or not str(args[0]).isdigit():
-            raise ValueError(f"Usage: /{bank} delete <id>")
+            raise PinnedMemoryInputError(f"Usage: /{bank} delete <id>")
         return PinnedMemoryCommand(bank=bank, action=action, memory_id=int(args[0]))
     if action == "undo":
         if not args:
-            raise ValueError(f"Usage: /{bank} undo <event_id>")
+            raise PinnedMemoryInputError(f"Usage: /{bank} undo <event_id>")
         return PinnedMemoryCommand(bank=bank, action=action, event_id=str(args[0]).strip())
     memory_id: Optional[int] = None
     fact_args = args
     if action == "replace":
         if not args or not str(args[0]).isdigit():
-            raise ValueError(f"Usage: /{bank} replace <id> \"fact\" [tags=a,b] [until=...]")
+            raise PinnedMemoryInputError(f"Usage: /{bank} replace <id> \"fact\" [tags=a,b] [until=...]")
         memory_id = int(args[0])
         fact_args = args[1:]
     fact_text = _collect_fact_text(fact_args)
@@ -695,7 +699,7 @@ def parse_memory_timestamp(raw_value: Optional[str], *, timezone_name: Optional[
     text = str(raw_value or "").strip()
     if not text:
         return None
-    if text.lower() == "never":
+    if text.lower() == PINNED_MEMORY_CLEAR_EXPIRY:
         return None
     tz_name = _resolve_timezone(timezone_name)
     tz = ZoneInfo(tz_name)
@@ -722,7 +726,7 @@ def parse_memory_timestamp(raw_value: Optional[str], *, timezone_name: Optional[
         },
     )
     if parsed is None:
-        raise ValueError(f"Could not parse timestamp {raw_value!r}. Include an ISO timestamp or tz=America/Chicago.")
+        raise PinnedMemoryInputError(f"Could not parse timestamp {raw_value!r}. Include an ISO timestamp or tz=America/Chicago.")
     return parsed.astimezone(timezone.utc).isoformat()
 
 
@@ -741,11 +745,11 @@ def normalize_tags(value: Optional[Any], *, max_tags: int = 20, max_tag_chars: i
         if not tag or tag in seen:
             continue
         if len(tag) > max_tag_chars:
-            raise ValueError(f"tag {tag!r} exceeds max length {max_tag_chars}.")
+            raise PinnedMemoryInputError(f"tag {tag!r} exceeds max length {max_tag_chars}.")
         tags.append(tag)
         seen.add(tag)
     if len(tags) > max_tags:
-        raise ValueError(f"too many tags: maximum is {max_tags}.")
+        raise PinnedMemoryInputError(f"too many tags: maximum is {max_tags}.")
     return sorted(tags)
 
 
@@ -753,10 +757,10 @@ def normalize_metadata(value: Optional[dict[str, Any]], *, max_chars: Optional[i
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ValueError("metadata must be a JSON object.")
+        raise PinnedMemoryInputError("metadata must be a JSON object.")
     normalized = dict(value)
     if max_chars is not None and len(json.dumps(normalized, sort_keys=True)) > int(max_chars):
-        raise ValueError(f"metadata JSON exceeds max length {max_chars}.")
+        raise PinnedMemoryInputError(f"metadata JSON exceeds max length {max_chars}.")
     return normalized
 
 
@@ -767,7 +771,7 @@ def parse_json_option(value: Any) -> Optional[dict[str, Any]]:
         return value
     parsed = json.loads(str(value))
     if not isinstance(parsed, dict):
-        raise ValueError("meta must be a JSON object.")
+        raise PinnedMemoryInputError("meta must be a JSON object.")
     return parsed
 
 
@@ -898,7 +902,7 @@ def _split_command(command_text: str) -> list[str]:
     try:
         return shlex.split(str(command_text or ""))
     except ValueError as exc:
-        raise ValueError(f"Could not parse command: {exc}") from exc
+        raise PinnedMemoryInputError(f"Could not parse command: {exc}") from exc
 
 
 def _parse_options(args: list[str]) -> dict[str, Any]:
@@ -943,14 +947,14 @@ def _parse_range_option(options: dict[str, Any]) -> tuple[int, int]:
         start = 1
         end = int(raw)
     if start < 1 or end < start:
-        raise ValueError("range must be positive and ascending, e.g. range=1-50.")
+        raise PinnedMemoryInputError("range must be positive and ascending, e.g. range=1-50.")
     return start, end
 
 
 def _normalize_bank(bank: str) -> str:
     normalized = str(bank or "").strip().lower()
     if normalized not in PINNED_MEMORY_BANKS:
-        raise ValueError(f"Unsupported pinned memory bank {bank!r}.")
+        raise PinnedMemoryInputError(f"Unsupported pinned memory bank {bank!r}.")
     return normalized
 
 
@@ -978,7 +982,7 @@ def _resolve_timezone(timezone_name: Optional[str]) -> str:
     try:
         return ZoneInfo(candidate).key
     except ZoneInfoNotFoundError as exc:
-        raise ValueError(f"Unknown timezone {candidate!r}. Use an IANA timezone such as America/Chicago.") from exc
+        raise PinnedMemoryInputError(f"Unknown timezone {candidate!r}. Use an IANA timezone such as America/Chicago.") from exc
 
 
 def _bank_label(bank: str) -> str:

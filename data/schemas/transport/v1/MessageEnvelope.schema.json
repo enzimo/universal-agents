@@ -3377,6 +3377,34 @@
       "title": "RequesterType",
       "type": "string"
     },
+    "RetiredGatewayCommand": {
+      "description": "A gateway command from before the upgrade whose handler is gone (``RetiredGatewayCommandClass``).\n\nThe team lead reads it only to tell the person it was not carried out\n(``custom_agents.retired_gateway_commands``); it never carries it out, so the\nold fields (the memory or knowledge command, its result) are accepted and ignored. Nothing\nsends one: ``message_class`` has no default, and only the contract and the\nlead's handler may name this model (tests/test_runtime_architecture_boundaries.py).\nRemove it, with its handler, when the upgrade steps from 0.9 are removed once\n0.11 ships (README_ARCHITECTURE.md, \"Upgrading an instance in place\").",
+      "properties": {
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "command_type": {
+          "$ref": "#/$defs/MessageMetaType",
+          "default": "request"
+        },
+        "message_class": {
+          "enum": [
+            "ManagerMemoryCommand",
+            "ManagerKnowledgeCommand",
+            "ManagerTopicCommand"
+          ],
+          "title": "Message Class",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message_class",
+        "command_id"
+      ],
+      "title": "RetiredGatewayCommand",
+      "type": "object"
+    },
     "RoutingType": {
       "enum": [
         "++<all>++",
@@ -7897,8 +7925,11 @@
           "DeliveryReceipt": "#/$defs/DeliveryReceipt",
           "Instruction": "#/$defs/Instruction",
           "ManagedSkillCatalogChangedV1": "#/$defs/ManagedSkillCatalogChangedV1",
+          "ManagerKnowledgeCommand": "#/$defs/RetiredGatewayCommand",
+          "ManagerMemoryCommand": "#/$defs/RetiredGatewayCommand",
           "ManagerRuntimeWorkCommand": "#/$defs/ManagerRuntimeWorkCommand",
           "ManagerScheduleCommand": "#/$defs/ManagerScheduleCommand",
+          "ManagerTopicCommand": "#/$defs/RetiredGatewayCommand",
           "NoOpMessage": "#/$defs/NoOpMessage",
           "PersonStandingCommandV1": "#/$defs/PersonStandingCommandV1",
           "ScheduledMessage": "#/$defs/ScheduledMessage",
@@ -7963,6 +7994,9 @@
         },
         {
           "$ref": "#/$defs/PersonStandingCommandV1"
+        },
+        {
+          "$ref": "#/$defs/RetiredGatewayCommand"
         },
         {
           "$ref": "#/$defs/ScheduledMessage"

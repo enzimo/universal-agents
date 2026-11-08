@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from team_transfer import sections as transfer_sections
 from team_transfer.container import TransferFileError, TransferReader, check_member_name
 from team_transfer.crypto import TransferKeyError, decrypt, new_key_derivation
@@ -357,8 +357,8 @@ def _owner_instance(tmp_path: Path) -> tuple[Path, Any]:
     AccessRepository(config.manager_storage_settings).replace_people(
         "team_old",
         [
-            TeamPersonV1(team_id="team_old", person_id="usr_owner", standing=PersonStanding.ACTIVE, roles=("owner", "admin"), changed_at_utc=now),
-            TeamPersonV1(team_id="team_old", person_id="usr_member", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=now),
+            TeamPersonV1(person_ref=new_person_ref(), team_id="team_old", person_id="usr_owner", standing=PersonStanding.ACTIVE, roles=("owner", "admin"), changed_at_utc=now),
+            TeamPersonV1(person_ref=new_person_ref(), team_id="team_old", person_id="usr_member", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=now),
         ],
         at=now,
     )
