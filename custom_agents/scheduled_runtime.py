@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Awaitable, Callable, Optional
 from access_control.ownership import PRIVATE_UPDATE, objective_access
-from custom_agents.contract_drain import is_contract_draining
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.access_runtime import resolve_meta_identity, verified_meta_person_id
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run

@@ -164,6 +164,36 @@ def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[str]:
 
 
 @pytest.mark.asyncio
+async def test_a_supervised_opening_retry_cannot_reattach_an_agent_that_left(monkeypatch) -> None:
+    from custom_agents import agent_host
+
+    monkeypatch.setattr(agent_host, "RETRY_SECONDS", (0.02,))
+    process, _ = _process()
+    answers = _Answers(process, [{"outcome": "ok", "session": _session("departed", "s-departed-1")},
+                                 {"outcome": "ok"}])
+    process._request = answers
+    failed = asyncio.Event()
+
+    async def fail_to_serve(*_args, **_kwargs):
+        failed.set()
+        raise ConnectionError("subscription interrupted")
+
+    process.host.live.serve = fail_to_serve
+    hosted = _hosted("departed")
+    opening = process._spawn(lambda: process._open(hosted), "open_session")
+    try:
+        await asyncio.wait_for(failed.wait(), 1)
+        await process._close("departed", "exited")
+        await asyncio.wait_for(opening, 1)
+        assert hosted.left.is_set()
+        assert not process.agents and not process._pending_closes
+        assert len(answers.ids()) == 1
+        assert len(answers.ids("sessions.close")) == 1
+    finally:
+        await process.stop()
+
+
+@pytest.mark.asyncio
 async def test_a_refused_session_is_asked_for_again_until_it_opens_and_each_change_is_logged_once(caplog) -> None:
     process, pauses = _process()
     answers = _Answers(process, [

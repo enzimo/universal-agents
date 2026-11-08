@@ -4707,8 +4707,8 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
   again at once when the list changes.
 - Each opening that got an answer is followed by one with a new request id, and each daily
   renewal has its own (the session and the sequence of the record it renews, as a digest),
-  kept only for retries of that one request, since a repeated id gets the first answer back
-  (README "Stored outcomes"). A refused renewal opens a new session.
+  kept only for retries of that one request. Session operations keep no stored reply;
+  repeating an open replaces its placement and session. A refused renewal opens a new session.
 
 **An agent process on another contract drains** (`custom_agents.agent_host`,
 `custom_agents.contract_drain`). When its host learns that the process runs another
@@ -4743,7 +4743,11 @@ installation's contract. The team lead and startup agents have no way to hand a 
 back yet (that comes with `task.handback` and the queued work of protocol 1), so they
 finish what they already admitted. The host's record says `draining` meanwhile; its
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
-Once no agent holds an unfinished task or a waiting request, the host closes their sessions
+Startup counts as held work until recovery finishes, so a drain cannot close controls
+before saved tasks become visible. A draining startup restores its own work and adopts
+no work from gone agents. Admission reads the leaf module `contract_drain_state`; drain
+execution can depend on turn and control handlers without creating an import cycle.
+Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions
 (`exited`), removing their placements; its record says `drained` and it renews only to give its agents up
 (`event=agent_host_drained`). A process that never joined drains its agents the same way,
 with no record to write. Under one launcher this happens only when a process, such as the

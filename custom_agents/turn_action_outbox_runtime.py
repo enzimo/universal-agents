@@ -154,7 +154,7 @@ async def _incoming_task_info(self: Any, incoming_content: ContentType) -> TaskI
 def _validate_manager_mediated_worker_delegation(self, action: TurnAction) -> None:
     if not isinstance(action, DelegateTaskAction):
         return
-    from custom_agents.contract_drain import is_contract_draining
+    from custom_agents.contract_drain_state import is_contract_draining
 
     if is_contract_draining(self):
         raise RuntimeError("This process is finishing work on another message contract and cannot delegate new tasks. "

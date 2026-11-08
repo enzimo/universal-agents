@@ -31,11 +31,13 @@ from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.live import NO_RESPONDERS, RequestRefused, ServiceUnavailable
 
 RELAYED_KINDS = ("tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump")
+_CHANGE_KINDS = frozenset({"tasks.remove", "tasks.purge", "debug.dump"})
 _PLACEMENT_BUCKET = "UA1_PLACEMENT"
 AGENT_UNAVAILABLE_TEXT = "That agent is not running now. Refresh, and try again when it is."
 RELAY_TIMEOUT_SECONDS = 10.0
 AGENT_SLOW_TEXT = "That agent did not answer in time. The command may still finish. Refresh to check its result."
 AGENT_REFUSED_TEXT = "That agent could not handle this request. Refresh and try again."
+AGENT_UNKNOWN_RESULT_TEXT = "The command may have finished. Refresh to check its result before sending it again."
 
 
 class AgentUnavailable(RuntimeError):
@@ -84,7 +86,10 @@ class Relays:
         except (RequestRefused, FrameRefused) as error:
             self._logger.warning("An agent refused a relayed command. event=team_relay_refused kind=%s agent=%s code=%s",
                                  verified.frame.kind, agent, error.code)
-            raise AgentUnavailable(AGENT_REFUSED_TEXT) from error
+            uncertain = verified.frame.kind in _CHANGE_KINDS and (
+                isinstance(error, FrameRefused) or error.code == "handler_failed"
+            )
+            raise AgentUnavailable(AGENT_UNKNOWN_RESULT_TEXT if uncertain else AGENT_REFUSED_TEXT) from error
         return dict(reply.raw["body"])
 
     async def _placement(self, key: str) -> Optional[Any]:

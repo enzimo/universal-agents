@@ -18,7 +18,8 @@ from typing import Any
 import pytest
 
 from custom_agents import contract_drain, lease_loss_wind_down, turn_registry
-from custom_agents.contract_drain import drain_agent, holds_work, is_contract_draining
+from custom_agents.contract_drain import drain_agent, holds_work
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.lease_loss_wind_down import may_start_next_task
 from custom_agents.task_manager import TaskManager
 from custom_messages.enums import ProgressState
@@ -57,7 +58,7 @@ def _agent(*, worker: bool = False, infos: tuple[SimpleNamespace, ...] = (), del
         get_task_info=by_id.get)
     agent = SimpleNamespace(id="agent_1", _logger=logging.getLogger("test.contract_drain"), _should_exit=asyncio.Event(),
                             _owned_tasks=set(), task_manager=task_manager, adapter=adapter,
-                            deferred_inbox=SimpleNamespace(messages=list(inbox)))
+                            deferred_inbox=SimpleNamespace(messages=list(inbox)), _worker_ready=True)
     agent._ensure_nats_transport_adapter = lambda: adapter
     if worker:
         agent._worker_launch = SimpleNamespace(launch_id="launch-1")
@@ -114,6 +115,11 @@ async def test_an_agent_holds_work_while_it_has_an_unfinished_task_or_a_waiting_
     # The record of a subtask it delegated is not work of its own.
     assert await holds_work(_agent(infos=(_info("sub-1", ProgressState.IN_PROGRESS),), delegated=("sub-1",))) is False
     assert await holds_work(_agent(inbox=("a request",))) is True
+    starting = _agent()
+    starting._worker_ready = False
+    assert await holds_work(starting) is True
+    starting._worker_ready = True
+    assert await holds_work(starting) is False
 
 
 @pytest.mark.asyncio
@@ -163,7 +169,7 @@ def test_a_draining_lead_fires_no_schedule_and_the_next_lead_fires_it_once(tmp_p
 
     from datetime import timedelta
 
-    from custom_agents.contract_drain import ContractDrain
+    from custom_agents.contract_drain_state import ContractDrain
     from custom_agents.schedule_store import ScheduleStore
     from custom_agents.scheduled_runtime import _scheduler_pass
     from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 import pytest
 
 from custom_agents.agent_instantiation_service import LAUNCH_REFUSED_OTHER_CONTRACT, AgentInstantiationService
-from custom_agents.contract_drain import ContractDrain
+from custom_agents.contract_drain_state import ContractDrain
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
 from custom_messages.contracts.control_v1 import AgentCreationRequest
 from custom_messages.contracts.schedule_worker_v1 import AgentLaunchState

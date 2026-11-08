@@ -1229,8 +1229,10 @@ session record:
 - **`sessions.close`** records a session's actual end when its agent exits, fails or is
   handed over: the team services sign the session again with that end, so it covers nothing
   dated after it, and remove the placement unless the agent was handed over (the new host's
-  open replaces it). Closing a session that has already ended answers `ok` with its recorded
-  end and changes nothing.
+  open replaces it). Before ending a handed-over session, the team services mark its
+  placement `handed_over: true`, so it survives the session's later deletion. Closing a
+  session that has already ended answers `ok` with its recorded end and retries any
+  unfinished placement cleanup without ending the session again.
 
 Renew and close answer `not_found` for a session that does not place its agent on the asking
 host, so no host renews or ends another host's sessions. Where hosts have their own NATS
@@ -1238,9 +1240,13 @@ credentials, an open that adds an agent is followed by a certificate renewal who
 names the agent's subjects ("Credentials follow placement"); until then the host cannot read
 the agent's queues or write its agent record.
 
-**Restarts.** A host that starts again first closes the sessions an earlier run of it left
-open (it finds them in `UA1_CERTS` under its runtime id), then opens sessions for the agents
-it now runs. A session it cannot close ends with its end time.
+**Restarts.** A host scans verified sessions in `UA1_CERTS` for its own runtime and closes
+those its earlier run left behind. Failed reads and closes retry during upkeep. Sessions
+of agents attached to this run are excluded, including an opening whose reply is pending.
+A session it cannot close ends with its end time. Team services remove an unmarked
+placement with no retained matching session, under their session mutation lock and with
+compare-and-set, after completing all session reads. This recovers interrupted openings
+and placements whose sessions were forgotten; an explicit handover stays.
 
 **Repeating a session operation.** The session operations keep no stored outcome ("Stored
 outcomes"): their outcome is the records in `UA1_PLACEMENT` and `UA1_CERTS`, and no
@@ -1249,8 +1255,8 @@ Each one is safe to repeat instead:
 - a host that lost an open's reply asks again and gets a new session for the same agent on
   itself (above);
 - the team services write the placement before the session, so a failure between the two
-  leaves the agent placed on the asking host without a session, which the host's next open
-  completes;
+  leaves an abandoned placement; the next open on that host or team-service upkeep removes
+  it before counting session capacity;
 - a repeated renewal signs the session again; a repeated close changes nothing.
 
 The host asks for itself, so these requests name no agent (one signed as an agent is refused
@@ -1497,6 +1503,11 @@ relayed frame carries the gateway's command token unchanged, with the
 same `request_id`. The agent's host verifies the person from the gateway's signature: no
 body names a person, and the team services never sign tokens. Command tokens are accepted
 only from these senders, so an agent host cannot use one on another operation.
+
+Task list rows must fit both the encoded frame limit and each field's character limit.
+Until blob transport is available, a waiting question longer than inline text allows is
+shown as a marked preview, with a structured warning; the saved full question is unchanged.
+The gateway displays that preview and retains the queue digest needed for removals.
 
 ### Knowledge
 

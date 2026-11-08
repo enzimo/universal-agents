@@ -68,6 +68,34 @@ async def test_the_context_dump_is_the_team_leads_setting(agent) -> None:
 
 
 @pytest.mark.asyncio
+async def test_relay_checks_reuse_the_access_store_but_read_current_person_standing(agent, monkeypatch) -> None:
+    from custom_agents import task_context_runtime
+
+    task_context_runtime._access_store.cache_clear()
+    original = task_context_runtime.AccessRepository
+    opened = []
+
+    def access_store(settings):
+        store = original(settings)
+        opened.append(store)
+        return store
+
+    monkeypatch.setattr(task_context_runtime, "AccessRepository", access_store)
+    body = {"enabled": True, "mode": "always"}
+    try:
+        assert (await RELAYED_HANDLERS["debug.dump"](
+            agent, relayed_frame(TEAM, "debug.dump", body, person_ref=OWNER)))["outcome"] == "ok"
+        opened[0].record_person(TeamPersonV1(team_id=TEAM, person_id="owner", person_ref=OWNER,
+            standing=PersonStanding.DISABLED, changed_at_utc=datetime.now(timezone.utc)))
+        refused = await RELAYED_HANDLERS["debug.dump"](
+            agent, relayed_frame(TEAM, "debug.dump", body, person_ref=OWNER, request_id="after-disable"))
+        assert refused["outcome"] == "not_allowed"
+        assert len(opened) == len(agent.applied) == 1
+    finally:
+        task_context_runtime._access_store.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_finished_history_pages_fit_encoded_frames_without_skipping_multibyte_results(agent, tmp_path) -> None:
     from custom_agents.task_manager import TaskManager
     from custom_messages.contracts.task_v1 import Task
@@ -112,7 +140,6 @@ async def test_repeating_an_older_context_dump_command_never_overrides_a_newer_o
 @pytest.mark.asyncio
 async def test_an_admitted_command_without_a_final_reply_is_not_run_twice(agent, monkeypatch) -> None:
     from storage.relayed_command_outcomes import RelayedCommandOutcomes
-    from team_services.outcomes import AnswerUnknown
 
     frame = relayed_frame(TEAM, "debug.dump", {"enabled": True, "mode": "always"}, person_ref=OWNER, request_id="lost-answer")
     real_complete = RelayedCommandOutcomes.complete
@@ -120,6 +147,6 @@ async def test_an_admitted_command_without_a_final_reply_is_not_run_twice(agent,
     with pytest.raises(RuntimeError, match="commit failed"):
         await RELAYED_HANDLERS["debug.dump"](agent, frame)
     monkeypatch.setattr(RelayedCommandOutcomes, "complete", real_complete)
-    with pytest.raises(AnswerUnknown):
-        await RELAYED_HANDLERS["debug.dump"](agent, frame)
+    reply = checked_reply("debug.dump", await RELAYED_HANDLERS["debug.dump"](agent, frame))
+    assert reply["outcome"] == "runtime_error" and "may have finished" in reply["message"]
     assert len(agent.applied) == 1

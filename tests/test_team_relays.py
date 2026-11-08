@@ -104,6 +104,8 @@ async def test_a_command_for_an_agent_whose_placement_does_not_verify_is_answere
 @pytest.mark.parametrize("failure,expected", [
     ("slow", "did not answer in time"),
     ("refused", "could not handle this request"),
+    ("handler_failed", "may have finished"),
+    ("invalid_reply", "may have finished"),
 ])
 async def test_relay_failures_explain_the_outcome_without_protocol_codes(failure, expected):
     from custom_transport.protocol1.live import ServiceUnavailable, RequestRefused, NO_ANSWER_IN_TIME
@@ -113,6 +115,10 @@ async def test_relay_failures_explain_the_outcome_without_protocol_codes(failure
         assert kwargs["timeout"] < 15
         if failure == "slow":
             raise ServiceUnavailable("tasks.remove", "agent", NO_ANSWER_IN_TIME)
+        if failure == "invalid_reply":
+            raise FrameRefused("bad_signature", at="/signature")
+        if failure == "handler_failed":
+            raise RequestRefused("tasks.remove", "handler_failed", "/body")
         raise RequestRefused("tasks.remove", "wrong_authority", "/authority")
 
     relays._host.live.request = request

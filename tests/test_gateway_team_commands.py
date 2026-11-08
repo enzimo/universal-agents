@@ -85,6 +85,8 @@ async def test_a_command_with_no_answer_in_time_is_sent_once_more_under_the_same
      "may still be made"),
     ("topics.list_tags", {}, "Try again", "may still be made"),
     ("topics.find_threads", {"tags": ["taxes"]}, "Try again", "may still be made"),
+    ("tasks.list", {"agent": "worker", "offset": 0, "limit": 20}, "Try again", "may still be made"),
+    ("tasks.list_finished", {"agent": "worker", "offset": 0, "limit": 20}, "Try again", "may still be made"),
     ("topics.tag_thread", {"conversation_id": "conv_example", "tags": ["taxes"], "private": True},
      "the change may still be made", None),
 ])

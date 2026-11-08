@@ -997,6 +997,7 @@ class PlacementState(WireModel):
     placed_at: Timestamp
     reason: Literal['initial', 'host_lost', 'rebalanced', 'drained', 'operator']
     previous_host: Union[RuntimeId, MISSING] = Field(default=MISSING)
+    handed_over: Union[Annotated[Literal[True], BeforeValidator(exact_type(bool))], MISSING] = Field(default=MISSING)
 
 
 class RevocationsStateEntriesItem(WireModel):

@@ -48,11 +48,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 
+from custom_agents.contract_drain_state import ContractDrain, is_pool_worker
 from custom_transport.nats_adapter import TEAM_LEAD_CONSUMER_ROLE
 
 # How often a pool worker checks whether its running turns ended before it winds down.
@@ -60,36 +60,12 @@ TURN_POLL_SECONDS = 1.0
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
-class ContractDrain:
-    """Why and since when an agent drains (module docstring)."""
-
-    reason: str
-    started_at: datetime
-    # A pool worker starts no task it has not started (``lease_loss_wind_down.may_start_next_task``).
-    holds_back_unstarted: bool = False
-    left_queues: int = 0
-    announced: bool = False
-    task: Optional[asyncio.Task[Any]] = field(default=None, repr=False)
-
-
-def is_contract_draining(agent: Any) -> bool:
-    return getattr(agent, "_contract_drain", None) is not None
-
-
-def is_pool_worker(agent: Any) -> bool:
-    """A worker started with a launch record, which the team lead takes tasks back from."""
-
-    return getattr(agent, "_worker_launch", None) is not None
-
-
 async def drain_agent(agent: Any, reason: str) -> None:
     """Drain one agent (module docstring); on its own loop, once. Returns when it took no more new work."""
 
     state = getattr(agent, "_contract_drain", None)
     worker = is_pool_worker(agent)
-    first = state is None
-    if first:
+    if state is None:
         state = ContractDrain(reason=reason, started_at=datetime.now(timezone.utc), holds_back_unstarted=worker)
         agent._contract_drain = state
     # Startup may have been subscribing when the drain began; a repeat leaves those queues too.
@@ -131,7 +107,10 @@ async def _wind_down_after_running_turns(agent: Any, state: ContractDrain) -> No
 
 
 async def holds_work(agent: Any) -> bool:
-    """Whether the agent still holds a task it has not finished, or a request waiting to be admitted."""
+    """Keep startup attached until recovery can reveal its saved work, then inspect what it holds."""
+
+    if not getattr(agent, "_worker_ready", False):
+        return True
 
     task_manager = agent.task_manager
     unfinished = await task_manager.operations_runtime.run(partial(_unfinished_task_ids, task_manager))

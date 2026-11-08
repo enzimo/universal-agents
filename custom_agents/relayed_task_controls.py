@@ -27,11 +27,22 @@ from typing import Any, Optional
 from custom_agents.runtime_task_controls import TaskControlCommand
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
-from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES, encoded_size
+from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS, INLINE_TEXT_TYPE, REPLY_BODY_MAX_BYTES, encoded_size
 
 _LOGGER = logging.getLogger(__name__)
 _MESSAGE_MAX = 500
 TASKS_PAGE_MAX = 20
+_SHORTENED_BLOCKER_NOTE = "\n[Preview shortened. Ask the agent for the full question.]"
+
+
+def _blocker_preview(text: str, *, agent_id: str, task_id: str) -> dict[str, str]:
+    """Keep a saved question readable within the inline contract until blob transport exists."""
+    if len(text) > INLINE_TEXT_MAX_CHARS:
+        _LOGGER.warning("A task's waiting question exceeds the inline text limit; showing a preview. "
+                        "event=task_blocker_preview_shortened agent=%s task=%s characters=%s limit=%s",
+                        agent_id, task_id, len(text), INLINE_TEXT_MAX_CHARS)
+        text = text[:INLINE_TEXT_MAX_CHARS - len(_SHORTENED_BLOCKER_NOTE)] + _SHORTENED_BLOCKER_NOTE
+    return {"type": INLINE_TEXT_TYPE, "text": text}
 
 
 def _message(outcome: str, message: str) -> dict[str, Any]:
@@ -42,9 +53,8 @@ def _message(outcome: str, message: str) -> dict[str, Any]:
 def relayed_person(agent: Any, verified: VerifiedFrame) -> tuple[Optional[Any], str]:
     """The person a relayed command acts for, or None with why it is refused (logged)."""
 
-    from access_control.people_directory import PeopleDirectory
     from custom_agents.manager_control_runtime import CommandPerson
-    from storage.access_repository import AccessRepository
+    from custom_agents.task_context_runtime import people_directory
 
     authority, sender = verified.authority, verified.certificate
     reason = ""
@@ -55,7 +65,7 @@ def relayed_person(agent: Any, verified: VerifiedFrame) -> tuple[Optional[Any], 
             or not isinstance(authority.token.person, str):
         reason = "The command carries no gateway's token for a person's command."
     else:
-        people = PeopleDirectory(AccessRepository(agent.task_manager.storage_settings), str(agent.team_id))
+        people = people_directory(agent)
         now = people.person_by_ref(authority.token.person)
         if now is None:
             reason = "The command names a person this team does not know."
@@ -116,7 +126,7 @@ async def tasks_list(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
         if root.latest_activity_at:
             row["last_updated_at"] = _timestamp(root.latest_activity_at)
         if root.blocker:
-            row["blocker"] = {"type": "inline", "text": root.blocker}
+            row["blocker"] = _blocker_preview(root.blocker, agent_id=str(agent.id), task_id=root.root_task_id)
         if root.latest_activity:
             row["latest_activity"] = root.latest_activity
         tasks.append(row)
@@ -219,7 +229,6 @@ def _once(handler: Any) -> Any:
     async def answer(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
         from storage.operation_outcomes import CommandOutcome, OutcomeKeyTaken, is_receipt
         from storage.relayed_command_outcomes import RelayedCommandOutcomes
-        from team_services.outcomes import AnswerUnknown
 
         person, reason = relayed_person(agent, verified)
         if person is None:
@@ -243,7 +252,7 @@ def _once(handler: Any) -> Any:
                 _LOGGER.warning("A relayed command's result is still unknown; it is not carried out again. "
                                 "event=relayed_command_outcome_unknown agent=%s kind=%s retry_key=%s",
                                 agent.id, outcome.kind, outcome.retry_key)
-                raise AnswerUnknown("The command may have finished. Refresh to check its result.")
+                return _message("runtime_error", "The command may have finished. Refresh to check its result.")
             return previous
         reply = await handler(agent, verified)
         return await asyncio.to_thread(store.complete, outcome, reply)

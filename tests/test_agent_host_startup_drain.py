@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_agents.contract_drain import ContractDrain, drain_agent
+from custom_agents.contract_drain import drain_agent
+from custom_agents.contract_drain_state import ContractDrain
 from custom_agents.strands_agent import UniversalAgent
 from custom_transport.base import FetchPolicy
 from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE

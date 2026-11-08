@@ -8,7 +8,7 @@ This module provides the UniversalAgent class, which:
 - Supports the hub-and-spoke multi-agent architecture
 """
 
-from custom_agents.contract_drain import is_contract_draining
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.lease_loss_wind_down import divert_request_during_wind_down, is_winding_down
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
@@ -4863,7 +4863,8 @@ class UniversalAgent(BaseModel):
     ) -> None:
         """Read this agent's type queue, shared by every agent of the type (ADR-019)."""
 
-        from custom_agents.contract_drain import drain_agent, is_contract_draining
+        from custom_agents.contract_drain import drain_agent
+        from custom_agents.contract_drain_state import is_contract_draining
 
         if is_contract_draining(self):
             return
@@ -4950,7 +4951,8 @@ class UniversalAgent(BaseModel):
                 # target the requesting agent id and are correlated in memory.
                 self._operational_queue_name = self.id
 
-                from custom_agents.contract_drain import drain_agent, is_contract_draining
+                from custom_agents.contract_drain import drain_agent
+                from custom_agents.contract_drain_state import is_contract_draining
 
                 if self.is_team_lead and not is_contract_draining(self):
                     await adapter.subscribe_route(

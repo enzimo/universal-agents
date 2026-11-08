@@ -35,8 +35,8 @@ Why it is shaped this way:
   refused renewal opens a new session the same way.
 - **Request ids.** Each opening that got an answer is followed by one with a new request
   id, and each renewal has its own (the session and the sequence of the record it renews),
-  stable only across retries of that one request: a repeated id gets the first answer back
-  (README "Stored outcomes").
+  stable only across retries of that one request. Session operations keep no stored reply:
+  repeating an open replaces its placement and session; repeating a close finishes its cleanup.
 - **Only verified records.** The placements read at start, to close the sessions an
   earlier run left, are verified like every record (signed by the team services); one that does not verify counts as absent and is logged,
   and one bad key never keeps the agents from their sessions.
@@ -399,7 +399,9 @@ class AgentProcessHost:
         if session is None or session.runtime != self.profile.runtime:
             return
         hosted = self.agents.get(session.agent)
-        if hosted is not None and hosted.session == session.session:
+        if hosted is not None:
+            # An opening can already be stored before its reply fills hosted.session.
+            # Agent ids are new for each run; an attached id belongs to this run.
             return
         # A completed close is cheap to repeat and also finishes a failed placement removal.
         self._pending_closes[session.session] = (session.agent, "failed")
@@ -437,11 +439,14 @@ class AgentProcessHost:
     async def _open(self, hosted: _HostedAgent) -> None:
         assert self._joined is not None and self.host is not None
         agent_id = str(hosted.agent.id)
+        if hosted.left is not None and hosted.left.is_set():
+            return  # A supervised retry must never reattach an agent that left.
         if agent_id in self.agents and self.agents[agent_id] is not hosted:
             self.logger.debug("The agent is attached already; its session is kept or being opened. runtime=%s agent=%s",
                               self.profile.runtime, agent_id)
             return
-        hosted.left = asyncio.Event()
+        if hosted.left is None:
+            hosted.left = asyncio.Event()
         self.agents[agent_id] = hosted
         if self._draining is None:
             waits = [asyncio.ensure_future(self._joined.wait()), asyncio.ensure_future(self._drain_started.wait())]
