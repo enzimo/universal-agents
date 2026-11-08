@@ -1437,8 +1437,7 @@ async def handle_manager_runtime_work_command(
     response.objectives = []
     response.cancellation_receipts = []
     person, refusal = verified_command_person(agent, msg_meta)
-    worker_task_control = command.action in {"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"}
-    if (not getattr(agent, "is_team_lead", False) and not worker_task_control) or person is None:
+    if not getattr(agent, "is_team_lead", False) or person is None:
         response.success = False
         response.message = refusal or "manager_required"
         await _send_durable_response(
@@ -1446,29 +1445,6 @@ async def handle_manager_runtime_work_command(
             content=response,
             incoming_header=msg_header,
             incoming_meta=msg_meta,
-        )
-        return
-
-    if command.action == "list_finished_tasks":
-        from custom_agents.runtime_task_controls import finished_task_inventory
-
-        response.finished_tasks, response.task_total = await agent.task_manager.operations_runtime.run(
-            partial(finished_task_inventory, agent, person=person), command,
-        )
-        response.success = True
-        response.message = "Finished tasks loaded."
-        await _send_durable_response(agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta)
-        return
-
-    if command.action in {"list_tasks", "remove_task", "purge_tasks"}:
-        from custom_agents.runtime_task_controls import apply_task_control
-
-        await apply_task_control(
-            agent, command, response, person=person, list_roots=_runtime_work_roots,
-            summarize_root=_runtime_work_root_summary, cancel_roots=_cancel_runtime_work_roots,
-        )
-        await _send_durable_response(
-            agent, content=response, incoming_header=msg_header, incoming_meta=msg_meta
         )
         return
 

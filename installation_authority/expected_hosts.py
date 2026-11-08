@@ -1,11 +1,11 @@
 """The hosts the launcher starts, which the authority approves without asking anyone.
 
 The launcher writes one entry per process it starts as a host: its runtime id, its
-public key, the roles, teams, agent types and sessions it may ask for, its connection
-class and its deployment. A join that presents exactly that key for that runtime, asking
-for no more, in that connection class and deployment, is approved at once (the embedded
-profile's automatic local bootstrap); a renewal is checked against the same entry. The
-file names public keys only.
+public key, roles, teams, agent types, session limit, connection class and deployment.
+The authority checks joins and renewals against that entry. The file names public keys only.
+
+The lead's entry may allow agent types from the current catalog. Its current certificate's
+types remain allowed too: removing a specialist leaves its running workers running.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ class ExpectedHost:
     teams: frozenset[str]
     agent_types: frozenset[str] = frozenset()
     session_limit: int = 0
+    agent_types_from_catalog: bool = False
     # Processes the launcher starts stay connected and run on this machine.
     connection_class: str = "connected"
     deployment: str = "local"
@@ -45,8 +46,10 @@ def read_expected_hosts(path: Path) -> dict[str, ExpectedHost]:
         raise ValueError(f"{path} has an unknown format")
     return {runtime: ExpectedHost(runtime, str(entry["key_id"]), str(entry["public_key"]), frozenset(entry["roles"]),
                                   frozenset(entry["teams"]), frozenset(entry.get("agent_types", ())),
-                                  int(entry.get("session_limit", 0)), str(entry.get("connection_class", "connected")),
-                                  str(entry.get("deployment", "local")))
+                                  int(entry.get("session_limit", 0)),
+                                  connection_class=str(entry.get("connection_class", "connected")),
+                                  deployment=str(entry.get("deployment", "local")),
+                                  agent_types_from_catalog=bool(entry.get("agent_types_from_catalog", False)))
             for runtime, entry in document["hosts"].items()}
 
 
@@ -57,6 +60,6 @@ def write_expected_hosts(path: Path, hosts: Mapping[str, ExpectedHost]) -> None:
         host.runtime: {"key_id": host.key_id, "public_key": host.public_key, "roles": sorted(host.roles),
                        "teams": sorted(host.teams), "agent_types": sorted(host.agent_types),
                        "session_limit": host.session_limit, "connection_class": host.connection_class,
-                       "deployment": host.deployment}
+                       "deployment": host.deployment, "agent_types_from_catalog": host.agent_types_from_catalog}
         for host in hosts.values()}}
     write_private_file(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())

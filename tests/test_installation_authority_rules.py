@@ -62,11 +62,11 @@ def join_body(**changes: Any) -> dict[str, Any]:
     ({"agent_types": [], "session_limit": 0}, None),
 ])
 def test_a_join_gets_no_more_than_the_launcher_listed(changes: dict[str, Any], reason: str | None) -> None:
-    assert _denial(LISTED, join_body(**changes)) == reason
+    assert _denial(LISTED, join_body(**changes), LISTED.agent_types) == reason
 
 
 def test_a_host_nobody_listed_is_not_approved() -> None:
-    assert _denial(None, join_body()) == "not_approved"
+    assert _denial(None, join_body(), frozenset()) == "not_approved"
 
 
 def certificate(**changes: Any) -> Any:
@@ -81,15 +81,15 @@ KEPT_KEY = {"key_id": "worker.key1", "public_key": "PUBLIC1"}
 
 
 def test_a_renewal_is_checked_against_the_launchers_list() -> None:
-    assert _renewal_refusal(LISTED, certificate(), KEPT_KEY) is None
-    assert _renewal_refusal(LISTED, certificate(agent_types=frozenset()), KEPT_KEY) is None
-    assert "no longer lists" in str(_renewal_refusal(None, certificate(), KEPT_KEY))
+    assert _renewal_refusal(LISTED, certificate(), KEPT_KEY, LISTED.agent_types) is None
+    assert _renewal_refusal(LISTED, certificate(agent_types=frozenset()), KEPT_KEY, LISTED.agent_types) is None
+    assert "no longer lists" in str(_renewal_refusal(None, certificate(), KEPT_KEY, frozenset()))
     assert "another key" in str(_renewal_refusal(LISTED, certificate(), {"key_id": "worker.key2",
-                                                                           "public_key": "PUBLIC2"}))
+                                                                           "public_key": "PUBLIC2"}, LISTED.agent_types))
     for wider in ({"agent_types": frozenset({"researcher", "analyst"})}, {"session_limit": 5},
                   {"teams": frozenset({"team_one", "team_two"})}, {"roles": frozenset({"worker_host", "lead_host"})},
                   {"connection_class": "intermittent"}):
-        assert "join again" in str(_renewal_refusal(LISTED, certificate(**wider), KEPT_KEY)), wider
+        assert "join again" in str(_renewal_refusal(LISTED, certificate(**wider), KEPT_KEY, LISTED.agent_types)), wider
 
 
 def test_the_list_keeps_connection_class_and_deployment(tmp_path: Path) -> None:
@@ -276,3 +276,22 @@ def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, ca
         _run_with(monkeypatch, tmp_path, Disconnecting())
     assert exited.value.code == 1
     assert "event=installation_authority_upkeep_stopped" in caplog.text
+
+
+@pytest.mark.parametrize("changed", ["key_id", "public_key", "expired", "absent"])
+def test_held_agent_types_require_the_same_live_certificate_key(changed) -> None:
+    from installation_authority.service import _held_agent_types
+    from custom_messages.wire.encoding import format_timestamp
+
+    now = utc_now()
+    stored = {"body": {"application_key": dict(KEPT_KEY), "agent_types": ["Researcher"],
+                        "expires_at": format_timestamp(now + timedelta(days=1))}}
+    assert _held_agent_types(stored, KEPT_KEY, now) == frozenset({"Researcher"})
+    key = dict(KEPT_KEY)
+    if changed in key:
+        key[changed] = "OTHER"
+    elif changed == "expired":
+        stored["body"]["expires_at"] = format_timestamp(now)
+    else:
+        stored = None
+    assert not _held_agent_types(stored, key, now)

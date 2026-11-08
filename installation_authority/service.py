@@ -166,7 +166,8 @@ class InstallationAuthority:
 
     def __init__(self, layout: InstanceLayout, authority: AuthorityKeys, host_keys: HostKeys, *,
                  clock: Callable[[], datetime] = utc_now, logger: logging.Logger = _LOGGER,
-                 contract_sha256: str = CONTRACT_SHA256, replicas: int = 1) -> None:
+                 contract_sha256: str = CONTRACT_SHA256, replicas: int = 1,
+                 catalog_agent_types: Callable[[], frozenset[str]] = frozenset) -> None:
         """``contract_sha256`` is the contract this authority runs: its code's, unless a test gives another.
 
         ``replicas`` is the operator's JetStream replica count (``transport.replicas``) for the buckets.
@@ -180,6 +181,8 @@ class InstallationAuthority:
         self.host_keys = host_keys
         self.clock = clock
         self.logger = logger
+        # The instance's agent types, read at each join of a host listed with agent_types_from_catalog.
+        self.catalog_agent_types = catalog_agent_types
         self.replicas = max(1, int(replicas))
         self.live: Optional[LiveHost] = None
         self._nc: Any = None
@@ -769,16 +772,17 @@ class InstallationAuthority:
         body = verified.raw["body"]
         runtime, key = str(body["runtime"]), body["application_key"]
         expected = read_expected_hosts(self.layout.trust_expected_hosts_path).get(runtime)
-        denial = _denial(expected, body)
+        # verify_frame already refused a join presenting a revoked key (README "Joining").
+        now = self.clock()
+        stored = await self._latest_certificate(runtime, now)
+        allowed = self._allowed_agent_types(expected) | _held_agent_types(stored, key, now)
+        denial = _denial(expected, body, allowed)
         if denial is not None:
             self.logger.warning("A join was refused. event=host_join_denied runtime=%s reason=%s key_id=%s "
                                 "connection_class=%s deployment=%s", runtime, denial, key["key_id"],
                                 body["connection_class"], body["deployment"])
             return {"outcome": "denied", "reason": denial,
                     "message": "This installation takes only the hosts its launcher starts, as the launcher lists them."}
-        # verify_frame already refused a join presenting a revoked key (README "Joining").
-        now = self.clock()
-        stored = await self._latest_certificate(runtime, now)
         if self._reusable(stored, key["key_id"], key["public_key"], str(body["nats_public_key"]), now) \
                 and stored is not None and _grants_exactly(stored["body"], body):
             return {"outcome": "ok", "certificate": stored}
@@ -795,6 +799,20 @@ class InstallationAuthority:
         record = await self._issue(request, replaces=replaces, after_epoch=self._newest_epoch(runtime, stored),
                                    revocation_epoch=int(self._revocations["body"]["revocation_epoch"]), now=now)
         return {"outcome": "ok", "certificate": record}
+
+    def _allowed_agent_types(self, expected: Any) -> frozenset[str]:
+        """The agent types a listed host may ask for: its own, and the catalog's when it is listed that way."""
+
+        if expected is None:
+            return frozenset()
+        if not expected.agent_types_from_catalog:
+            return expected.agent_types
+        try:
+            return expected.agent_types | self.catalog_agent_types()
+        except Exception:
+            self.logger.exception("The agent catalog could not be read; only the listed agent types are allowed. "
+                                  "event=authority_catalog_unreadable runtime=%s", expected.runtime)
+            return expected.agent_types
 
     async def answer_renew(self, verified: VerifiedFrame) -> dict[str, Any]:
         certificate = verified.certificate
@@ -827,7 +845,10 @@ class InstallationAuthority:
         key = rotation["key"] if rotation else {"key_id": certificate.key_id, "public_key": _public_text(certificate)}
         expected = read_expected_hosts(self.layout.trust_expected_hosts_path).get(certificate.runtime)
         if not give_up:
-            refusal = _renewal_refusal(expected, certificate, key)
+            refusal = _renewal_refusal(expected, certificate, key,
+                                       self._allowed_agent_types(expected) | (
+                                           certificate.agent_types if expected is not None and expected.agent_types_from_catalog
+                                           else frozenset()))
             if refusal is not None:
                 self.logger.warning("A renewal was refused: the launcher's list does not cover it. "
                                     "event=host_renewal_not_allowed runtime=%s membership_epoch=%s reason=%s",
@@ -893,8 +914,31 @@ def _public_text(certificate: HostCertificate) -> str:
     return b64url(certificate.public_key.public_bytes(Encoding.Raw, PublicFormat.Raw))
 
 
-def _denial(expected: Optional[ExpectedHost], body: Mapping[str, Any]) -> Optional[str]:
-    """Why a join is refused, as the reply's reason, or ``None`` when the launcher listed exactly this host."""
+def _held_agent_types(stored: Optional[Mapping[str, Any]], key: Mapping[str, Any], now: datetime) -> frozenset[str]:
+    """The agent types the host's current certificate grants, when the join presents that certificate's key.
+
+    A join from the host that holds them keeps them, as a renewal does (module docstring): a
+    type removed from the catalog leaves its running agents running, and the host asks for its
+    certificate's types again with every new one, so a removed type would otherwise make every
+    later join of that host refused.
+    """
+
+    if stored is None:
+        return frozenset()
+    body = stored["body"]
+    if (body["application_key"]["key_id"], body["application_key"]["public_key"]) != (key["key_id"], key["public_key"]):
+        return frozenset()
+    if parse_timestamp(body["expires_at"]) <= now:
+        return frozenset()
+    return frozenset(body["agent_types"])
+
+
+def _denial(expected: Any, body: Mapping[str, Any], agent_types: frozenset[str]) -> Optional[str]:
+    """Why a join is refused, as the reply's reason, or ``None`` when the launcher listed exactly this host.
+
+    ``agent_types`` are the types the host may ask for: those it is listed for or the catalog has
+    (``_allowed_agent_types``), and those its current certificate grants (``_held_agent_types``).
+    """
 
     if expected is None:
         return "not_approved"
@@ -903,7 +947,7 @@ def _denial(expected: Optional[ExpectedHost], body: Mapping[str, Any]) -> Option
         return "key_mismatch"
     if not set(body["teams"]) <= expected.teams:
         return "team_not_allowed"
-    if not set(body["roles"]) <= expected.roles or not set(body["agent_types"]) <= expected.agent_types:
+    if not set(body["roles"]) <= expected.roles or not set(body["agent_types"]) <= agent_types:
         return "role_not_allowed"
     if int(body["session_limit"]) > expected.session_limit:
         return "over_limit"
@@ -915,7 +959,7 @@ def _denial(expected: Optional[ExpectedHost], body: Mapping[str, Any]) -> Option
 
 
 def _renewal_refusal(expected: Optional[ExpectedHost], certificate: HostCertificate,
-                     key: Mapping[str, Any]) -> Optional[str]:
+                     key: Mapping[str, Any], agent_types: frozenset[str]) -> Optional[str]:
     """Why the launcher's list no longer covers a renewal, as the reply's message; ``None`` when it does.
 
     A renewal keeps the grants of the certificate it replaces (README "Renewing"), so they
@@ -928,7 +972,7 @@ def _renewal_refusal(expected: Optional[ExpectedHost], certificate: HostCertific
     if (expected.key_id, expected.public_key) != (key.get("key_id"), key.get("public_key")):
         return "The launcher lists another key for this host; it must join again with that key."
     if not (certificate.teams <= expected.teams and certificate.roles <= expected.roles
-            and certificate.agent_types <= expected.agent_types and certificate.session_limit <= expected.session_limit
+            and certificate.agent_types <= agent_types and certificate.session_limit <= expected.session_limit
             and certificate.connection_class == expected.connection_class):
         return "The launcher now lists fewer grants than this certificate holds; the host must join again."
     return None

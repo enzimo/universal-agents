@@ -18,7 +18,6 @@ from assistant_gateway.application.private_resources import (
     RESOURCE_CONVERSATION,
     RESOURCE_OBJECTIVE,
     RESOURCE_SCHEDULE,
-    RESOURCE_TASK,
 )
 from assistant_gateway.application.request_context import (
     GatewayCommandPerson,
@@ -65,7 +64,6 @@ class GatewayManagerCommandRequest:
     # context the envelope carries; the command itself names nobody.
     person: GatewayCommandPerson
     route: GatewayRequestRoute = GatewayRequestRoute()
-    target_agent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,12 +120,7 @@ class GatewayManagerCommandService:
         """Check the command and build its envelope: (manager id, correlation id, envelope)."""
 
         self._authorize(request.command, session=request.session, person=request.person)
-        if request.target_agent_id is not None and not (
-            isinstance(request.command, ManagerRuntimeWorkCommand)
-            and request.command.action in {"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"}
-        ):
-            raise ValueError("Only task controls may target a team member.")
-        manager_id = request.target_agent_id or self._require_manager_id()
+        manager_id = self._require_manager_id()
         correlation_id = self._id_generator.new_correlation_id()
         envelope = self._build_envelope(
             request,
@@ -249,12 +242,6 @@ class GatewayManagerCommandService:
                 ),
             )
         if isinstance(command, ManagerRuntimeWorkCommand):
-            if command.action in {"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"}:
-                return _PrivateResourceTarget(
-                    resource_type=RESOURCE_TASK,
-                    resource_id=command.target_task_id or f"user:{person.canonical_user_id}",
-                    action=PRIVATE_ACTION_READ if command.action in {"list_tasks", "list_finished_tasks"} else PRIVATE_ACTION_DELETE,
-                )
             if command.scope == "objective":
                 return _PrivateResourceTarget(
                     resource_type=RESOURCE_OBJECTIVE,

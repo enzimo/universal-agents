@@ -67,7 +67,8 @@ async def test_losing_the_lock_ends_the_process_with_exit_code_1(monkeypatch, ca
     monkeypatch.setattr(process, "serve_team", serve_team)
     transport = SimpleNamespace(nats_servers=["nats://127.0.0.1:4222"], nats_url=None, subject_prefix="ua",
                                 nats_user=None, nats_password=None, credentials_file=None)
-    config = SimpleNamespace(manager=SimpleNamespace(team_id="team_one"), transport=transport, instance_name="test",
+    config = SimpleNamespace(manager=SimpleNamespace(team_id="team_one", named_agent_type="TeamArchitect"),
+                             transport=transport, instance_name="test",
                              layout=None)
     with pytest.raises(SystemExit) as exited:
         await process.run_team_services(config)  # type: ignore[arg-type]

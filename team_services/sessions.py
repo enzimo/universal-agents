@@ -36,7 +36,11 @@ placement a new revision. So a session's placement is recognised by its host and
 **Handovers** to another host come with phase 3's custody windows (README "Custody
 windows"): a placement kept by a ``handed_over`` close still names the old host, so
 another host's ``sessions.open`` is refused ``already_placed`` until then. The same host
-may place the agent again.
+may place the agent again. Its placement is marked before the session ends, so deleting
+the retained session cannot erase an intentional handover. Other placements without a
+retained matching session are abandoned writes or forgotten sessions and are removed
+under the mutation lock before opening and during upkeep. All session reads finish
+before removal, and compare-and-set protects a newer placement.
 
 Every refused request is logged with its outcome (``event=agent_session_refused``), as
 plan 13B.12 asks, so an operator can see why an agent got no session.
@@ -186,6 +190,7 @@ class SessionService:
                                 self.trust.store.contract_sha256)
             return {"outcome": "not_allowed", "message": "This host runs another message contract than the team "
                     "services, so no agent is placed on it; install the installation's release there."}
+        await self._remove_orphan_placements(team, runtime=certificate.runtime)
         key = placement_key(team, agent)
         current, previous = await self._placement(key)
         if previous is not None and previous.body.host != certificate.runtime:
@@ -303,6 +308,10 @@ class SessionService:
         assert stored is not None
         reason = verified.raw["body"]["reason"]
         now = self.clock()
+        if reason == HANDED_OVER:
+            # Persist the reason before ending the session. Its eventual retention
+            # deletion must not turn an intentional handover into an orphan.
+            await self._mark_handover(stored)
         if stored.ends_at <= now:
             # Already ended (closed, or past its end): not signed again, so it covers nothing more
             # (README "Agent sessions"). An earlier close whose removal failed is finished here.
@@ -319,6 +328,16 @@ class SessionService:
         if reason != HANDED_OVER:
             await self._remove_placement(stored)
         return {"outcome": "ok", "ended_at": format_timestamp(ended)}
+
+    async def _mark_handover(self, session: AgentSession) -> None:
+        key = placement_key(session.team, session.agent)
+        revision, placement = await self._placement(key)
+        if placement is None or not _places(placement, session) or placement.body.handed_over is True:
+            return
+        now = self.clock()
+        document = self.records.signed(PLACEMENT, key, {**placement.document.body, "handed_over": True},
+                                       sequence=rising_sequence(placement.document.sequence, now), issued_at=now)
+        await self.records.put(PLACEMENT, key, document, last_revision=revision)
 
     async def _remove_placement(self, session: AgentSession) -> None:
         """Remove the placement ``session`` was opened for; a newer placement of the agent stays."""
@@ -347,6 +366,38 @@ class SessionService:
         async with self._changing:
             await self._sign_placements_again(team)
             await self._delete_forgotten_sessions(team)
+            await self._remove_orphan_placements(team)
+
+    async def _remove_orphan_placements(self, team: str, *, runtime: Optional[str] = None) -> None:
+        """Remove verified abandoned placements; a marked handover stays without its ended session.
+
+        Opening writes placement before session because the session names its KV
+        revision. The shared mutation lock keeps this scan outside that write gap.
+        Finish every session read before deleting anything: a failed read is not
+        evidence that a session is missing. The placement CAS protects newer work.
+        """
+        candidates = []
+        for key in await self.records.keys(PLACEMENT, f"{team}.", team=team):
+            revision, placement = await self._placement(key)
+            if placement is not None and placement.body.handed_over is not True and (
+                runtime is None or placement.body.host == runtime
+            ):
+                candidates.append((key, revision, placement))
+        if not candidates:
+            return
+        sessions = set()
+        prefix = f"session.{self.installation}.{team}."
+        for key in await self.records.keys(AGENT_SESSION, prefix):
+            session = await self._session(team, key[len(prefix):])
+            if session is not None:
+                sessions.add((session.runtime, session.agent, format_timestamp(session.started_at)))
+        for key, revision, placement in candidates:
+            if (placement.body.host, placement.body.agent, placement.body.placed_at) in sessions:
+                continue
+            if await self.records.delete(PLACEMENT, key, last_revision=revision):
+                self.logger.warning("Removed an abandoned placement with no retained session. "
+                                    "event=orphan_placement_removed team=%s agent=%s host=%s revision=%s",
+                                    team, placement.body.agent, placement.body.host, revision)
 
     async def _sign_placements_again(self, team: str) -> None:
         epoch = self.records.writer().certificate.membership_epoch

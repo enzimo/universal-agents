@@ -315,4 +315,3 @@ async def test_requests_a_caller_lets_run_side_by_side_do_not_wait_for_each_othe
             for number in range(5)))
         assert [reply.body.outcome for reply in replies] == ["ok"] * 5
         assert time.monotonic() - started < 3
-

@@ -49,6 +49,7 @@ from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
+from team_services.relays import Relays
 from team_services.topics import TopicOperations
 from custom_agents.conversation_store import ConversationStore
 from assistant_gateway.runtime_config import lead_memory_config
@@ -219,7 +220,8 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     await adapter.connect()
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
-        await serve_team(host, team, stop, team_operations(config, host.clock))
+        relays = Relays(host, team, config.manager.named_agent_type, _LOGGER)
+        await serve_team(host, team, stop, [*team_operations(config, host.clock), relays.family()])
     except LockLost as lost:
         # Exit code 1 for the launcher's supervisor, which stops the team (module docstring).
         _LOGGER.error("The team services stop. event=team_services_stopped reason=%s", lost)

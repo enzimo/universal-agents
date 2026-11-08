@@ -221,6 +221,14 @@ class MessageHost:
         session = issuer.get("session")
         if isinstance(session, str):
             wanted.append(("agent_session", f"session.{installation}.{team}.{session}"))
+        # Relayed commands also name the gateway that signed their authority token.
+        authority = document.get("authority")
+        token_issuer = authority.get("issuer") if isinstance(authority, dict) else None
+        if isinstance(token_issuer, dict) and token_issuer.get("installation") == installation:
+            try:
+                wanted.append(("certificate", f"host.{installation}.{token_issuer['runtime']}.{int(token_issuer['membership_epoch'])}"))
+            except (KeyError, TypeError, ValueError):
+                pass
         taken = False
         for record, key in wanted:
             try:
@@ -444,8 +452,10 @@ class MessageHost:
         team created while it runs, whose ``sessions.open`` was refused ``not_allowed``.
         The join asks for the types the host's certificate and profile already name plus
         the requested ones, never fewer, so no running agent loses its type. The authority
-        grants a join only whole: when the launcher's list or the catalog lacks any type
-        asked for, it refuses it and the host keeps its certificate. A granted join gets a
+        keeps the types the host's certificate grants, as a renewal does, also one since
+        removed from the catalog; it grants a join only whole: when the launcher's list and
+        the catalog both lack a new type asked for, it refuses the join and the host keeps
+        its certificate. A granted join gets a
         certificate at the next membership epoch that replaces the old one; frames and
         records are signed with it from then on, and later renewals and joins ask for the
         same types. Requested types the certificate already names need no join. Names no
@@ -575,7 +585,7 @@ class MessageHost:
     async def drain(self) -> None:
         """Say ``draining`` in the host record now: the host takes no new work and finishes or hands back what it holds."""
 
-        if self.state != "accepting":
+        if self.state == "drained":
             return
         self.state = "draining"
         await self.report_now()
@@ -583,8 +593,6 @@ class MessageHost:
     async def finish_drain(self) -> None:
         """Say ``drained`` once the host holds nothing, and renew to give up its agents (module docstring)."""
 
-        if self.state == "drained":
-            return
         self.state = "drained"
         if self.records is not None and self._reported_state is not None:
             await self.publish_liveness("drained")

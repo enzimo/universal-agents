@@ -8,6 +8,7 @@ This module provides the UniversalAgent class, which:
 - Supports the hub-and-spoke multi-agent architecture
 """
 
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.lease_loss_wind_down import divert_request_during_wind_down, is_winding_down
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
@@ -210,6 +211,7 @@ from custom_agents.strands_model_factory import (
     build_strands_model,
     resolve_context_window_tokens,
 )
+from custom_agents.agent_host import attach_agent, detach_agent
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.context_engine import (
     ContextEngine,
@@ -268,7 +270,7 @@ from custom_transport.base import (
     SubscriptionDelivery,
     TransportPublishOptions,
 )
-from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, NatsTransportAdapter
+from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, TEAM_LEAD_CONSUMER_ROLE, NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from custom_agents.task_runtime_coordinator import (
     RuntimeBatchInterrupted,
@@ -4861,6 +4863,11 @@ class UniversalAgent(BaseModel):
     ) -> None:
         """Read this agent's type queue, shared by every agent of the type (ADR-019)."""
 
+        from custom_agents.contract_drain import drain_agent
+        from custom_agents.contract_drain_state import is_contract_draining
+
+        if is_contract_draining(self):
+            return
         named_type = str(self.named_agent_type)
         queue_name = self.named_agent_type_queue_map.get(named_type) or f"{self.team_id}_{named_type}"
         await adapter.subscribe_subject(
@@ -4872,8 +4879,11 @@ class UniversalAgent(BaseModel):
             consumer_role=NAMED_WORKER_CONSUMER_ROLE,
             owner_agent_id=self.id,
             fetch_policy=policy,
-            ready=ready,
+            ready=lambda: not is_contract_draining(self) and ready(),
         )
+        if is_contract_draining(self):
+            await drain_agent(self, self._contract_drain.reason)
+            return
         self._logger.info(
             "[%s] NATS type queue ready for %s. event=agent_type_queue_ready "
             "agent_type=%s fetch_policy=%s",
@@ -4893,6 +4903,8 @@ class UniversalAgent(BaseModel):
         await adapter.connect(
             reconcile_topology=self.is_team_lead and not self.instance_config_path
         )
+        # This process's protocol 1 host gives the agent a session; it never waits for it.
+        attach_agent(self, adapter)
         try:
             # A durable subscription can deliver before its setup await returns.
             # Prepare shared schedule state first; start the scheduler only after
@@ -4939,7 +4951,10 @@ class UniversalAgent(BaseModel):
                 # target the requesting agent id and are correlated in memory.
                 self._operational_queue_name = self.id
 
-                if self.is_team_lead:
+                from custom_agents.contract_drain import drain_agent
+                from custom_agents.contract_drain_state import is_contract_draining
+
+                if self.is_team_lead and not is_contract_draining(self):
                     await adapter.subscribe_route(
                         name=f"{self.id}:lead",
                         routing_key=self.team_id,
@@ -4947,10 +4962,12 @@ class UniversalAgent(BaseModel):
                         durable_name=self._nats_mapper().durable_name(
                             f"lead_{self.team_id}"
                         ),
-                        consumer_role="team_lead",
+                        consumer_role=TEAM_LEAD_CONSUMER_ROLE,
                         owner_agent_id=self.id,
-                        ready=lambda: mailbox_has_room(self),
+                        ready=lambda: not is_contract_draining(self) and mailbox_has_room(self),
                     )
+                    if is_contract_draining(self):
+                        await drain_agent(self, self._contract_drain.reason)
 
                 if _should_consume_broadcasts(
                     self.process_broadcasts,
@@ -5094,6 +5111,8 @@ class UniversalAgent(BaseModel):
                     "[%s] Failed to publish NATS exit presence: %s", self.id, exc
                 )
 
+        # Its protocol 1 session closes while the connection is still up.
+        await detach_agent(self)
         # Delivery callbacks can still be committing task state while shutdown
         # starts. Join them before releasing their provider and state resources.
         await adapter.close()
@@ -5408,7 +5427,8 @@ class UniversalAgent(BaseModel):
             has_execution_capacity=status_metrics["has_execution_capacity"],
             is_busy=self.is_executing,
             is_exiting=is_exiting,
-            accepting_work=not is_winding_down(self),
+            # A worker winding down, or an agent whose process runs another message contract, takes no new work.
+            accepting_work=not is_winding_down(self) and not is_contract_draining(self),
             is_team_lead=self.is_team_lead,
             top_level_queue_depth=status_metrics["top_level_queue_depth"],
             waiting_top_level_task_count=status_metrics["waiting_top_level_task_count"],
@@ -5730,21 +5750,6 @@ class UniversalAgent(BaseModel):
                         f"[{self.id}] Agent received 'resume' control instruction."
                     )
                     await self.resume()
-                elif instruct_string == "debug_context_dump":
-                    settings = dict(control_instruction.runtime_settings or {})
-                    applied = self.apply_runtime_context_dump_settings(
-                        enabled=bool(settings.get("enabled", False)),
-                        mode=str(settings.get("mode") or "on_error"),
-                        source="web_chat_control",
-                    )
-                    await self._send_control_status_response(
-                        msg_header=msg_header,
-                        msg_meta=msg_meta,
-                        status_text=(
-                            "Context debug dump settings applied: "
-                            f"enabled={str(applied['enabled']).lower()} mode={applied['mode']}."
-                        ),
-                    )
                 elif instruct_string == "stop":
                     self._logger.info(
                         f"[{self.id}] Agent received 'stop' control instruction: "

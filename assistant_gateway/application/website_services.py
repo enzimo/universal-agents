@@ -116,6 +116,7 @@ from custom_messages.enums import ScheduleManagementClass
 from assistant_gateway.application.website_application import (
     WebTaskListRequestV1, WebTaskListV1, WebTaskControlRequestV1, WebTaskControlResultV1,
 )
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from assistant_gateway.application.website_tasks import list_tasks, control_tasks
 from runtime_settings.appearance import DarkMetalAppearanceSettings, retired_dark_keys
 
@@ -950,6 +951,7 @@ class WebsiteOperationsApplication:
         mcp: WebsiteMCPControls,
         event_output: GatewayEventOutput,
         operational_controls: GatewayOperationalControlApplication,
+        team_commands: GatewayTeamCommandService,
         schedules: GatewayScheduleApplication,
         memory_operations: WebsitePinnedMemoryOperations,
         workspace_browser: WebsiteWorkspaceBrowser,
@@ -958,6 +960,8 @@ class WebsiteOperationsApplication:
         self._mcp = mcp
         self._event_output = event_output
         self._operational_controls = operational_controls
+        # The Tasks page's lists and removals go to the team services (website_tasks).
+        self._team_commands = team_commands
         self._schedules = schedules
         self._memory_operations = memory_operations
         self._workspace_browser = workspace_browser
@@ -1236,11 +1240,11 @@ class WebsiteOperationsApplication:
 
     async def list_web_chat_tasks(self, request: WebTaskListRequestV1) -> WebTaskListV1:
         self._require_task_agent(request.agent_id)
-        return await list_tasks(self._operational_controls, request)
+        return await list_tasks(self._team_commands, request)
 
     async def control_web_chat_tasks(self, request: WebTaskControlRequestV1) -> WebTaskControlResultV1:
         self._require_task_agent(request.agent_id)
-        return await control_tasks(self._operational_controls, request)
+        return await control_tasks(self._team_commands, request)
 
     async def list_web_chat_objectives(
         self,

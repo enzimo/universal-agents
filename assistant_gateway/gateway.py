@@ -1156,6 +1156,10 @@ class UserGateway:
             manager_commands=self._manager_commands,
             responses=self._response_coordinator,
             id_generator=self._id_generator,
+            team_commands=_team_commands(
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+            ),
+            local_responses=self._local_responses,
             logger=logger,
         )
         self.manager_transitions = GatewayManagerTransitionApplication(
@@ -1316,6 +1320,9 @@ class UserGateway:
             mcp=self.mcp_controls,
             event_output=self._event_output,
             operational_controls=self._operational_controls,
+            team_commands=_team_commands(
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+            ),
             schedules=self._schedule_application,
             memory_operations=self._command_operations,
             workspace_browser=WebsiteWorkspaceBrowser(

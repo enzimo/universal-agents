@@ -1699,70 +1699,6 @@
       "title": "ExecutionUnknownStatus",
       "type": "string"
     },
-    "FinishedTaskSummary": {
-      "properties": {
-        "answer": {
-          "default": "",
-          "title": "Answer",
-          "type": "string"
-        },
-        "finished_at": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Finished At"
-        },
-        "owner_agent_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Owner Agent Id"
-        },
-        "owner_agent_name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Owner Agent Name"
-        },
-        "problem_statement": {
-          "title": "Problem Statement",
-          "type": "string"
-        },
-        "state": {
-          "title": "State",
-          "type": "string"
-        },
-        "task_id": {
-          "title": "Task Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "task_id",
-        "state",
-        "problem_statement"
-      ],
-      "title": "FinishedTaskSummary",
-      "type": "object"
-    },
     "GatewayContext": {
       "description": "Optional gateway-specific metadata that should survive task scheduling and replies.\n\nThis keeps channel/session/delivery information grouped under one stable\nsub-object instead of spreading many transport-specific fields across\nMessageMeta.",
       "properties": {
@@ -2297,10 +2233,6 @@
           "enum": [
             "inventory",
             "cancel",
-            "list_tasks",
-            "list_finished_tasks",
-            "remove_task",
-            "purge_tasks",
             "list_objectives",
             "pause_objective",
             "resume_objective",
@@ -2338,12 +2270,6 @@
           "default": null,
           "title": "Conversation Id"
         },
-        "current_task_count": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Current Task Count",
-          "type": "integer"
-        },
         "expected_objective_digest": {
           "anyOf": [
             {
@@ -2356,13 +2282,6 @@
           ],
           "default": null,
           "title": "Expected Objective Digest"
-        },
-        "finished_tasks": {
-          "items": {
-            "$ref": "#/$defs/FinishedTaskSummary"
-          },
-          "title": "Finished Tasks",
-          "type": "array"
         },
         "inventory_digest": {
           "anyOf": [
@@ -2404,12 +2323,6 @@
           },
           "title": "Objectives",
           "type": "array"
-        },
-        "queued_task_count": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Queued Task Count",
-          "type": "integer"
         },
         "reason": {
           "default": "Operator requested runtime recovery control.",
@@ -2488,25 +2401,6 @@
           ],
           "default": null,
           "title": "Target Task Id"
-        },
-        "task_limit": {
-          "default": 20,
-          "maximum": 20,
-          "minimum": 1,
-          "title": "Task Limit",
-          "type": "integer"
-        },
-        "task_offset": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Task Offset",
-          "type": "integer"
-        },
-        "task_total": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Task Total",
-          "type": "integer"
         }
       },
       "required": [
@@ -7787,6 +7681,15 @@
       "additionalProperties": false,
       "description": "Why the worker stopped: its launch identity and recent scheduler errors.",
       "properties": {
+        "cause": {
+          "default": "launch_lease_lost",
+          "enum": [
+            "launch_lease_lost",
+            "other_message_contract"
+          ],
+          "title": "Cause",
+          "type": "string"
+        },
         "launch_id": {
           "anyOf": [
             {

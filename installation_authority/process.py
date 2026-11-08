@@ -22,6 +22,7 @@ from typing import Any
 
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+from custom_transport.protocol1.joining import certificate_agent_types
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.subjects import NatsSubjectMapper
 from installation_authority.service import AUTHORITY_RUNTIME, AuthorityStartRefused, InstallationAuthority
@@ -47,10 +48,20 @@ def transport_config(config: GatewayInstanceConfig) -> NatsTransportConfig:
     )
 
 
+def catalog_agent_types(config: GatewayInstanceConfig) -> frozenset[str]:
+    """The instance's agent types a certificate can name, read again at each join (``expected_hosts``)."""
+
+    from custom_agents.agent_catalog import instance_agent_catalog
+
+    catalog = instance_agent_catalog(str(config.instance_root_path), config.agent.agent_definition_paths)
+    return certificate_agent_types(catalog.agent_types, _LOGGER)
+
+
 async def run_installation_authority(config: GatewayInstanceConfig) -> None:
     layout = config.layout
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
-                                      logger=_LOGGER, replicas=config.transport.replicas)
+                                      logger=_LOGGER, replicas=config.transport.replicas,
+                                      catalog_agent_types=lambda: catalog_agent_types(config))
     adapter = NatsTransportAdapter(config=transport_config(config),
                                    mapper=NatsSubjectMapper(team_id=config.manager.team_id), logger=_LOGGER)
     stop = asyncio.Event()

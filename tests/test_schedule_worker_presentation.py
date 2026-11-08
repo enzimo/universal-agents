@@ -178,6 +178,7 @@ async def test_owner_scoped_assignment_reaches_website_without_changing_control_
         schedules=schedules,
         memory_operations=None,
         workspace_browser=None,
+        team_commands=None,
     )
     result = await website.list_web_chat_schedules(
         GatewayRouteContextV1(session_key="session_owner", canonical_user_id=owner)
@@ -210,6 +211,7 @@ async def test_website_does_not_present_failed_assignment_read_as_empty_inventor
         ),
         memory_operations=None,
         workspace_browser=None,
+        team_commands=None,
     )
     with pytest.raises(RuntimeError, match="manager_required"):
         await website.list_web_chat_schedules(
