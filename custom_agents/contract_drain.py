@@ -69,6 +69,7 @@ class ContractDrain:
     # A pool worker starts no task it has not started (``lease_loss_wind_down.may_start_next_task``).
     holds_back_unstarted: bool = False
     left_queues: int = 0
+    announced: bool = False
     task: Optional[asyncio.Task[Any]] = field(default=None, repr=False)
 
 
@@ -93,13 +94,13 @@ async def drain_agent(agent: Any, reason: str) -> None:
         agent._contract_drain = state
     # Startup may have been subscribing when the drain began; a repeat leaves those queues too.
     state.left_queues += await _leave_shared_queues(agent)
-    if not first:
-        return
-    agent._logger.warning(
-        "This agent's process runs another message contract than its installation: it takes no new work and "
-        "finishes or hands back what it holds. event=agent_contract_drain_started agent_id=%s pool_worker=%s "
-        "queues_left=%s reason=%s", agent.id, worker, state.left_queues, reason)
-    if worker:
+    if not state.announced:
+        agent._logger.warning(
+            "This agent's process runs another message contract than its installation: it takes no new work and "
+            "finishes or hands back what it holds. event=agent_contract_drain_started agent_id=%s pool_worker=%s "
+            "queues_left=%s reason=%s", agent.id, worker, state.left_queues, reason)
+        state.announced = True
+    if worker and state.task is None:
         from custom_agents.pending_work_runtime import start_owned_task
 
         state.task = start_owned_task(agent, partial(_wind_down_after_running_turns, agent, state),

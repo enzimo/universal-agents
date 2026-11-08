@@ -165,6 +165,7 @@ async def test_a_drain_step_failure_is_logged_and_retried(failure, caplog) -> No
     async def fail_once():
         attempts.append(1)
         if len(attempts) == 1:
+            assert [agent for agent, reason in agents.drained] == ["a1"]
             raise failure
         host.steps.append("draining")
 

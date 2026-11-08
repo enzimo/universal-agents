@@ -112,7 +112,8 @@ class Relays:
             try:
                 await records.take_trust_record("agent_session", key, now=now)
                 session = live.trust.store.agent_session(live.identity.installation, self._team, key.rsplit(".", 1)[-1])
-                if session is None or session.agent_role != "lead" or session.ends_at <= now:
+                if session is None or session.agent_role != "lead" or session.agent_type != self._lead_agent_type \
+                        or session.ends_at <= now:
                     continue
                 placement = await self._placement(f"{self._team}.{session.agent}")
                 if placement is None or placement.host != session.runtime or placement.placed_at != format_timestamp(session.started_at):

@@ -4760,6 +4760,7 @@ async def test_gateway_context_debug_dump_control_goes_to_the_team_services(tmp_
 
     assert response.message_type == "system_status"
     assert response.text == "Context debug dump is on (mode always)."
+    assert response.live_applied is True
     [(kind, body, person_ref)] = team.sent
     assert (kind, body["enabled"], body["mode"]) == ("debug.dump", True, "always")
     # The person is named by their reference from the gateway's copy of the people, never by id.

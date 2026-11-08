@@ -39,6 +39,7 @@ def _relays(stored: dict[str, Any]) -> tuple[Relays, list[tuple[str, dict[str, A
 
     sessions = {key.rsplit(".", 1)[-1]: SimpleNamespace(
         agent=key.rsplit(".", 1)[-1], runtime="lead",
+        agent_type="TeamArchitect",
         agent_role="worker" if key.endswith("worker_1") else "lead", started_at=NOW,
         ends_at=NOW + timedelta(days=1)) for key in stored}
 

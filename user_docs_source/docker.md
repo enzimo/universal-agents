@@ -16,6 +16,12 @@ automatically when no instance exists. See [Quickstart](quickstart.md).
 The build and raw-container workflows below are intended for development and
 custom deployments.
 
+Use the team launcher for the Tasks controls and live context dump setting. A
+manually started agent without `--host-runtime` has no message session for those
+controls and logs an explanation at startup. Configured startup agent type names
+must fit the message contract: 1 to 24 letters, digits, `_` or `-`, starting with
+a letter or digit. Longer or invalid names are refused when configuration loads.
+
 Both images include the pinned X and Hugging Face CLIs and their agent skills.
 See [X and Hugging Face](hub-cli.md) for broker/Sealbox setup, supported operations,
 and credential isolation.

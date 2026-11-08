@@ -63,8 +63,6 @@ class GatewayStopControlRequest:
     target_objective_id: str | None = None
     expected_objective_digest: str | None = None
     inventory_digest: str | None = None
-    task_offset: int = 0
-    task_limit: int = 20
     command_text: str = "/stop"
     route: GatewayRequestRoute = GatewayRequestRoute()
     reason: str = "Stop requested by user."
@@ -310,8 +308,6 @@ class GatewayOperationalControlApplication:
             target_objective_id=request.target_objective_id,
             expected_objective_digest=request.expected_objective_digest,
             inventory_digest=request.inventory_digest,
-            task_offset=request.task_offset,
-            task_limit=request.task_limit,
             session_key=resolved.session_key,
             conversation_id=resolved.conversation_id,
             reason=request.reason,

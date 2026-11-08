@@ -60,15 +60,20 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
     layout = InstanceLayout.at(tmp_path / "instance")
     profile = startup_agent_host_profile(TEAM, RUNTIME, "Researcher")
     asked: list[tuple[str, str, frozenset[str]]] = []
+    slow_started, release_slow = asyncio.Event(), asyncio.Event()
+    extra_profile = startup_agent_host_profile(TEAM, "agent-another", "Researcher")
 
     async def tasks_list(agent, verified):
         asked.append((agent.id, verified.authority.token.person, verified.certificate.roles))
+        if verified.raw["body"]["request_id"] == "slow-command":
+            slow_started.set()
+            await release_slow.wait()
         return {"outcome": "ok", "tasks": [], "total": 0, "queued_count": 0, "current_count": 0,
                 "queue_digest": "digest-1"}
 
     stop = asyncio.Event()
     async with AsyncExitStack() as stack:
-        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), profile)
+        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), profile, extra_profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         relays = Relays(services_host, TEAM, "TeamArchitect", logging.getLogger("test.relays"))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop, [relays.family()]))
@@ -87,6 +92,21 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         assert reply.raw["body"].get("queue_digest") == "digest-1", reply.raw["body"]
         # The agent saw the gateway's token, relayed by the team services.
         assert asked == [("researcher_1", PERSON, frozenset({"team_services"}))]
+
+        # A slow relay must not hold the team's session request queue.
+        waiting = asyncio.create_task(gateway.command("tasks.list", {**body, "request_id": "slow-command"},
+                                                      person_ref=PERSON))
+        extra = AgentProcessHost(layout, extra_profile, TEAM)
+        try:
+            await asyncio.wait_for(slow_started.wait(), timeout=3)
+            extra.attach(_agent("another_researcher"), agent_type="Researcher", definition=DEFINITION,
+                         nc=await connect(stack, broker, extra_profile.runtime))
+            await _until(lambda: _has_session(extra, "another_researcher"), timeout=3)
+            assert not waiting.done()
+        finally:
+            release_slow.set()
+            await waiting
+            await extra.stop()
 
         # The agent leaves: its session closes, and a command for it is answered plainly.
         await asyncio.wrap_future(agent_host.detach("researcher_1"))
@@ -445,3 +465,26 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
         await gateway.close()
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_live_cleanup_removes_exact_installation_and_team_keys_only(broker, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from tests.protocol1_team_support import _remove_what_the_team_left
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM))
+        nc = await connect(stack, broker, "cleanup")
+        identity = message_hosts.prepare_message_host_trust(layout)
+        bucket = await nc.jetstream().key_value("UA1_CERTS")
+        own = f"session.{identity}.{TEAM}.session-test"
+        other = "host.other_install.foreign.1"
+        await bucket.put(own, b"test record")
+        await bucket.put(other, b"another installation")
+        # This helper normally uses the shared configured server for old team streams.
+        monkeypatch.setattr("tests.protocol1_team_support.delete_team_streams", AsyncMock())
+        await _remove_what_the_team_left(nc, identity, TEAM)
+        keys = await bucket.keys()
+        assert other in keys and own not in keys
+        assert not any(key.startswith(f"host.{identity}.") or key == f"revocations.{identity}" for key in keys)

@@ -59,7 +59,7 @@ async def _page(team: GatewayTeamCommandService, kind: str, body: dict[str, Any]
 
 
 async def list_tasks(team: GatewayTeamCommandService, request: WebTaskListRequestV1) -> WebTaskListV1:
-    body = {"agent": request.agent_id, "offset": request.offset, "limit": min(request.limit, _PAGE_LIMIT)}
+    body: dict[str, Any] = {"agent": request.agent_id, "offset": request.offset, "limit": min(request.limit, _PAGE_LIMIT)}
     if request.view == "finished":
         reply = await _page(team, "tasks.list_finished", {**body, "limit": min(body["limit"], 10)}, _person(request))
         if reply.get("outcome") != "ok":

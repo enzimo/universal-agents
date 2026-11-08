@@ -2652,6 +2652,10 @@ def test_each_agent_process_is_told_its_host(tmp_path: Path, monkeypatch) -> Non
     config = GatewayInstanceConfig.load_for_process(config_path)
     manager = lh.build_manager_command(config)
     assert manager[manager.index("--host-runtime") + 1] == "lead"
-    for label, command in lh.build_startup_agent_commands(config):
-        assert command[command.index("--host-runtime") + 1] == "agent-" + label.replace("#", "-")
+    commands = lh.build_startup_agent_commands(config)
+    hosts = lh.agent_process_hosts(config, commands)
+    for label, command in commands:
+        runtime = command[command.index("--host-runtime") + 1]
+        assert runtime in hosts
+        assert hosts[runtime].agent_types == {lh.startup_agent_type(label)}
 

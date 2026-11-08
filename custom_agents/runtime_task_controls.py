@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 from typing import Literal
 from id_generation import new_id
 from custom_messages.contracts.control_v1 import RuntimeWorkSummary, RuntimeWorkCancellationReceipt
-from custom_messages.contracts.control_v1 import FinishedTaskSummary
 
 QUEUE_PAUSE_EVENT = "task_queue_explicit_pause"
 
@@ -30,6 +29,16 @@ if TYPE_CHECKING:
 
 # The reply contract allows at most this many cancellation receipts.
 TASK_PURGE_MAX = 100
+
+
+class FinishedTaskSummary(BaseModel):
+    task_id: str
+    state: str
+    problem_statement: str
+    owner_agent_id: str | None = None
+    owner_agent_name: str | None = None
+    finished_at: str | None = None
+    answer: str = ""
 
 
 class TaskControlCommand(BaseModel):

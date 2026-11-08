@@ -69,7 +69,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Iterable, Optional
 
 import rfc8785
 
@@ -113,7 +113,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # What an agent answers on its address: the operation's kind, and the handler that runs on
 # the agent's own loop with the agent and the verified request.
-AgentHandler = Callable[[Any, VerifiedFrame], Awaitable[dict[str, Any]]]
+AgentHandler = Callable[[Any, VerifiedFrame], Coroutine[Any, Any, dict[str, Any]]]
 
 
 def agent_host_runtime(label: str) -> str:
@@ -224,8 +224,8 @@ class AgentProcessHost:
     refused_retry_seconds: tuple[float, float] = REFUSED_RETRY_SECONDS
     # Drains one agent on its own loop, and says whether it still holds work, when this process runs another
     # contract than its installation (module docstring); tests give stand-ins.
-    drain_agent: Callable[[Any, str], Awaitable[None]] = drain_agent
-    holds_work: Callable[[Any], Awaitable[bool]] = holds_work
+    drain_agent: Callable[[Any, str], Coroutine[Any, Any, None]] = drain_agent
+    holds_work: Callable[[Any], Coroutine[Any, Any, bool]] = holds_work
     drain_poll_seconds: float = DRAIN_POLL_SECONDS
     _draining: Optional[asyncio.Task[None]] = None
     _joined: Optional[asyncio.Event] = None
@@ -293,7 +293,9 @@ class AgentProcessHost:
                 await work()
                 return
             except asyncio.CancelledError:
-                if asyncio.current_task().cancelling():
+                current = asyncio.current_task()
+                assert current is not None
+                if current.cancelling():
                     raise
                 self.logger.warning("An agent host step was interrupted; trying again. "
                                     "event=agent_host_step_interrupted runtime=%s step=%s", self.profile.runtime, what)
@@ -701,12 +703,13 @@ class AgentProcessHost:
 
         assert self.host is not None and self._stop is not None
         joined = self.host.live is not None
-        if joined:
-            await self.host.drain()
         reason = (f"Its process runs another message contract ({self.host.contract_sha256}) than its installation "
                   f"({theirs}).")
         for hosted in list(self.agents.values()):
             await self._drain_one(hosted, reason)
+        # Stop taking work even when publishing the host's status fails.
+        if joined:
+            await self.host.drain()
         while not self._stop.is_set():
             holding = [str(hosted.agent.id) for hosted in list(self.agents.values()) if await self._still_holds(hosted)]
             if not holding:
@@ -750,7 +753,9 @@ class AgentProcessHost:
         try:
             return bool(await self._on_agent_loop_result(hosted, lambda: self.holds_work(hosted.agent)))
         except (Exception, asyncio.CancelledError):
-            if asyncio.current_task().cancelling():
+            current = asyncio.current_task()
+            assert current is not None
+            if current.cancelling():
                 raise
             exited = getattr(hosted.agent, "_should_exit", None)
             if exited is not None and exited.is_set():
@@ -762,7 +767,7 @@ class AgentProcessHost:
                                       self.profile.runtime, hosted.agent.id)
             return True
 
-    async def _on_agent_loop_result(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]]) -> Any:
+    async def _on_agent_loop_result(self, hosted: _HostedAgent, work: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
         agent_loop = getattr(hosted.agent, "_runtime_loop", None)
         if agent_loop is None or agent_loop is asyncio.get_running_loop():
             return await work()

@@ -734,6 +734,7 @@ async def test_a_type_removed_from_the_catalog_does_not_stop_the_lead_host_joini
         with pytest.raises(JoinRefused):
             await join(await connect(stack, broker, "lead"), other_keys, host_trust(layout, "lead"),
                        HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), ("Writer",), 8))
+@pytest.mark.asyncio
 async def test_each_join_the_launchers_list_does_not_cover_is_denied_with_its_reason(broker: str, tmp_path: Path) -> None:
     """Another key for a listed runtime, another team, agent type, more sessions, another connection class."""
 

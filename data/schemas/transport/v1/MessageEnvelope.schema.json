@@ -2270,12 +2270,6 @@
           "default": null,
           "title": "Conversation Id"
         },
-        "current_task_count": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Current Task Count",
-          "type": "integer"
-        },
         "expected_objective_digest": {
           "anyOf": [
             {
@@ -2329,12 +2323,6 @@
           },
           "title": "Objectives",
           "type": "array"
-        },
-        "queued_task_count": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Queued Task Count",
-          "type": "integer"
         },
         "reason": {
           "default": "Operator requested runtime recovery control.",
@@ -2413,25 +2401,6 @@
           ],
           "default": null,
           "title": "Target Task Id"
-        },
-        "task_limit": {
-          "default": 20,
-          "maximum": 20,
-          "minimum": 1,
-          "title": "Task Limit",
-          "type": "integer"
-        },
-        "task_offset": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Task Offset",
-          "type": "integer"
-        },
-        "task_total": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Task Total",
-          "type": "integer"
         }
       },
       "required": [

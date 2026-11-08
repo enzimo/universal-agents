@@ -224,8 +224,10 @@ def _once(handler: Any) -> Any:
         person, reason = relayed_person(agent, verified)
         if person is None:
             return _message("not_allowed", reason)
-        store = getattr(agent, "_relayed_command_outcomes", None)
-        if store is None:
+        cached = getattr(agent, "_relayed_command_outcomes", None)
+        if isinstance(cached, RelayedCommandOutcomes):
+            store = cached
+        else:
             store = await asyncio.to_thread(RelayedCommandOutcomes, agent.task_manager.storage_settings)
             agent._relayed_command_outcomes = store
         outcome = CommandOutcome(team_id=str(agent.team_id), person_id=person.canonical_user_id,

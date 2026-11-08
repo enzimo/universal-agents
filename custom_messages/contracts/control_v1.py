@@ -473,16 +473,6 @@ class RuntimeWorkCancellationReceipt(BaseModel):
     message: str = ""
 
 
-class FinishedTaskSummary(BaseModel):
-    task_id: str
-    state: str
-    problem_statement: str
-    owner_agent_id: Optional[str] = None
-    owner_agent_name: Optional[str] = None
-    finished_at: Optional[str] = None
-    answer: str = ""
-
-
 class ManagerRuntimeWorkCommand(BaseModel):
     """Authenticated gateway-to-manager inventory or cancellation request."""
 
@@ -509,11 +499,6 @@ class ManagerRuntimeWorkCommand(BaseModel):
     session_key: Optional[str] = None
     conversation_id: Optional[str] = None
     inventory_digest: Optional[str] = None
-    task_offset: int = Field(default=0, ge=0)
-    task_limit: int = Field(default=20, ge=1, le=20)
-    task_total: int = Field(default=0, ge=0)
-    queued_task_count: int = Field(default=0, ge=0)
-    current_task_count: int = Field(default=0, ge=0)
     reason: str = "Operator requested runtime recovery control."
     success: Optional[bool] = None
     message: str = ""

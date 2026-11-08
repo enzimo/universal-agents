@@ -256,3 +256,38 @@ async def test_cancelled_task_cannot_start_between_queue_selection_and_terminali
         "selected", ProgressState.IN_PROGRESS, "2026-09-20T12:00:00+00:00",
     )
     assert agent.task_manager.current_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_relayed_removal_returns_its_saved_receipt_and_sends_one_final_reply(agent):
+    from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+    from tests.team_services_support import checked_reply, relayed_frame
+
+    add(agent, "remove-once")
+    view = await command(agent)
+    frame = relayed_frame("team", "tasks.remove", {
+        "agent": agent.id, "task_id": "remove-once", "seen_queue_digest": view.inventory_digest,
+    }, person_ref="p-OwnerOwnerOwnerOwnerOw", request_id="remove-once-command")
+    first = checked_reply("tasks.remove", await RELAYED_HANDLERS["tasks.remove"](agent, frame))
+    del agent._relayed_command_outcomes
+    repeated = checked_reply("tasks.remove", await RELAYED_HANDLERS["tasks.remove"](agent, frame))
+    assert first == repeated
+    assert first["outcome"] == "ok" and first["removed"] == 1
+    assert final_replies(agent) == ["remove-once"]
+
+
+@pytest.mark.asyncio
+async def test_a_large_purge_keeps_receipts_within_the_message_contract(agent):
+    from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+    from tests.team_services_support import checked_reply, relayed_frame
+
+    agent.task_manager._max_queued_top_level_tasks = 150
+    for i in range(105):
+        add(agent, f"queued-{i}")
+    view = await command(agent)
+    frame = relayed_frame("team", "tasks.purge", {
+        "agent": agent.id, "seen_queue_digest": view.inventory_digest,
+    }, person_ref="p-OwnerOwnerOwnerOwnerOw", request_id="large-purge")
+    reply = checked_reply("tasks.purge", await RELAYED_HANDLERS["tasks.purge"](agent, frame))
+    assert reply["removed"] == len(reply["receipts"]) == 100
+    assert (await command(agent)).task_total == 5
