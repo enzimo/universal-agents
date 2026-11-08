@@ -2173,7 +2173,7 @@ kinds:
     body: bodies/debug.dump.schema.json
     reply:
       body: bodies/debug.dump.reply.schema.json
-      errors: [not_allowed]
+      errors: [not_allowed, runtime_error]
     senders: [gateway, team_services]
     senders_by_address: {svc.team: [gateway], "ctl.agent.{agent}": [team_services]}
     receivers: [team_services, lead_host, worker_host]

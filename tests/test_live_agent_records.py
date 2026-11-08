@@ -150,7 +150,7 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
 
 @pytest.mark.asyncio
 async def test_the_team_leads_record_names_it_the_lead(
-    broker: str, tmp_path: Path,  # noqa: F811 - the shared live NATS fixture
+    broker: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811 - shared live NATS fixture
 ) -> None:
     layout = InstanceLayout.at(tmp_path / "instance")
     profile = lead_host_profile(TEAM, ("TeamArchitect", "Researcher"), 3)
@@ -175,6 +175,37 @@ async def test_the_team_leads_record_names_it_the_lead(
 
         assert reader.lead() == reader.agent("lead_1") and reader.agent("lead_1").is_lead
         assert reader.agent("worker_1").is_lead is False
+
+        # A replacement session may already exist at the services while its reply
+        # has not reached a detaching host. Both sessions must close over real NATS.
+        hosted = lead_host.agents["worker_1"]
+        opened, release = asyncio.Event(), asyncio.Event()
+        request = lead_host._request
+        replacement = []
+
+        async def delayed_open(kind, body):
+            reply = await request(kind, body)
+            if kind == "sessions.open":
+                replacement.append(reply["session"]["body"]["session"])
+                opened.set()
+                await release.wait()
+            return reply
+
+        monkeypatch.setattr(lead_host, "_request", delayed_open)
+        reopening = asyncio.create_task(lead_host._hold_session(hosted))
+        await asyncio.wait_for(opened.wait(), 5)
+        await lead_host._close("worker_1", "exited")
+        release.set()
+        await asyncio.wait_for(reopening, 5)
+        await _until(lambda: reader.agent("worker_1") is None)
+        assert replacement[0] in hosted.closed_sessions
+        records, now = lead_host.host.records, lead_host.host.clock()
+        assert await records.read_report("agent", f"{TEAM}.worker_1", now=now) is None
+        assert await records.read_report("placement", f"{TEAM}.worker_1", now=now) is None
+        key = f"session.{lead_host.host.identity.installation}.{TEAM}.{replacement[0]}"
+        await records.take_trust_record("agent_session", key, now=now)
+        assert lead_host.host.live.trust.store.agent_session(
+            lead_host.host.identity.installation, TEAM, replacement[0]).ends_at <= now
 
         await lead_host.stop()
         await _until(lambda: reader.live() == {})

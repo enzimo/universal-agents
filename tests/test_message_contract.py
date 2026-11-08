@@ -1879,6 +1879,21 @@ def test_a_host_record_of_another_contract_is_still_checked_for_its_signature() 
     assert refused.value.code == "bad_signature"
 
 
+@pytest.mark.parametrize("field", ["key", "runtime"])
+def test_a_host_record_of_another_contract_still_names_the_host_that_signed_it(field: str) -> None:
+    """A host writes only its own liveness, also on another contract: otherwise any host could tell readers that
+    another host, the team services included, runs another contract, and make them drain it."""
+
+    document = host_record_of_another_contract()
+    if field == "key":
+        document["key"] = "worker-host-1"
+    else:
+        document["body"]["runtime"] = "worker-host-1"
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/key" if field == "key" else "/body/runtime")
+
+
 def test_a_released_label_reads_every_host_record_strictly(monkeypatch: pytest.MonkeyPatch) -> None:
     """A released label compares only the label and its minor, so the digest no longer decides how a record is read."""
 

@@ -12,8 +12,10 @@ looks the current version up first, so it acts on the schedule as named, as befo
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
+import logging
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from assistant_gateway.application.delivery_service import GatewayDeliveryService
 from assistant_gateway.application.manager_client import GatewayManagerClient
@@ -29,7 +31,7 @@ from assistant_gateway.application.session_service import (
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from assistant_gateway.application.team_commands import GatewayTeamCommandService
+from assistant_gateway.application.team_commands import GatewayTeamCommandService, TeamServicesUnavailable
 from custom_messages.contracts.schedule_v1 import (
     SYSTEM_SCHEDULE_CHANGE_KIND,
     ScheduledMessage,
@@ -90,6 +92,7 @@ class GatewayScheduleView:
     instruction_preview: str
     seen_version: str
     worker: dict[str, Any]
+    invalid_time_fields: tuple[str, ...] = ()
     # The chat the list was asked for; None for a person's list across chats.
     session_key: str | None = None
 
@@ -101,7 +104,8 @@ class GatewayScheduleView:
             system_schedule_kind=row.get("system_schedule_kind"), objective_id=row.get("objective_id"),
             enabled=bool(row["enabled"]), paused_until=row.get("paused_until"), next_fire_at=row.get("next_fire_at"),
             instruction_preview=str(row.get("instruction_preview") or ""), seen_version=row["seen_version"],
-            worker=dict(row["worker"]), session_key=session_key,
+            worker=dict(row["worker"]), invalid_time_fields=tuple(row.get("invalid_time_fields", ())),
+            session_key=session_key,
         )
 
 
@@ -116,6 +120,15 @@ class GatewayScheduleListing:
 
 # The contract's page size for schedule lists; longer lists are read page by page.
 SCHEDULE_PAGE_SIZE = 50
+_LOGGER = logging.getLogger(__name__)
+
+
+class ScheduleControlRefused(RuntimeError):
+    """A schedule control's typed refusal, kept until the channel renders its explanation."""
+
+    def __init__(self, outcome: str, message: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
 
 
 class GatewayScheduleApplication:
@@ -144,7 +157,7 @@ class GatewayScheduleApplication:
         self._delivery_refs = delivery_refs
         self._id_generator = id_generator
         # Decides who may change schedules the runtime manages; without it
-        # nobody may (the manager refuses those changes).
+        # the gateway offers no system-schedule controls. The team services decide every change.
         self._person_changes = person_changes
 
     def may_change_system_schedules(self, route: GatewayRequestRoute = GatewayRequestRoute()) -> bool:
@@ -266,7 +279,9 @@ class GatewayScheduleApplication:
         response = await self.list_with_worker_assignments(
             session_key=session_key, route=route, owner_wide=owner_wide,
         )
-        return list(response.schedules) if response.success else []
+        if not response.success:
+            raise TeamServicesUnavailable(response.message)
+        return list(response.schedules)
 
     async def list_with_worker_assignments(
         self,
@@ -282,7 +297,10 @@ class GatewayScheduleApplication:
         body: dict[str, Any] = {}
         if not owner_wide:
             if self._delivery_refs is None:
-                return GatewayScheduleListing(False, "This gateway cannot name its chats to the team services.")
+                _LOGGER.warning("A chat's schedule list needs the delivery reference key. "
+                                "event=gateway_schedule_delivery_ref_unavailable")
+                return GatewayScheduleListing(False, "This chat's schedules cannot be listed until an administrator "
+                                               "restarts the team through the launcher to prepare its chat reference key.")
             body["delivery_ref"] = self._delivery_refs.ref(session.session_key)
         listed: list[GatewayScheduleView] = []
         offset = 0
@@ -297,8 +315,12 @@ class GatewayScheduleApplication:
                 for row in reply["schedules"]
             )
             if "next_offset" not in reply:
+                listed.sort(key=lambda item: (max(item.paused_until or "", item.next_fire_at or ""), item.schedule_id))
                 return GatewayScheduleListing(True, "schedule_listed", tuple(listed))
-            offset = int(reply["next_offset"])
+            following = int(reply["next_offset"])
+            if following <= offset:
+                return GatewayScheduleListing(False, "The schedule list did not advance to its next page. Try again.")
+            offset = following
 
     async def pause(
         self,
@@ -308,9 +330,21 @@ class GatewayScheduleApplication:
         session_key: str | None = None,
         expected_record_digest: str | None = None,
     ) -> bool:
+        try:
+            moment = datetime.fromisoformat(str(paused_until).replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                route = GatewayRequestRoute()
+                session = self._resolve_session(session_key, route)
+                zone = self._request_context.requester_presentation_for_session(
+                    session, self._resolved_route(route, session),
+                ).timezone or self._settings.request_timezone
+                moment = _local_moment(moment, zone)
+        except (ValueError, KeyError):
+            raise ScheduleControlRefused("invalid_request", "Use a pause time such as 2030-01-01T09:30:00, "
+                                         "in your time zone, or include a UTC offset such as +01:00.") from None
         return await self._change("pause", schedule_id, session_key=session_key,
                                   expected_record_digest=expected_record_digest,
-                                  paused_until=format_timestamp(_moment(paused_until)))
+                                  paused_until=format_timestamp(moment))
 
     async def resume(
         self,
@@ -354,7 +388,7 @@ class GatewayScheduleApplication:
         expected_record_digest: str | None,
         paused_until: str | None = None,
     ) -> bool:
-        """One change at the team services for the signed-in person; False when refused or gone."""
+        """One change for the signed-in person; a refusal retains its outcome and explanation."""
 
         route = GatewayRequestRoute()
         session = self._resolve_session(session_key, route)
@@ -363,14 +397,19 @@ class GatewayScheduleApplication:
         if seen is None:
             # A chat command names the schedule only: act on it as it is now (module docstring).
             listing = await self.list_with_worker_assignments(session_key=session_key, route=route, owner_wide=True)
+            if not listing.success:
+                raise TeamServicesUnavailable(listing.message)
             seen = next((item.seen_version for item in listing.schedules if item.schedule_id == schedule_id), None)
             if seen is None:
-                return False
+                raise ScheduleControlRefused("not_found", "That schedule was not found.")
         body: dict[str, Any] = {"schedule_id": schedule_id, "seen_version": seen}
         if paused_until is not None:
             body["paused_until"] = paused_until
         reply = await self._team_commands.request(f"schedules.{action}", body, person_id=person)
-        return reply.get("outcome") == "ok"
+        if reply.get("outcome") != "ok":
+            raise ScheduleControlRefused(str(reply.get("outcome")), str(reply.get("message") or
+                                          "The schedule was not changed. Refresh the list and try again."))
+        return True
 
     def _person(self, route: GatewayRequestRoute, session: SessionRecord) -> str:
         """The signed-in person; an unregistered route is refused (``PermissionError``)."""
@@ -432,7 +471,13 @@ class GatewayScheduleApplication:
         return manager_id
 
 
-def _moment(value: str) -> datetime:
-    moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+def _local_moment(moment: datetime, zone_name: str) -> datetime:
+    """Read a typed local time in the person's zone; require an offset at a DST ambiguity or gap."""
+
+    zone = ZoneInfo(zone_name)
+    first = moment.replace(tzinfo=zone, fold=0)
+    second = moment.replace(tzinfo=zone, fold=1)
+    if first.utcoffset() != second.utcoffset():
+        raise ValueError("This local time needs an explicit UTC offset.")
+    return first
 

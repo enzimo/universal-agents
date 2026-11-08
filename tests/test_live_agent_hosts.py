@@ -60,18 +60,23 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
     layout = InstanceLayout.at(tmp_path / "instance")
     profile = startup_agent_host_profile(TEAM, RUNTIME, "Researcher")
     asked: list[tuple[str, str, frozenset[str]]] = []
+    slow_started, release_slow = asyncio.Event(), asyncio.Event()
+    extra_profile = startup_agent_host_profile(TEAM, "agent-another", "Researcher")
 
     async def tasks_list(agent, verified):
         asked.append((agent.id, verified.authority.token.person, verified.certificate.roles))
+        if verified.raw["body"]["request_id"] == "slow-command":
+            slow_started.set()
+            await release_slow.wait()
         return {"outcome": "ok", "tasks": [], "total": 0, "queued_count": 0, "current_count": 0,
                 "queue_digest": "digest-1"}
 
     stop = asyncio.Event()
     async with AsyncExitStack() as stack:
-        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), profile)
+        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), profile, extra_profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         relays = Relays(services_host, TEAM, "TeamArchitect", logging.getLogger("test.relays"))
-        serving = asyncio.create_task(serve_team(services_host, TEAM, stop, [relays.handlers()]))
+        serving = asyncio.create_task(serve_team(services_host, TEAM, stop, [relays.family()]))
         gateway = GatewayMessageHost(layout, TEAM)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         await gateway.ready(timeout=20)
@@ -83,15 +88,29 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         await _until(lambda: "researcher_1" in agent_host.agents and agent_host.agents["researcher_1"].subscription)
 
         body = {"request_id": "cmd-1", "agent": "researcher_1", "offset": 0, "limit": 20}
-        reply = await gateway.command("tasks.list", body, person_ref=PERSON, request_id="cmd-1")
+        reply = await gateway.command("tasks.list", body, person_ref=PERSON)
         assert reply.raw["body"].get("queue_digest") == "digest-1", reply.raw["body"]
         # The agent saw the gateway's token, relayed by the team services.
         assert asked == [("researcher_1", PERSON, frozenset({"team_services"}))]
 
+        # A slow relay must not hold the team's session request queue.
+        waiting = asyncio.create_task(gateway.command("tasks.list", {**body, "request_id": "slow-command"},
+                                                      person_ref=PERSON))
+        extra = AgentProcessHost(layout, extra_profile, TEAM)
+        try:
+            await asyncio.wait_for(slow_started.wait(), timeout=3)
+            extra.attach(_agent("another_researcher"), agent_type="Researcher", definition=DEFINITION,
+                         nc=await connect(stack, broker, extra_profile.runtime))
+            await _until(lambda: _has_session(extra, "another_researcher"), timeout=3)
+            assert not waiting.done()
+        finally:
+            release_slow.set()
+            await waiting
+            await extra.stop()
+
         # The agent leaves: its session closes, and a command for it is answered plainly.
         await asyncio.wrap_future(agent_host.detach("researcher_1"))
-        gone = await gateway.command("tasks.list", {**body, "request_id": "cmd-2"}, person_ref=PERSON,
-                                     request_id="cmd-2")
+        gone = await gateway.command("tasks.list", {**body, "request_id": "cmd-2"}, person_ref=PERSON)
         assert gone.raw["body"] == {"outcome": "runtime_error", "message": AGENT_UNAVAILABLE_TEXT}
 
         # A host whose run stopped without closing its agent's session: its next start closes it, so its
@@ -99,13 +118,20 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         agent_host.attach(_agent("researcher_2"), agent_type="Researcher", definition=DEFINITION,
                           nc=await connect(stack, broker, RUNTIME))
         await _until(lambda: "researcher_2" in agent_host.agents and agent_host.agents["researcher_2"].subscription)
+        # Upkeep rewrites placements under the team services' renewed certificate.
+        # The session keeps its original placement revision.
+        from team_services.sessions import SessionService
+        await services_host._renew()
+        sessions = SessionService(services_host.records, services_host.live.trust, services_host.identity.installation,
+                                  services_host.clock)
+        await sessions.maintain(TEAM)
         agent_host._stop.set()  # the process stops without closing its sessions
         restarted = AgentProcessHost(layout, profile, TEAM, handlers={"tasks.list": tasks_list})
         restarted.attach(_agent("researcher_3"), agent_type="Researcher", definition=DEFINITION,
                          nc=await connect(stack, broker, RUNTIME))
         await _until(lambda: "researcher_3" in restarted.agents and restarted.agents["researcher_3"].subscription)
         relayed = await gateway.command("tasks.list", {**body, "request_id": "cmd-3", "agent": "researcher_3"},
-                                        person_ref=PERSON, request_id="cmd-3")
+                                        person_ref=PERSON)
         assert relayed.raw["body"]["outcome"] == "ok"
 
         await restarted.stop()
@@ -139,6 +165,17 @@ async def test_a_real_agent_opens_its_session_through_its_process_host(tmp_path:
             try:
                 await _until(lambda: lead.id in host.agents and host.agents[lead.id].session is not None, timeout=30)
                 assert host.agents[lead.id].subscription is not None
+                # Drain the production UniversalAgent, including its actual durable subscriptions.
+                from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, TEAM_LEAD_CONSUMER_ROLE
+                host.host.learned_other_contract("2" * 64, "live_test")
+                await _until(lambda: host._draining is not None and host._draining.done(), timeout=30)
+                assert host.host.state == "drained"
+                assert lead._contract_drain.left_queues >= 2
+                roles = {handle.consumer_role for handle in lead._ensure_nats_transport_adapter()._subscriptions}
+                assert not roles & {NAMED_WORKER_CONSUMER_ROLE, TEAM_LEAD_CONSUMER_ROLE}
+                assert "agent_direct" in roles
+                assert lead.id not in host.agents
+
             finally:
                 await _stop_agents(running)
 
@@ -345,7 +382,7 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
                            b_profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         relays = Relays(services_host, TEAM, "TeamArchitect", logging.getLogger("test.relays"))
-        serving = asyncio.create_task(serve_team(services_host, TEAM, stop, [relays.handlers()]))
+        serving = asyncio.create_task(serve_team(services_host, TEAM, stop, [relays.family()]))
         gateway = GatewayMessageHost(layout, TEAM)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         await gateway.ready(timeout=20)
@@ -402,20 +439,19 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
 
             # A person's command about the task B holds still reaches it, signed as its agent.
             body = {"request_id": "cmd-1", "agent": "researcher_b", "offset": 0, "limit": 20}
-            reply = await gateway.command("tasks.list", body, person_ref=PERSON, request_id="cmd-1")
+            reply = await gateway.command("tasks.list", body, person_ref=PERSON)
             assert reply.raw["body"]["queue_digest"] == "held-1", reply.raw["body"]
 
             # B hands its task back; A runs it. B then holds nothing: it gives its agents up and says so.
             epoch = b_host.host.identity.certificate.membership_epoch
             await b_worker.hand_back()
             await _until(lambda: a_worker.ran == ["task-2", "task-1"])
-            await _until(lambda: b_host.host.state == "drained" and not b_host.agents, timeout=20)
+            await _until(lambda: b_host.host._give_up_answered and not b_host.agents, timeout=20)
             assert (await b_record()).body.state == "drained"
             given_up = b_host.host.identity.certificate
             assert (given_up.agent_types, given_up.session_limit) == (frozenset(), 0)
             assert given_up.membership_epoch == epoch + 1
-            gone = await gateway.command("tasks.list", {**body, "request_id": "cmd-2"}, person_ref=PERSON,
-                                         request_id="cmd-2")
+            gone = await gateway.command("tasks.list", {**body, "request_id": "cmd-2"}, person_ref=PERSON)
             assert gone.raw["body"] == {"outcome": "runtime_error", "message": AGENT_UNAVAILABLE_TEXT}
 
         assert caplog.text.count("event=protocol1_host_other_contract") == 1
@@ -429,3 +465,26 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
         await gateway.close()
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_live_cleanup_removes_exact_installation_and_team_keys_only(broker, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from tests.protocol1_team_support import _remove_what_the_team_left
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM))
+        nc = await connect(stack, broker, "cleanup")
+        identity = message_hosts.prepare_message_host_trust(layout)
+        bucket = await nc.jetstream().key_value("UA1_CERTS")
+        own = f"session.{identity}.{TEAM}.session-test"
+        other = "host.other_install.foreign.1"
+        await bucket.put(own, b"test record")
+        await bucket.put(other, b"another installation")
+        # This helper normally uses the shared configured server for old team streams.
+        monkeypatch.setattr("tests.protocol1_team_support.delete_team_streams", AsyncMock())
+        await _remove_what_the_team_left(nc, identity, TEAM)
+        keys = await bucket.keys()
+        assert other in keys and own not in keys
+        assert not any(key.startswith(f"host.{identity}.") or key == f"revocations.{identity}" for key in keys)

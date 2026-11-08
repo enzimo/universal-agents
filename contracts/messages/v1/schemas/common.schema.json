@@ -2219,12 +2219,12 @@
               "const": "person"
             },
             "person": {
+              "description": "The person, by reference. Absent when the team's people records no longer hold them, such as someone who left the team.",
               "$ref": "#/$defs/person_ref"
             }
           },
           "required": [
-            "kind",
-            "person"
+            "kind"
           ],
           "additionalProperties": false
         },

@@ -257,6 +257,9 @@ class TeamAgents:
                 self._logger.warning("A team record watch stopped; reopening it. event=team_agents_watch_failed "
                                      "team=%s record=%s", self.team, record, exc_info=True)
                 held.clear()  # the replacement watch supplies a complete current snapshot
+                for slot in list(self._pending):
+                    if slot[0] == record:
+                        self._pending.pop(slot, None)
                 self._rebuild()
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._recheck_seconds)
@@ -346,7 +349,7 @@ class TeamAgents:
         if self._refusals.get((record, key)) == code:
             return
         self._refusals[(record, key)] = code
-        self._logger.warning("A team record was refused; it will be checked again. event=team_agents_record_refused "
+        self._logger.warning("A team record was refused and left out. event=team_agents_record_refused "
                              "record=%s key=%s code=%s at=%s", record, key, code, at)
 
     def _log_other_contract(self, runtime: str, theirs: str) -> None:

@@ -2,24 +2,30 @@
 
 It connects to NATS as host ``authority`` with its own reply inbox, sets up the
 topology and its records (``service.InstallationAuthority.start``), answers joins and
-renewals, and signs the revocations record again every six hours until it is stopped.
-The launcher starts it right after NATS and waits for its certificate in the
-bootstrap bundle before it starts any other host.
+renewals, and keeps its records current (``InstallationAuthority.keep_current``) until
+it is stopped. The launcher starts it once NATS and the team's message streams are
+ready, and waits for its certificate in the bootstrap bundle before it starts any other
+host.
+
+It exits with code 1, which the launcher's supervisor sees, when it cannot start safely
+(``AuthorityStartRefused``: the log line says what to do) and when its NATS connection
+closed for good: alive but unreachable, it would answer no join or renewal and let the
+revocations record expire.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import signal
+from typing import Any
 
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.protocol1.joining import certificate_agent_types
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.subjects import NatsSubjectMapper
-from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
+from installation_authority.service import AUTHORITY_RUNTIME, AuthorityStartRefused, InstallationAuthority
 
 _LOGGER = logging.getLogger("installation_authority")
 
@@ -54,7 +60,8 @@ def catalog_agent_types(config: GatewayInstanceConfig) -> frozenset[str]:
 async def run_installation_authority(config: GatewayInstanceConfig) -> None:
     layout = config.layout
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
-                                      logger=_LOGGER, catalog_agent_types=lambda: catalog_agent_types(config))
+                                      logger=_LOGGER, replicas=config.transport.replicas,
+                                      catalog_agent_types=lambda: catalog_agent_types(config))
     adapter = NatsTransportAdapter(config=transport_config(config),
                                    mapper=NatsSubjectMapper(team_id=config.manager.team_id), logger=_LOGGER)
     stop = asyncio.Event()
@@ -62,15 +69,26 @@ async def run_installation_authority(config: GatewayInstanceConfig) -> None:
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
     await adapter.connect()
-    resign = None
+    tasks: list[asyncio.Task[Any]] = []
     try:
-        await authority.start(adapter.nats_connection, teams=[config.manager.team_id])
-        resign = asyncio.create_task(authority.resign_revocations_forever())
-        await stop.wait()
+        try:
+            await authority.start(adapter.nats_connection, teams=[config.manager.team_id])
+        except AuthorityStartRefused as refused:
+            _LOGGER.error("The installation authority cannot start. event=installation_authority_start_refused "
+                          "reason=%s %s", type(refused).__name__, refused)
+            raise SystemExit(1) from None
+        upkeep = asyncio.create_task(authority.keep_current())
+        stopping = asyncio.create_task(stop.wait())
+        tasks = [upkeep, stopping]
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if upkeep.done():
+            _LOGGER.error("The installation authority stopped keeping its records current and exits. "
+                          "event=installation_authority_upkeep_stopped error=%s", upkeep.exception())
+            raise SystemExit(1)
         _LOGGER.info("The installation authority is stopping. event=installation_authority_stopping")
     finally:
-        if resign is not None:
-            resign.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await resign
+        for task in tasks:
+            task.cancel()
+        # The upkeep's own error was logged above; gathering keeps it from replacing the exit.
+        await asyncio.gather(*tasks, return_exceptions=True)
         await adapter.close()

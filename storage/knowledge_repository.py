@@ -107,7 +107,14 @@ from storage.change_ledger import (
     work_writer,
 )
 from storage.read_only import repositories_are_read_only
-from storage.operation_outcomes import CommandOutcome, CommandOutcomeWrites, ensure_outcome_table
+from storage.operation_outcomes import (
+    CommandOutcome,
+    StoredOutcome,
+    ensure_outcome_table,
+    purge_expired,
+    save_refusal,
+    stored_outcome,
+)
 from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
@@ -190,7 +197,7 @@ class KnowledgeRepository(Protocol):
 
     def count_pages(
         self, *, team_id: str, reader_person_id: str, spaces: tuple[KnowledgeSpace, ...], terms: list[str],
-        status: PageStatus = PageStatus.ACTIVE,
+        status: PageStatus = PageStatus.ACTIVE, page_type: str = "", tag: str = "",
     ) -> int: ...
 
     def backlinks(self, page: KnowledgePage, *, reader_person_id: str, limit: int) -> list[KnowledgePage]: ...
@@ -198,6 +205,8 @@ class KnowledgeRepository(Protocol):
     def get_redirect_target(self, key: PageKey) -> Optional[KnowledgePage]: ...
 
     def list_notes(self, page_id: str, *, status: Optional[NoteStatus], limit: int) -> list[KnowledgeNote]: ...
+
+    def get_note(self, note_id: str) -> Optional[KnowledgeNote]: ...
 
     def get_contribution(self, contribution_id: str) -> Optional[KnowledgeContribution]: ...
 
@@ -270,14 +279,14 @@ class KnowledgeRepository(Protocol):
 
     def page_problems(self, *, team_id: str, stale_before: datetime, limit: int) -> PageProblems: ...
 
-    def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts: ...
+    def count_long_texts(self, *, team_id: str, longer_than: int, larger_than_bytes: int = 0) -> LongTextCounts: ...
 
     def export_rows(self, table: str) -> list[dict[str, Any]]: ...
 
     def import_rows(self, table: str, rows: list[dict[str, Any]]) -> int: ...
 
 
-class _RelationalKnowledgeRepository(CommandOutcomeWrites):
+class _RelationalKnowledgeRepository:
     """SQL shared by both databases; subclasses supply connections and search."""
 
     _dialect: SqlDialect
@@ -501,6 +510,26 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
             yield conn
             conn.commit()
 
+    # -- stored outcomes of people's commands (storage.operation_outcomes) ------------------
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        """Store a refused command's reply in a transaction of its own; what is stored under its key now."""
+
+        with self._write() as conn:
+            return save_refusal(conn, self._dialect, command_outcome, reply)
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        """The reply or receipt already stored for this command's retry key, read without the write lock."""
+
+        with self._connect() as conn:
+            return stored_outcome(conn, self._dialect, command_outcome.team_id, command_outcome.retry_key)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        """Delete stored outcomes past their retention; how many were deleted."""
+
+        with self._write() as conn:
+            return purge_expired(conn, self._dialect, now)
+
     # -- reads -----------------------------------------------------------------------------
 
     def get_write_receipt(self, actor: KnowledgeActor, write_key: KnowledgeWriteKey) -> Optional[KnowledgeWriteReceipt]:
@@ -624,16 +653,16 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
 
     def count_pages(
         self, *, team_id: str, reader_person_id: str, spaces: tuple[KnowledgeSpace, ...], terms: list[str],
-        status: PageStatus = PageStatus.ACTIVE,
+        status: PageStatus = PageStatus.ACTIVE, page_type: str = "", tag: str = "",
     ) -> int:
-        """How many pages ``search`` finds for these terms, for paged lists (the Web Chat Knowledge page).
+        """How many pages ``search`` finds for these terms and filters, for paged lists (the Web Chat Knowledge page).
 
         The same widening as ``search``: all words, or any word when all words
         find fewer than ``_ANY_WORD_FALLBACK_BELOW`` pages (any-word matches
         include every all-word match, so their count is the widened total).
         """
 
-        where, params = self._visible_pages_filter(team_id, reader_person_id, spaces, "", "", status)
+        where, params = self._visible_pages_filter(team_id, reader_person_id, spaces, page_type, tag, status)
         with self._connect() as conn:
             if not terms:
                 row = conn.execute(f"SELECT COUNT(*) AS total FROM knowledge_pages p WHERE {where}", params).fetchone()
@@ -752,6 +781,13 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
                 params,
             ).fetchall()
         return [self._note(row) for row in rows]
+
+    def get_note(self, note_id: str) -> Optional[KnowledgeNote]:
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT * FROM knowledge_notes WHERE note_id = {self._dialect.bind}", (note_id,)
+            ).fetchone()
+        return self._note(row) if row is not None else None
 
     def get_contribution(self, contribution_id: str) -> Optional[KnowledgeContribution]:
         with self._connect() as conn:
@@ -1757,7 +1793,7 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
             duplicate_pages=[(f"{team}/{row[0]}", f"{team}/{row[1]}") for row in duplicates],
         )
 
-    def count_long_texts(self, *, team_id: str, longer_than: int) -> LongTextCounts:
+    def count_long_texts(self, *, team_id: str, longer_than: int, larger_than_bytes: int = 0) -> LongTextCounts:
         """Pages, earlier revisions, pending contributions and open notes whose text has more than ``longer_than`` characters.
 
         For administrators' Status page (``custom_agents.long_knowledge``): counts only,
@@ -1766,6 +1802,11 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
         PostgreSQL reads it without decompressing the text, and a text longer than
         ``longer_than`` characters is always longer than that many bytes; LENGTH then
         counts characters on both databases, as Python's ``len`` does.
+
+        ``larger_than_bytes`` also counts the pages whose own text fits but whose text
+        and open notes together have more bytes (``too_large_pages``): an estimate of
+        the pages too large for one reply, which also carries links, backlinks and
+        JSON escapes.
         """
 
         p = self._dialect.bind
@@ -1774,6 +1815,10 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
             return f"{self._dialect.text_bytes(column)} > {p} AND LENGTH({column}) > {p}"
 
         limit = (int(longer_than), int(longer_than))
+        notes_bytes = (
+            f"(SELECT COALESCE(SUM({self._dialect.text_bytes('n.body')}), 0) FROM knowledge_notes n "
+            f"WHERE n.page_id = pg.page_id AND n.status = {p})"
+        )
         with self._connect() as conn:
             row = conn.execute(
                 f"""
@@ -1783,17 +1828,22 @@ class _RelationalKnowledgeRepository(CommandOutcomeWrites):
                    WHERE r.team_id = {p} AND r.revision < pg.revision AND {longer("r.body")}),
                   (SELECT COUNT(*) FROM knowledge_contributions WHERE team_id = {p} AND status = {p}
                    AND {longer("body")}),
-                  (SELECT COUNT(*) FROM knowledge_notes WHERE team_id = {p} AND status = {p} AND {longer("body")})
+                  (SELECT COUNT(*) FROM knowledge_notes WHERE team_id = {p} AND status = {p} AND {longer("body")}),
+                  (SELECT COUNT(*) FROM knowledge_pages pg WHERE pg.team_id = {p} AND {p} > 0
+                   AND NOT ({longer("pg.body")})
+                   AND {self._dialect.text_bytes("pg.body")} + {notes_bytes} > {p})
                 """,
                 (
                     team_id, *limit,
                     team_id, *limit,
                     team_id, ContributionStatus.PENDING.value, *limit,
                     team_id, NoteStatus.OPEN.value, *limit,
+                    team_id, int(larger_than_bytes), *limit, NoteStatus.OPEN.value, int(larger_than_bytes),
                 ),
             ).fetchone()
         return LongTextCounts(
-            pages=int(row[0]), earlier_revisions=int(row[1]), pending_contributions=int(row[2]), open_notes=int(row[3])
+            pages=int(row[0]), earlier_revisions=int(row[1]), pending_contributions=int(row[2]), open_notes=int(row[3]),
+            too_large_pages=int(row[4]),
         )
 
     # -- write helpers ---------------------------------------------------------------------

@@ -21,6 +21,7 @@ from custom_agents.pinned_memory_transfer import (
     ImportOutcome,
     PersonTargets,
     PinnedMemoryExportV1,
+    apply_import,
     plan_import,
 )
 from custom_messages.contracts.access_v2 import PersonStanding
@@ -83,6 +84,28 @@ def _export(old_path: Path, tmp_path: Path, *extra: str) -> Path:
 
 def _texts(rows: list[Any]) -> list[str]:
     return sorted(row.fact_text for row in rows)
+
+
+def test_export_from_an_instance_whose_people_records_predate_references_leaves_out_removed_people(
+    old, tmp_path: Path, capsys
+) -> None:
+    """A 0.9 instance's people records carry no ``person_ref`` (plan decision 64); the export reads their standing."""
+
+    import sqlite3
+
+    old_path, old_config = old
+    with sqlite3.connect(old_config.manager_storage_settings.sqlite_path) as conn:
+        for person_id, payload_json in conn.execute("SELECT person_id, payload_json FROM access_people").fetchall():
+            payload = json.loads(payload_json)
+            del payload["person_ref"]
+            conn.execute("UPDATE access_people SET payload_json=? WHERE person_id=?", (json.dumps(payload), person_id))
+        conn.execute("DROP INDEX access_people_person_ref")
+        conn.execute("ALTER TABLE access_people DROP COLUMN person_ref")
+
+    raw = _export(old_path, tmp_path).read_text(encoding="utf-8")
+
+    assert "Held until deletion." not in raw and "Ana prefers short answers." in raw
+    assert "usr_gone" in capsys.readouterr().out
 
 
 def test_export_import_round_trip_maps_people_and_keeps_history(old, tmp_path: Path, capsys) -> None:
@@ -281,6 +304,39 @@ def test_the_planner_skips_repeats_within_the_file_and_expired_facts() -> None:
     )
 
     assert [item.outcome for item in plan] == [ImportOutcome.IMPORTED, ImportOutcome.ALREADY_THERE, ImportOutcome.EXPIRED]
+
+
+def test_the_import_stores_times_with_their_zone_when_the_export_names_none(tmp_path: Path) -> None:
+    """Older exports wrote times without a zone; the store writes UTC with its zone, and so does the import."""
+
+    _, config = _instance(tmp_path, "new", NEW_TEAM)
+    fact = {
+        "bank": USERMEM_BANK,
+        "person_id": "usr_a",
+        "memory_id": 1,
+        "fact_text": "Office moves in January.",
+        "valid_from_utc": "2026-01-01T09:00:00",
+        "invalid_after_utc": "2099-01-01T00:00:00",
+        "created_by_kind": "user",
+        "created_at_utc": PAST,
+        "updated_at_utc": PAST,
+    }
+    document = PinnedMemoryExportV1.model_validate(
+        {"exported_at_utc": PAST, "source_instance": "old", "source_team_id": OLD_TEAM, "facts": [fact]}
+    )
+    repo = _repo(config)
+    plan = plan_import(
+        document,
+        existing_rows=[],
+        team_id=NEW_TEAM,
+        targets=PersonTargets(explicit={}, known={"usr_a": PersonStanding.ACTIVE}),
+        memory_config={},
+    )
+
+    apply_import(repo, plan, memory_config={}, team_id=NEW_TEAM)
+
+    (row,) = repo.list_usermem(canonical_user_id="usr_a")
+    assert (row.valid_from_utc, row.invalid_after_utc) == ("2026-01-01T09:00:00+00:00", "2099-01-01T00:00:00+00:00")
 
 
 def test_the_import_refuses_a_file_it_cannot_read(tmp_path: Path) -> None:

@@ -61,6 +61,9 @@ Parameter guidance:
 - `idle_ttl_seconds`: Optional per-child idle TTL. When omitted, `TEAM_AGENTS.yaml` ephemeral policy is used.
 
 Runtime behavior:
+- A process draining for another message contract starts no agents and accepts
+  no new delegations. Finish locally or tell the person the work needs the
+  restarted team; repeating a launch or changing pool limits cannot clear it.
 - Create exactly one child agent per tool call. Repeat the tool call to create multiple children.
 - Forward `agent_type` into `AgentCreationRequest.named_agent_type`.
 - Always set `agent_quantity=1` for this tool path.

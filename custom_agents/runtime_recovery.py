@@ -11,7 +11,7 @@ from custom_agents.orphaned_subtasks import stop_left_out_delegations
 from custom_agents.task_human_interaction_blockers import (
     has_pending_human_interaction,
 )
-from custom_agents.task_manager import TaskInfo
+from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType, TaskQueryDecision
 from storage.runtime_custody import CustodyStore, RuntimeRecoveryConflict
@@ -277,7 +277,9 @@ async def _take_over_saved_tasks(agent: Any, *, last_attempt: bool = False) -> O
     holder is gone (``orphaned_work_takeover``), and a startup agent that
     stopped here would stop the whole runtime.
     """
-    if not agent.team_id or not agent.named_agent_type:
+    from custom_agents.contract_drain_state import is_contract_draining
+
+    if is_contract_draining(agent) or not agent.team_id or not agent.named_agent_type:
         return None
     candidates = agent.task_manager.runtime_state_store.peek_task_runtime_by_role(
         agent.team_id, agent.named_agent_type
@@ -285,6 +287,8 @@ async def _take_over_saved_tasks(agent: Any, *, last_attempt: bool = False) -> O
     owner_ids = await gone_owner_ids(
         agent, [row.owner_agent_id for row in candidates], purpose=LivenessPurpose.STARTUP_TAKEOVER
     )
+    if is_contract_draining(agent):
+        return None
     try:
         restored: Optional[Dict[str, Any]] = await agent.task_manager.operations_runtime.run(
             agent.task_manager.restore_runtime_state_for_owner_ids, owner_ids
@@ -306,11 +310,15 @@ async def _take_over_saved_tasks(agent: Any, *, last_attempt: bool = False) -> O
 
 async def _take_over_deferred_messages(agent: Any) -> bool:
     """Adopt the deferred messages of gone agents of this type; a lost race is logged (see above)."""
+    from custom_agents.contract_drain_state import is_contract_draining
+
+    if is_contract_draining(agent):
+        return False
     decided: List[str] = []
 
     async def gone(owner_ids: List[str]) -> List[str]:
         decided.extend(await gone_owner_ids(agent, owner_ids, purpose=LivenessPurpose.DEFERRED_TAKEOVER))
-        return decided
+        return [] if is_contract_draining(agent) else decided
 
     try:
         restored: bool = await agent.deferred_inbox.restore_role(stale_owner_filter=gone)

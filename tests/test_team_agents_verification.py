@@ -279,5 +279,31 @@ async def test_a_copied_host_record_cannot_announce_a_different_installation_con
                            clock=lambda: NOW, _contract_record_refused=None, profile=SimpleNamespace(runtime="reader"),
                            logger=logging.getLogger(__name__),
                            learned_other_contract=lambda *args: announced.append(args))
-    await MessageHost.follow_contract(host)
+    await MessageHost._contract_record(host, "team-services-1", _signed(document), "team-services-1")
     assert announced == [] and host._contract_record_refused == "invalid_body"
+
+
+@pytest.mark.parametrize("expires", [None, "2026-10-22T04:31:00.000Z"])
+def test_a_host_on_another_contract_still_has_to_expire_within_thirty_seconds(expires):
+    from custom_messages.wire.refusals import FrameRefused
+
+    document = _example("host/lead-host.json")
+    document["body"]["contract_sha256"] = "f" * 64
+    if expires is None:
+        document.pop("expires_at")
+    else:
+        document["expires_at"] = expires
+    with pytest.raises(FrameRefused, match="invalid_body") as refused:
+        trust_store().verify(_signed(document), record="host", now=NOW)
+    assert refused.value.at == "/expires_at"
+
+
+def test_a_host_on_another_contract_cannot_sign_another_hosts_identity():
+    from custom_messages.wire.refusals import FrameRefused
+
+    document = _example("host/lead-host.json")
+    document["body"].update(runtime="team-services-1", contract_sha256="f" * 64)
+    document["key"] = "team-services-1"
+    with pytest.raises(FrameRefused, match="invalid_body") as refused:
+        trust_store().verify(_signed(document), record="host", now=NOW)
+    assert refused.value.at == "/key"

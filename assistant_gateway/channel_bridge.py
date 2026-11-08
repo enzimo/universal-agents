@@ -159,13 +159,19 @@ class ChannelBridge:
             ]
 
         if action.action_type == "list_cron_jobs":
-            jobs = await self.application.list_scheduled_jobs(
-                session_key=action.session_key or resolved_session_key,
-                channel_name=inbound.channel_name,
-                user_id=inbound.user_id,
-                chat_id=inbound.chat_id,
-                thread_id=inbound.thread_id,
-            )
+            from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
+
+            try:
+                jobs = await self.application.list_scheduled_jobs(
+                    session_key=action.session_key or resolved_session_key,
+                    channel_name=inbound.channel_name,
+                    user_id=inbound.user_id,
+                    chat_id=inbound.chat_id,
+                    thread_id=inbound.thread_id,
+                )
+            except (TeamCommandRefused, TeamServicesUnavailable) as error:
+                return [self.translator.render_outbound(inbound=inbound, text=str(error),
+                                                       session_key=action.session_key or resolved_session_key)]
             if not jobs:
                 text = "No scheduled jobs."
             else:

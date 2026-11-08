@@ -568,8 +568,9 @@ def _create(repository: PinnedMemoryRepository, planned: PlannedFact, capacity: 
     common: dict[str, Any] = {
         "fact_text": fact.fact_text,
         "capacity": capacity,
-        "valid_from_utc": fact.valid_from_utc,
-        "invalid_after_utc": fact.invalid_after_utc,
+        # Stored with their zone, as the store writes its own times (an exported time may have none: UTC).
+        "valid_from_utc": _utc_datetime(fact.valid_from_utc).isoformat(),
+        "invalid_after_utc": _utc_datetime(fact.invalid_after_utc).isoformat() if fact.invalid_after_utc else None,
         "tags": list(planned.tags),
         "metadata": planned.metadata,
         "source_key": fact.source_key,

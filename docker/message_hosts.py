@@ -4,18 +4,22 @@ The message contract's hosts sign their messages with keys of their own, and an
 installation authority vouches for them (``installation_authority``,
 ``custom_transport.protocol1``). Before it starts any host, the launcher:
 
-1. keeps the installation's id (from the authority's key file or the bootstrap bundle,
-   or a new random one on the first start);
+1. keeps the installation's id, which the authority's key file holds, or picks a new
+   random one when there is no key file: on the first start, and when the key was lost,
+   since nothing the old key signed can be checked any more;
 2. creates any missing key: the authority's, and each host's it starts;
 3. writes the list of hosts the authority approves without asking anyone, with their
    public keys (``expected-hosts.json``), and the bootstrap bundle's authority keys;
-4. starts the installation authority right after NATS and waits until the bundle carries
-   its certificate and a fresh revocations record, so every later host can join;
+4. starts the installation authority once NATS and the team's message streams are ready,
+   and waits until the bundle carries its certificate and a fresh revocations record, so
+   every later host can join (a join that comes before the authority serves waits for it);
 5. starts the team services and waits until they serve (``team_services.serving``), so the
    team lead, the startup agents and the gateway find them answering. After an unclean
    stop that takes until the dead instance's lease on the team's lock runs out (about 40
    seconds), and the launcher says every 10 seconds what it still waits for.
 
+A process that is not ready in time, or whose wait ends any other way (Ctrl+C included),
+is stopped and waited for, so nothing a failed start began is left running.
 ``MessageServices`` does steps 3 to 5 at launch and again on a restart of everything (the
 configuration editor's restart): it writes the expected hosts from the saved configuration
 as it is then, so a raised limit takes effect, and the restarted authority and team
@@ -23,7 +27,8 @@ services read the saved settings again.
 
 Keys are files only their owner can read; each process is given only its own folder
 (``runtime_settings.instance_layout``). A process the launcher stops listing loses
-automatic approval at the next start.
+automatic approval at its next join or renewal. The trust folder and the NATS data are
+backed up together (user docs, "Message host trust").
 """
 
 from __future__ import annotations
@@ -66,14 +71,24 @@ _TEAM_SERVICES_WAIT = (f"they join and take the team's lock, which another insta
 
 
 def _installation_id(layout: InstanceLayout) -> str:
-    """The installation's id: kept by the authority's key and the bundle, chosen once at random."""
+    """The installation's id: kept by the authority's key, chosen at random when there is none.
+
+    A bundle without its key is not reused: a new key under the old id could check none
+    of the records the old key signed, so every host joins a new installation instead.
+    """
 
     if (layout.trust_authority_dir / AUTHORITY_KEY_FILENAME).exists():
         return load_authority_keys(layout).installation
+    installation = f"ua-{secrets.token_hex(6)}"
     try:
-        return read_bundle(layout.trust_bootstrap_path).installation
+        previous: Optional[str] = read_bundle(layout.trust_bootstrap_path).installation
     except BootstrapError:
-        return f"ua-{secrets.token_hex(6)}"
+        previous = None
+    if previous is not None:
+        LOGGER.warning("The installation authority's key is missing; the instance starts a new installation and "
+                       "every message host joins it again. event=installation_authority_key_missing previous=%s "
+                       "installation=%s", previous, installation)
+    return installation
 
 
 def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, ExpectedHost] | None = None) -> str:
@@ -113,7 +128,7 @@ def expected_host(layout: InstanceLayout, profile: HostProfile, *,
     keys, _ = ensure_host_keys(layout, profile.runtime)
     return ExpectedHost(profile.runtime, keys.key_id, keys.public_key_text, frozenset(profile.roles),
                         frozenset(profile.teams), frozenset(profile.agent_types), profile.session_limit,
-                        agent_types_from_catalog)
+                        agent_types_from_catalog=agent_types_from_catalog)
 
 
 def build_team_services_command(config_path: Path, *, repo_root: Path, python_executable: str | None = None) -> list[str]:
@@ -151,42 +166,51 @@ def _never() -> bool:
     return False
 
 
-def _stop_unready(process: subprocess.Popen[bytes]) -> None:
-    """Stop a process that did not get ready in time, so nothing is left running."""
+def _stop(process: subprocess.Popen[bytes], name: str, *, timeout_seconds: float = 10.0) -> None:
+    """Stop a process whose start failed: ask, wait, and kill it when it does not stop in time."""
 
+    if process.poll() is not None:
+        return
     process.terminate()
     try:
-        process.wait(timeout=10)
+        process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
+        LOGGER.warning("The %s did not stop after %.0f seconds; killing it. event=message_service_killed process=%s",
+                       name, timeout_seconds, name.replace(" ", "_"))
         process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=5.0)
 
 
 def _wait_until_ready(process: subprocess.Popen[bytes], ready: Callable[[], bool], *, name: str,
                       timeout_seconds: float, stop_requested: Callable[[], bool], waiting_for: str) -> bool:
-    """Wait until ``ready``; ``False`` when the launcher stops first.
+    """Wait until ``ready``; ``False`` when the launcher stops first, leaving the process to its stop.
 
-    Raises ``RuntimeError``, with the process stopped, when it exits or is not ready in time.
+    Raises ``RuntimeError`` when the process exits or is not ready in time. The process is
+    stopped (and waited for) whenever the wait ends with an error, Ctrl+C or a ``ready()``
+    that cannot be read included, so a failed start never leaves it running unrecorded.
     """
 
     started = time.monotonic()
     report_at = started + WAIT_REPORT_SECONDS
-    while not ready():
-        if stop_requested():
-            return False
-        code = process.poll()
-        if code is not None:
-            raise RuntimeError(f"The {name} exited with code {code} before getting ready.")
-        now = time.monotonic()
-        if now >= started + timeout_seconds:
-            _stop_unready(process)
-            raise RuntimeError(f"The {name} did not get ready within {timeout_seconds:.0f} seconds: {waiting_for}.")
-        if now >= report_at:
-            LOGGER.info("Still waiting for the %s: %s. event=message_service_waiting process=%s seconds=%.0f "
-                        "timeout_seconds=%.0f", name, waiting_for, name.replace(" ", "_"), now - started,
-                        timeout_seconds)
-            report_at = now + WAIT_REPORT_SECONDS
-        time.sleep(0.2)
+    try:
+        while not ready():
+            if stop_requested():
+                return False
+            code = process.poll()
+            if code is not None:
+                raise RuntimeError(f"The {name} exited with code {code} before getting ready.")
+            now = time.monotonic()
+            if now >= started + timeout_seconds:
+                raise RuntimeError(f"The {name} did not get ready within {timeout_seconds:.0f} seconds: {waiting_for}.")
+            if now >= report_at:
+                LOGGER.info("Still waiting for the %s: %s. event=message_service_waiting process=%s seconds=%.0f "
+                            "timeout_seconds=%.0f", name, waiting_for, name.replace(" ", "_"), now - started,
+                            timeout_seconds)
+                report_at = now + WAIT_REPORT_SECONDS
+            time.sleep(0.2)
+    except BaseException:
+        _stop(process, name)
+        raise
     return True
 
 
@@ -195,7 +219,9 @@ def start_installation_authority(layout: InstanceLayout, command: list[str], env
                                  stop_requested: Callable[[], bool] = _never) -> subprocess.Popen[bytes]:
     """Start the authority and wait until it signed its records; raise ``RuntimeError`` if it does not.
 
-    When ``stop_requested`` says the launcher stops, this returns the authority still starting.
+    The authority is stopped when it is not ready in time and when the wait ends any other
+    way (``_wait_until_ready``). When ``stop_requested`` says the launcher stops, this
+    returns the authority still starting, for the launcher's own stop.
     """
 
     sequence_before = _revocations_sequence(layout)

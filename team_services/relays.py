@@ -9,8 +9,7 @@ agent's reply. The agent decides for the person the token names
 (``custom_agents.relayed_task_controls``); the team services never sign tokens.
 
 ``debug.dump`` without an agent goes to the team lead (the placement of the lead's type).
-An agent that runs nowhere, or does not answer, is answered ``runtime_error``
-(``debug.dump`` has no such outcome, so it is refused as ``handler_failed``).
+A missing agent and an unanswered or refused command get distinct plain runtime_error replies.
 
 A placement is used only when it verifies (``StateRecords.read_report``: signed by a team
 services host, which the registry's signer roles check, and stored under its own key), as
@@ -26,14 +25,19 @@ import logging
 from typing import Any, Callable, Optional
 
 from custom_messages.wire.frame import VerifiedFrame
+from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import MessageHost
-from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+from custom_transport.protocol1.live import NO_RESPONDERS, RequestRefused, ServiceUnavailable
 
 RELAYED_KINDS = ("tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump")
+_CHANGE_KINDS = frozenset({"tasks.remove", "tasks.purge", "debug.dump"})
 _PLACEMENT_BUCKET = "UA1_PLACEMENT"
 AGENT_UNAVAILABLE_TEXT = "That agent is not running now. Refresh, and try again when it is."
-RELAY_TIMEOUT_SECONDS = 15.0
+RELAY_TIMEOUT_SECONDS = 10.0
+AGENT_SLOW_TEXT = "That agent did not answer in time. The command may still finish. Refresh to check its result."
+AGENT_REFUSED_TEXT = "That agent could not handle this request. Refresh and try again."
+AGENT_UNKNOWN_RESULT_TEXT = "The command may have finished. Refresh to check its result before sending it again."
 
 
 class AgentUnavailable(RuntimeError):
@@ -51,6 +55,11 @@ class Relays:
     def handlers(self) -> dict[str, Callable[[VerifiedFrame], Any]]:
         return {kind: self.handle for kind in RELAYED_KINDS}
 
+    def family(self) -> Any:
+        from team_services.service import OperationFamily
+
+        return OperationFamily(self.handlers(), side_by_side=frozenset(RELAYED_KINDS))
+
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
         kind = verified.frame.kind
         body = verified.raw["body"]
@@ -60,21 +69,27 @@ class Relays:
         except AgentUnavailable as unavailable:
             self._logger.warning("A relayed command found no agent to answer it. event=team_relay_unavailable kind=%s "
                                  "agent=%s reason=%s", kind, body.get("agent"), unavailable)
-            if kind == "debug.dump":
-                raise
-            return {"outcome": "runtime_error", "message": AGENT_UNAVAILABLE_TEXT}
+            return {"outcome": "runtime_error", "message": str(unavailable)}
 
     async def _relay(self, verified: VerifiedFrame, agent: str) -> dict[str, Any]:
         if await self._placement(f"{self._team}.{agent}") is None:
-            raise AgentUnavailable(f"{agent} has no placement")
+            raise AgentUnavailable(AGENT_UNAVAILABLE_TEXT)
         live = self._host.live
         assert live is not None, "the team services serve only after joining"
         audience = {"installation": live.identity.installation, "team": self._team, "target": "agent", "id": agent}
         try:
             reply = await live.request(verified.frame.kind, verified.raw["body"], audience, team=self._team,
                                        authority=verified.raw["authority"], timeout=RELAY_TIMEOUT_SECONDS)
-        except (ServiceUnavailable, RequestRefused) as error:
-            raise AgentUnavailable(str(error)) from error
+        except ServiceUnavailable as error:
+            text = AGENT_UNAVAILABLE_TEXT if error.reason == NO_RESPONDERS else AGENT_SLOW_TEXT
+            raise AgentUnavailable(text) from error
+        except (RequestRefused, FrameRefused) as error:
+            self._logger.warning("An agent refused a relayed command. event=team_relay_refused kind=%s agent=%s code=%s",
+                                 verified.frame.kind, agent, error.code)
+            uncertain = verified.frame.kind in _CHANGE_KINDS and (
+                isinstance(error, FrameRefused) or error.code == "handler_failed"
+            )
+            raise AgentUnavailable(AGENT_UNKNOWN_RESULT_TEXT if uncertain else AGENT_REFUSED_TEXT) from error
         return dict(reply.raw["body"])
 
     async def _placement(self, key: str) -> Optional[Any]:
@@ -92,21 +107,32 @@ class Relays:
         return None if stored is None else stored.record.body
 
     async def _lead_agent(self) -> str:
-        """The team lead's agent: the placement of the lead's type on a lead host."""
-
-        try:
-            keys = await (await self._host.nc.jetstream().key_value(_PLACEMENT_BUCKET)).keys()
-        except Exception as error:  # an empty bucket raises too
-            raise AgentUnavailable("no placements") from error
-        for key in keys:
-            if not key.startswith(f"{self._team}."):
-                continue
+        """The newest live lead session, on a lead host, matching its current placement."""
+        records, live = self._host.records, self._host.live
+        assert records is not None and live is not None
+        now = self._host.clock()
+        candidates = []
+        prefix = f"session.{live.identity.installation}.{self._team}."
+        for key in await records.keys("agent_session", prefix):
             try:
-                placed = await self._placement(key)
+                await records.take_trust_record("agent_session", key, now=now)
+                session = live.trust.store.agent_session(live.identity.installation, self._team, key.rsplit(".", 1)[-1])
+                if session is None or session.agent_role != "lead" or session.agent_type != self._lead_agent_type \
+                        or session.ends_at <= now:
+                    continue
+                placement = await self._placement(f"{self._team}.{session.agent}")
+                if placement is None or placement.host != session.runtime or placement.placed_at != format_timestamp(session.started_at):
+                    continue
+                host = await records.read_report("host", session.runtime, now=now)
+                if host is None or host.record.other_contract or host.record.body.state not in {"accepting", "draining"}:
+                    continue
+                candidates.append((host.record.body.state == "accepting", session.started_at, session.agent))
+            except FrameRefused as refused:
+                self._logger.warning("A stored lead record does not verify. event=team_services_record_refused "
+                                     "record=agent_session key=%s code=%s at=%s", key, refused.code, refused.at)
             except Exception:
-                self._logger.exception("A placement could not be read; looking at the others. "
+                self._logger.exception("A lead session could not be read; looking at the others. "
                                        "event=team_relay_placement_unreadable key=%s", key)
-                continue
-            if placed is not None and placed.agent_type == self._lead_agent_type:
-                return str(placed.agent)
-        raise AgentUnavailable("the team lead has no placement")
+        if candidates:
+            return str(max(candidates)[2])
+        raise AgentUnavailable(AGENT_UNAVAILABLE_TEXT)

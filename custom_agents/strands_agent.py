@@ -8,7 +8,7 @@ This module provides the UniversalAgent class, which:
 - Supports the hub-and-spoke multi-agent architecture
 """
 
-from custom_agents.contract_drain import is_contract_draining
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.lease_loss_wind_down import divert_request_during_wind_down, is_winding_down
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
@@ -269,7 +269,7 @@ from custom_transport.base import (
     SubscriptionDelivery,
     TransportPublishOptions,
 )
-from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, NatsTransportAdapter
+from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, TEAM_LEAD_CONSUMER_ROLE, NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from custom_agents.task_runtime_coordinator import (
     RuntimeBatchInterrupted,
@@ -288,6 +288,7 @@ from custom_messages.contracts.control_v1 import (
     ControlInstruction,
     ManagerRuntimeWorkCommand,
     PersonStandingCommandV1,
+    RetiredGatewayCommand,
 )
 from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionRequest,
@@ -4035,6 +4036,17 @@ class UniversalAgent(BaseModel):
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )
+        elif isinstance(msg_content, RetiredGatewayCommand):
+            # A 0.9 gateway's command queued before an in-place upgrade: the person is
+            # told it was not carried out (custom_agents.retired_gateway_commands).
+            from custom_agents.retired_gateway_commands import answer_retired_gateway_command
+
+            await answer_retired_gateway_command(
+                self,
+                command=msg_content,
+                msg_header=msg_header,
+                msg_meta=msg_meta,
+            )
         elif isinstance(msg_content, TaskSteering):
             await handle_task_steering_message(
                 self,
@@ -4849,6 +4861,11 @@ class UniversalAgent(BaseModel):
     ) -> None:
         """Read this agent's type queue, shared by every agent of the type (ADR-019)."""
 
+        from custom_agents.contract_drain import drain_agent
+        from custom_agents.contract_drain_state import is_contract_draining
+
+        if is_contract_draining(self):
+            return
         named_type = str(self.named_agent_type)
         queue_name = self.named_agent_type_queue_map.get(named_type) or f"{self.team_id}_{named_type}"
         await adapter.subscribe_subject(
@@ -4860,8 +4877,11 @@ class UniversalAgent(BaseModel):
             consumer_role=NAMED_WORKER_CONSUMER_ROLE,
             owner_agent_id=self.id,
             fetch_policy=policy,
-            ready=ready,
+            ready=lambda: not is_contract_draining(self) and ready(),
         )
+        if is_contract_draining(self):
+            await drain_agent(self, self._contract_drain.reason)
+            return
         self._logger.info(
             "[%s] NATS type queue ready for %s. event=agent_type_queue_ready "
             "agent_type=%s fetch_policy=%s",
@@ -4929,7 +4949,10 @@ class UniversalAgent(BaseModel):
                 # target the requesting agent id and are correlated in memory.
                 self._operational_queue_name = self.id
 
-                if self.is_team_lead:
+                from custom_agents.contract_drain import drain_agent
+                from custom_agents.contract_drain_state import is_contract_draining
+
+                if self.is_team_lead and not is_contract_draining(self):
                     await adapter.subscribe_route(
                         name=f"{self.id}:lead",
                         routing_key=self.team_id,
@@ -4937,10 +4960,12 @@ class UniversalAgent(BaseModel):
                         durable_name=self._nats_mapper().durable_name(
                             f"lead_{self.team_id}"
                         ),
-                        consumer_role="team_lead",
+                        consumer_role=TEAM_LEAD_CONSUMER_ROLE,
                         owner_agent_id=self.id,
-                        ready=lambda: mailbox_has_room(self),
+                        ready=lambda: not is_contract_draining(self) and mailbox_has_room(self),
                     )
+                    if is_contract_draining(self):
+                        await drain_agent(self, self._contract_drain.reason)
 
                 if _should_consume_broadcasts(
                     self.process_broadcasts,

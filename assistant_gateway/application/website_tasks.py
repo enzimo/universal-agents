@@ -37,10 +37,31 @@ def _refusal(reply: dict[str, Any], fallback: str) -> RuntimeError:
     return RuntimeError(str(reply.get("message") or fallback))
 
 
+async def _page(team: GatewayTeamCommandService, kind: str, body: dict[str, Any], person: str) -> dict[str, Any]:
+    reply = await team.request(kind, body, person_id=person)
+    if reply.get("outcome") != "ok":
+        raise _refusal(reply, "Tasks could not be loaded.")
+    tasks = list(reply["tasks"])
+    while len(tasks) < body["limit"] and reply.get("next_offset") is not None:
+        offset = reply["next_offset"]
+        if offset != body["offset"] + len(tasks):
+            raise RuntimeError("The task page did not advance. Refresh and try again.")
+        following = await team.request(kind, {**body, "offset": offset, "limit": body["limit"] - len(tasks)}, person_id=person)
+        if following.get("outcome") != "ok":
+            raise _refusal(following, "Tasks could not be loaded.")
+        if kind == "tasks.list" and following["queue_digest"] != reply["queue_digest"]:
+            raise RuntimeError(QUEUE_CHANGED_TEXT)
+        if not following["tasks"]:
+            raise RuntimeError("The task page did not advance. Refresh and try again.")
+        tasks.extend(following["tasks"])
+        reply = {**following, "tasks": tasks}
+    return {**reply, "tasks": tasks}
+
+
 async def list_tasks(team: GatewayTeamCommandService, request: WebTaskListRequestV1) -> WebTaskListV1:
-    body = {"agent": request.agent_id, "offset": request.offset, "limit": min(request.limit, _PAGE_LIMIT)}
+    body: dict[str, Any] = {"agent": request.agent_id, "offset": request.offset, "limit": min(request.limit, _PAGE_LIMIT)}
     if request.view == "finished":
-        reply = await team.request("tasks.list_finished", body, person_id=_person(request))
+        reply = await _page(team, "tasks.list_finished", {**body, "limit": min(body["limit"], 10)}, _person(request))
         if reply.get("outcome") != "ok":
             raise _refusal(reply, "Tasks could not be loaded.")
         tasks = tuple(
@@ -53,7 +74,7 @@ async def list_tasks(team: GatewayTeamCommandService, request: WebTaskListReques
         )
         return WebTaskListV1(tasks=tasks, total=reply["total"], queued_count=0, current_count=0,
                              inventory_digest=contract_sha256({"finished_tasks": reply["tasks"]}))
-    reply = await team.request("tasks.list", body, person_id=_person(request))
+    reply = await _page(team, "tasks.list", body, _person(request))
     if reply.get("outcome") != "ok":
         raise _refusal(reply, "Tasks could not be loaded.")
     return WebTaskListV1(

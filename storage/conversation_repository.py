@@ -6,16 +6,20 @@ from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 
 import json
 import logging
-import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import Any, Iterator, Optional, Protocol
 
 from custom_agents.conversation_delivery_states import (
     MODEL_VISIBLE_TIMER_DELIVERY_STATES,
 )
 from id_generation import new_id
+from topic_tags import TOPIC_TAG_MAX, normalize_topic_tag, normalize_topic_tags
+from storage.operation_outcomes import (
+    CommandOutcome, StoredOutcome, ensure_outcome_table, stored_outcome, save_refusal, purge_expired,
+)
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 from .config import StorageSettings
@@ -29,6 +33,9 @@ from .runtime import describe_storage_capabilities, require_repository_backend
 from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
+
+# A stable signed-bigint PostgreSQL advisory lock, shared by every tag writer.
+CONVERSATION_TAG_WRITE_LOCK_KEY = int.from_bytes(b"uatopics", "big")
 
 
 def utc_now_iso() -> str:
@@ -132,14 +139,6 @@ def _json_loads(raw_value: Any, default: Any) -> Any:
         return json.loads(raw_value)
     except (TypeError, json.JSONDecodeError):
         return default
-
-
-def normalize_topic_tag(raw_value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", str(raw_value or "").strip().lower())
-    normalized = re.sub(r"-+", "-", normalized).strip("-_")
-    if not normalized:
-        raise ValueError("Topic tag must contain at least one letter or number.")
-    return normalized
 
 
 TURN_MEMORY_REVIEW_UNREVIEWED = "unreviewed"
@@ -358,6 +357,17 @@ class ConversationRepository(Protocol):
         created_by_agent_id: Optional[str] = None,
     ) -> dict[str, Any]: ...
 
+    def tag_thread_with_tags(self, *, conversation_id: str, tags: list[str], team_id: Optional[str] = None,
+                    canonical_user_id: Optional[str] = None, source: str = "manual",
+                    created_by_agent_id: Optional[str] = None,
+                    command_outcome: Optional[CommandOutcome] = None) -> list[dict[str, Any]]: ...
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]: ...
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]: ...
+
+    def purge_command_outcomes(self, now: datetime) -> int: ...
+
     def untag_thread(self, *, conversation_id: str, tag: str) -> bool: ...
 
     def list_thread_tags(self, conversation_id: str) -> list[dict[str, Any]]: ...
@@ -474,6 +484,12 @@ class _RelationalConversationRepository:
     """Shared record operations for durable conversation-thread persistence."""
 
     _dialect: SqlDialect
+    _logger: logging.Logger
+    _db_path: str
+    _artifacts_dir: Path
+
+    def _connect(self) -> Any:
+        raise NotImplementedError
 
 
     def _init_schema(self) -> None:
@@ -481,6 +497,7 @@ class _RelationalConversationRepository:
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             begin_schema_setup(conn, __name__)
+            ensure_outcome_table(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_threads (
@@ -1609,74 +1626,82 @@ class _RelationalConversationRepository:
             conn.commit()
         return int(cursor.rowcount or 0)
 
-    def tag_thread(
-        self,
-        *,
-        conversation_id: str,
-        tag: str,
-        team_id: Optional[str] = None,
-        canonical_user_id: Optional[str] = None,
-        source: str = "manual",
-        created_by_agent_id: Optional[str] = None,
-    ) -> dict[str, Any]:
-        normalized_tag = normalize_topic_tag(tag)
-        thread = self.get_thread(conversation_id)
-        if thread is None:
-            raise ValueError(f"Conversation {conversation_id!r} was not found.")
-        resolved_team_id = team_id if team_id is not None else thread.get("team_id")
-        resolved_user_id = str(canonical_user_id or "").strip()
-        now_ts = utc_now_iso()
+    @contextmanager
+    def _write(self) -> Iterator[Any]:
         with self._connect() as conn:
-            existing = conn.execute(
-                f"""
-                SELECT conversation_id, tag
-                FROM conversation_thread_tags
-                WHERE conversation_id = {self._dialect.bind} AND tag = {self._dialect.bind}
-                """,
-                (conversation_id, normalized_tag),
-            ).fetchone()
-            if existing is None:
-                conn.execute(
-                    f"""
-                    INSERT INTO conversation_thread_tags (
-                        conversation_id, tag, team_id, canonical_user_id, source, status,
-                        created_by_agent_id, created_at, updated_at
-                    ) VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
-                    """,
-                    (
-                        conversation_id,
-                        normalized_tag,
-                        resolved_team_id,
-                        resolved_user_id,
-                        source or "manual",
-                        "active",
-                        created_by_agent_id,
-                        now_ts,
-                        now_ts,
-                    ),
-                )
-            else:
-                conn.execute(
-                    f"""
-                    UPDATE conversation_thread_tags
-                    SET team_id = {self._dialect.bind}, canonical_user_id = {self._dialect.bind}, source = {self._dialect.bind}, status = {self._dialect.bind},
-                        created_by_agent_id = {self._dialect.bind}, updated_at = {self._dialect.bind}
-                    WHERE conversation_id = {self._dialect.bind} AND tag = {self._dialect.bind}
-                    """,
-                    (
-                        resolved_team_id,
-                        resolved_user_id,
-                        source or "manual",
-                        "active",
-                        created_by_agent_id,
-                        now_ts,
-                        conversation_id,
-                        normalized_tag,
-                    ),
-                )
+            conn.begin_write()
+            yield conn
             conn.commit()
-        tags = self.list_thread_tags(conversation_id)
-        return next(item for item in tags if item["tag"] == normalized_tag)
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        with self._connect() as conn:
+            return stored_outcome(conn, self._dialect, command_outcome.team_id, command_outcome.retry_key)
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        with self._write() as conn:
+            return save_refusal(conn, self._dialect, command_outcome, reply)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        with self._write() as conn:
+            return purge_expired(conn, self._dialect, now)
+
+    def tag_thread(self, *, conversation_id: str, tag: str, team_id: Optional[str] = None,
+                   canonical_user_id: Optional[str] = None, source: str = "manual",
+                   created_by_agent_id: Optional[str] = None) -> dict[str, Any]:
+        return self.tag_thread_with_tags(conversation_id=conversation_id, tags=[tag], team_id=team_id,
+                                canonical_user_id=canonical_user_id, source=source,
+                                created_by_agent_id=created_by_agent_id)[0]
+
+    def tag_thread_with_tags(self, *, conversation_id: str, tags: list[str], team_id: Optional[str] = None,
+                    canonical_user_id: Optional[str] = None, source: str = "manual",
+                    created_by_agent_id: Optional[str] = None,
+                    command_outcome: Optional[CommandOutcome] = None) -> list[dict[str, Any]]:
+        """All tags and the command reply commit together, after checking the retry key under the write lock.
+
+        Upserts also handle automatic tagging racing a person's command. A retry must
+        never restore a tag or privacy setting changed by a newer command.
+        """
+
+        normalized = normalize_topic_tags(tags)
+        with self._write() as conn:
+            if command_outcome is not None:
+                command_outcome.raise_if_stored(conn, self._dialect)
+            thread = conn.execute(
+                f"SELECT team_id FROM conversation_threads WHERE conversation_id = {self._dialect.bind}",
+                (conversation_id,),
+            ).fetchone()
+            if thread is None:
+                raise ValueError("That conversation was not found.")
+            resolved_team_id = team_id if team_id is not None else thread["team_id"]
+            rows = [self._tag_thread_row(conn, conversation_id, tag, resolved_team_id,
+                                         str(canonical_user_id or "").strip(), source, created_by_agent_id)
+                    for tag in normalized]
+            if command_outcome is not None:
+                command_outcome.save(conn, self._dialect, rows)
+        return rows
+
+    def _tag_thread_row(self, conn: Any, conversation_id: str, tag: str, team_id: Optional[str],
+                        person_id: str, source: str, agent_id: Optional[str]) -> dict[str, Any]:
+        now = utc_now_iso()
+        p = self._dialect.bind
+        conn.execute(
+            f"""
+            INSERT INTO conversation_thread_tags
+                (conversation_id, tag, team_id, canonical_user_id, source, status,
+                 created_by_agent_id, created_at, updated_at)
+            VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
+            ON CONFLICT (conversation_id, tag) DO UPDATE SET
+                team_id = excluded.team_id, canonical_user_id = excluded.canonical_user_id,
+                source = excluded.source, status = excluded.status,
+                created_by_agent_id = excluded.created_by_agent_id, updated_at = excluded.updated_at
+            """,
+            (conversation_id, tag, team_id, person_id, source or "manual", "active", agent_id, now, now),
+        )
+        row = conn.execute(
+            f"SELECT * FROM conversation_thread_tags WHERE conversation_id = {p} AND tag = {p}",
+            (conversation_id, tag),
+        ).fetchone()
+        return self._row_to_topic_tag(row)
 
     def untag_thread(self, *, conversation_id: str, tag: str) -> bool:
         normalized_tag = normalize_topic_tag(tag)
@@ -1704,7 +1729,14 @@ class _RelationalConversationRepository:
                 """,
                 (conversation_id, "active"),
             ).fetchall()
-        return [self._row_to_topic_tag(row) for row in rows]
+        return self._visible_topic_tags(rows)
+
+    def _visible_topic_tags(self, rows: list[Any]) -> list[dict[str, Any]]:
+        hidden = sum(len(row["tag"]) > TOPIC_TAG_MAX for row in rows)
+        if hidden:
+            self._logger.warning("Omitted stored topic tags longer than the limit. "
+                                 "event=topic_tags_omitted count=%s limit=%s", hidden, TOPIC_TAG_MAX)
+        return [self._row_to_topic_tag(row) for row in rows if len(row["tag"]) <= TOPIC_TAG_MAX]
 
     def list_known_thread_tags(
         self,
@@ -1715,7 +1747,6 @@ class _RelationalConversationRepository:
     ) -> list[dict[str, Any]]:
         safe_limit = max(1, min(int(limit or 200), 1000))
         query = f"""
-            SELECT tt.tag, COUNT(DISTINCT tt.conversation_id) AS thread_count, MAX(tt.updated_at) AS updated_at
             FROM conversation_thread_tags tt
             LEFT JOIN conversation_threads ct ON ct.conversation_id = tt.conversation_id
             WHERE tt.status = {self._dialect.bind}
@@ -1731,6 +1762,17 @@ class _RelationalConversationRepository:
             params.append(canonical_user_id)
         else:
             query += " AND tt.canonical_user_id = ''"
+        with self._connect() as conn:
+            hidden = conn.execute(
+                f"SELECT COUNT(*) AS count {query} AND LENGTH(tt.tag) > {TOPIC_TAG_MAX}", params,
+            ).fetchone()["count"]
+        if hidden:
+            self._logger.warning("Omitted stored topic tags longer than the limit. "
+                                 "event=topic_tags_omitted person=%s count=%s limit=%s",
+                                 canonical_user_id, hidden, TOPIC_TAG_MAX)
+        query += f" AND LENGTH(tt.tag) <= {TOPIC_TAG_MAX}"
+        query = ("SELECT tt.tag, COUNT(DISTINCT tt.conversation_id) AS thread_count, "
+                 f"MAX(tt.updated_at) AS updated_at {query}")
         query += f" GROUP BY tt.tag ORDER BY updated_at DESC, tt.tag ASC LIMIT {self._dialect.bind}"
         params.append(safe_limit)
         with self._connect() as conn:
@@ -1887,7 +1929,7 @@ class _RelationalConversationRepository:
                 """,
                 (conversation_id, int(turn_index), "active"),
             ).fetchall()
-        return [self._row_to_topic_tag(row) for row in rows]
+        return self._visible_topic_tags(rows)
 
     @staticmethod
     def _row_to_topic_tag(row: sqlite3.Row) -> dict[str, Any]:
@@ -2243,7 +2285,7 @@ class PostgresConversationRepository(_RelationalConversationRepository):
         self._init_schema()
 
     def _connect(self) -> PostgresConnection:
-        return connect_postgres(self._dsn)
+        return connect_postgres(self._dsn, write_lock_key=CONVERSATION_TAG_WRITE_LOCK_KEY)
 
 
 def create_conversation_repository(
