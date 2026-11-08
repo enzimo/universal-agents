@@ -9,6 +9,7 @@ from custom_agents.memory_plugins.hydration import DomainTopicRecallPlugin
 from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
+from custom_agents.memory_plugins.maintenance import DomainTopicTaggerPlugin
 
 
 def _store(tmp_path: Path) -> ConversationStore:
@@ -110,3 +111,12 @@ def test_domain_topic_recall_plugin_injects_compact_hints_only_when_relevant(tmp
     assert "Car repair brake troubleshooting" in sections[0].text
     assert "Other team car repair" not in sections[0].text
     assert unrelated == []
+
+
+def test_automatic_and_recalled_tags_skip_oversized_hashtags(caplog) -> None:
+    long_tag = "x" * 65
+    assert DomainTopicTaggerPlugin._extract_explicit_tags(f"#{long_tag} #valid") == ["valid"]
+    assert DomainTopicRecallPlugin._matched_tags(f"#{long_tag} #valid", [long_tag, "valid"]) == ["valid"]
+    assert DomainTopicRecallPlugin._matched_tags("#car--repair", ["car-repair"]) == ["car-repair"]
+    assert "event=topic_tag_skipped" in caplog.text
+    assert long_tag not in caplog.text

@@ -34,7 +34,7 @@ from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import forget_task_context_keys, use_gateway_key
-from tests.test_retired_gateway_commands import FIXTURE, KNOWLEDGE_FIXTURE, _queued_0_9_command
+from tests.test_retired_gateway_commands import FIXTURE, KNOWLEDGE_FIXTURE, TOPIC_FIXTURE, _queued_0_9_command
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
@@ -52,6 +52,7 @@ async def _until(condition, *, timeout: float) -> bool:
 QUEUED_COMMANDS = {
     "memory": (FIXTURE, "memory command", ("cli", "owner-chat", "cli:owner")),
     "knowledge": (KNOWLEDGE_FIXTURE, "Knowledge page request", ("website", "web-chat", "website:web-chat:owner")),
+    "topics": (TOPIC_FIXTURE, "topic command", ("cli", "owner-chat", "cli:owner")),
 }
 
 

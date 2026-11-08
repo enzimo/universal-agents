@@ -43,17 +43,12 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Optional
 
-from storage.config import StorageSettings
-from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
 from storage.schema_setup import begin_schema_setup
-from storage.sql_dialect import POSTGRES, SQLITE, SqlDialect
-from storage.sqlite_connection import connect_sqlite
+from storage.sql_dialect import SqlDialect
 
 OUTCOMES_TABLE = "protocol1_operation_outcomes"
 # The person a stored reply's command acted for (module docstring).
@@ -229,71 +224,3 @@ def _insert(conn: Any, dialect: SqlDialect, outcome: CommandOutcome, reply: dict
         (outcome.team_id, outcome.retry_key, outcome.person_id, outcome.kind, outcome.body_digest,
          json.dumps(reply, separators=(",", ":"), sort_keys=True), outcome.now.isoformat()),
     )
-
-
-class CommandOutcomeWrites:
-    """For a store with ``_write()`` (a write transaction under its lock) and ``_dialect``.
-
-    Refusals and completed replies are stored in transactions of their own, after the
-    change's transaction rolled back or committed.
-    """
-
-    _dialect: SqlDialect
-
-    def _write(self) -> Any:  # pragma: no cover - the store provides it
-        raise NotImplementedError
-
-    def _connect(self) -> Any:  # pragma: no cover - the store provides it
-        raise NotImplementedError
-
-    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[tuple[dict[str, Any], str, bool]]:
-        """A read outside any change: (reply or receipt, body digest, complete), or None."""
-
-        with self._connect() as conn:
-            return stored_reply(conn, self._dialect, command_outcome.team_id, command_outcome.retry_key)
-
-    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> None:
-        with self._write() as conn:
-            save_refusal(conn, self._dialect, command_outcome, reply)
-
-    def complete_command_outcome(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> None:
-        with self._write() as conn:
-            complete_outcome(conn, self._dialect, command_outcome, reply)
-
-
-class OperationOutcomeStore(CommandOutcomeWrites):
-    """The outcome table on connections of its own.
-
-    For a family whose store has no outcome hook in its writes because its changes can
-    be carried out again with the same effect (tagging a conversation thread): the reply
-    is stored right after the change, in a transaction of its own. A stop between the
-    two only means a retry makes the same change again and gets the same reply.
-    """
-
-    def __init__(self, settings: StorageSettings, *, logger: logging.Logger = _LOGGER) -> None:
-        self._settings = settings
-        self._logger = logger
-        self._dialect = POSTGRES if settings.postgres_dsn else SQLITE
-        with self._connect() as conn:
-            ensure_outcome_table(conn)
-            conn.commit()
-
-    def _connect(self) -> Any:
-        if self._settings.postgres_dsn:
-            return connect_postgres(self._settings.postgres_dsn)
-        ensure_storage_parent_dir(self._settings.sqlite_path)
-        return connect_sqlite(str(self._settings.sqlite_path), logger=self._logger, row_factory=sqlite3.Row)
-
-    @contextmanager
-    def _write(self) -> Iterator[Any]:
-        with self._connect() as conn:
-            conn.begin_write()
-            yield conn
-            conn.commit()
-
-    def save_reply(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> dict[str, Any]:
-        """Store a carried-out command's reply (a reply already stored under the key is kept); returns it."""
-
-        with self._write() as conn:
-            _insert(conn, self._dialect, command_outcome, reply, complete=True)
-        return reply

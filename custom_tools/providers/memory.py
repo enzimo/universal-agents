@@ -48,7 +48,7 @@ from custom_tools.providers._user_scope import (
 from custom_tools.providers.memory_review_inspection import review_job_in_scope
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.tool_results import failed
-from storage.conversation_repository import normalize_topic_tag
+from topic_tags import normalize_topic_tag, normalize_topic_tags
 from storage.change_ledger import ChangeRefused
 from storage.pinned_memory_repository import USERMEM_BANK, PinnedMemoryConflictError
 
@@ -245,17 +245,11 @@ def _list_tags(agent: Any, person: Optional[str], **inputs: Any) -> dict[str, An
 
 def _tag_thread(agent: Any, person: Optional[str], **inputs: Any) -> dict[str, Any]:
     store = _conversation_store_for_agent(agent)
-    rows = [
-        store.tag_thread(
-            conversation_id=inputs["conversation_id"],
-            tag=tag,
-            team_id=getattr(agent, "team_id", None),
-            canonical_user_id=person,
-            source="agent_tool",
-            created_by_agent_id=getattr(agent, "id", None),
-        )
-        for tag in inputs["tags"]
-    ]
+    rows = store.tag_thread_with_tags(
+        conversation_id=inputs["conversation_id"], tags=normalize_topic_tags(inputs["tags"]),
+        team_id=getattr(agent, "team_id", None), canonical_user_id=person,
+        source="agent_tool", created_by_agent_id=getattr(agent, "id", None),
+    )
     return {"conversation_id": inputs["conversation_id"], "tags": rows}
 
 
@@ -272,7 +266,7 @@ def _tag_turn(agent: Any, person: Optional[str], **inputs: Any) -> dict[str, Any
             source="agent_tool",
             created_by_agent_id=getattr(agent, "id", None),
         )
-        for tag in inputs["tags"]
+        for tag in normalize_topic_tags(inputs["tags"])
     ]
     return {"conversation_id": inputs["conversation_id"], "turn_index": turn_index, "tags": rows}
 
@@ -284,7 +278,7 @@ def _untag(agent: Any, person: Optional[str], **inputs: Any) -> dict[str, Any]:
             "tag": normalize_topic_tag(tag),
             "deleted": store.untag_thread(conversation_id=inputs["conversation_id"], tag=normalize_topic_tag(tag)),
         }
-        for tag in inputs["tags"]
+        for tag in normalize_topic_tags(inputs["tags"])
     ]
     return {"conversation_id": inputs["conversation_id"], "removed": removed}
 
@@ -330,7 +324,8 @@ def topic_tags(
     Args:
         action: What to do; see Actions.
         conversation_id: The conversation to tag or untag.
-        tags: Topic tags, such as "travel" or "taxes".
+        tags: Topic tags, such as "travel" or "taxes", at most 64 characters after normalization.
+            Changes accept at most 20 tags per call.
         turn_index: The turn of the conversation to tag.
         limit: How many tags or conversations to return at most.
     """

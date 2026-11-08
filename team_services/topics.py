@@ -8,10 +8,9 @@ Until phase 2 the gateway sent these to the team lead's process as a durable
 authority token (``team_services.people``): their tags and threads are their own, and a
 thread is tagged only by its owner (``access_control.ownership``), as before.
 
-Tagging a thread can be done again with the same effect, so its stored outcome is saved
-right after the change (``storage.operation_outcomes.OperationOutcomeStore``): a stop
-between the two only means a retry tags the thread again and gets the same reply. The
-store is synchronous, so each command runs in a worker thread.
+All tags and the stored reply commit in one conversation-store transaction. Retries
+are answered before checking the command again and never restore older tag state.
+The store is synchronous, so commands run side by side in worker threads.
 """
 
 from __future__ import annotations
@@ -24,10 +23,12 @@ from typing import Any, Callable
 from access_control.ownership import PRIVATE_UPDATE, RESOURCE_CONVERSATION, private_access
 from access_control.people_directory import PeopleDirectory
 from custom_messages.wire.encoding import format_timestamp
-from custom_messages.wire.frame import VerifiedFrame
-from storage.operation_outcomes import CommandOutcome, OperationOutcomeStore
-from team_services.outcomes import carried_out_once
+from custom_messages.wire.frame import VerifiedFrame, body_model
+from storage.operation_outcomes import CommandOutcome
+from team_services.outcomes import CommandOnce
 from team_services.people import CommandPerson, command_person
+from team_services.service import OperationFamily
+from topic_tags import TopicTagInputError
 
 TOPIC_KINDS = ("topics.list_tags", "topics.find_threads", "topics.tag_thread")
 # How many threads a search returns (the contract's limit, and the chat's).
@@ -46,16 +47,20 @@ class ThreadNotFound(LookupError):
 class TopicOperations:
     """Answers people's topic commands for one team (module docstring)."""
 
-    def __init__(self, conversations: Any, outcomes: OperationOutcomeStore, people: PeopleDirectory,
+    def __init__(self, conversations: Any, people: PeopleDirectory,
                  clock: Callable[[], datetime], logger: logging.Logger) -> None:
         self._conversations = conversations
-        self._outcomes = outcomes
         self._people = people
         self._clock = clock
         self._logger = logger
 
-    def handlers(self) -> dict[str, Callable[[VerifiedFrame], Any]]:
-        return {kind: self.handle for kind in TOPIC_KINDS}
+    def family(self) -> OperationFamily:
+        return OperationFamily({kind: self.handle for kind in TOPIC_KINDS}, frozenset(TOPIC_KINDS), self.purge_outcomes)
+
+    async def purge_outcomes(self) -> None:
+        purged = await asyncio.to_thread(self._conversations.purge_command_outcomes, self._clock())
+        if purged:
+            self._logger.info("Deleted old stored topic replies. event=team_topic_outcomes_purged count=%s", purged)
 
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
         return await asyncio.to_thread(self.answer, verified)
@@ -63,21 +68,35 @@ class TopicOperations:
     def answer(self, verified: VerifiedFrame) -> dict[str, Any]:
         kind = verified.frame.kind
         body = verified.raw["body"]
-        person, reason = command_person(verified, self._people, self._logger)
+        check = command_person(verified, self._people, self._logger)
+        once = None
+        if kind == "topics.tag_thread" and check.person_id is not None:
+            outcome = CommandOutcome(
+                team_id=self._people.team_id, retry_key=str(verified.raw["idempotency_key"]),
+                person_id=check.person_id, kind=kind, body_digest=str(verified.raw["body_digest"]),
+                now=self._clock(), reply_for=_tag_reply, logger=self._logger,
+            )
+            once = CommandOnce(
+                self._conversations, outcome, reply_from_receipt=lambda reply: reply,
+                key_taken=lambda error: _message("invalid_request", str(error)),
+                not_stored=_message("runtime_error", "The topic command could not be stored. Try again in a moment."),
+                logger=self._logger,
+            )
+            stored = once.stored_reply()
+            if stored is not None:
+                return stored
+        person = check.person
         if person is None:
             # The topic operations have no not_allowed outcome; a refused sender gets nothing back.
-            return _message("runtime_error", reason)
+            return _message("runtime_error", check.reason)
         if kind == "topics.list_tags":
             return self._read(kind, person, lambda: self._list_tags(person))
         if kind == "topics.find_threads":
             return self._read(kind, person, lambda: self._find_threads(person, body["tags"]))
-        outcome = CommandOutcome(
-            team_id=person.team_id, retry_key=str(verified.raw["idempotency_key"]), kind=kind,
-            body_digest=str(verified.raw["body_digest"]), now=self._clock(), reply_for=lambda reply: reply,
-            logger=self._logger,
-        )
-        return carried_out_once(self._outcomes, outcome, lambda: self._tag_thread(person, body, outcome),
-                                refusal_for=lambda error: self._refusal(kind, person, error), logger=self._logger)
+        if once is None:
+            raise RuntimeError("A topic change has no stored-outcome context.")
+        return once.run(lambda: self._tag_thread(person, body, once.outcome),
+                        refusal_for=lambda error: self._refusal(kind, person, error))
 
     def _read(self, kind: str, person: CommandPerson, read: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         try:
@@ -105,24 +124,30 @@ class TopicOperations:
                                   resource_id=conversation_id, action=PRIVATE_UPDATE, team_id=person.team_id)
         if not thread or not decision.allowed:
             raise ThreadNotFound("That conversation was not found.")
-        applied = [
-            str(self._conversations.tag_thread(
-                conversation_id=conversation_id, tag=tag, team_id=person.team_id,
-                canonical_user_id=person.person_id if body["private"] else None,
-                source=TAG_SOURCE, created_by_agent_id=TAGGED_BY,
-            )["tag"])
-            for tag in body["tags"]
-        ]
-        return self._outcomes.save_reply(outcome, {"outcome": "ok", "applied_tags": applied})
+        rows = self._conversations.tag_thread_with_tags(
+            conversation_id=conversation_id, tags=body["tags"], team_id=person.team_id,
+            canonical_user_id=person.person_id if body["private"] else None,
+            source=TAG_SOURCE, created_by_agent_id=TAGGED_BY, command_outcome=outcome,
+        )
+        return _tag_reply(rows)
 
     def _refusal(self, kind: str, person: CommandPerson, error: Exception) -> dict[str, Any]:
         if isinstance(error, ThreadNotFound):
             return _message("not_found", str(error))
-        if isinstance(error, ValueError) and kind != "topics.list_tags":
+        if isinstance(error, TopicTagInputError):
+            self._logger.warning("Refused invalid topic tags. event=team_topic_invalid_input person=%s kind=%s",
+                                 person.person_id, kind)
             return _message("invalid_request", str(error))
         self._logger.error("A topic command failed. event=team_topic_command_failed person=%s kind=%s error_type=%s",
                            person.person_id, kind, type(error).__name__, exc_info=error)
         return _message("runtime_error", "The topic command failed; nothing was changed.")
+
+
+def _tag_reply(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    reply = {"outcome": "ok", "applied_tags": [row["tag"] for row in rows]}
+    # Validate while the transaction is open. A reply the contract refuses must roll back all tags.
+    body_model("topics.tag_thread.reply")[0].validate_python(reply)
+    return reply
 
 
 def _match(item: dict[str, Any]) -> dict[str, Any]:

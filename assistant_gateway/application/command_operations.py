@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from topic_tags import TopicTagInputError, normalize_topic_tag, normalize_topic_tags
+
 import logging
-import re
 import shlex
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -801,6 +802,25 @@ class GatewayCommandOperationsApplication:
         session_key: str | None = None,
     ) -> tuple[str | None, str]:
         try:
+            return await self._execute_topic_command(
+                command=command, channel_name=channel_name, user_id=user_id, chat_id=chat_id,
+                thread_id=thread_id, session_key=session_key,
+            )
+        except TopicTagInputError as error:
+            self._logger.warning("Refused invalid topic tags. event=gateway_topic_invalid_input")
+            return session_key, f"Topic command failed: {error}"
+
+    async def _execute_topic_command(
+        self,
+        *,
+        command: str,
+        channel_name: str | None,
+        user_id: str | None,
+        chat_id: str | None,
+        thread_id: str | None,
+        session_key: str | None = None,
+    ) -> tuple[str | None, str]:
+        try:
             parts = shlex.split(command)
         except ValueError as exc:
             return session_key, f"Topic command failed: {exc}"
@@ -835,8 +855,18 @@ class GatewayCommandOperationsApplication:
 
             try:
                 return await self._team_commands.request(kind, body, person_id=person.canonical_user_id)
-            except Exception as exc:  # noqa: BLE001 - shown to the person as the command's failure
+            except TeamCommandRefused as exc:
+                if kind == "topics.tag_thread" and exc.code == "handler_failed":
+                    return {"outcome": "runtime_error", "message": "The result of the topic change is unknown. "
+                            "Check the thread's tags before sending it again."}
                 return {"outcome": "runtime_error", "message": str(exc)}
+            except TeamServicesUnavailable as exc:
+                return {"outcome": "runtime_error", "message": str(exc)}
+            except Exception:
+                self._logger.exception("A topic command failed in the gateway. "
+                                       "event=gateway_topic_command_failed kind=%s person=%s",
+                                       kind, person.canonical_user_id)
+                return {"outcome": "runtime_error", "message": "The topic command failed. Try again in a moment."}
 
         command_name = parts[0].lower()
         if command_name == "/topics":
@@ -856,7 +886,7 @@ class GatewayCommandOperationsApplication:
                         for item in response["tags"]
                     ]
                 )
-            tag = _normalize_topic_tag(" ".join(parts[1:]))
+            tag = normalize_topic_tag(" ".join(parts[1:]))
             response = await request_topic("topics.find_threads", {"tags": [tag]})
             if response["outcome"] != "ok":
                 return session.session_key, f"Topic command failed: {response.get('message', '')}"
@@ -872,12 +902,7 @@ class GatewayCommandOperationsApplication:
             ).strip()
             if not tag_text:
                 return session_key, "Usage: /tag_thread <tag[,tag]> [--private]"
-            tags = [
-                _normalize_topic_tag(tag)
-                for chunk in tag_text.split(",")
-                for tag in [chunk.strip()]
-                if tag
-            ]
+            tags = normalize_topic_tags([chunk.strip() for chunk in tag_text.split(",") if chunk.strip()])
             response = await request_topic(
                 "topics.tag_thread",
                 {"conversation_id": session.conversation_id, "tags": tags, "private": private},
@@ -892,7 +917,7 @@ class GatewayCommandOperationsApplication:
             tag_text = " ".join(parts[1:]).strip()
             if not tag_text:
                 return session_key, "Usage: /switch_topic <tag>"
-            tag = _normalize_topic_tag(tag_text)
+            tag = normalize_topic_tag(tag_text)
             response = await request_topic("topics.find_threads", {"tags": [tag]})
             if response["outcome"] != "ok":
                 return session.session_key, f"Topic command failed: {response.get('message', '')}"
@@ -930,14 +955,6 @@ class GatewayCommandOperationsApplication:
 _TOPIC_USAGE = (
     "Usage: /topics [tag], /tag_thread <tag[,tag]> [--private], /switch_topic <tag>"
 )
-
-
-def _normalize_topic_tag(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
-    normalized = re.sub(r"-+", "-", normalized).strip("-_")
-    if not normalized:
-        raise ValueError("Topic tag must contain at least one letter or number.")
-    return normalized
 
 
 def _render_topic_matches(

@@ -19,9 +19,9 @@ committed those checks refuse a retry as stale. So, as the memory commands do
 - **Whose command it was.** A stored outcome answers only the same person's repeat;
   another person's command under a reused key is refused (``OutcomeKeyTaken``).
 
-The team services' address answers these commands one at a time
-(``custom_transport.protocol1.live.LiveHost.serve``), and one team services process
-holds the team's lock; the gateway sends a command a second time, under the same id,
+The team services run each family's commands side by side in worker threads, and
+the stores serialize writes under their database locks. One team services process
+holds the team's process lock; the gateway sends a command a second time, under the same id,
 only when the first got no answer in time (``assistant_gateway.application.team_commands``).
 
 A command whose store keeps a receipt (``storage.operation_outcomes.is_receipt``) has its

@@ -13,7 +13,7 @@ from assistant_gateway.application.commands.context import (
 
 @runtime_checkable
 class GatewayMemoryTopicCommandPort(Protocol):
-    """Manager-backed memory and topic use cases exposed to commands."""
+    """Memory and topic use cases answered by the team services."""
 
     async def execute_pinned_memory_command(
         self,
@@ -68,7 +68,7 @@ class GatewayMemoryTopicCommands(Protocol):
 
 
 class MemoryTopicCommandHandler:
-    """Parse memory/topic commands and invoke only their manager use cases."""
+    """Parse memory/topic commands and invoke their application operations."""
 
     def __init__(self, operations: GatewayMemoryTopicCommandPort) -> None:
         self._operations = operations

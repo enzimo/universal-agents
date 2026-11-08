@@ -456,6 +456,12 @@ external-platform registration and `/user link` must
 be run on the platform whose identity is being linked. Broader session, memory,
 and topic commands are kept out of the browser command list.
 
+In channels that support topic commands, `/topics` lists your tags,
+`/tag_thread <tag[,tag]> [--private]` tags the current thread, and
+`/switch_topic <tag>` continues a matching thread. Tags use at most 64
+characters after normalization, with at most 20 tags per tagging command.
+Older oversized tags are left out of lists with a warning in the team log.
+
 The local CLI also supports `/reply <message-ref> <text>` and prints local
 `[msg_n]` references for that purpose. Other chat channels show plain replies
 without message-reference prefixes.

@@ -83,6 +83,10 @@ async def test_a_command_with_no_answer_in_time_is_sent_once_more_under_the_same
     ("memory.create", CREATE, "the change may still be made", None),
     ("memory.list", {"bank": "usermem", "sort": "memory_id", "offset": 0, "limit": 10}, "Try again",
      "may still be made"),
+    ("topics.list_tags", {}, "Try again", "may still be made"),
+    ("topics.find_threads", {"tags": ["taxes"]}, "Try again", "may still be made"),
+    ("topics.tag_thread", {"conversation_id": "conv_example", "tags": ["taxes"], "private": True},
+     "the change may still be made", None),
 ])
 async def test_after_two_sends_without_an_answer_the_person_is_told_what_may_have_happened(
         kind: str, body: dict, says: str, never_says: str | None) -> None:

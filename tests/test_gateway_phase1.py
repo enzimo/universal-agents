@@ -119,14 +119,6 @@ class _AsyncNullContext:
         return False
 
 
-class _CaptureManagerComms:
-    def __init__(self) -> None:
-        self.messages: list[MessageEnvelope] = []
-
-    async def send_message(self, *, message: MessageEnvelope, routing_key: str) -> None:
-        self.messages.append(message)
-
-
 class _CaptureGatewayManagerTransport:
     def __init__(self, on_durable=None, on_operational=None) -> None:
         self.durable: list[tuple[MessageEnvelope, str]] = []
@@ -4322,14 +4314,15 @@ async def test_usermem_command_requires_registration_and_isolates_by_canonical_u
 
 
 @pytest.mark.asyncio
-async def test_topic_commands_tag_list_and_switch_threads(tmp_path: Path, gateway_signed_commands: None):
+async def test_topic_commands_tag_list_and_switch_threads(tmp_path: Path, gateway_signed_commands: None, monkeypatch, caplog):
     config = _build_test_config(tmp_path)
     bootstrap_instance(config)
+    topic_services = InProcessTeamServices(config)
     gateway = UserGateway(
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
-        team_services=InProcessTeamServices(config),
+        team_services=topic_services,
     )
     await _link_bootstrap_admin_channel(
         gateway,
@@ -4453,6 +4446,40 @@ async def test_topic_commands_tag_list_and_switch_threads(tmp_path: Path, gatewa
     assert "+00:00" not in ambiguous
     assert ambiguous_session is not None
     assert ambiguous_session.conversation_id == target_conversation_id
+
+    sent_before = len(topic_services.sent)
+    for command, expected in (
+        ("/tag_thread " + "x" * 65, "64 characters or fewer"),
+        ("/topics " + "x" * 65, "64 characters or fewer"),
+        ("/switch_topic " + "x" * 65, "64 characters or fewer"),
+        ("/tag_thread " + ",".join(f"tag-{i}" for i in range(21)), "between 1 and 20"),
+        ("/tag_thread ,,,", "between 1 and 20"),
+        ("/tag_thread !!!", "at least one letter or number"),
+    ):
+        _, _, text = await handle_interactive_session_command(
+            raw_text=command, gateway=gateway, current_session_key=switched_session_key,
+            channel_name="telegram", user_id="tg_topics", chat_id="chat_topics",
+        )
+        assert expected in text
+        assert "pydantic" not in text
+    assert len(topic_services.sent) == sent_before
+
+    from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
+    for error, expected in (
+        (TeamServicesUnavailable("The team services are not running right now."), "not running"),
+        (TeamCommandRefused("topics.tag_thread", "handler_failed"), "result of the topic change is unknown"),
+        (RuntimeError("private database detail"), "The topic command failed. Try again"),
+    ):
+        async def fail(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(topic_services, "command", fail)
+        _, _, text = await handle_interactive_session_command(
+            raw_text="/tag_thread example", gateway=gateway, current_session_key=switched_session_key,
+            channel_name="telegram", user_id="tg_topics", chat_id="chat_topics",
+        )
+        assert expected in text
+        assert "private database detail" not in text
+    assert "event=gateway_topic_command_failed" in caplog.text
 
 
 @pytest.mark.asyncio
