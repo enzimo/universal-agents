@@ -1,7 +1,8 @@
 """A gateway command queued before an in-place upgrade gets an answer (plan 13B.10 and 13B.12).
 
-Phase 2 moved people's memory commands from a durable ``ManagerMemoryCommand`` in the
-team lead's control queue to protocol 1 request/reply at the team services. Before this
+Phase 2 moved people's memory commands from a durable ``ManagerMemoryCommand``, and the
+Web Chat Knowledge page's from a ``ManagerKnowledgeCommand``, in the team lead's control
+queue to protocol 1 request/reply at the team services. Before this
 change a command a 0.9 gateway queued just before the upgrade could not be read by the
 0.10 lead: it was redelivered, set aside as a dead letter, and the person never heard
 back. Now the lead reads it as a ``RetiredGatewayCommand`` and tells the person, in the
@@ -50,6 +51,8 @@ from tests.test_gateway_phase1 import _build_test_config, _CaptureGatewayManager
 from tests.test_nats_pull_delivery import _adapter, _decode, _JsMessage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-memory-command.json"
+# A Web Chat Knowledge page note as the v0.9.11 gateway serialized it (dumped with that release's models).
+KNOWLEDGE_FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-knowledge-command.json"
 PERSON = "Owner"
 LEAD_ID = "manager_1234"
 REFUSAL = "Your memory command was sent before the team was upgraded, so nothing was changed. Please send it again."
@@ -97,10 +100,11 @@ def _queued_0_9_command(
     signed: Any = "gateway",
     command_type: str = "request",
     claimed_person: str = PERSON,
+    fixture: Path = FIXTURE,
 ) -> bytes:
     """The 0.9 gateway's bytes for this instance, as they wait in the lead's control queue."""
 
-    document = json.loads(FIXTURE.read_text())
+    document = json.loads(fixture.read_text())
     gateway_route = world.config.manager.response_queue_name
     document["msg_header"].update(
         from_agent_id=gateway_route, response_routing_key=gateway_route, to_routing_path=LEAD_ID
@@ -181,6 +185,31 @@ async def test_a_memory_command_queued_before_the_upgrade_is_answered_in_the_per
     (event,) = delivered
     assert event.text == notice.msg_content.text
     assert (event.channel_name, event.chat_id, event.session_key) == ("cli", "owner-chat", "cli:owner")
+
+
+@pytest.mark.asyncio
+async def test_a_knowledge_page_request_queued_before_the_upgrade_is_answered_in_the_persons_web_chat(
+    world, caplog
+) -> None:
+    with caplog.at_level(logging.INFO, logger="test.retired_gateway_commands"):
+        envelope = await _lead_handles(world, _queued_0_9_command(world, fixture=KNOWLEDGE_FIXTURE))
+
+    command = envelope.msg_content
+    assert isinstance(command, RetiredGatewayCommand)
+    assert (command.message_class, command.command_id) == ("ManagerKnowledgeCommand", "mgr_knowledge_5d2e7a41")
+    (routing_key, notice), = world.lead.team_comms.sent
+    assert routing_key == world.config.manager.response_queue_name
+    assert notice.msg_content.text == (
+        "Your Knowledge page request was not carried out\n\nYour Knowledge page request was sent before the team "
+        "was upgraded, so nothing was changed. Please send it again."
+    )
+    assert notice.msg_header.idempotency_key == "retired_gateway_command:mgr_knowledge_5d2e7a41"
+    context = notice.msg_meta.gateway_context
+    assert (context.session_key, context.channel_name, context.chat_id, context.canonical_user_id) == (
+        "website:web-chat:owner", "website", "web-chat", PERSON,
+    )
+    answered = next(r.getMessage() for r in caplog.records if "event=retired_gateway_command_answered" in r.getMessage())
+    assert "command_class=ManagerKnowledgeCommand" in answered
 
 
 @pytest.mark.asyncio

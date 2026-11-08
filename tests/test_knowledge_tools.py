@@ -172,3 +172,35 @@ def test_knowledge_write_keeps_an_omitted_summary_and_clears_an_explicit_empty_s
     cleared = _call(alice, knowledge_write, page="personal/guide", summary="", base_revision=2)
     assert cleared["ok"]
     assert _call(alice, knowledge_read, page="personal/guide")["summary"] == ""
+
+
+def test_agents_read_and_write_whole_pages_longer_than_web_chat_shows(tmp_path):
+    """Web Chat carries at most INLINE_TEXT_MAX characters (team_services.knowledge); agents' tools carry whole
+    pages up to agent.knowledge.limits.max_body_chars, which allows 500,000."""
+
+    from custom_tools.providers.knowledge_curation import publish_contribution, read_contribution
+    from knowledge_base.records import INLINE_TEXT_MAX
+
+    db = tmp_path / "kb.db"
+    longest = {"limits": {"max_body_chars": 500_000}}
+    system, alice = _Agent(db, signed_for=None), _Agent(db, signed_for="alice")
+    system.knowledge_config = alice.knowledge_config = longest
+    first = ("Ünïcode line — ✓ 🚀 " * 30_000)[:499_999] + "."
+    second = first[:-1] + "!"
+    proposal = ("Proposed text. " * 3_000).strip()
+
+    saved = _call(system, knowledge_write, page="team/big", title="Big", body=first)
+    edited = _call(system, knowledge_write, page="team/big", body=second, base_revision=1)
+    current = _call(alice, knowledge_read, page="team/big")
+    earlier = _call(alice, knowledge_read, page="team/big", revision=1)
+    proposed = _call(alice, knowledge_write, page="team/big", body=proposal, base_revision=2)
+    # The knowledge curator's tools, working for alice, read and publish the whole proposal.
+    reviewed = _call(alice, read_contribution, contribution_id=proposed["contribution_id"])
+    published = _call(alice, publish_contribution, contribution_id=proposed["contribution_id"], base_revision=2)
+
+    assert len(first) == 500_000 and len(proposal) > INLINE_TEXT_MAX
+    assert (saved["status"], edited["revision"]) == ("saved", 2)
+    assert current["body"] == second and earlier["body"] == first
+    assert reviewed["text"] == proposal and reviewed["current_page"]["body"] == second
+    assert published["revision"] == 3
+    assert _call(alice, knowledge_read, page="team/big")["body"] == proposal

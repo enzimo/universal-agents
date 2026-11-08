@@ -43,8 +43,11 @@ from custom_transport.protocol1.live import LiveHost
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
+from runtime_settings.knowledge import knowledge_settings
+from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
+from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
 from assistant_gateway.runtime_config import lead_memory_config
 from team_services.service import OperationFamily, TeamServices, Upkeep
@@ -191,9 +194,14 @@ def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]
 
     storage = config.manager_storage_settings
     people = PeopleDirectory(AccessRepository(storage), config.manager.team_id)
-    memory = MemoryOperations(create_pinned_memory_repository(storage, logger=_LOGGER), people,
-                              lead_memory_config(config), clock, _LOGGER)
-    return [memory.family()]
+    memory_store = create_pinned_memory_repository(storage, logger=_LOGGER)
+    memory = MemoryOperations(memory_store, people, lead_memory_config(config), clock, _LOGGER)
+    # The team's knowledge settings: agent types cannot override them.
+    settings = knowledge_settings(config.agent.knowledge)
+    # With the knowledge base off no store is opened, and its commands are answered feature_off.
+    knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None
+    knowledge = KnowledgeOperations(knowledge_store, people, settings, clock, _LOGGER, personal_memory=memory_store)
+    return [memory.family(), knowledge.family()]
 
 
 async def run_team_services(config: GatewayInstanceConfig) -> None:

@@ -3,7 +3,8 @@
 ``MessageHostTeamServices`` sends one command through the gateway's protocol 1 host
 (``assistant_gateway.message_host``) and returns the verified reply's body. It
 implements ``GatewayTeamServices`` in ``assistant_gateway.application.team_commands``;
-people's references come from ``assistant_gateway.people_directory_sync``.
+people's references for commands come from ``assistant_gateway.people_directory_sync``.
+``AccessStorePersonReferences`` reads the people copy to name the people a reply names.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from assistant_gateway.application.team_commands import (
 
 if TYPE_CHECKING:
     from assistant_gateway.message_host import GatewayMessageHost
+    from storage.access_repository import AccessRepository
+    from storage.config import StorageSettings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,3 +74,30 @@ class MessageHostTeamServices:
             raise TeamServicesUnavailable("The team services' answer could not be checked, so it is not shown. An "
                                           "administrator can find the reason in the gateway log.") from error
         return dict(verified.raw["body"])
+
+
+class AccessStorePersonReferences:
+    """Reads, never writes, the gateway's copy of the team's people: for naming the people a reply names.
+
+    The Knowledge page names its editors with it (``application.knowledge_pages``);
+    commands get their person's reference from ``people_directory_sync``, which first
+    makes the copy current.
+    """
+
+    def __init__(self, storage: "StorageSettings", team_id: str) -> None:
+        self._storage = storage
+        self._team_id = team_id
+
+    def person_ref(self, person_id: str) -> str | None:
+        person = self._store().team_person(self._team_id, person_id)
+        return None if person is None else person.person_ref
+
+    def person_id(self, person_ref: str) -> str | None:
+        person = self._store().team_person_by_ref(self._team_id, person_ref)
+        return None if person is None else person.person_id
+
+    def _store(self) -> "AccessRepository":
+        # Imported when first used, as the message host is: command-line runs import this module too.
+        from storage.access_repository import AccessRepository
+
+        return AccessRepository(self._storage)

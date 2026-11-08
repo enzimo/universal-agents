@@ -545,7 +545,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "agent.knowledge.limits.edit_war_freeze_minutes": "How long a frozen page refuses agent edits; agents add notes instead.",
     "agent.knowledge.limits.max_title_chars": "Longest page title.",
     "agent.knowledge.limits.max_summary_chars": "Longest page summary or change description.",
-    "agent.knowledge.limits.max_body_chars": "Longest page text; longer pages should be split into linked pages.",
+    "agent.knowledge.limits.max_body_chars": "Longest page text; longer pages should be split into linked pages. Web Chat shows and saves at most 32768 characters until long text travels as a file.",
     "agent.knowledge.limits.max_note_chars": "Longest note.",
     "agent.knowledge.limits.max_tags": "Most tags on one page.",
     "agent.knowledge.sensitive_content": "Content the knowledge base never stores, beyond the built-in rules (credentials and identity numbers).",

@@ -19,6 +19,7 @@ from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.encoding import body_digest
 from custom_messages.wire.frame import body_model, idempotency_key
 from custom_messages.wire.kinds import KINDS
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES, encoded_size
 from custom_transport.protocol1.ids import new_message_id
 from team_services.process import team_operations
 
@@ -74,9 +75,11 @@ def stand_in_frame(team: str, kind: str, body: dict[str, Any], *, person_ref: st
 
 
 def checked_reply(kind: str, reply: dict[str, Any]) -> dict[str, Any]:
-    """The reply, after checking it against the contract's reply model."""
+    """The reply, after checking it against the contract's reply model and the frame's size."""
 
     body_model(f"{kind}.reply")[0].validate_python(reply)
+    size = encoded_size(reply)
+    assert size <= REPLY_BODY_MAX_BYTES, f"{kind} reply has {size:,} bytes, more than one reply frame carries"
     return reply
 
 

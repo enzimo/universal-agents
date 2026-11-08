@@ -5,7 +5,6 @@ from custom_messages.contracts.control_v1 import AgentCreationRequest
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.control_v1 import ControlInstruction
 from custom_messages.contracts.control_v1 import Instruction
-from custom_messages.contracts.control_v1 import ManagerKnowledgeCommand
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.control_v1 import ManagerTopicCommand
 from custom_messages.contracts.control_v1 import NoOpMessage
@@ -55,7 +54,6 @@ ContentType = Annotated[
         DelegatedTaskClaimedV1,
         DeliveryReceipt,
         Instruction,  # Used directly? Or always via ControlPayload? Let's assume via ControlPayload
-        ManagerKnowledgeCommand,
         ManagerRuntimeWorkCommand,
         ManagerScheduleCommand,
         ManagerTopicCommand,
@@ -99,7 +97,6 @@ ContentType = Annotated[
 # paused, so agents cannot send one, and so a 0.9 lead's late reply to one is
 # dropped by the gateway like any unmatched control reply.
 GATEWAY_MANAGER_CONTROL_TYPES = (
-    ManagerKnowledgeCommand,
     ManagerRuntimeWorkCommand,
     ManagerScheduleCommand,
     ManagerTopicCommand,

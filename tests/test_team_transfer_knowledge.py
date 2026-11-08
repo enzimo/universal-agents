@@ -342,3 +342,52 @@ def test_planning_checks_links_against_the_destinations_own_page_even_when_the_p
         assert outcomes[link_key] == (RecordOutcome.REFUSED, "its link is absent from the page's current text")
     else:
         assert outcomes[link_key][0] is RecordOutcome.IMPORT
+
+
+def test_knowledge_longer_than_web_chat_shows_travels_whole(tmp_path: Path) -> None:
+    """Web Chat shows at most INLINE_TEXT_MAX characters (team_services.knowledge); agents write up to
+    max_body_chars, and a team transfer carries every longer page, revision, note and proposal row exactly."""
+
+    import json
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from knowledge_base.records import INLINE_TEXT_MAX
+    from runtime_settings.knowledge import KnowledgeWriteLimits
+    from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES
+
+    def repository(config: Path):
+        return create_knowledge_repository(GatewayInstanceConfig.load(config).manager_storage_settings)
+
+    config_path = _old_instance(tmp_path)
+    source_store = repository(config_path)
+    source = KnowledgeService(
+        source_store, settings=KnowledgeSettings(limits=KnowledgeWriteLimits(max_body_chars=500_000, max_note_chars=50_000))
+    )
+
+    def long(name: str, length: int = 100_000) -> str:
+        return (f"{name}: Ünïcode — ✓ 🚀 line\n" * length)[: length - 1] + "."
+
+    system, ana = _actor("sys_long"), _actor("w_long", "usr_ana")
+    page = source.write(system, "team/handbook", DraftInput(title="Handbook", body=long("first"))).page
+    source.write(system, "team/handbook", DraftInput(body=long("second")), base_revision=page.revision)
+    source.add_note(system, "team/handbook", long("note", 40_000))
+    source.write(ana, "personal/journal", DraftInput(title="Journal", body=long("journal")))
+    source.write(ana, "team/handbook", DraftInput(body=long("proposal")), base_revision=page.revision + 1)
+
+    def long_rows(store) -> dict[str, list[str]]:
+        """Every stored row with longer text, as exact text."""
+
+        return {
+            table: sorted(json.dumps(row, sort_keys=True, default=str) for row in store.export_rows(table)
+                          if len(str(row.get("body") or "")) > INLINE_TEXT_MAX)
+            for table in KNOWLEDGE_TRANSFER_TABLES
+        }
+
+    exported = long_rows(source_store)
+    _plan, target = _transfer(tmp_path, config_path)
+    imported = long_rows(repository(target / "instance_config.yaml"))
+
+    assert {table: len(rows) for table, rows in exported.items() if rows} == {
+        "knowledge_pages": 2, "knowledge_revisions": 3, "knowledge_notes": 1, "knowledge_contributions": 1,
+    }
+    assert imported == exported

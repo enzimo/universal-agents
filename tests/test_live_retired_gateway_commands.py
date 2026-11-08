@@ -1,4 +1,4 @@
-"""A memory command a 0.9 gateway queued before the upgrade, answered over real NATS (plan 13B.10, 13B.12).
+"""A memory or Knowledge page command a 0.9 gateway queued before the upgrade, answered over real NATS (plan 13B.10, 13B.12).
 
 The 0.9 gateway's bytes (``tests/fixtures/upgrade/0.9-manager-memory-command.json``) wait
 in the team lead's durable control queue before the 0.10 lead subscribes, as they do
@@ -34,7 +34,7 @@ from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import forget_task_context_keys, use_gateway_key
-from tests.test_retired_gateway_commands import REFUSAL, _queued_0_9_command
+from tests.test_retired_gateway_commands import FIXTURE, KNOWLEDGE_FIXTURE, _queued_0_9_command
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
@@ -48,16 +48,25 @@ async def _until(condition, *, timeout: float) -> bool:
     return await condition()
 
 
+# (fixture, the command's name in the notice, where the 0.9 gateway sent it from: channel, chat, session)
+QUEUED_COMMANDS = {
+    "memory": (FIXTURE, "memory command", ("cli", "owner-chat", "cli:owner")),
+    "knowledge": (KNOWLEDGE_FIXTURE, "Knowledge page request", ("website", "web-chat", "website:web-chat:owner")),
+}
+
+
 @pytest.mark.asyncio
-async def test_a_queued_0_9_memory_command_is_answered_in_the_persons_chat_over_nats(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("family", sorted(QUEUED_COMMANDS))
+async def test_a_queued_0_9_command_is_answered_in_the_persons_chat_over_nats(tmp_path, monkeypatch, caplog,
+                                                                               family: str):
     use_gateway_key(monkeypatch)
     try:
-        await _answered_over_nats(tmp_path, caplog)
+        await _answered_over_nats(tmp_path, caplog, *QUEUED_COMMANDS[family])
     finally:
         forget_task_context_keys()
 
 
-async def _answered_over_nats(tmp_path, caplog) -> None:
+async def _answered_over_nats(tmp_path, caplog, fixture, name: str, chat: tuple[str, str, str]) -> None:
     team_id, lead_id = new_id("live_retired"), new_id("manager")
     config = GatewayInstanceConfig.create(
         instance_name="live_retired", instance_root=str(tmp_path / "instance"),
@@ -68,10 +77,15 @@ async def _answered_over_nats(tmp_path, caplog) -> None:
     config.transport = resolve_live_transport_settings()
     config.delivery.quiet_hours.enabled = False
     delivered: list[Any] = []
-    gateway = UserGateway(
-        config, output_sink=None, event_sink=delivered.append,
-        state_store=GatewayStateStore(str(tmp_path / "gateway.db")),
-    )
+    state_store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    channel, chat_id, session_key = chat
+    if channel == "website":
+        # The person's Web Chat thread, where they used the Knowledge page before the upgrade.
+        state_store.create_session(
+            session_key=session_key, conversation_id="conv_owner_web", manager_agent_id=lead_id,
+            channel_name=channel, user_id="owner", chat_id=chat_id, owner_canonical_user_id="Owner",
+        )
+    gateway = UserGateway(config, output_sink=None, event_sink=delivered.append, state_store=state_store)
     # The lead's own connection: one delivery per message, so an unreadable one is set aside at once.
     lead_transport = nats_transport_config_from_env(transport=config.transport, max_deliver=1, name=new_id("live_lead"))
     lead_adapter = NatsTransportAdapter(
@@ -121,7 +135,7 @@ async def _answered_over_nats(tmp_path, caplog) -> None:
         durable = mapper.durable_name(f"agent_{lead_id}_control")
         try:
             # Queued by the 0.9 gateway before the upgrade; nobody reads it yet.
-            await lead_adapter._js.publish(control_subject, _queued_0_9_command(world))
+            await lead_adapter._js.publish(control_subject, _queued_0_9_command(world, fixture=fixture))
             await lead_client.adapter.subscribe_subject(
                 name="live-retired-lead-status", subject=lead_client.mapper.operational_subject(),
                 handler=lead_status, delivery=SubscriptionDelivery.CORE,
@@ -137,8 +151,9 @@ async def _answered_over_nats(tmp_path, caplog) -> None:
                 assert await _until(lambda: _delivered(delivered), timeout=15), "the person was never answered"
 
             (event,) = delivered
-            assert event.text == f"Your memory command was not carried out\n\n{REFUSAL}"
-            assert (event.channel_name, event.chat_id, event.session_key) == ("cli", "owner-chat", "cli:owner")
+            assert event.text == (f"Your {name} was not carried out\n\nYour {name} was sent before the team was "
+                                  "upgraded, so nothing was changed. Please send it again.")
+            assert (event.channel_name, event.chat_id, event.session_key) == chat
             info = await lead_adapter._js.consumer_info(mapper.work_stream_name(), durable)
             assert (info.num_pending, info.num_ack_pending) == (0, 0)
             dead_letters = await lead_adapter._js.stream_info(mapper.dead_letter_stream_name())

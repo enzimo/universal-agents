@@ -213,6 +213,47 @@ class PageProblems:
     duplicate_pages: list[tuple[str, str]]  # (canonical page, exact duplicate)
 
 
+# The longest knowledge text one Web Chat request or reply carries: the message
+# contract's inline text (``long_text``). Longer text needs the contract's object store,
+# which does not exist yet, so the Web Chat Knowledge page refuses it
+# (``team_services.knowledge``) while agents' tools read and write whole pages up to
+# ``agent.knowledge.limits.max_body_chars`` (at most 500,000 characters).
+INLINE_TEXT_MAX = 32768
+
+
+@dataclass(frozen=True)
+class LongTextCounts:
+    """Stored knowledge longer than ``INLINE_TEXT_MAX``, which Web Chat cannot open: counts only.
+
+    ``earlier_revisions`` leaves out each page's current revision, which ``pages`` counts.
+    """
+
+    pages: int
+    earlier_revisions: int
+    pending_contributions: int
+    open_notes: int
+    # Pages whose texts each fit but which, with their open notes, are about too large for one reply.
+    too_large_pages: int = 0
+
+    @property
+    def total(self) -> int:
+        return (self.pages + self.earlier_revisions + self.pending_contributions + self.open_notes
+                + self.too_large_pages)
+
+
+@dataclass(frozen=True)
+class ConfirmedChange:
+    """What a person's write or note stored, with the review kinds the person confirmed.
+
+    The knowledge service hands this to a command's stored receipt
+    (``storage.operation_outcomes.CommandOutcome.reply_for``) inside the change's
+    transaction, so a reply built from the receipt later names the same kinds.
+    """
+
+    result: Any  # the KnowledgePage or KnowledgeNote the store returned
+    review_kinds: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class SearchHit:
     page: KnowledgePage

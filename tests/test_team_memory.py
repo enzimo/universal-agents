@@ -587,7 +587,7 @@ async def test_memory_commands_use_the_team_leads_own_memory_settings(tmp_path: 
         {"agent": {"memory": {"coremem": {"max_facts_per_team": 1}}}})
     config.save()
     record(AccessRepository(config.manager_storage_settings), ADA, ("admin",), PersonStanding.ACTIVE)
-    (family,) = team_operations(config, lambda: NOW)
+    family = next(family for family in team_operations(config, lambda: NOW) if "memory.create" in family.handlers)
 
     async def create_team_fact(text: str, request_id: str) -> dict:
         body = {"request_id": request_id, "bank": "coremem", "fact_text": inline(text)}

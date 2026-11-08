@@ -31,7 +31,12 @@ from typing import Any, Callable, Protocol
 
 # How many times one command is sent when no answer comes in time (module docstring).
 SEND_ATTEMPTS = 2
-_READ_KINDS = frozenset({"memory.list", "memory.show"})
+# Commands that only read: when no answer comes, nothing can still be changed.
+_READ_KINDS = frozenset({
+    "memory.list", "memory.show",
+    "knowledge.list", "knowledge.read", "knowledge.history", "knowledge.list_contributions",
+    "knowledge.count_contributions", "knowledge.read_contribution",
+})
 
 
 class TeamServicesUnavailable(RuntimeError):

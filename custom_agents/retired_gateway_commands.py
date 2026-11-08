@@ -2,8 +2,10 @@
 
 Why this exists: phase 2 of the message contract moved people's memory commands
 (``/coremem``, ``/usermem`` and the Settings memory page) from a durable
-``ManagerMemoryCommand`` in the team lead's control queue to protocol 1
-request/reply at the team services (``team_services.memory``). A command a 0.9
+``ManagerMemoryCommand``, and the Web Chat Knowledge page's requests from a
+``ManagerKnowledgeCommand``, in the team lead's control queue to protocol 1
+request/reply at the team services (``team_services.memory``,
+``team_services.knowledge``). A command a 0.9
 gateway queued just before the instance was upgraded in place can still be
 waiting in that queue when 0.10 starts. Plan 13B.10 requires that the person
 gets an answer, not silence.

@@ -202,7 +202,7 @@ from assistant_gateway.mcp_controls import GatewayMCPControls
 from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.person_departure import build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
-from assistant_gateway.team_services_client import MessageHostTeamServices, new_request_id
+from assistant_gateway.team_services_client import AccessStorePersonReferences, MessageHostTeamServices, new_request_id
 from assistant_gateway.application.team_commands import (
     GatewayPersonReferences,
     GatewayTeamCommandService,
@@ -595,6 +595,12 @@ def _team_commands(
         request_ids=new_request_id,
         logger=logger,
     )
+
+
+def _person_references(config: GatewayInstanceConfig) -> AccessStorePersonReferences:
+    """People's opaque references, from the gateway's copy of the team's people."""
+
+    return AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id)
 
 
 class UserGateway:
@@ -1364,9 +1370,13 @@ class UserGateway:
                 person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
             ),
-            # People's Knowledge page; the knowledge base is in the manager's database.
+            # People's Knowledge page; the team services answer it (team_services.knowledge).
             knowledge=GatewayKnowledgePages(
-                runner=self._command_operations,
+                team_commands=_team_commands(
+                    resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+                ),
+                # Naming editors only reads the people copy; commands make it current first.
+                references=_person_references(config),
                 display_name=self.access_inbox.display_name,
                 enabled=config.agent.knowledge.enabled,
             ),

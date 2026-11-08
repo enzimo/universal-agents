@@ -29,6 +29,14 @@ Why it is shaped this way:
   so they also go when nothing new is stored.
 - **A repeated key with another body** is the sender's defect: the stored reply still
   answers, and both body digests are logged.
+- **Receipts for replies read after the change.** Some replies show what the change
+  produced as readers see it once committed (a knowledge page with its links and notes),
+  which the change's transaction cannot read. Such a command stores a receipt instead, a
+  stored reply whose only key is ``receipt`` (``is_receipt``): what it changed, by id,
+  and what the person confirmed, never the text. Its reply is built from the receipt
+  after the commit, on the first try and every retry alike (``team_services.outcomes``),
+  so a retry gets the same outcome for the same records, shown as they are then; the
+  change itself is never carried out again.
 """
 
 from __future__ import annotations
@@ -47,7 +55,16 @@ OUTCOMES_TABLE = "protocol1_operation_outcomes"
 OUTCOME_PERSON_COLUMN = "person_id"
 OUTCOME_RETENTION = timedelta(days=7)
 
+# The one key of a stored receipt (module docstring); a contract reply always has an ``outcome``.
+RECEIPT_KEY = "receipt"
+
 _LOGGER = logging.getLogger(__name__)
+
+
+def is_receipt(reply: dict[str, Any]) -> bool:
+    """Whether a stored reply is a receipt to build the reply from (module docstring)."""
+
+    return set(reply) == {RECEIPT_KEY}
 
 
 def outcome_table_statements() -> tuple[str, ...]:

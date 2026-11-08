@@ -91,6 +91,12 @@ class PeopleDirectory:
             return None
         return PersonNow(record.person_id, record.standing, tuple(record.roles))
 
+    def person_ref(self, person_id: str) -> str | None:
+        """The person's opaque reference, for naming them in protocol 1 replies; None if never recorded."""
+
+        record = self.store.team_person(self.team_id, person_id)
+        return None if record is None else record.person_ref
+
     def people(self) -> dict[str, PersonNow]:
         """Everyone the gateway recorded in the team, by person id."""
 
