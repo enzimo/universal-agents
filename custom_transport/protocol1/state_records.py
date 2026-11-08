@@ -17,6 +17,7 @@ copy of another agent's record is not this one's.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -62,6 +63,13 @@ class StoredRecord:
 
     revision: int
     record: VerifiedRecord
+
+
+def require_record_key(verified: VerifiedRecord, key: str) -> None:
+    """A valid signature authenticates the document, never the bucket key holding it."""
+
+    if verified.document.key != key:
+        raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
 
 
 class StateRecords:
@@ -150,8 +158,7 @@ class StateRecords:
             if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
                 raise
             verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
-        if verified.document.key != key:
-            raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
+        require_record_key(verified, key)
         return StoredRecord(int(entry.revision), verified)
 
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
@@ -165,6 +172,14 @@ class StateRecords:
         entry = await self._get(record, key)
         if entry is None:
             return False
+        # Check before mutating the trust store. A copied session is still authentic,
+        # but it cannot supply the session requested under a different bucket key.
+        try:
+            document = json.loads(entry.value)
+        except (ValueError, TypeError) as error:
+            raise FrameRefused("malformed", at="/key") from error
+        if not isinstance(document, dict) or document.get("key") != key:
+            raise FrameRefused("invalid_body", "a trust record is stored under another key", at="/key")
         try:
             return self._trust.add(entry.value, now=now)
         except FrameRefused as refused:
@@ -224,11 +239,14 @@ class StateRecords:
         return entry if entry.value else None
 
     async def watch(self, record: str, keys: str = ">", *,
-                    team: Optional[str] = None) -> AsyncIterator[tuple[str, Optional[bytes]]]:
-        """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or expired.
+                    team: Optional[str] = None,
+                    caught_up: Optional[asyncio.Event] = None) -> AsyncIterator[tuple[str, Optional[bytes]]]:
+        """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or purged.
 
         The caller verifies each record it uses, as ``read_report`` does, keeping the
-        sequence it holds per key.
+        sequence it holds per key. ``caught_up`` is set once the bucket's current values
+        have all been given. A record that expires by its bucket's age limit (host
+        liveness) gives no change: readers judge those by the record's own expiry.
         """
 
         bucket = await self._bucket(record, team=team)
@@ -236,7 +254,9 @@ class StateRecords:
         try:
             async for entry in watcher:
                 if entry is None:
-                    continue  # the end of the initial values
+                    if caught_up is not None:
+                        caught_up.set()  # the end of the initial values
+                    continue
                 yield entry.key, (entry.value or None)
         finally:
             await watcher.stop()

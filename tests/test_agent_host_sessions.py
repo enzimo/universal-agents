@@ -31,6 +31,7 @@ from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import Rejoined
 from custom_transport.protocol1.joining import HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable
+from custom_transport.protocol1.state_records import StoredRecord
 
 TEAM = "team_one"
 NOW = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
@@ -79,12 +80,40 @@ class _Live:
         return _Subscription()
 
 
+class _Records:
+    """Stands in for ``StateRecords``: keeps the agent records written and removed."""
+
+    def __init__(self) -> None:
+        self.written: list[dict[str, Any]] = []
+        self.removed: list[str] = []
+        self.values: dict[str, dict[str, Any]] = {}
+
+    def signed(self, record: str, key: str, body: dict[str, Any], *, sequence: int, issued_at: datetime,
+               expires_at: Optional[datetime] = None) -> dict:
+        return {"record": record, "key": key, "body": body}
+
+    async def put(self, record: str, key: str, document: dict[str, Any]) -> int:
+        self.written.append(document)
+        self.values[key] = document
+        return 1
+
+    async def read_report(self, record: str, key: str, *, now: datetime):
+        if key not in self.values:
+            return None
+        return StoredRecord(1, SimpleNamespace(signer=SimpleNamespace(runtime="lead")))
+
+    async def delete(self, record: str, key: str, *, last_revision: int) -> bool:
+        self.removed.append(key)
+        self.values.pop(key, None)
+        return True
+
+
 class _Host:
     """Stands in for ``MessageHost``: joined, with a certificate naming ``agent_types``."""
 
     def __init__(self, agent_types: Iterable[str], *, grant: bool = True) -> None:
         self.live = _Live(agent_types)
-        self.records: Any = SimpleNamespace()
+        self.records: Any = _Records()
         self.rejoined: list[list[str]] = []
         self.grant = grant
         self.reports = 0
@@ -507,3 +536,35 @@ def test_production_host_factory_uses_the_launchers_limit_and_the_current_catalo
     assert set(lead._catalog_types()) == catalog
     worker = process_host_for("agent-test", layout, TEAM, is_lead=False, agent_type="Researcher", worker_pools={})
     assert worker.profile == startup_agent_host_profile(TEAM, "agent-test", "Researcher")
+
+
+@pytest.mark.asyncio
+async def test_a_start_removes_only_the_earlier_agent_records_that_verify_as_its_own(caplog) -> None:
+    process, _ = _process()
+    mine = SimpleNamespace(signer=SimpleNamespace(runtime="lead"))
+    theirs = SimpleNamespace(signer=SimpleNamespace(runtime="agent-Researcher"))
+    stored: dict[str, Any] = {
+        f"{TEAM}.forged": FrameRefused("bad_signature", at="/signature"),
+        f"{TEAM}.removed": None,
+        f"{TEAM}.broken": RuntimeError("nats: timeout"),
+        f"{TEAM}.old_1": StoredRecord(4, mine),  # type: ignore[arg-type]
+        f"{TEAM}.other_host": StoredRecord(2, theirs),  # type: ignore[arg-type]
+    }
+    records = process.host.records  # type: ignore[union-attr]
+
+    async def keys(record: str, prefix: str) -> list[str]:
+        return [*stored, "other_team.z"]
+
+    async def read_report(record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+        assert record == "agent"
+        found = stored[key]
+        if isinstance(found, Exception):
+            raise found
+        return found
+
+    records.keys, records.read_report = keys, read_report
+    with caplog.at_level(logging.WARNING, logger=agent_host.__name__):
+        await process._remove_earlier_records()
+    assert records.removed == [f"{TEAM}.old_1"]
+    assert "event=agent_host_record_refused" in caplog.text and f"key={TEAM}.forged" in caplog.text
+    assert "event=agent_record_stale_remove_failed" in caplog.text

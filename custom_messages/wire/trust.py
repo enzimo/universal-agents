@@ -565,6 +565,9 @@ class TrustStore:
                 # Authentic, but shaped by another contract: the reader decides what it means.
                 assert signer is not None
                 self._check_own_record_of_another_contract(document, raw, signer)
+                # A different body schema cannot remove this protocol's signed
+                # lifetime limit. Otherwise a stopped host could remain live forever.
+                self._check_record_dates(document, spec, None, issued_at)
                 return VerifiedRecord(document=document, body=None, signer=signer, digest=digest,
                                       other_contract=True, their_contract_sha256=theirs)
         try:

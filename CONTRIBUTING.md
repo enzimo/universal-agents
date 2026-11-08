@@ -249,6 +249,12 @@ records and vectors, then run its `--check` mode. See
 `contracts/messages/v1/README.md` for the language-neutral validation and
 signing rules.
 
+Agent-record changes need real NATS coverage in `tests/test_live_agent_records.py`
+and `tests/test_live_agent_hosts.py`: verify signed identity, watch reconnects,
+expiry, conditional removal and detach during session replacement. Scripted
+failure tests cover refused repairs and cancellation, which must not prevent
+unrelated agents refreshing their records.
+
 PostgreSQL connection strings in logs and error messages go through
 `storage.postgres_connection.redact_postgres_dsn`. It uses psycopg's libpq parser
 for both URLs and keyword settings, then writes redacted keyword settings.

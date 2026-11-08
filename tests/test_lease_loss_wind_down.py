@@ -660,6 +660,24 @@ async def test_shutdown_during_a_handback_keeps_the_tasks_not_yet_handed_back(ma
     assert manager.get_task_info("queued") is not None
 
 
+def test_winding_down_tells_the_agents_record_at_once() -> None:
+    """Its signed record says it takes no more work before any later state refresh (custom_agents.agent_host)."""
+
+    from custom_agents.agent_host import agent_record_state
+
+    reported: list[tuple[str, bool]] = []
+    agent = SimpleNamespace(id="worker_1", paused=False, is_executing=True, _worker_launch=None,
+                            _logger=logging.getLogger("test.wind_down"), schedule_workers={})
+    agent._report_record_state = lambda: reported.append(agent_record_state(agent))
+    original = wind_down.start_owned_task
+    wind_down.start_owned_task = lambda *args, **kwargs: None
+    try:
+        wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    finally:
+        wind_down.start_owned_task = original
+    assert reported == [("busy", False)]
+
+
 @pytest.mark.asyncio
 async def test_a_wind_down_for_another_contract_names_that_reason_not_a_lost_lease(manager, monkeypatch, caplog):
     """A pool worker whose process runs another message contract winds down this way (custom_agents.contract_drain).

@@ -68,6 +68,9 @@ async def drain_agent(agent: Any, reason: str) -> None:
     if state is None:
         state = ContractDrain(reason=reason, started_at=datetime.now(timezone.utc), holds_back_unstarted=worker)
         agent._contract_drain = state
+        report = getattr(agent, "_report_record_state", None)
+        if callable(report):
+            report()
     # Startup may have been subscribing when the drain began; a repeat leaves those queues too.
     state.left_queues += await _leave_shared_queues(agent)
     if not state.announced:

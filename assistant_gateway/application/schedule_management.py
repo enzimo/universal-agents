@@ -37,7 +37,6 @@ from custom_messages.contracts.schedule_v1 import (
     ScheduledMessage,
     ScheduleTaskMemory,
 )
-from custom_messages.wire.encoding import format_timestamp
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
     MessageMetaType,
@@ -342,6 +341,10 @@ class GatewayScheduleApplication:
         except (ValueError, KeyError):
             raise ScheduleControlRefused("invalid_request", "Use a pause time such as 2030-01-01T09:30:00, "
                                          "in your time zone, or include a UTC offset such as +01:00.") from None
+        # Wire encoding loads the generated models. Command-line startup needs
+        # none of those; load them only when this command sends a wire timestamp.
+        from custom_messages.wire.encoding import format_timestamp
+
         return await self._change("pause", schedule_id, session_key=session_key,
                                   expected_record_digest=expected_record_digest,
                                   paused_until=format_timestamp(moment))

@@ -37,7 +37,7 @@ def live_host(connection, runtime, key, epoch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", [
     "request", "reply", "unsupported", "handler_failed", "bad_reply", "invalid_frame",
-    "put", "create", "update", "join",
+    "put", "create", "update", "join", "delete",
 ])
 async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeypatch, caplog, operation):
     entered, release = asyncio.Event(), asyncio.Event()
@@ -60,7 +60,7 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
     worker = live_host(connection, "worker-host-1", "test-worker-key-1", 3)
     services = live_host(connection, "team-services-1", "test-services-key-1", 2)
     bucket = SimpleNamespace(put=AsyncMock(return_value=1), create=AsyncMock(return_value=1),
-                             update=AsyncMock(return_value=2))
+                             update=AsyncMock(return_value=2), delete=AsyncMock())
     js = SimpleNamespace(key_value=AsyncMock(return_value=bucket))
     records = StateRecords(js, lambda: services.identity, services.trust)
     body = {"request_id": "close_1", "session": "s-researcher-2-1", "reason": "exited"}
@@ -80,6 +80,8 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
         if operation in {"put", "create", "update"}:
             await records.put("agent", f"{TEAM}.researcher-2", {},
                               last_revision={"put": None, "create": 0, "update": 1}[operation])
+        elif operation == "delete":
+            await records.delete("agent", f"{TEAM}.researcher-2", last_revision=1)
         elif operation == "join":
             with pytest.raises(ServiceUnavailable):
                 await join(connection, worker.identity.keys, worker.trust,
@@ -95,7 +97,7 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
             await answer(message)
             await services.drain()
 
-    writes = [connection.request, connection.publish, bucket.put, bucket.create, bucket.update]
+    writes = [connection.request, connection.publish, bucket.put, bucket.create, bucket.update, bucket.delete]
     pending = asyncio.create_task(send())
     try:
         await asyncio.wait_for(entered.wait(), timeout=2)
@@ -107,7 +109,7 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
     assert sum(write.await_count for write in writes) == 1
 
     fail = True
-    if operation in {"put", "create", "update", "request", "join"}:
+    if operation in {"put", "create", "update", "delete", "request", "join"}:
         with pytest.raises(OSError, match="disk flush failed"):
             await send()
     else:

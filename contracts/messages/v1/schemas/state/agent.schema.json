@@ -14,6 +14,12 @@
     "agent_type": {
       "$ref": "../common.schema.json#/$defs/agent_type"
     },
+    "display_name": {
+      "description": "The agent's name as the team knows it (the lead routes by it and the gateway's Team page shows it); not a person's name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
     "session": {
       "$ref": "../common.schema.json#/$defs/token_id"
     },
