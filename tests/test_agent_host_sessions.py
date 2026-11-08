@@ -87,15 +87,22 @@ class _Records:
         self.written: list[dict[str, Any]] = []
         self.removed: list[str] = []
 
-    def signed(self, record: str, key: str, body: dict[str, Any], *, sequence: int, issued_at: datetime) -> dict:
+    def signed(self, record: str, key: str, body: dict[str, Any], *, sequence: int, issued_at: datetime,
+               expires_at: Optional[datetime] = None) -> dict:
         return {"record": record, "key": key, "body": body}
 
     async def put(self, record: str, key: str, document: dict[str, Any]) -> int:
         self.written.append(document)
         return 1
 
-    async def delete(self, record: str, key: str) -> None:
+    async def read_report(self, record: str, key: str, *, now: datetime):
+        if key in self.removed or not any(item["key"] == key for item in self.written):
+            return None
+        return StoredRecord(1, SimpleNamespace(signer=SimpleNamespace(runtime="lead")))
+
+    async def delete(self, record: str, key: str, *, last_revision: int) -> bool:
         self.removed.append(key)
+        return True
 
 
 class _Host:
@@ -462,7 +469,7 @@ async def test_a_start_removes_only_the_earlier_agent_records_that_verify_as_its
     }
     records = process.host.records  # type: ignore[union-attr]
 
-    async def keys(record: str) -> list[str]:
+    async def keys(record: str, prefix: str) -> list[str]:
         return [*stored, "other_team.z"]
 
     async def read_report(record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:

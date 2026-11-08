@@ -207,7 +207,8 @@ async def test_signed_records_are_written_with_compare_and_set_and_verified_when
         agents = StateRecords(worker.nc.jetstream(), lambda: worker.identity, worker.trust)
         state = {"team": TEAM, "agent": "researcher-2", "agent_type": "researcher", "session": "s-researcher-2-1",
                  "state": "idle", "accepting_work": True, "since": format_timestamp(fixtures.NOW)}
-        await agents.put("agent", key, agents.signed("agent", key, state, sequence=1, issued_at=fixtures.NOW))
+        await agents.put("agent", key, agents.signed("agent", key, state, sequence=1, issued_at=fixtures.NOW,
+                                                   expires_at=fixtures.NOW + timedelta(seconds=180)))
         read = await StateRecords(js, lambda: services.identity, services.trust).read_report("agent", key, now=fixtures.NOW)
         assert read is not None and read.record.signer.runtime == "worker-host-1"
         assert await reader.read_report("agent", f"{TEAM}.nobody", now=fixtures.NOW) is None

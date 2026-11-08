@@ -4545,20 +4545,41 @@ has no address, so nothing can ask it anything and its exit goes unseen. So:
 
 **Agent records and who is live** (step 7a): each agent's host signs the agent's state into
 `UA1_AGENTS` (key `<team>.<agent>`: starting, idle, busy, paused or exiting, whether it
-accepts work, and its name, plan decision 69) when the agent reports a change
+accepts work, and its `display_name`, plan decision 69) when the agent reports a change
 (`custom_agents.agent_host.report_agent_state`, called wherever the agent refreshes its own
-state row and when a worker starts winding down after losing its launch lease). It writes at
+state row, when a worker starts winding down after losing its launch lease, and when an
+agent begins draining for another contract). Starting and paused agents accept no new work.
+The agent reports `starting` until routes and recovery are ready. It writes at
 most every 2 seconds, so a burst of busy and idle turns costs one write. "Exiting" is
 written at once as the agent leaves, before its session closes, and the record is then
 removed, since agent ids are new at every start; a host's start also removes the records
 its earlier run left, read verified as its own (one that does not verify is left and
-logged). Readers use `custom_transport.protocol1.team_agents.TeamAgents`, which
-watches `UA1_AGENTS`, `UA1_PLACEMENT` and `UA1_HOSTS`, verifies each record, and counts an
-agent live while its record is not exiting, its placement names the host that signed the
+logged). Unfinished removals and failed startup listings retry during upkeep. Removal
+checks the current signed record and deletes only that exact bucket revision, so a
+concurrent replacement survives. An unchanged record is signed again every minute with
+the current certificate; this also repairs removed records. A missing placement is
+reopened through the team services, which own placements. A record whose ownership
+cannot be verified is left in place rather than deleted on the strength of its key alone.
+Every agent record expires within three minutes, and the bucket enforces that lifetime
+even for unverifiable data, so abandoned records leave without a claim of ownership.
+This is a pre-release contract change: records without the new expiry are refused.
+Readers use `custom_transport.protocol1.team_agents.TeamAgents`, which
+watches `UA1_AGENTS`, `UA1_PLACEMENT`, `UA1_HOSTS` and the team's session records in
+`UA1_CERTS`, verifies each record's signature and bucket key, and counts an
+agent live while its record is not exiting, its placement names the type and host that signed the
 record, and that host's liveness record has not expired (checked again every 5 seconds,
 since an expired record gives no change), so a stopped host's agents drop out at most 35
 seconds after its last liveness write. Whether an agent is the team lead comes from its
-session's `agent_role`, which the team services signed. The view is replaced as a whole on
+session's `agent_role`, which the team services signed. That session must name this agent,
+type and signing host and still be current; a role is never cached by session id alone.
+The host's liveness certificate must be at least the placement's `host_epoch`.
+Replay protection is kept per key and signing host, including after deletion. A refused
+record cannot consume another host's sequences. Temporary trust failures retry without
+waiting for an agent to change state; failed watches reopen and expiry checks continue.
+`ready` clears when the reader stops, `running` reports its state, and listeners can read
+`departure_reason` to distinguish exit from host unavailability. Duplicate names or lead
+roles produce no selected agent, since sorting attacker-chosen ids proves no authority.
+The view is replaced as a whole on
 each change, so agents on other threads read it without locks. The team lead's process and
 the gateway start reading it in steps 7b and 7c, which replace the presence heartbeat.
 A host record that names another contract digest is authentic but its body is not read, so

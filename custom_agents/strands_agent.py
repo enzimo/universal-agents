@@ -5035,6 +5035,7 @@ class UniversalAgent(BaseModel):
             # request during a resumed turn still reaches cleanup.
             schedule_pending_work(self)
 
+            report_agent_state(self)
             self._logger.info(
                 "[%s] NATS transport ready; waiting for messages until exit.", self.id
             )

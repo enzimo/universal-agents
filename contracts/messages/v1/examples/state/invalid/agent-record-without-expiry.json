@@ -1,0 +1,13 @@
+{
+  "description": "An agent record must expire within three minutes so an abandoned record cannot persist indefinitely.",
+  "refusal": "invalid_body",
+  "at": "/expires_at",
+  "base": "agent/lead-busy.json",
+  "changes": [
+    {
+      "remove": "/expires_at"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"agent\", \"protocol\": \"1.0-pre\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"key_id\": \"test-lead-key-1\"}, \"sequence\": 12, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"team_lead\", \"display_name\": \"Team lead\", \"session\": \"s-lead-1\", \"state\": \"busy\", \"accepting_work\": true, \"since\": \"2026-10-22T04:29:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"IQJqKPFGQB77Uww1ycfU4NoiE_ccFRQjJ20BDNuoyS0\", \"signature\": \"KRDRl4kIONKyXyORj7h_NooEJhufjg-Q6FlrXBNw_NnbXQ9aJ9FVdrveqUAgCf50NEhFxRmW_OkJRP12xzf4Dg\"}"
+}

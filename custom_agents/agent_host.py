@@ -49,7 +49,8 @@ Why it is shaped this way:
   ``<team>.<agent>``: starting, idle, busy, paused or exiting, whether it accepts work, and
   its name) when it changes, at most every 2 seconds, so a burst of busy and idle turns
   costs one write; readers join it with the agent's placement and the host's liveness
-  (``custom_transport.protocol1.team_agents``). "Exiting" is written at once as the agent
+  (``custom_transport.protocol1.team_agents``). A record is refreshed every minute under
+  current trust and expires within three minutes, bounding abandoned records. "Exiting" is written at once as the agent
   leaves, before its session closes, and the record is then removed: agent ids are new at
   every start, so records left behind would only pile up. A host's start removes the
   records its earlier run left, with their sessions.
@@ -78,12 +79,13 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
 import rfc8785
 
 from custom_messages.wire.encoding import b64url, format_timestamp
+from custom_messages.wire.kinds import STATE_RECORDS
 from custom_agents.contract_drain import drain_agent, holds_work
 from custom_messages.wire.frame import Receiver, VerifiedFrame
 from custom_messages.wire.refusals import FrameRefused
@@ -119,6 +121,12 @@ _NOT_IN_TOKEN = re.compile(r"[^A-Za-z0-9_-]")
 SESSION_RENEW_SECONDS = 24 * 3600.0
 # An agent's record is written when its state changes, at most this often (README "State records").
 AGENT_RECORD_INTERVAL_SECONDS = 2.0
+# Refresh unchanged records with current certificates and repair a removed record.
+_AGENT_RECORD_TTL = STATE_RECORDS["agent"].ttl_seconds
+assert _AGENT_RECORD_TTL is not None
+AGENT_RECORD_LIFETIME = timedelta(seconds=_AGENT_RECORD_TTL)
+AGENT_RECORD_REFRESH_SECONDS = _AGENT_RECORD_TTL / 3
+AGENT_RECORD_CLEANUP_SECONDS = 10.0
 # While the process drains, how often it checks whether its agents still hold work (module docstring).
 DRAIN_POLL_SECONDS = 5.0
 _PLACEMENT_BUCKET = "UA1_PLACEMENT"
@@ -216,11 +224,13 @@ class _HostedAgent:
     state: str = "starting"
     accepting_work: bool = True
     since: Optional[datetime] = None
-    written: Optional[tuple[str, bool]] = None
+    written: Optional[tuple[str, bool, str]] = None
     written_at: float = float("-inf")
     record_sequence: int = 0
     write_due: Optional[asyncio.TimerHandle] = None
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    write_failures: int = 0
+    session_closed: bool = False
 
     def key(self, team: str) -> str:
         return f"{team}.{self.agent.id}"
@@ -253,6 +263,9 @@ class AgentProcessHost:
     _drain_started: asyncio.Event = field(default_factory=asyncio.Event)
     _stop: Optional[asyncio.Event] = None
     _task: Optional[asyncio.Task[None]] = None
+    _pending_departures: dict[str, tuple[_HostedAgent, str]] = field(default_factory=dict)
+    _record_cleanup_needed: bool = False
+    _stale_refusals: set[tuple[str, str]] = field(default_factory=set)
 
     # -- the agent's side (called on the agent's own loop) --------------------------------
 
@@ -317,11 +330,14 @@ class AgentProcessHost:
         loop = asyncio.get_running_loop()
         renewals = loop.create_task(self._renew_sessions())
         following = loop.create_task(self.host.follow_contract(), name="agent_host_contract")
+        records = loop.create_task(self._record_upkeep(), name="agent_host_records")
         try:
             await self.host.keep_up(self._stop)
         finally:
             renewals.cancel()
             following.cancel()
+            records.cancel()
+            await asyncio.gather(renewals, following, records, return_exceptions=True)
             if self._draining is not None:
                 self._draining.cancel()
 
@@ -447,6 +463,13 @@ class AgentProcessHost:
             receiver = Receiver(self.host.identity.installation, self.team, "agent", agent_id, self.profile.runtime)
             hosted.subscription = await self.host.live.serve(AGENT_ADDRESS, receiver, self._handler_for(hosted),
                                                              agent=agent_id)
+        if self.agents.get(agent_id) is not hosted:
+            # Detach may have completed while serve was subscribing. Close that new
+            # subscription too and never publish a record after the removal.
+            if hosted.subscription is not None:
+                await hosted.subscription.unsubscribe()
+                hosted.subscription = None
+            return
         hosted.written = None  # its record names the session it holds now
         await self._write_record(hosted)
 
@@ -611,33 +634,45 @@ class AgentProcessHost:
         self.agents.pop(agent_id, None)
         if hosted is None or self.host is None or self.host.live is None:
             return
+        self._pending_departures[agent_id] = (hosted, reason)
+        hosted.state, hosted.accepting_work, hosted.since = "exiting", False, self.host.clock()
+        if hosted.write_due is not None:
+            hosted.write_due.cancel()
+            hosted.write_due = None
         if hosted.left is not None:
             hosted.left.set()  # a wait to ask for its session again ends at once
         if hosted.refusal is not None:
             self._components_changed()  # it is no longer listed
-        if hosted.subscription is not None:
-            try:
-                await hosted.subscription.unsubscribe()
-            except Exception:
-                self.logger.debug("The agent's address was already closed. agent=%s", agent_id, exc_info=True)
-        if hosted.session is None:
-            return
-        if hosted.write_due is not None:
-            hosted.write_due.cancel()
-            hosted.write_due = None
         # Readers learn it is leaving before its session ends (the lead fails what it was asked).
-        hosted.state, hosted.accepting_work, hosted.since = "exiting", False, self.host.clock()
-        await self._write_record(hosted)
+        await self._finish_departure(agent_id)
+
+    async def _finish_departure(self, agent_id: str) -> None:
+        """Finish an exit in order; cancellation leaves the complete job for upkeep."""
+
+        assert self.host is not None and self.host.live is not None
+        pending = self._pending_departures.get(agent_id)
+        if pending is None:
+            return
+        hosted, reason = pending
         try:
-            await self._request("sessions.close", {"request_id": f"close-{hosted.session}"[:128],
-                                                   "session": hosted.session, "reason": reason})
+            if hosted.subscription is not None:
+                await hosted.subscription.unsubscribe()
+                hosted.subscription = None
+            if hosted.session is not None and not hosted.session_closed:
+                await self._write_record(hosted)
+                reply = await self._request("sessions.close", {"request_id": f"close-{hosted.session}"[:128],
+                                                               "session": hosted.session, "reason": reason})
+                if reply.get("outcome") not in {"ok", "not_found"}:
+                    raise RuntimeError(f"session close was refused: {reply.get('outcome')}")
+                hosted.session_closed = True
+            self.host.live.identity = self.host.live.identity.without_session(agent_id)
+            await self._remove_record(hosted.key(self.team), agent_id)
         except Exception:
-            # The next start of this host closes it (module docstring).
-            self.logger.warning("An agent's session could not be closed; the host's next start closes it. "
-                                "event=agent_host_session_close_failed runtime=%s agent=%s", self.profile.runtime,
+            self.logger.warning("An agent's exit did not finish; upkeep will try again. "
+                                "event=agent_record_exit_pending runtime=%s agent=%s", self.profile.runtime,
                                 agent_id, exc_info=True)
-        self.host.live.identity = self.host.live.identity.without_session(agent_id)
-        await self._remove_record(hosted.key(self.team), agent_id)
+            return
+        self._pending_departures.pop(agent_id, None)
 
     # -- each agent's record (module docstring) -----------------------------------------
 
@@ -671,8 +706,14 @@ class AgentProcessHost:
 
         assert self.host is not None and self.host.records is not None and self.loop is not None
         async with hosted.write_lock:
-            current = (hosted.state, hosted.accepting_work)
-            if hosted.session is None or current == hosted.written:
+            current = (hosted.state, hosted.accepting_work, hosted.session)
+            if hosted.session is None or hosted.session_closed:
+                return
+            elapsed = self.loop.time() - hosted.written_at
+            if current == hosted.written and elapsed < AGENT_RECORD_REFRESH_SECONDS:
+                return
+            if hosted.state != "exiting" and elapsed < AGENT_RECORD_INTERVAL_SECONDS:
+                self._record_soon(hosted)
                 return
             now = self.host.clock()
             # Above every earlier sequence for the key, also if the agent's id were ever used again.
@@ -685,19 +726,31 @@ class AgentProcessHost:
                 body["display_name"] = hosted.display_name
             key = hosted.key(self.team)
             try:
-                document = self.host.records.signed("agent", key, body, sequence=hosted.record_sequence, issued_at=now)
+                document = self.host.records.signed("agent", key, body, sequence=hosted.record_sequence, issued_at=now,
+                                                    expires_at=now + AGENT_RECORD_LIFETIME)
                 await self.host.records.put("agent", key, document)
             except Exception:
-                self.logger.warning("An agent's record could not be written; trying again. "
-                                    "event=agent_record_write_failed runtime=%s agent=%s state=%s",
-                                    self.profile.runtime, hosted.agent.id, hosted.state, exc_info=True)
-                if hosted.state != "exiting" and hosted.write_due is None:
-                    hosted.write_due = self.loop.call_later(AGENT_RECORD_INTERVAL_SECONDS,
-                                                            lambda: self._retry_record(hosted))
+                self._record_failed(hosted)
                 return
+            if hosted.write_failures:
+                self.logger.info("An agent's record can be written again. event=agent_record_write_recovered "
+                                 "runtime=%s agent=%s failures=%s", self.profile.runtime, hosted.agent.id,
+                                 hosted.write_failures)
+                hosted.write_failures = 0
             hosted.written, hosted.written_at = current, self.loop.time()
-        if (hosted.state, hosted.accepting_work) != current:
+        if (hosted.state, hosted.accepting_work, hosted.session) != current:
             self._record_soon(hosted)  # it changed while this one was written
+
+    def _record_failed(self, hosted: _HostedAgent) -> None:
+        assert self.loop is not None
+        hosted.write_failures += 1
+        if hosted.write_failures == 1:
+            self.logger.warning("An agent's record could not be written; trying again. "
+                                "event=agent_record_write_failed runtime=%s agent=%s state=%s",
+                                self.profile.runtime, hosted.agent.id, hosted.state, exc_info=True)
+        if hosted.state != "exiting" and hosted.write_due is None:
+            delay = min(60.0, AGENT_RECORD_INTERVAL_SECONDS * 2 ** min(hosted.write_failures - 1, 5))
+            hosted.write_due = self.loop.call_later(delay, lambda: self._retry_record(hosted))
 
     def _retry_record(self, hosted: _HostedAgent) -> None:
         hosted.write_due = None
@@ -706,21 +759,66 @@ class AgentProcessHost:
 
     async def _remove_record(self, key: str, agent_id: str) -> None:
         assert self.host is not None and self.host.records is not None
+        if agent_id in self.agents:
+            return  # a new attachment using this id owns its record now
+        stored = await self.host.records.read_report("agent", key, now=self.host.clock())
+        if stored is None or stored.record.signer is None or stored.record.signer.runtime != self.profile.runtime:
+            return
+        if not await self.host.records.delete("agent", key, last_revision=stored.revision):
+            raise RuntimeError("the agent record changed during removal")
+
+    async def _record_upkeep(self) -> None:
+        """Retry interrupted exits and startup cleanup, and refresh unchanged records."""
+
+        assert self._stop is not None and self.loop is not None
+        while not self._stop.is_set():
+            for agent_id in list(self._pending_departures):
+                await self._finish_departure(agent_id)
+            if self._record_cleanup_needed:
+                await self._remove_earlier_records()
+            for hosted in list(self.agents.values()):
+                if self.loop.time() - hosted.written_at >= AGENT_RECORD_REFRESH_SECONDS and hosted.write_due is None:
+                    await self._refresh_record(hosted)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=AGENT_RECORD_CLEANUP_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _refresh_record(self, hosted: _HostedAgent) -> None:
+        """Repair a removed placement through the service that owns it, then refresh our report."""
+
+        assert self.host is not None and self.host.records is not None
+        if hosted.session is None or hosted.state == "exiting":
+            return
         try:
-            await self.host.records.delete("agent", key)
+            placement = await self.host.records.read_report("placement", hosted.key(self.team), now=self.host.clock())
+            if placement is None:
+                self.logger.warning("An attached agent's placement is missing; opening its session again. "
+                                    "event=agent_record_placement_missing runtime=%s agent=%s",
+                                    self.profile.runtime, hosted.agent.id)
+                await self._hold_session(hosted)
+            elif placement.record.body.host != self.profile.runtime:
+                self.logger.warning("An attached agent is placed on another host; this host will not overwrite its record. "
+                                    "event=agent_record_placement_changed runtime=%s agent=%s placed_host=%s",
+                                    self.profile.runtime, hosted.agent.id, placement.record.body.host)
+                return
+            self._record_soon(hosted)
         except Exception:
-            self.logger.warning("An agent's record could not be removed; the host's next start removes it. "
-                                "event=agent_record_remove_failed runtime=%s agent=%s", self.profile.runtime, agent_id,
-                                exc_info=True)
+            self.logger.warning("An agent's record upkeep did not finish; trying again during upkeep. "
+                                "event=agent_record_refresh_failed runtime=%s agent=%s",
+                                self.profile.runtime, hosted.agent.id, exc_info=True)
 
     async def _remove_earlier_records(self) -> None:
         """Remove the records of agents this host ran before it restarted (module docstring)."""
 
         assert self.host is not None and self.host.records is not None
+        self._record_cleanup_needed = False
         try:
-            keys = await self.host.records.keys("agent")
-        except Exception as error:
-            self.logger.debug("No earlier agent records to read. runtime=%s error=%s", self.profile.runtime, error)
+            keys = await self.host.records.keys("agent", f"{self.team}.")
+        except Exception:
+            self._record_cleanup_needed = True
+            self.logger.warning("Earlier agent records could not be listed; upkeep will try again. "
+                                "event=agent_record_listing_failed runtime=%s", self.profile.runtime, exc_info=True)
             return
         for key in keys:
             agent_id = key.removeprefix(f"{self.team}.")
@@ -729,6 +827,7 @@ class AgentProcessHost:
             try:
                 await self._remove_earlier_record(key, agent_id)
             except Exception:
+                self._record_cleanup_needed = True
                 # One record that cannot be read or removed never keeps the agents from their sessions.
                 self.logger.exception("An earlier agent record could not be removed. "
                                       "event=agent_record_stale_remove_failed runtime=%s key=%s", self.profile.runtime, key)
@@ -740,11 +839,16 @@ class AgentProcessHost:
         try:
             stored = await self.host.records.read_report("agent", key, now=self.host.clock())
         except FrameRefused as refused:
-            self.logger.warning("A stored record does not verify and counts as absent. event=agent_host_record_refused "
-                                "runtime=%s record=agent key=%s code=%s at=%s", self.profile.runtime, key, refused.code,
-                                refused.at)
+            self._record_cleanup_needed = refused.code in {"unknown_key", "revocations_not_current"} or self._record_cleanup_needed
+            if (key, refused.code) not in self._stale_refusals:
+                self._stale_refusals.add((key, refused.code))
+                self.logger.warning("A stored record does not verify and counts as absent. event=agent_host_record_refused "
+                                    "runtime=%s record=agent key=%s code=%s at=%s", self.profile.runtime, key, refused.code,
+                                    refused.at)
             return
         if stored is None or stored.record.signer is None or stored.record.signer.runtime != self.profile.runtime:
+            return
+        if agent_id in self.agents:
             return
         await self._remove_record(key, agent_id)
         self.logger.info("Removed an agent record an earlier run of this host left behind. "
@@ -926,7 +1030,9 @@ def agent_record_state(agent: Any) -> tuple[str, bool]:
         state = "busy"
     else:
         state = "idle"
-    return state, not is_winding_down(agent) and not is_contract_draining(agent)
+    if not getattr(agent, "_worker_ready", True):
+        return "starting", False
+    return state, state != "paused" and not is_winding_down(agent) and not is_contract_draining(agent)
 
 
 def report_agent_state(agent: Any) -> None:

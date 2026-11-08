@@ -75,7 +75,7 @@ async def test_protocol_writes_wait_for_the_flush_and_stop_when_it_fails(monkeyp
             await records.put("agent", f"{TEAM}.researcher-2", {},
                               last_revision={"put": None, "create": 0, "update": 1}[operation])
         elif operation == "delete":
-            await records.delete("agent", f"{TEAM}.researcher-2")
+            await records.delete("agent", f"{TEAM}.researcher-2", last_revision=1)
         elif operation == "join":
             with pytest.raises(ServiceUnavailable):
                 await join(connection, worker.identity.keys, worker.trust,

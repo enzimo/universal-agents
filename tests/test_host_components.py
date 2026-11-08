@@ -3,7 +3,7 @@
 An agent whose session was refused has no record of its own; its host lists it among the
 components of its host record (custom_agents.agent_host), and readers of the team
 (custom_transport.protocol1.team_agents) pass those on for the gateway's Status page.
-tests/test_live_gateway_team_view.py reads them from real hosts.
+tests/test_live_agent_records.py reads the host records from real hosts.
 """
 
 from __future__ import annotations

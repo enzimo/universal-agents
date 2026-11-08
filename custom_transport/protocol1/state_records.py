@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
 
-from nats.js.errors import KeyNotFoundError, NoKeysError
+from nats.js.errors import BadRequestError, KeyNotFoundError, KeyWrongLastSequenceError, NoKeysError, NotFoundError
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.buckets import bucket_name
@@ -33,12 +33,29 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from custom_transport.send_barrier import before_send
 
 
+WRONG_LAST_SEQUENCE = 10071
+
+
+def wrong_revision(error: BaseException) -> bool:
+    """JetStream reports a failed conditional delete as BadRequestError, unlike create/update."""
+
+    return isinstance(error, KeyWrongLastSequenceError) or (
+        isinstance(error, BadRequestError) and error.err_code == WRONG_LAST_SEQUENCE)
+
+
 @dataclass(frozen=True)
 class StoredRecord:
     """A record as read from its bucket: the key-value revision and the verified record."""
 
     revision: int
     record: VerifiedRecord
+
+
+def require_record_key(verified: VerifiedRecord, key: str) -> None:
+    """A valid signature authenticates the document, never the bucket key holding it."""
+
+    if verified.document.key != key:
+        raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
 
 
 class StateRecords:
@@ -120,8 +137,7 @@ class StateRecords:
             if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
                 raise
             verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
-        if verified.document.key != key:
-            raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
+        require_record_key(verified, key)
         return StoredRecord(int(entry.revision), verified)
 
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
@@ -135,6 +151,14 @@ class StateRecords:
         entry = await self._get(record, key)
         if entry is None:
             return False
+        # Check before mutating the trust store. A copied session is still authentic,
+        # but it cannot supply the session requested under a different bucket key.
+        try:
+            document = json.loads(entry.value)
+        except (ValueError, TypeError) as error:
+            raise FrameRefused("malformed", at="/key") from error
+        if not isinstance(document, dict) or document.get("key") != key:
+            raise FrameRefused("invalid_body", "a trust record is stored under another key", at="/key")
         try:
             return self._trust.add(entry.value, now=now)
         except FrameRefused as refused:
@@ -150,20 +174,26 @@ class StateRecords:
             return None
         return entry if entry.value else None
 
-    async def delete(self, record: str, key: str) -> None:
-        """Remove one of this host's own records (an agent's record when it has left); absent is fine."""
+    async def delete(self, record: str, key: str, *, last_revision: int) -> bool:
+        """Remove a record only while it remains at the verified revision; False when it changed."""
 
         bucket = await self._bucket(record, key)
         await before_send()
-        await bucket.delete(key)
+        try:
+            await bucket.delete(key, last=last_revision)
+        except BadRequestError as error:
+            if not wrong_revision(error):
+                raise
+            return False
+        return True
 
-    async def keys(self, record: str, *, team: Optional[str] = None) -> list[str]:
-        """Every key in the record's bucket; none when it is empty."""
+    async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
+        """Keys with the requested prefix; none when the bucket is empty."""
 
         bucket = await self._bucket(record, team=team)
         try:
-            return list(await bucket.keys())
-        except NoKeysError:
+            return [key for key in await bucket.keys() if key.startswith(prefix)]
+        except (NoKeysError, NotFoundError):
             return []
 
     async def watch(self, record: str, keys: str = ">", *,

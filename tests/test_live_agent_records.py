@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import nats
 
 from assistant_gateway.message_host import GATEWAY_RUNTIME, GatewayMessageHost, gateway_profile
 from custom_agents import agent_host as agent_host_module
@@ -84,7 +85,8 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         put = records.put
 
         async def counted(record, key, document, **kwargs):
-            written.append(document["body"]["state"])
+            if record == "agent":
+                written.append(document["body"]["state"])
             return await put(record, key, document, **kwargs)
 
         monkeypatch.setattr(records, "put", counted)
@@ -92,14 +94,28 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
             agent_host.report("researcher_1", state, True)
             await asyncio.sleep(0.05)
         await _until(lambda: reader.agent("researcher_1").state == "busy")
-        assert written == ["busy"]  # the first change at once, the rest coalesced into the same state
+        assert written == ["busy"]  # changes within the first interval coalesce into the final state
         agent_host.report("researcher_1", "paused", False)
         await _until(lambda: reader.agent("researcher_1").state == "paused", timeout=5)
         assert reader.agent("researcher_1").accepting_work is False and written == ["busy", "paused"]
 
         # The agent leaves: "exiting" is written at once, then the record is removed; readers drop it.
-        await asyncio.wrap_future(agent_host.detach("researcher_1"))
+        close_entered, close_release = asyncio.Event(), asyncio.Event()
+        request = agent_host._request
+
+        async def delayed_close(kind, body):
+            if kind == "sessions.close":
+                close_entered.set()
+                await close_release.wait()
+            return await request(kind, body)
+
+        monkeypatch.setattr(agent_host, "_request", delayed_close)
+        leaving = agent_host.detach("researcher_1")
+        await asyncio.wait_for(close_entered.wait(), 5)
         await _until(lambda: reader.agent("researcher_1") is None)
+        assert reader.departure_reason("researcher_1") == "exiting"
+        close_release.set()
+        await asyncio.wrap_future(leaving)
         assert written[-1] == "exiting"
         assert await records.read_report("agent", f"{TEAM}.researcher_1", now=agent_host.host.clock()) is None
         assert any("researcher_1" in changed for changed in changes)
@@ -165,6 +181,73 @@ async def test_the_team_leads_record_names_it_the_lead(
         await gateway.close()
         stop.set()
         await asyncio.wait_for(asyncio.gather(serving, reading), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_real_reader_reconnect_recovers_and_a_host_that_stops_publishing_expires(
+    broker: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811 - shared isolated NATS fixture
+) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    profile = startup_agent_host_profile(TEAM, RUNTIME, "Researcher")
+    stop, disconnected = asyncio.Event(), asyncio.Event()
+    monkeypatch.setattr(agent_host_module, "AGENT_RECORD_REFRESH_SECONDS", 0.5)
+    monkeypatch.setattr(agent_host_module, "AGENT_RECORD_CLEANUP_SECONDS", 0.2)
+
+    async def on_disconnect():
+        disconnected.set()
+
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), profile)
+        services = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        serving = asyncio.create_task(serve_team(services, TEAM, stop))
+        nc = await nats.connect(broker, inbox_prefix=f"_INBOX.{GATEWAY_RUNTIME}".encode(),
+                                disconnected_cb=on_disconnect, reconnect_time_wait=0.05)
+        stack.push_async_callback(nc.close)
+        gateway = GatewayMessageHost(layout, TEAM)
+        gateway.start(nc)
+        await gateway.ready(timeout=20)
+        reader = TeamAgents(gateway.host, TEAM, recheck_seconds=0.1)
+        reading = asyncio.create_task(reader.run(stop))
+        process = AgentProcessHost(layout, profile, TEAM)
+        process.attach(_agent("researcher_1", "Researcher-1"), agent_type="Researcher", definition=DEFINITION,
+                       nc=await connect(stack, broker, RUNTIME), state=("idle", True))
+        try:
+            await _until(lambda: reader.agent("researcher_1") is not None)
+            await nc.force_reconnect()
+            await asyncio.wait_for(disconnected.wait(), 5)
+            await _until(lambda: nc.is_connected)
+            process.report("researcher_1", "busy", True)
+            await _until(lambda: reader.agent("researcher_1") is not None
+                         and reader.agent("researcher_1").state == "busy")
+            assert not reading.done()
+
+            records = process.host.records
+            key = f"{TEAM}.researcher_1"
+            bucket = await process.host.nc.jetstream().stream_info("KV_UA1_AGENTS")
+            assert bucket.config.max_age == 180
+            stored = await records.read_report("agent", key, now=process.host.clock())
+            assert await records.delete("agent", key, last_revision=stored.revision)
+            await _until(lambda: reader.agent("researcher_1") is None)
+            await _until(lambda: reader.agent("researcher_1") is not None)
+
+            previous_session = reader.agent("researcher_1").session
+            placement = await services.records.read_report("placement", key, now=services.clock())
+            assert await services.records.delete("placement", key, last_revision=placement.revision)
+            await _until(lambda: reader.agent("researcher_1") is None)
+            await _until(lambda: reader.agent("researcher_1") is not None
+                         and reader.agent("researcher_1").session != previous_session)
+
+            # Cancel the process's upkeep, without publishing a graceful close and
+            # without moving the reader's clock. Its last heartbeat expires over NATS.
+            process._task.cancel()
+            await asyncio.gather(process._task, return_exceptions=True)
+            await _until(lambda: reader.agent("researcher_1") is None, timeout=36)
+            assert reader.departure_reason("researcher_1") == "host_unavailable"
+        finally:
+            await process.stop()
+            await gateway.close()
+            stop.set()
+            await asyncio.wait_for(asyncio.gather(serving, reading), timeout=10)
 
 
 @pytest.mark.asyncio

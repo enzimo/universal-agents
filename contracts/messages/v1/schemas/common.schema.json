@@ -23,7 +23,7 @@
       "$ref": "#/$defs/token_id"
     },
     "agent_id": {
-      "description": "An agent's stable id: one NATS subject token of at most 32 characters, which a host's credential names in each of the agent's grants (README, \"Credential size\"). It stays the same when the agent restarts or moves to another host.",
+      "description": "An agent's id: one NATS subject token of at most 32 characters, which a host's credential names in each of the agent's grants (README, \"Credential size\"). A session binds it to a host. A runtime may explicitly restore an id, but this implementation gives a new process's agents fresh ids; an id alone proves no continuity across restarts.",
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"
     },

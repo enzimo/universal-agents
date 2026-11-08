@@ -6224,14 +6224,15 @@
     "agent": {
       "body": "state/agent.schema.json",
       "bucket": "UA1_AGENTS",
-      "description": "An agent's state, written by the host it is placed on when the state changes.",
+      "description": "An agent's state, written on change and refreshed by the host it is placed on.",
       "key": "<team>.<agent>",
       "signer": "host",
       "signer_roles": [
         "lead_host",
         "worker_host"
       ],
-      "write_rule": "written on change, at most once per 2 seconds; readers accept it only from the placement's host",
+      "ttl_seconds": 180,
+      "write_rule": "written on change, at most once per 2 seconds, and refreshed every 60 seconds with current trust; expires within 180 seconds so abandoned or unverifiable records do not accumulate; exiting is written immediately before session closure and conditional removal; readers accept it only from the placement's host with its current session and matching type",
       "writers": [
         "lead_host",
         "worker_host"

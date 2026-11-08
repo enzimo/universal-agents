@@ -63,7 +63,7 @@ from custom_transport.protocol1.joining import (
     join,
 )
 from custom_transport.protocol1.live import LiveHost, utc_now
-from custom_transport.protocol1.state_records import StateRecords
+from custom_transport.protocol1.state_records import StateRecords, require_record_key
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
@@ -498,6 +498,7 @@ class MessageHost:
                     if refused.code != "unknown_key" or not await self.fetch_trust(raw):
                         raise
                     record = self.live.trust.store.verify(raw, record="host", now=self.clock())
+                require_record_key(record, key)
             except FrameRefused as refused:
                 if refused.code != self._contract_record_refused:  # each new reason once, not at every write
                     self._contract_record_refused = refused.code

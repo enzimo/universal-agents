@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '250a6c77b555d2d2cf1ab691b658c93fee248ec34131c599f326b3153e5c0136'
+CONTRACT_SHA256 = '142e39bd8ee6b09d6283662affd16974c0aa2c5bfda7eeb2ec50709a0dd355b3'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -3841,7 +3841,7 @@ KINDS: dict[str, KindSpec] = {
 }
 
 STATE_RECORDS: dict[str, StateSpec] = {
-    'agent': StateSpec(name='agent', bucket='UA1_AGENTS', key='<team>.<agent>', signer='host', signer_roles=('lead_host', 'worker_host'), writers=('lead_host', 'worker_host'), ttl_seconds=None, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.AgentStateAdapter, body_shape={'properties': {'team': None, 'agent': None, 'agent_type': None, 'display_name': None, 'session': None, 'state': None, 'accepting_work': None, 'since': None}}),
+    'agent': StateSpec(name='agent', bucket='UA1_AGENTS', key='<team>.<agent>', signer='host', signer_roles=('lead_host', 'worker_host'), writers=('lead_host', 'worker_host'), ttl_seconds=180, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.AgentStateAdapter, body_shape={'properties': {'team': None, 'agent': None, 'agent_type': None, 'display_name': None, 'session': None, 'state': None, 'accepting_work': None, 'since': None}}),
     'agent_session': StateSpec(name='agent_session', bucket='UA1_CERTS', key='session.<installation>.<team>.<session>', signer='host', signer_roles=('team_services',), writers=('team_services', 'edge_adapter'), ttl_seconds=None, max_lifetime_seconds=604800, fresh_seconds=None, body_model=models.AgentSessionStateAdapter, body_shape={'properties': {'session': None, 'installation': None, 'team': None, 'agent': None, 'agent_type': None, 'agent_role': None, 'runtime': None, 'placement_revision': None, 'started_at': None, 'ends_at': None}}),
     'agreement': StateSpec(name='agreement', bucket='UA1_CERTS', key='agreement.<peer>', signer='authority', signer_roles=(), writers=('installation_authority',), ttl_seconds=None, max_lifetime_seconds=31622400, fresh_seconds=None, body_model=models.AgreementStateAdapter, body_shape={'properties': {'agreement_id': None, 'installation': None, 'peer': None, 'authority_keys': {'items': {'properties': {'key_id': None, 'public_key': None}}}, 'teams': {'items': None}, 'kinds': {'items': None}, 'issued_at': None, 'expires_at': None}}),
     'block_list': StateSpec(name='block_list', bucket='UA1_BLOCK_LIST_{team}', key='<team>', signer='host', signer_roles=('team_services',), writers=('team_services',), ttl_seconds=None, max_lifetime_seconds=604800, fresh_seconds=900, body_model=models.BlockListStateAdapter, body_shape={'properties': {'team': None, 'blocks': {'items': {'properties': {'block_id': None, 'subject': {'one_of': 'kind', 'variants': {'team': {'properties': {'kind': None}}, 'agent_type': {'properties': {'kind': None, 'agent_type': None}}, 'agent': {'properties': {'kind': None, 'agent': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'schedule': {'properties': {'kind': None, 'schedule_id': None}}}}, 'tool_id': None, 'operation': None, 'request': {'properties': {'root_task_id': None, 'person': None}}}}}, 'people': {'items': {'properties': {'person': None, 'standing': None}}}}}),
