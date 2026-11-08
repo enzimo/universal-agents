@@ -4745,7 +4745,8 @@ finish what they already admitted. The host's record says `draining` meanwhile; 
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
 Startup counts as held work until recovery finishes, so a drain cannot close controls
 before saved tasks become visible. A draining startup restores its own work and adopts
-no work from gone agents. Admission reads the leaf module `contract_drain_state`; drain
+no work from gone agents. Pool-worker wind-down waits for recovery too, so it returns
+the complete set of saved tasks. Admission reads the leaf module `contract_drain_state`; drain
 execution can depend on turn and control handlers without creating an import cycle.
 Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions
 (`exited`), removing their placements; its record says `drained` and it renews only to give its agents up

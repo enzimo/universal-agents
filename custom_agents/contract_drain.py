@@ -19,8 +19,8 @@ draining an agent means:
    the replies to what it holds, and its controls are still read.
 2. **The turns in progress finish.** A running turn is not stopped.
 3. **What it has not finished goes back where this release has a way.** A pool worker (one
-   started with a launch record) starts no task it has not started yet and, once its
-   running turns ended, winds down as after a lost launch lease
+   started with a launch record) starts no task it has not started yet and, once startup
+   recovery and its running turns ended, winds down as after a lost launch lease
    (``custom_agents.lease_loss_wind_down``), naming its own cause in its logs and texts and
    counted as no interruption, nor as a lost worker by a delegated task's requester
    (``custom_agents.delegated_work_runtime``): the tasks it has not started go back to the
@@ -94,13 +94,13 @@ async def _leave_shared_queues(agent: Any) -> int:
 
 
 async def _wind_down_after_running_turns(agent: Any, state: ContractDrain) -> None:
-    """A pool worker: once no turn runs, return what it has not started to the team lead (module docstring)."""
+    """After recovery and running turns finish, return unstarted work to the team lead."""
 
     from custom_agents.lease_loss_wind_down import start_lease_loss_wind_down
     from custom_agents.turn_registry import executing_task_ids
     from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_OTHER_CONTRACT
 
-    while executing_task_ids(agent) and not agent._should_exit.is_set():
+    while (not getattr(agent, "_worker_ready", False) or executing_task_ids(agent)) and not agent._should_exit.is_set():
         await asyncio.sleep(TURN_POLL_SECONDS)
     if not agent._should_exit.is_set():
         start_lease_loss_wind_down(agent, reason=state.reason, cause=WIND_DOWN_OTHER_CONTRACT)

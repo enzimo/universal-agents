@@ -91,6 +91,7 @@ async def test_a_pool_worker_starts_nothing_new_and_winds_down_once_its_running_
                         lambda agent, *, reason, cause: wound_down.append((reason, cause)))
     started = _info("t-waiting", ProgressState.WAITING, (ProgressState.IN_PROGRESS, ProgressState.WAITING))
     agent = _agent(worker=True, infos=(_info("t-new", ProgressState.ACCEPTED), started), queue=("t-new",))
+    agent._worker_ready = False
 
     await drain_agent(agent, REASON)
     assert agent._contract_drain.holds_back_unstarted
@@ -102,6 +103,9 @@ async def test_a_pool_worker_starts_nothing_new_and_winds_down_once_its_running_
     await asyncio.sleep(0.05)
     assert wound_down == []
     running.clear()
+    await asyncio.sleep(0.05)
+    assert wound_down == []  # Startup may still load saved work, even with no running turn.
+    agent._worker_ready = True
     await asyncio.wait_for(agent._contract_drain.task, timeout=5)
     # It winds down for its own cause, which no log line, text or interruption count takes for a lost lease.
     assert wound_down == [(REASON, "other_message_contract")]
