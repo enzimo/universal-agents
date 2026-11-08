@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import re
+import logging
 from typing import Any
 
 from custom_agents.memory_plugins.base import MemoryHydrationSection, MemoryPluginContext
 from custom_agents.memory_plugins.config import plugin_settings
 from custom_agents.pinned_memory_metadata import public_pinned_memory_metadata
-from storage.conversation_repository import normalize_topic_tag
+from topic_tags import TopicTagInputError, extract_topic_tags, normalize_topic_tag
 
 
 class BaseHydrationPlugin:
@@ -182,13 +182,15 @@ class DomainTopicRecallPlugin(BaseHydrationPlugin):
     @staticmethod
     def _matched_tags(request_text: str, known_tags: list[str]) -> list[str]:
         normalized_text = request_text.lower()
-        explicit_tags = {
-            normalize_topic_tag(match)
-            for match in re.findall(r"#([A-Za-z0-9_-]+)", request_text)
-        }
+        explicit_tags = set(extract_topic_tags(request_text, logging.getLogger(__name__)))
         matched: list[str] = []
         for tag in known_tags:
-            normalized_tag = normalize_topic_tag(tag)
+            try:
+                normalized_tag = normalize_topic_tag(tag)
+            except TopicTagInputError:
+                logging.getLogger(__name__).warning(
+                    "Skipped an invalid recalled topic tag. event=topic_tag_skipped length=%s", len(tag))
+                continue
             readable = normalized_tag.replace("-", " ")
             if normalized_tag in explicit_tags or normalized_tag in normalized_text or readable in normalized_text:
                 matched.append(normalized_tag)

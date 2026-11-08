@@ -49,6 +49,8 @@ from storage.pinned_memory_repository import create_pinned_memory_repository
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
+from team_services.topics import TopicOperations
+from custom_agents.conversation_store import ConversationStore
 from assistant_gateway.runtime_config import lead_memory_config
 from team_services.service import OperationFamily, TeamServices, Upkeep
 from team_services.serving import mark_serving
@@ -201,7 +203,10 @@ def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]
     # With the knowledge base off no store is opened, and its commands are answered feature_off.
     knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None
     knowledge = KnowledgeOperations(knowledge_store, people, settings, clock, _LOGGER, personal_memory=memory_store)
-    return [memory.family(), knowledge.family()]
+    conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
+                                      artifacts_dir=config.layout.conversation_artifacts_dir)
+    topics = TopicOperations(conversations, people, clock, _LOGGER)
+    return [memory.family(), knowledge.family(), topics.family()]
 
 
 async def run_team_services(config: GatewayInstanceConfig) -> None:

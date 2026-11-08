@@ -33,7 +33,7 @@ from typing import Any, Callable, Protocol
 SEND_ATTEMPTS = 2
 # Commands that only read: when no answer comes, nothing can still be changed.
 _READ_KINDS = frozenset({
-    "memory.list", "memory.show",
+    "memory.list", "memory.show", "topics.list_tags", "topics.find_threads",
     "knowledge.list", "knowledge.read", "knowledge.history", "knowledge.list_contributions",
     "knowledge.count_contributions", "knowledge.read_contribution",
 })

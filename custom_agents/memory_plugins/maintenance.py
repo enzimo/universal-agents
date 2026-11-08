@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import re
+import logging
 from typing import Any
 
 from custom_agents.memory_review_runtime import enqueue_conversation_window_review_job
 from custom_agents.memory_plugins.base import MemoryMaintenanceEvent, PruneResult, ReviewJobRef, VerifiedPersonOf
 from custom_agents.memory_plugins.config import bank_automatic_creation_enabled
-from storage.conversation_repository import normalize_topic_tag
+from topic_tags import extract_topic_tags
 
 
 class PinnedMemoryPrunerPlugin:
@@ -152,15 +152,7 @@ class DomainTopicTaggerPlugin(PinnedMemoryReviewPlugin):
 
     @staticmethod
     def _extract_explicit_tags(text: str) -> list[str]:
-        tags: list[str] = []
-        seen: set[str] = set()
-        for raw in re.findall(r"#([A-Za-z0-9_-]+)", text):
-            tag = normalize_topic_tag(raw)
-            if tag in seen:
-                continue
-            tags.append(tag)
-            seen.add(tag)
-        return tags
+        return extract_topic_tags(text, logging.getLogger(__name__))
 
 
 class MemoryNotificationPlugin(PinnedMemoryReviewPlugin):

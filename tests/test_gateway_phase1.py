@@ -52,17 +52,12 @@ from assistant_gateway.translation import ChannelInboundMessage
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.heartbeat_store import HeartbeatStore, extract_active_heartbeat_tasks
 from custom_agents.manager_bootstrap_runtime import migrate_legacy_heartbeat_markdown
-from custom_agents.manager_control_runtime import (
-    handle_manager_topic_command,
-)
 from custom_agents.provider_error_runtime import PROVIDER_TIMEOUT_USER_MESSAGE
-from custom_agents.task_operation_runtime import TaskOperationRuntime
 from custom_agents.team_composition import TEAM_COMPOSITION_SCHEMA_VERSION
 from custom_messages.contracts.control_v1 import (
     AgentStatus,
     ControlInstruction,
     ManagerRuntimeWorkCommand,
-    ManagerTopicCommand,
     PinnedMemoryCommandPayload,
     SystemStatusMessage,
 )
@@ -106,8 +101,7 @@ from custom_messages.system_schedules import (
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.transport import TransportSettings
 from storage.conversation_repository import SqliteConversationRepository
-from storage.pinned_memory_repository import create_pinned_memory_repository
-from storage.knowledge_repository import create_knowledge_repository
+from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 from tests.team_services_support import InProcessTeamServices
 
 
@@ -122,14 +116,6 @@ class _AsyncNullContext:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
-
-
-class _CaptureManagerComms:
-    def __init__(self) -> None:
-        self.messages: list[MessageEnvelope] = []
-
-    async def send_message(self, *, message: MessageEnvelope, routing_key: str) -> None:
-        self.messages.append(message)
 
 
 class _CaptureGatewayManagerTransport:
@@ -204,59 +190,6 @@ def _gateway_signer():
     from tests.broker_access_support import context_signer
 
     return context_signer()
-
-
-def _attach_in_process_manager_control(
-    gateway: UserGateway,
-    config: GatewayInstanceConfig,
-) -> ConversationStore:
-    comms = _CaptureManagerComms()
-    conversation_store = ConversationStore(
-        db_path=config.manager_storage_settings.sqlite_path or "",
-        storage_settings=config.manager_storage_settings, artifacts_dir=Path(config.manager_storage_settings.sqlite_path or "").parent / "conversation_artifacts",
-    )
-    manager = SimpleNamespace(
-        task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime()),
-        id=config.manager.manager_agent_id or "manager_1234",
-        name="Manager",
-        is_team_lead=True,
-        team_id=config.manager.team_id,
-        memory_config=dict(config.agent.memory or {}),
-        _logger=logging.getLogger("test.in_process_manager"),
-        _pinned_memory_repository=create_pinned_memory_repository(
-            config.manager_storage_settings
-        ),
-        _conversation_store=conversation_store,
-        knowledge_config={},
-        _knowledge_repository=create_knowledge_repository(config.manager_storage_settings),
-        team_comms=comms,
-    )
-
-    async def request_manager(request):
-        command = request.command
-        session = request.session
-        comms.messages.clear()
-        # As the gateway sends it: the signed-in person, gateway-signed.
-        meta = MessageMeta(
-            msg_correlation_id="corr_manager_control",
-            conversation_id=session.conversation_id,
-            request_timezone=config.user.timezone,
-            gateway_context=GatewayContext(
-                canonical_user_id=request.person.canonical_user_id,
-                session_key=session.session_key,
-                task_context=_gateway_signer().issue(
-                    team_id=request.person.team_id,
-                    person_id=request.person.canonical_user_id,
-                    person_roles=request.person.roles,
-                ),
-            ),
-        )
-        header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway")
-        await handle_manager_topic_command(manager, command=command, msg_header=header, msg_meta=meta)
-        return comms.messages[-1].msg_content
-
-    gateway._manager_commands.request = request_manager  # type: ignore[method-assign]
-    return conversation_store
 
 
 class _FakeGatewayManagerRuntime:
@@ -4380,13 +4313,15 @@ async def test_usermem_command_requires_registration_and_isolates_by_canonical_u
 
 
 @pytest.mark.asyncio
-async def test_topic_commands_tag_list_and_switch_threads(tmp_path: Path, gateway_signed_commands: None):
+async def test_topic_commands_tag_list_and_switch_threads(tmp_path: Path, gateway_signed_commands: None, monkeypatch, caplog):
     config = _build_test_config(tmp_path)
     bootstrap_instance(config)
+    topic_services = InProcessTeamServices(config)
     gateway = UserGateway(
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
+        team_services=topic_services,
     )
     await _link_bootstrap_admin_channel(
         gateway,
@@ -4400,7 +4335,12 @@ async def test_topic_commands_tag_list_and_switch_threads(tmp_path: Path, gatewa
         user_id="tg_topics",
         chat_id="chat_topics",
     )
-    store = _attach_in_process_manager_control(gateway, config)
+    # The team services' conversation store, on the team's database.
+    store = ConversationStore(
+        db_path=config.manager_storage_settings.sqlite_path or "",
+        storage_settings=config.manager_storage_settings,
+        artifacts_dir=config.layout.conversation_artifacts_dir,
+    )
     store.ensure_thread(
         conversation_id=session.conversation_id,
         team_id=config.manager.team_id,
@@ -4505,6 +4445,40 @@ async def test_topic_commands_tag_list_and_switch_threads(tmp_path: Path, gatewa
     assert "+00:00" not in ambiguous
     assert ambiguous_session is not None
     assert ambiguous_session.conversation_id == target_conversation_id
+
+    sent_before = len(topic_services.sent)
+    for command, expected in (
+        ("/tag_thread " + "x" * 65, "64 characters or fewer"),
+        ("/topics " + "x" * 65, "64 characters or fewer"),
+        ("/switch_topic " + "x" * 65, "64 characters or fewer"),
+        ("/tag_thread " + ",".join(f"tag-{i}" for i in range(21)), "between 1 and 20"),
+        ("/tag_thread ,,,", "between 1 and 20"),
+        ("/tag_thread !!!", "at least one letter or number"),
+    ):
+        _, _, text = await handle_interactive_session_command(
+            raw_text=command, gateway=gateway, current_session_key=switched_session_key,
+            channel_name="telegram", user_id="tg_topics", chat_id="chat_topics",
+        )
+        assert expected in text
+        assert "pydantic" not in text
+    assert len(topic_services.sent) == sent_before
+
+    from assistant_gateway.application.team_commands import TeamCommandRefused, TeamServicesUnavailable
+    for error, expected in (
+        (TeamServicesUnavailable("The team services are not running right now."), "not running"),
+        (TeamCommandRefused("topics.tag_thread", "handler_failed"), "result of the topic change is unknown"),
+        (RuntimeError("private database detail"), "The topic command failed. Try again"),
+    ):
+        async def fail(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(topic_services, "command", fail)
+        _, _, text = await handle_interactive_session_command(
+            raw_text="/tag_thread example", gateway=gateway, current_session_key=switched_session_key,
+            channel_name="telegram", user_id="tg_topics", chat_id="chat_topics",
+        )
+        assert expected in text
+        assert "private database detail" not in text
+    assert "event=gateway_topic_command_failed" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -4975,19 +4949,19 @@ def test_delivery_presentation_humanizes_raw_tool_setup_result(status: str, mess
 
 def test_delivery_presentation_rejects_manager_control_envelopes() -> None:
     envelope = MessageEnvelope(
-        msg_content=ManagerTopicCommand(
+        msg_content=ManagerScheduleCommand(
             command_type=MessageMetaType.RESPONSE,
-            action="list_tags",
+            action="list",
             success=True,
         ),
         msg_header=MessageHeader(from_agent_id="manager_1234"),
-        msg_meta=MessageMeta(msg_correlation_id="corr_topic_response"),
+        msg_meta=MessageMeta(msg_correlation_id="corr_schedule_response"),
     )
 
     assert not GatewayDeliveryPresentation.supports_user_delivery(envelope.msg_content)
     with pytest.raises(
         ValueError,
-        match="Unsupported gateway delivery content type: ManagerTopicCommand",
+        match="Unsupported gateway delivery content type: ManagerScheduleCommand",
     ):
         GatewayDeliveryPresentation.render_envelope(envelope)
 
@@ -5969,15 +5943,15 @@ async def test_gateway_drops_unsupported_unsolicited_manager_control(
     )
     session = gateway.application.start_new_session()
     envelope = MessageEnvelope(
-        msg_content=ManagerTopicCommand(
-            command_id="manager_topic_late",
+        msg_content=ManagerScheduleCommand(
+            command_id="manager_schedule_late",
             command_type=MessageMetaType.RESPONSE,
-            action="list_tags",
+            action="list",
             success=True,
-            message="No tags yet.",
+            message="schedule_listed",
         ),
         msg_meta=MessageMeta(
-            msg_correlation_id="corr_topic_late",
+            msg_correlation_id="corr_schedule_late",
             conversation_id=session.conversation_id,
             gateway_context=GatewayContext(
                 canonical_user_id=config.user.canonical_user_id,

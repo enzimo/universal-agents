@@ -131,7 +131,6 @@ from custom_agents.internal_improvement_runtime import (
 from custom_agents.manager_control_runtime import (
     handle_manager_runtime_work_command,
     handle_manager_schedule_command,
-    handle_manager_topic_command,
     handle_task_progress_status,
 )
 from custom_agents.manager_bootstrap_runtime import resume_manager_data_cleanups, run_manager_bootstrap
@@ -287,7 +286,6 @@ from custom_messages.contracts.control_v1 import (
     AgentStatusMap,
     ControlInstruction,
     ManagerRuntimeWorkCommand,
-    ManagerTopicCommand,
     PersonStandingCommandV1,
     RetiredGatewayCommand,
 )
@@ -4033,13 +4031,6 @@ class UniversalAgent(BaseModel):
             from custom_agents.person_departure_runtime import handle_person_standing_command
 
             await handle_person_standing_command(
-                self,
-                command=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
-        elif isinstance(msg_content, ManagerTopicCommand):
-            await handle_manager_topic_command(
                 self,
                 command=msg_content,
                 msg_header=msg_header,

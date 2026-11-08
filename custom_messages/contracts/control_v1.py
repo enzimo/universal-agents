@@ -621,27 +621,6 @@ class PinnedMemoryCommandPayload(BaseModel):
     )
 
 
-class ManagerTopicCommand(BaseModel):
-    """Durable gateway-to-manager conversation-topic command."""
-
-    message_class: Literal["ManagerTopicCommand"] = "ManagerTopicCommand"
-    command_id: str = Field(default_factory=lambda: new_id("manager_topic"))
-    command_type: MessageMetaType = MessageMetaType.REQUEST
-    action: Literal["list_tags", "find_threads", "tag_thread"]
-    conversation_id: Optional[str] = None
-    tag: Optional[str] = None
-    tags: List[str] = Field(default_factory=list)
-    private: bool = False
-    success: Optional[bool] = None
-    known_tags: List[Dict[str, Any]] = Field(default_factory=list)
-    thread_matches: List[Dict[str, Any]] = Field(default_factory=list)
-    applied_tags: List[str] = Field(default_factory=list)
-    message: str = ""
-
-    def get_id(self) -> str:
-        return self.command_id
-
-
 # The one list of retired gateway commands: durable commands a 0.9 gateway put in the
 # team lead's control queue whose handling phase 2 moved to protocol 1 request/reply at
 # the team services (plan 13B.10). A command queued just before an in-place upgrade may
@@ -649,11 +628,12 @@ class ManagerTopicCommand(BaseModel):
 # so it was redelivered, set aside as a dead letter and the person never heard back.
 # A family that moves the same way adds its old class name to the ``Literal`` and what
 # people call the command to the mapping below it, in the same change.
-RetiredGatewayCommandClass = Literal["ManagerMemoryCommand", "ManagerKnowledgeCommand"]
+RetiredGatewayCommandClass = Literal["ManagerMemoryCommand", "ManagerKnowledgeCommand", "ManagerTopicCommand"]
 # What people called each retired command, for the refusal they are sent.
 RETIRED_GATEWAY_COMMAND_NAMES: Dict[str, str] = {
     "ManagerMemoryCommand": "memory command",
     "ManagerKnowledgeCommand": "Knowledge page request",
+    "ManagerTopicCommand": "topic command",
 }
 
 

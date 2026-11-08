@@ -53,6 +53,8 @@ from tests.test_nats_pull_delivery import _adapter, _decode, _JsMessage
 FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-memory-command.json"
 # A Web Chat Knowledge page note as the v0.9.11 gateway serialized it (dumped with that release's models).
 KNOWLEDGE_FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-knowledge-command.json"
+# Topic command serialized with v0.9.11's own ManagerTopicCommand model.
+TOPIC_FIXTURE = Path(__file__).parent / "fixtures" / "upgrade" / "0.9-manager-topic-command.json"
 PERSON = "Owner"
 LEAD_ID = "manager_1234"
 REFUSAL = "Your memory command was sent before the team was upgraded, so nothing was changed. Please send it again."
@@ -210,6 +212,20 @@ async def test_a_knowledge_page_request_queued_before_the_upgrade_is_answered_in
     )
     answered = next(r.getMessage() for r in caplog.records if "event=retired_gateway_command_answered" in r.getMessage())
     assert "command_class=ManagerKnowledgeCommand" in answered
+
+
+@pytest.mark.asyncio
+async def test_a_topic_command_queued_before_the_upgrade_is_answered(world) -> None:
+    envelope = await _lead_handles(world, _queued_0_9_command(world, fixture=TOPIC_FIXTURE))
+    assert isinstance(envelope.msg_content, RetiredGatewayCommand)
+    assert envelope.msg_content.message_class == "ManagerTopicCommand"
+    assert requires_execution_slot(envelope) is False
+    (_, notice), = world.lead.team_comms.sent
+    assert notice.msg_content.text == (
+        "Your topic command was not carried out\n\nYour topic command was sent before the team was upgraded, "
+        "so nothing was changed. Please send it again."
+    )
+    assert notice.msg_header.idempotency_key == "retired_gateway_command:manager_topic_41c2a7b9"
 
 
 @pytest.mark.asyncio

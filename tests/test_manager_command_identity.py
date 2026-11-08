@@ -6,9 +6,10 @@ memory and a "may change system schedules" flag from the gateway, and verified
 the signature only for person standing commands. Anything able to publish to
 the manager's control subject could claim any person and role.
 
-Memory commands moved to the team services in phase 2, where the person comes
-from the command's authority token (tests/test_team_memory.py); the families
-still in the manager's process use the topic command here.
+Memory, knowledge and topic commands moved to the team services in phase 2,
+where the person comes from the command's authority token
+(tests/test_team_memory.py and the others); the families still in the
+manager's process use the schedule command here.
 """
 
 from __future__ import annotations
@@ -20,10 +21,10 @@ import pytest
 
 from access_control.identity import ContextSigner
 from custom_agents.manager_control_runtime import (
-    handle_manager_topic_command,
+    handle_manager_schedule_command,
     verified_command_person,
 )
-from custom_messages.contracts.control_v1 import ManagerTopicCommand
+from custom_messages.contracts.schedule_v1 import ManagerScheduleCommand
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from tests.broker_access_support import context_signer, use_scheduler_key
 from tests.test_manager_control_runtime import (  # noqa: F401
@@ -35,12 +36,12 @@ from tests.test_manager_control_runtime import (  # noqa: F401
 )
 
 
-def _list_tags() -> ManagerTopicCommand:
-    return ManagerTopicCommand(action="list_tags")
+def _list_schedules() -> ManagerScheduleCommand:
+    return ManagerScheduleCommand(action="list")
 
 
-async def _send(agent, command: ManagerTopicCommand, context: GatewayContext) -> ManagerTopicCommand:
-    await handle_manager_topic_command(
+async def _send(agent, command: ManagerScheduleCommand, context: GatewayContext) -> ManagerScheduleCommand:
+    await handle_manager_schedule_command(
         agent,
         command=command,
         msg_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
@@ -62,7 +63,7 @@ def manager(tmp_path: Path):
 async def test_an_unsigned_command_is_refused_whoever_it_claims_to_be(manager) -> None:
     agent, _config_ = manager
 
-    response = await _send(agent, _list_tags(), GatewayContext(canonical_user_id="Owner"))
+    response = await _send(agent, _list_schedules(), GatewayContext(canonical_user_id="Owner"))
 
     assert response.success is False
     assert response.message.startswith("unsigned_sender")
@@ -77,7 +78,7 @@ async def test_a_context_the_gateway_did_not_sign_for_this_team_is_refused(manag
 
     by_scheduler = await _send(
         agent,
-        _list_tags(),
+        _list_schedules(),
         GatewayContext(
             canonical_user_id="Owner",
             task_context=scheduler.issue(team_id=agent.team_id, person_id="Owner", person_roles=("owner",)),
@@ -85,7 +86,7 @@ async def test_a_context_the_gateway_did_not_sign_for_this_team_is_refused(manag
     )
     other_team = await _send(
         agent,
-        _list_tags(),
+        _list_schedules(),
         GatewayContext(
             canonical_user_id="Owner",
             task_context=context_signer().issue(team_id="another_team", person_id="Owner", person_roles=("owner",)),
@@ -130,7 +131,6 @@ def test_commands_carry_no_person_or_authority_fields() -> None:
     from custom_messages.contracts.control_v1 import (
         KnowledgeCommandPayload,
         ManagerRuntimeWorkCommand,
-        ManagerTopicCommand,
         PersonStandingCommandV1,
         RetiredGatewayCommand,
     )
@@ -142,7 +142,6 @@ def test_commands_carry_no_person_or_authority_fields() -> None:
     for model in (
         ManagerRuntimeWorkCommand,
         ManagerScheduleCommand,
-        ManagerTopicCommand,
         PersonStandingCommandV1,
         RetiredGatewayCommand,
     ):

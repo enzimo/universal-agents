@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from topic_tags import TopicTagInputError, normalize_topic_tag, normalize_topic_tags
+
 import logging
-import re
 import shlex
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -15,10 +16,6 @@ from assistant_gateway.application.interactive_submission import (
 )
 from assistant_gateway.application.person_lifecycle import GatewayPersonLifecycle
 from assistant_gateway.application.person_setup import PersonSetupChoices
-from assistant_gateway.application.manager_commands import (
-    GatewayManagerCommandRequest,
-    GatewayManagerCommandService,
-)
 from assistant_gateway.application.ports import GatewayPrivateResourceAuthorizer
 from assistant_gateway.application.private_resources import (
     PRIVATE_ACTION_CREATE,
@@ -46,7 +43,6 @@ from assistant_gateway.application.team_commands import (
     TeamServicesUnavailable,
 )
 from custom_messages.contracts.control_v1 import (
-    ManagerTopicCommand,
     PinnedMemoryCommandPayload,
     PinnedMemoryCommandResultPayload,
 )
@@ -117,7 +113,6 @@ class GatewayCommandOperationsApplication:
         identity: GatewayIdentityService,
         request_context: GatewayRequestContextService,
         sessions: GatewaySessionService,
-        manager_commands: GatewayManagerCommandService,
         submission: GatewayInteractiveSubmissionService,
         team_commands: GatewayTeamCommandService,
         pinned_memory: GatewayPinnedMemoryCodec,
@@ -131,7 +126,6 @@ class GatewayCommandOperationsApplication:
         self._person_lifecycle = person_lifecycle
         self._request_context = request_context
         self._sessions = sessions
-        self._manager_commands = manager_commands
         self._submission = submission
         # People's memory commands go to the team services (team_commands).
         self._team_commands = team_commands
@@ -621,26 +615,6 @@ class GatewayCommandOperationsApplication:
             )
         )
 
-    async def _manager_request(
-        self,
-        command: ManagerTopicCommand,
-        *,
-        session: SessionRecord,
-        route: GatewayRequestRoute,
-        person: GatewayCommandPerson,
-    ) -> ManagerTopicCommand:
-        result = await self._manager_commands.request(
-            GatewayManagerCommandRequest(
-                command=command,
-                session=session,
-                person=person,
-                route=route,
-            )
-        )
-        if not isinstance(result, ManagerTopicCommand):
-            raise TypeError("Manager returned the wrong command result type.")
-        return result
-
     async def execute_pinned_memory_command(
         self,
         *,
@@ -828,6 +802,25 @@ class GatewayCommandOperationsApplication:
         session_key: str | None = None,
     ) -> tuple[str | None, str]:
         try:
+            return await self._execute_topic_command(
+                command=command, channel_name=channel_name, user_id=user_id, chat_id=chat_id,
+                thread_id=thread_id, session_key=session_key,
+            )
+        except TopicTagInputError as error:
+            self._logger.warning("Refused invalid topic tags. event=gateway_topic_invalid_input")
+            return session_key, f"Topic command failed: {error}"
+
+    async def _execute_topic_command(
+        self,
+        *,
+        command: str,
+        channel_name: str | None,
+        user_id: str | None,
+        chat_id: str | None,
+        thread_id: str | None,
+        session_key: str | None = None,
+    ) -> tuple[str | None, str]:
+        try:
             parts = shlex.split(command)
         except ValueError as exc:
             return session_key, f"Topic command failed: {exc}"
@@ -857,48 +850,49 @@ class GatewayCommandOperationsApplication:
             canonical_user_id=session.owner_canonical_user_id,
         )
 
-        async def request_topic(request: ManagerTopicCommand) -> ManagerTopicCommand:
-            response = await self._manager_request(
-                request,
-                session=session,
-                route=route, person=person,
-            )
-            if not isinstance(response, ManagerTopicCommand):
-                raise TypeError("Manager returned the wrong topic result type.")
-            return response
+        async def request_topic(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+            """The team services' reply; a refusal or an unreachable team services becomes a message."""
+
+            try:
+                return await self._team_commands.request(kind, body, person_id=person.canonical_user_id)
+            except TeamCommandRefused as exc:
+                if kind == "topics.tag_thread" and exc.code == "handler_failed":
+                    return {"outcome": "runtime_error", "message": "The result of the topic change is unknown. "
+                            "Check the thread's tags before sending it again."}
+                return {"outcome": "runtime_error", "message": str(exc)}
+            except TeamServicesUnavailable as exc:
+                return {"outcome": "runtime_error", "message": str(exc)}
+            except Exception:
+                self._logger.exception("A topic command failed in the gateway. "
+                                       "event=gateway_topic_command_failed kind=%s person=%s",
+                                       kind, person.canonical_user_id)
+                return {"outcome": "runtime_error", "message": "The topic command failed. Try again in a moment."}
 
         command_name = parts[0].lower()
         if command_name == "/topics":
             if len(parts) == 1:
-                response = await request_topic(
-                    ManagerTopicCommand(action="list_tags")
-                )
-                if not response.success:
+                response = await request_topic("topics.list_tags", {})
+                if response["outcome"] != "ok":
                     return (
                         session.session_key,
-                        f"Topic command failed: {response.message}",
+                        f"Topic command failed: {response.get('message', '')}",
                     )
-                if not response.known_tags:
+                if not response["tags"]:
                     return session.session_key, "No topic tags found."
                 return session.session_key, "\n".join(
                     ["Topic tags:"]
                     + [
                         f"- {item['tag']} ({item['thread_count']} thread(s))"
-                        for item in response.known_tags
+                        for item in response["tags"]
                     ]
                 )
-            tag = _normalize_topic_tag(" ".join(parts[1:]))
-            response = await request_topic(
-                ManagerTopicCommand(
-                    action="find_threads",
-                    tags=[tag],
-                )
-            )
-            if not response.success:
-                return session.session_key, f"Topic command failed: {response.message}"
+            tag = normalize_topic_tag(" ".join(parts[1:]))
+            response = await request_topic("topics.find_threads", {"tags": [tag]})
+            if response["outcome"] != "ok":
+                return session.session_key, f"Topic command failed: {response.get('message', '')}"
             return session.session_key, _render_topic_matches(
                 tag,
-                response.thread_matches,
+                response["matches"],
                 timezone_name=timezone_name,
             )
         if command_name == "/tag_thread":
@@ -908,52 +902,39 @@ class GatewayCommandOperationsApplication:
             ).strip()
             if not tag_text:
                 return session_key, "Usage: /tag_thread <tag[,tag]> [--private]"
-            tags = [
-                _normalize_topic_tag(tag)
-                for chunk in tag_text.split(",")
-                for tag in [chunk.strip()]
-                if tag
-            ]
+            tags = normalize_topic_tags([chunk.strip() for chunk in tag_text.split(",") if chunk.strip()])
             response = await request_topic(
-                ManagerTopicCommand(
-                    action="tag_thread",
-                    conversation_id=session.conversation_id,
-                    tags=tags,
-                    private=private,
-                )
+                "topics.tag_thread",
+                {"conversation_id": session.conversation_id, "tags": tags, "private": private},
             )
-            if not response.success:
-                return session.session_key, f"Topic tagging failed: {response.message}"
+            if response["outcome"] != "ok":
+                return session.session_key, f"Topic tagging failed: {response.get('message', '')}"
             return session.session_key, (
                 f"Tagged thread {session.conversation_id}: "
-                f"{', '.join(response.applied_tags)}"
+                f"{', '.join(response['applied_tags'])}"
             )
         if command_name == "/switch_topic":
             tag_text = " ".join(parts[1:]).strip()
             if not tag_text:
                 return session_key, "Usage: /switch_topic <tag>"
-            tag = _normalize_topic_tag(tag_text)
-            response = await request_topic(
-                ManagerTopicCommand(
-                    action="find_threads",
-                    tags=[tag],
-                )
-            )
-            if not response.success:
-                return session.session_key, f"Topic command failed: {response.message}"
-            if not response.thread_matches:
+            tag = normalize_topic_tag(tag_text)
+            response = await request_topic("topics.find_threads", {"tags": [tag]})
+            if response["outcome"] != "ok":
+                return session.session_key, f"Topic command failed: {response.get('message', '')}"
+            matches = response["matches"]
+            if not matches:
                 return session_key, f"No threads matched topic: {tag}"
-            if len(response.thread_matches) > 1:
+            if len(matches) > 1:
                 return session_key, (
                     f"Multiple threads matched topic {tag}; choose one explicitly "
                     "by continuing in the desired thread.\n"
                     + _render_topic_matches(
                         tag,
-                        response.thread_matches,
+                        matches,
                         timezone_name=timezone_name,
                     )
                 )
-            target = response.thread_matches[0]
+            target = matches[0]
             updated = self._sessions.switch_conversation(
                 session_key=session.session_key,
                 conversation_id=target["conversation_id"],
@@ -974,14 +955,6 @@ class GatewayCommandOperationsApplication:
 _TOPIC_USAGE = (
     "Usage: /topics [tag], /tag_thread <tag[,tag]> [--private], /switch_topic <tag>"
 )
-
-
-def _normalize_topic_tag(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
-    normalized = re.sub(r"-+", "-", normalized).strip("-_")
-    if not normalized:
-        raise ValueError("Topic tag must contain at least one letter or number.")
-    return normalized
 
 
 def _render_topic_matches(

@@ -1230,7 +1230,6 @@ class UserGateway:
             identity=self._identity_service,
             request_context=self._request_context_service,
             sessions=self._session_service,
-            manager_commands=self._manager_commands,
             submission=self._interactive_submission_service,
             team_commands=_team_commands(
                 resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory

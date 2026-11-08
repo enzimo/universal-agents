@@ -3036,7 +3036,7 @@ The manager awaits this storage and Cedar lookup on its bounded
 `TaskOperationRuntime` lane before checking the record digest or changing the
 schedule. A slow lookup leaves the event loop responsive; a cancelled command
 joins the lookup and stops before mutation.
-Every gateway-to-manager command (schedules, memory, topics, task and objective
+Every gateway-to-manager command (schedules, task and objective
 controls, person standing) names its person only through that signed context
 (`manager_control_runtime.verified_command_person`); the commands carry no
 person, roles or authority flag. Until 2026-10-07 the manager trusted a person
@@ -4599,7 +4599,18 @@ They serve the team's address (`svc.team`) and answer, so far:
   page (`custom_agents.long_knowledge`).
   A Knowledge page command a 0.9 gateway queued before the upgrade
   (`ManagerKnowledgeCommand`) is a retired command like the memory one above: the lead
-  tells the person it was not carried out.
+  tells the person it was not carried out;
+- the chat's topic commands, `topics.list_tags`, `.find_threads` and `.tag_thread`
+  (`team_services.topics`), on the same conversation store. All requested tags and
+  the reply commit in one transaction, with the retry key checked under the store's
+  write lock. An old retry never restores tags or privacy settings changed later.
+  Tags are at most 64 characters after normalization, with at most 20 per tagging
+  command. The gateway, agent tools and automatic tagger use `topic_tags`; invalid
+  typed input is refused in plain words before sending. Automatic oversized hashtags
+  are skipped with a warning. Existing oversized tags stay stored but are omitted
+  from lists with `event=topic_tags_omitted`, without logging the tag text. A queued
+  0.9 `ManagerTopicCommand` is retired like memory and knowledge commands: the person
+  is told nothing was carried out and to send it again.
 
 Every other operation is answered `unsupported` at once; today's team operations still
 run in the team lead's process and move here one family at a time.
@@ -4609,9 +4620,9 @@ in the manager database): a change command is carried out once however often it 
 retried. The store that makes the change checks for a stored reply under its write
 lock, before changing anything, and stores the reply under the team and the command's
 retry key (the frame's idempotency key) in the same transaction as the change
-(`CommandOutcome`, passed to the memory and knowledge stores' writes). A repeat is looked
+(`CommandOutcome`, passed to the memory, knowledge and conversation stores' writes). A repeat is looked
 up first, so it gets its stored reply even if its body would no longer pass the checks;
-the knowledge commands look again after a failure (`team_services.outcomes`), which
+the knowledge and topic commands look again after a failure (`team_services.outcomes`), which
 finds a change whose commit's acknowledgement was lost. Every final
 refusal is stored too, in a transaction of its own (a refused person, refused access, a
 wrong command, a change the store refused), except outcomes that ask for a retry
