@@ -104,15 +104,21 @@ async def _probe_live_named_agent_type(
 ) -> Optional[AgentStatus]:
     """A live agent of the type (or with the name) that accepts work, or None.
 
-    Answered from the team's agent records (``custom_agents.team_directory``): they already
-    say who is live, so nothing is sent and nothing waits.
+    By type, the team's agent records answer at once (``custom_agents.team_directory``):
+    nothing is sent and nothing waits, because work for a type waits in the type's queue.
+    By name, the agent must take the task from its own mailbox, so the lookup waits a
+    bounded time for a just-started agent to appear and then asks it for its status: one
+    that does not answer is refused at once (``team_directory.live_named_agent``).
     """
 
-    from custom_agents.team_directory import live_agent_status
+    from custom_agents.team_directory import live_agent_status, live_named_agent
 
     if not self.team_id or not (named_agent_type or target_agent_name):
         return None
-    status = live_agent_status(self, named_agent_type, target_agent_name)
+    if target_agent_name:
+        status = await live_named_agent(self, named_agent_type, target_agent_name)
+    else:
+        status = live_agent_status(self, named_agent_type)
     self._logger.debug(
         "[%s] event=agent_liveness_lookup target_named_agent_type=%s target_agent_name=%s found_agent_id=%s",
         self.id,
@@ -149,15 +155,30 @@ async def exact_delegation_route(
 ) -> Optional[str]:
     """The private mailbox (agent id) of one named worker, or None when it is not live.
 
-    The team lead asks the worker for a live status first and uses the id it
-    answers with, so a restarted worker is reached under its new id and no
-    other worker is substituted; with ``named_agent_type`` the worker must also
-    be of that type. Other agents have no live probe here and use the names
-    they learned from presence.
+    The team lead finds the worker by name in the team's agent records, waiting a
+    bounded time for one just started, and asks it for its status; it uses the id
+    of the worker that answered, so a restarted worker is reached under its new id
+    and no other worker is substituted, and a worker that does not answer is refused
+    at once. With ``named_agent_type`` the worker must also be of that type. Other
+    agents get the same bounded wait and the records' checks (it takes work, it is
+    of that type) without asking: the contract lets only the lead's host, the team
+    services and the gateway ask for a status.
     """
 
     if not self.is_team_lead:
-        return self._agent_id_by_name.get(target_agent_name)
+        from custom_agents.team_directory import live_named_agent
+
+        found = await live_named_agent(self, named_agent_type, target_agent_name, ask=False)
+        if found is None:
+            self._logger.error(
+                "[%s] Exact delegation target %s (%s) is not live or takes no work; refusing to "
+                "substitute a different worker. event=exact_delegation_target_unavailable",
+                self.id,
+                target_agent_name,
+                named_agent_type,
+            )
+            return None
+        return str(found.self_id)
     verified_status = await self._probe_live_named_agent_type(named_agent_type, target_agent_name)
     if verified_status is None:
         self._logger.error(
@@ -184,7 +205,8 @@ async def _verify_delegation_target(
     started here; before 2026-10-04 this probed for a live worker and started
     one, and a later check failed tasks that were only waiting in a busy
     worker's inbox. An exact agent (``target_agent_name``) is reached at its own
-    mailbox, so it must answer a live status probe (``exact_delegation_route``).
+    mailbox, so for the team lead it must be in the team's records and answer its
+    status (``exact_delegation_route``).
     """
 
     if target_agent_name:

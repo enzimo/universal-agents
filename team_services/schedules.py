@@ -25,8 +25,10 @@ it at its next pass, within a minute (``MAX_SCHEDULER_SLEEP_SECONDS``).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
+from threading import Event, Lock
 from typing import Any, Callable, Optional
 
 from access_control.ownership import PRIVATE_DELETE, PRIVATE_READ, PRIVATE_UPDATE
@@ -40,19 +42,27 @@ from custom_agents.schedule_management import SystemScheduleMutationDenied, is_s
 from custom_agents.schedule_store import ScheduleStore, ScheduleWriteConflict, schedule_record_digest
 from custom_messages.contracts.schedule_v1 import SYSTEM_SCHEDULE_CHANGE_KIND, ScheduledMessage
 from custom_messages.wire.encoding import format_timestamp
-from custom_messages.wire.frame import VerifiedFrame
+from custom_messages.wire.frame import VerifiedFrame, body_model
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES, encoded_size
 from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from storage.operation_outcomes import CommandOutcome
-from team_services.outcomes import carried_out_once
+from team_services.outcomes import CommandOnce
 from team_services.people import CommandPerson, command_person
+from team_services.service import OperationFamily
 
 SCHEDULE_KINDS = ("schedules.list", "schedules.pause", "schedules.resume", "schedules.disable", "schedules.remove")
 _STATES = {"pause": "paused", "resume": "resumed", "disable": "disabled", "remove": "removed"}
 _MESSAGE_MAX = 500
 _PREVIEW_MAX = 500
+# The schedule list schema's name and run-note string limit.
+_ROW_TEXT_MAX = 16_384
 NOT_FOUND_TEXT = "That schedule was not found."
 CHANGED_TEXT = "The schedule changed since you listed it. Refresh and try again."
 SYSTEM_NOT_ALLOWED_TEXT = "Only people who may change the team's system schedules can change this one."
+
+
+class ScheduleNotFound(LookupError):
+    """An absent schedule or one outside the command person's team and ownership."""
 
 
 class ScheduleOperations:
@@ -68,18 +78,60 @@ class ScheduleOperations:
         self._clock = clock
         self._logger = logger
 
-    def handlers(self) -> dict[str, Callable[[VerifiedFrame], Any]]:
-        return {kind: self.handle for kind in SCHEDULE_KINDS}
+    def family(self) -> OperationFamily:
+        return OperationFamily({kind: self.handle for kind in SCHEDULE_KINDS}, frozenset(SCHEDULE_KINDS),
+                               self.purge_outcomes, self.close)
+
+    async def purge_outcomes(self) -> None:
+        await asyncio.to_thread(self._store.command_outcomes.purge_command_outcomes, self._clock())
+
+    def close(self) -> None:
+        if isinstance(self._may_change_system, SystemScheduleCheck):
+            self._may_change_system.close()
 
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
-        return await asyncio.to_thread(self.answer, verified)
+        cancelled = Event()
+        running = asyncio.create_task(asyncio.to_thread(self.answer, verified, cancelled=cancelled))
+        cancellation = None
+        # Retain the same worker through overlapping stop and shutdown requests.
+        # Its write must finish before the host counts this handler as drained.
+        while not running.done():
+            try:
+                await asyncio.shield(running)
+            except asyncio.CancelledError as error:
+                cancelled.set()
+                cancellation = error
+        try:
+            return running.result()
+        finally:
+            if cancellation is not None:
+                raise cancellation
 
-    def answer(self, verified: VerifiedFrame) -> dict[str, Any]:
+    def answer(self, verified: VerifiedFrame, *, cancelled: Optional[Event] = None) -> dict[str, Any]:
         action = verified.frame.kind.removeprefix("schedules.")
         body = verified.raw["body"]
-        person, reason = command_person(verified, self._people, self._logger)
+        check = command_person(verified, self._people, self._logger)
+        once = None
+        if action != "list" and check.person_id is not None:
+            outcome = CommandOutcome(
+                team_id=self._people.team_id, person_id=check.person_id,
+                retry_key=str(verified.raw["idempotency_key"]), kind=verified.frame.kind,
+                body_digest=str(verified.raw["body_digest"]), now=self._clock(),
+                reply_for=lambda write: _checked_change_reply(action, body["schedule_id"], write), logger=self._logger,
+            )
+            once = CommandOnce(
+                self._store.command_outcomes, outcome, reply_from_receipt=lambda reply: reply,
+                key_taken=lambda error: _message("not_allowed", str(error)),
+                not_stored=_message("runtime_error", "The schedule command could not be answered. "
+                                    "Check the schedule before sending it again."), logger=self._logger,
+            )
+            stored = once.stored_reply()
+            if stored is not None:
+                return stored
+        person = check.person
         if person is None:
-            return _message("not_allowed", reason)
+            reply = _message("not_allowed", check.reason)
+            return once.final(reply) if once is not None else reply
         if action == "list":
             try:
                 return self._list(person, body)
@@ -87,41 +139,57 @@ class ScheduleOperations:
                 self._logger.exception("A schedule list failed. event=team_schedule_list_failed person=%s",
                                        person.person_id)
                 return _message("runtime_error", "The schedules could not be listed.")
-        outcome = CommandOutcome(
-            team_id=person.team_id, retry_key=str(verified.raw["idempotency_key"]), kind=verified.frame.kind,
-            body_digest=str(verified.raw["body_digest"]), now=self._clock(),
-            reply_for=lambda write: _changed_reply(action, body["schedule_id"], write), logger=self._logger,
-        )
-        return carried_out_once(self._store.command_outcomes, outcome, lambda: self._change(person, action, body, outcome),
-                                refusal_for=lambda error: self._refusal(person, action, body, error),
-                                logger=self._logger)
+        assert once is not None
+        return once.run(lambda: self._change(person, action, body, once.outcome, cancelled),
+                        refusal_for=lambda error: self._refusal(person, action, body, error))
 
     # -- list -------------------------------------------------------------------------
 
     def _list(self, person: CommandPerson, body: dict[str, Any]) -> dict[str, Any]:
         wanted = body.get("delivery_ref")
         if wanted is not None and self._delivery_refs is None:
-            raise RuntimeError("This team services instance has no delivery reference key.")
+            self._logger.warning("A chat's schedule list needs the delivery reference key. "
+                                 "event=team_schedule_delivery_ref_unavailable")
+            return _message("runtime_error", "This chat's schedules cannot be listed until an administrator "
+                            "restarts the team through the launcher to prepare its chat reference key.")
+        rows = self._visible_schedules(person, wanted)
+        return self._list_page(rows, person, offset=int(body["offset"]), limit=int(body["limit"]))
+
+    def _visible_schedules(self, person: CommandPerson, wanted: Optional[str]) -> list[ScheduledMessage]:
+        """The person's rows in stable id order, optionally restricted to one opaque chat reference."""
+
         rows = []
-        for row in self._store.get_all():
-            schedule_id = str(row.get("schedule_id") or "").strip()
-            schedule = self._store.get_scheduled_message(schedule_id) if schedule_id else None
-            if schedule is None or not schedule_owned_by(schedule, person_id=person.person_id, action=PRIVATE_READ):
+        for schedule in self._store.list_scheduled_messages(team_id=person.team_id):
+            if not schedule_owned_by(schedule, person_id=person.person_id, action=PRIVATE_READ):
                 continue
             if wanted is not None:
                 session_key = getattr(getattr(schedule.payload_meta, "gateway_context", None), "session_key", None)
                 if not session_key or self._delivery_refs.ref(str(session_key)) != wanted:  # type: ignore[union-attr]
                     continue
             rows.append(schedule)
-        offset, limit = int(body["offset"]), int(body["limit"])
-        shown = [self._wire_schedule(schedule, person) for schedule in rows[offset:offset + limit]]
+        return rows
+
+    def _list_page(self, rows: list[ScheduledMessage], person: CommandPerson, *, offset: int, limit: int) -> dict[str, Any]:
+        """Stop before the next row would exceed the signed reply's byte budget."""
+
+        shown = []
+        size = encoded_size({"outcome": "ok", "schedules": [], "total": len(rows), "next_offset": len(rows)})
+        for schedule in rows[offset:offset + limit]:
+            wire = self._wire_schedule(schedule, person)
+            size += encoded_size(wire) + 1
+            if size > REPLY_BODY_MAX_BYTES:
+                if not shown:
+                    raise ValueError("One schedule row exceeds the reply size limit.")
+                break
+            shown.append(wire)
         reply: dict[str, Any] = {"outcome": "ok", "schedules": shown, "total": len(rows)}
         if shown and offset + len(shown) < len(rows):
             reply["next_offset"] = offset + len(shown)
+        body_model("schedules.list.reply")[0].validate_python(reply)
         return reply
 
     def _wire_schedule(self, schedule: ScheduledMessage, person: CommandPerson) -> dict[str, Any]:
-        worker = schedule_worker_assignment(self._store, schedule, person.person_id).model_dump(mode="json",
+        worker = schedule_worker_assignment(self._store, schedule, person.person_id, now=self._clock()).model_dump(mode="json",
                                                                                                 exclude_none=True)
         if "not_running_since" in worker:
             worker["not_running_since"] = _timestamp(worker["not_running_since"])
@@ -142,35 +210,107 @@ class ScheduleOperations:
         if schedule.management_class.value == "system" and schedule.effective_system_schedule_kind is not None:
             row["system_schedule_kind"] = schedule.effective_system_schedule_kind.value
         if schedule.schedule_name:
-            row["name"] = schedule.schedule_name
+            row["name"] = self._bounded(schedule, "name", schedule.schedule_name)
         if schedule.objective_id:
             row["objective_id"] = schedule.objective_id
         preview = " ".join(str(schedule.payload.problem_statement or "").split())
         if preview:
             row["instruction_preview"] = preview[:_PREVIEW_MAX]
-        for field, wire in (("next_fire_at", "next_fire_at"), ("paused_until", "paused_until")):
-            value = getattr(schedule, field, None)
-            if value:
-                row[wire] = _timestamp(value)
-        expires = getattr(schedule, "expires_at_utc", None)
-        if expires:
-            row["expires_at"] = _timestamp(expires)
+        self._wire_times(schedule, row, worker)
         if getattr(schedule, "repeat_count", None) is not None:
             row["repeat_count"] = int(schedule.repeat_count)
+        self._wire_notes(schedule, row)
         return row
+
+    def _wire_times(self, schedule: ScheduledMessage, row: dict[str, Any], worker: dict[str, Any]) -> None:
+        """Invalid saved optional times remain visible as a warning, without preventing removal."""
+
+        for field, wire in (("next_fire_at", "next_fire_at"), ("paused_until", "paused_until"),
+                             ("expires_at_utc", "expires_at")):
+            value = getattr(schedule, field, None)
+            if value:
+                parsed = self._stored_timestamp(schedule, field, value)
+                if parsed is not None:
+                    row[wire] = parsed
+                else:
+                    row.setdefault("invalid_time_fields", []).append(field)
+                    worker["not_running_explanation"] = {
+                        "type": "inline", "text": "A saved schedule time is invalid. Resume the schedule to clear "
+                        "an invalid pause, or remove it and create it again.",
+                    }
+    def _wire_notes(self, schedule: ScheduledMessage, row: dict[str, Any]) -> None:
+        """Run-note settings and state, while keeping even one large row within the frame budget."""
+
+        if schedule.schedule_memory is not None:
+            row["run_notes"] = self._run_notes(schedule)
+            if encoded_size(row) > REPLY_BODY_MAX_BYTES - 1024:
+                del row["run_notes"]
+                self._logger.warning("The run notes do not fit beside their schedule in one reply. "
+                                     "event=team_schedule_notes_omitted schedule_id=%s field=run_notes",
+                                     schedule.schedule_id)
+
+    def _bounded(self, schedule: ScheduledMessage, field: str, value: str) -> str:
+        if len(value) > _ROW_TEXT_MAX:
+            self._logger.warning("Shortened a schedule listing field; its stored value is unchanged. "
+                                 "event=team_schedule_text_shortened schedule_id=%s field=%s",
+                                 schedule.schedule_id, field)
+        return value[:_ROW_TEXT_MAX]
+
+    def _stored_timestamp(self, schedule: ScheduledMessage, field: str, value: Any) -> Optional[str]:
+        try:
+            return _timestamp(value)
+        except (ValueError, TypeError):
+            # Older pause commands accepted arbitrary text. Keep the row available to
+            # resume or remove; never rewrite its stored value while listing it.
+            self._logger.warning("A saved schedule time is invalid; omitted it from the list. "
+                                 "event=team_schedule_invalid_time schedule_id=%s field=%s",
+                                 schedule.schedule_id, field)
+            return None
+
+    def _run_notes(self, schedule: ScheduledMessage) -> dict[str, Any]:
+        memory = schedule.schedule_memory
+        assert memory is not None
+        policy = memory.policy.model_dump(exclude={"custom"})
+        policy["evidence_required"] = self._bounded(schedule, "evidence_required", policy["evidence_required"])
+        state = {field: self._bounded(schedule, field, getattr(memory.state, field))
+                 for field in ("summary", "confidence")}
+        for field in ("last_observed_at", "last_changed_at"):
+            value = getattr(memory.state, field)
+            if value:
+                parsed = self._stored_timestamp(schedule, field, value)
+                if parsed is not None:
+                    state[field] = parsed
+        notes = {"schedule_kind": self._bounded(schedule, "schedule_kind", memory.schedule_kind),
+                 "policy": policy, "state": state}
+        for target, field, value in ((policy, "custom_json", memory.policy.custom),
+                                     (state, "domain_json", memory.state.domain),
+                                     (notes, "domain_schema_hint_json", memory.domain_schema_hint)):
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            if len(text) <= _ROW_TEXT_MAX:
+                target[field] = text
+            else:
+                self._logger.warning("Omitted oversized structured run notes from a schedule list. "
+                                     "event=team_schedule_notes_omitted schedule_id=%s field=%s",
+                                     schedule.schedule_id, field)
+        return notes
 
     # -- changes ----------------------------------------------------------------------
 
-    def _change(self, person: CommandPerson, action: str, body: dict[str, Any], outcome: CommandOutcome) -> dict[str, Any]:
-        schedule = self._store.get_scheduled_message(body["schedule_id"])
+    def _change(self, person: CommandPerson, action: str, body: dict[str, Any], outcome: CommandOutcome,
+                cancelled: Optional[Event]) -> dict[str, Any]:
+        schedule = self._store.read_scheduled_message(body["schedule_id"])
         needed = PRIVATE_DELETE if action == "remove" else PRIVATE_UPDATE
-        if not schedule_owned_by(schedule, person_id=person.person_id, action=needed):
-            raise LookupError(NOT_FOUND_TEXT)
+        if schedule is None or schedule.claim_team_id != person.team_id or not schedule_owned_by(
+            schedule, person_id=person.person_id, action=needed,
+        ):
+            raise ScheduleNotFound(NOT_FOUND_TEXT)
         assert schedule is not None
         if is_system_managed_schedule(schedule) and not self._may_change_system(person):
             self._logger.warning("Refused a person's change to a system schedule. event=team_system_schedule_change_refused "
                                  "schedule_id=%s action=%s person=%s", schedule.schedule_id, action, person.person_id)
             raise PermissionError(SYSTEM_NOT_ALLOWED_TEXT)
+        if cancelled is not None and cancelled.is_set():
+            raise RuntimeError("The schedule command was cancelled before its write.")
         replies: list[dict[str, Any]] = []
         applied = apply_person_schedule_change(
             self._store, action, schedule, person_id=person.person_id, team_id=person.team_id,
@@ -178,16 +318,14 @@ class ScheduleOperations:
             command_outcome=_capturing(outcome, replies),
         )
         if not applied:
-            raise LookupError(NOT_FOUND_TEXT)
+            raise ScheduleNotFound(NOT_FOUND_TEXT)
         self._logger.info("A person changed a schedule. event=team_schedule_changed schedule_id=%s action=%s person=%s",
                           schedule.schedule_id, action, person.person_id)
         return replies[-1]
 
     def _refusal(self, person: CommandPerson, action: str, body: dict[str, Any], error: Exception) -> dict[str, Any]:
-        if isinstance(error, LookupError):
+        if isinstance(error, ScheduleNotFound):
             return _message("not_found", str(error))
-        if isinstance(error, PermissionError):
-            return _message("not_allowed", str(error))
         if isinstance(error, SystemScheduleMutationDenied):
             # The person may make the change (checked above); the store's permit, built from the schedule as
             # read, no longer matches it: it changed in between, like a stale listed version.
@@ -195,11 +333,20 @@ class ScheduleOperations:
                                  "action=%s person=%s reason=%s", body.get("schedule_id"), action, person.person_id,
                                  error.reason_code)
         if isinstance(error, (ScheduleWriteConflict, SystemScheduleMutationDenied)):
-            current = self._store.get_scheduled_message(body["schedule_id"])
-            if current is None:
+            try:
+                current = self._store.read_scheduled_message(body["schedule_id"])
+            except Exception as failure:
+                return self._refusal(person, action, body, failure)
+            if current is None or current.claim_team_id != person.team_id or not schedule_owned_by(
+                current, person_id=person.person_id, action=PRIVATE_READ,
+            ):
                 return _message("not_found", NOT_FOUND_TEXT)
+            if isinstance(error, SystemScheduleMutationDenied) and schedule_record_digest(current) == body["seen_version"]:
+                return _message("not_allowed", "The schedule changed while this command was checked. Refresh and try again.")
             return {"outcome": "changed_since_read", "current_version": schedule_record_digest(current),
                     "message": CHANGED_TEXT}
+        if isinstance(error, PermissionError):
+            return _message("not_allowed", str(error))
         self._logger.error("A schedule change failed. event=team_schedule_change_failed schedule_id=%s action=%s "
                            "person=%s error_type=%s", body.get("schedule_id"), action, person.person_id,
                            type(error).__name__, exc_info=error)
@@ -227,12 +374,18 @@ def _changed_reply(action: str, schedule_id: str, write: Any) -> dict[str, Any]:
     return reply
 
 
+def _checked_change_reply(action: str, schedule_id: str, write: Any) -> dict[str, Any]:
+    reply = _changed_reply(action, schedule_id, write)
+    body_model(f"schedules.{action}.reply")[0].validate_python(reply)
+    return reply
+
+
 def _timing(schedule: ScheduledMessage) -> dict[str, Any]:
     if schedule.interval_ms:
         return {"kind": "interval", "interval_ms": int(schedule.interval_ms)}
     if schedule.cron_expression:
         return {"kind": "cron", "expression": schedule.cron_expression, "time_zone": schedule.cron_timezone or "UTC"}
-    return {"kind": "once", "at": _timestamp(schedule.next_fire_at or datetime.now(timezone.utc).isoformat())}
+    return {"kind": "once", "at": _timestamp(schedule.next_fire_at or schedule.created_at)}
 
 
 def _timestamp(value: Any) -> str:
@@ -268,9 +421,12 @@ class SystemScheduleCheck:
         from assistant_gateway.access_setup import PersonChangeCheck
 
         self._check = PersonChangeCheck(config, _PeopleCopyRoles(people))
+        self._lock = Lock()
 
     def __call__(self, person: CommandPerson) -> bool:
-        return self._check.may_change(person.person_id, SYSTEM_SCHEDULE_CHANGE_KIND)
+        with self._lock:
+            return self._check.may_change(person.person_id, SYSTEM_SCHEDULE_CHANGE_KIND)
 
     def close(self) -> None:
-        self._check.close()
+        with self._lock:
+            self._check.close()

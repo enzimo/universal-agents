@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '4cb0ee0669e161f75cfce69b19cefb9ed88ec73fe87e8fb623feb43a2d69cd31'
+CONTRACT_SHA256 = 'b33da5f60e92d4721ef7c0c1cce2ac6fa3d00d8e092baea80136ce2541dc8c40'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -35,6 +35,7 @@ COVERED_RECORD_KINDS = ('memory_fact', 'knowledge_page', 'schedule', 'objective'
 RETRY_OUTCOMES = frozenset(['not_started', 'record_busy', 'runtime_error', 'waiting'])
 HOST_ROLES = ('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler')
 TOPOLOGIES = {'hub_and_spoke': {'lead': ('down', 'person', 'out'), 'worker': ('up',)}, 'same_type_peers': {'lead': ('down', 'person', 'out'), 'worker': ('up', 'sideways')}, 'all_peers': {'lead': ('down', 'person', 'out', 'sideways'), 'worker': ('up', 'sideways')}, 'nested': {'lead': ('down', 'person', 'out'), 'worker': ('up', 'down')}}
+REQUESTER_KINDS = frozenset(['task.probe'])
 FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'installation': None, 'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None}}, 'person': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'schedule_id': None, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
 STATE_SHAPE = {'properties': {'record': None, 'protocol': None, 'key': None, 'writer': {'one_of': 'type', 'variants': {'authority': {'properties': {'type': None, 'installation': None, 'key_id': None}}, 'host': {'properties': {'type': None, 'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}}}, 'sequence': None, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
 
@@ -192,7 +193,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentExitBodyAdapter,
         reply_model=models.AgentExitReplyAdapter,
-        reply_errors=(),
+        reply_errors=('not_allowed',),
         senders=('lead_host',),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -210,7 +211,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.pause': KindSpec(
@@ -221,7 +222,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentPauseBodyAdapter,
         reply_model=models.AgentPauseReplyAdapter,
-        reply_errors=('agent_exiting',),
+        reply_errors=('agent_exiting', 'not_allowed'),
         senders=('lead_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -239,7 +240,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.resume': KindSpec(
@@ -250,7 +251,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentResumeBodyAdapter,
         reply_model=models.AgentResumeReplyAdapter,
-        reply_errors=('agent_exiting',),
+        reply_errors=('agent_exiting', 'not_allowed'),
         senders=('lead_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -268,7 +269,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.status': KindSpec(
@@ -453,7 +454,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/body/request_id',),
         body_model=models.DebugDumpBodyAdapter,
         reply_model=models.DebugDumpReplyAdapter,
-        reply_errors=('not_allowed',),
+        reply_errors=('not_allowed', 'runtime_error'),
         senders=('gateway', 'team_services'),
         senders_by_target={'team_services': ('gateway',), 'agent': ('team_services',)},
         receivers=('team_services', 'lead_host', 'worker_host'),
@@ -471,7 +472,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'enabled': None, 'mode': None, 'agent': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'enabled': None, 'mode': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'enabled': None, 'mode': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'delivery.receipt': KindSpec(
@@ -2472,7 +2473,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'offset': None, 'limit': None, 'delivery_ref': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'schedules': {'items': {'one_of': 'management_class', 'variants': {'user': {'properties': {'schedule_id': None, 'name': None, 'management_class': None, 'objective_id': None, 'instruction_preview': None, 'action': {'properties': {'type': None}}, 'timing': {'one_of': 'kind', 'variants': {'interval': {'properties': {'kind': None, 'interval_ms': None}}, 'cron': {'properties': {'kind': None, 'expression': None, 'time_zone': None}}, 'once': {'properties': {'kind': None, 'at': None}}}}, 'next_fire_at': None, 'paused_until': None, 'expires_at': None, 'enabled': None, 'timing_revision': None, 'seen_version': None, 'worker': {'properties': {'agent_type': None, 'agent_id': None, 'automatic_creation': None, 'review_agent_type': None, 'upgrade_required': None, 'desired_agent_type': None, 'reassignment_pending': None, 'not_running_since': None, 'not_running_explanation': {'one_of': 'type', 'variants': {'inline': {'properties': {'type': None, 'text': None}}, 'blob': {'properties': {'type': None, 'ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}}}}}, 'repeat_count': None, 'run_notes': {'properties': {'schedule_kind': None, 'policy': {'properties': {'notify': None, 'notify_on_failure': None, 'evidence_required': None, 'custom_json': None}}, 'state': {'properties': {'summary': None, 'confidence': None, 'last_observed_at': None, 'last_changed_at': None, 'domain_json': None}}, 'domain_schema_hint_json': None}}}}, 'system': {'properties': {'schedule_id': None, 'name': None, 'management_class': None, 'system_schedule_kind': None, 'objective_id': None, 'instruction_preview': None, 'action': {'properties': {'type': None}}, 'timing': {'one_of': 'kind', 'variants': {'interval': {'properties': {'kind': None, 'interval_ms': None}}, 'cron': {'properties': {'kind': None, 'expression': None, 'time_zone': None}}, 'once': {'properties': {'kind': None, 'at': None}}}}, 'next_fire_at': None, 'paused_until': None, 'expires_at': None, 'enabled': None, 'timing_revision': None, 'seen_version': None, 'worker': {'properties': {'agent_type': None, 'agent_id': None, 'automatic_creation': None, 'review_agent_type': None, 'upgrade_required': None, 'desired_agent_type': None, 'reassignment_pending': None, 'not_running_since': None, 'not_running_explanation': {'one_of': 'type', 'variants': {'inline': {'properties': {'type': None, 'text': None}}, 'blob': {'properties': {'type': None, 'ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}}}}}, 'repeat_count': None, 'run_notes': {'properties': {'schedule_kind': None, 'policy': {'properties': {'notify': None, 'notify_on_failure': None, 'evidence_required': None, 'custom_json': None}}, 'state': {'properties': {'summary': None, 'confidence': None, 'last_observed_at': None, 'last_changed_at': None, 'domain_json': None}}, 'domain_schema_hint_json': None}}}}}}}, 'total': None, 'next_offset': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'schedules': {'items': {'one_of': 'management_class', 'variants': {'user': {'properties': {'schedule_id': None, 'name': None, 'management_class': None, 'objective_id': None, 'instruction_preview': None, 'action': {'properties': {'type': None}}, 'timing': {'one_of': 'kind', 'variants': {'interval': {'properties': {'kind': None, 'interval_ms': None}}, 'cron': {'properties': {'kind': None, 'expression': None, 'time_zone': None}}, 'once': {'properties': {'kind': None, 'at': None}}}}, 'next_fire_at': None, 'paused_until': None, 'expires_at': None, 'enabled': None, 'timing_revision': None, 'seen_version': None, 'worker': {'properties': {'agent_type': None, 'agent_id': None, 'automatic_creation': None, 'review_agent_type': None, 'upgrade_required': None, 'desired_agent_type': None, 'reassignment_pending': None, 'not_running_since': None, 'not_running_explanation': {'one_of': 'type', 'variants': {'inline': {'properties': {'type': None, 'text': None}}, 'blob': {'properties': {'type': None, 'ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}}}}}, 'repeat_count': None, 'run_notes': {'properties': {'schedule_kind': None, 'policy': {'properties': {'notify': None, 'notify_on_failure': None, 'evidence_required': None, 'custom_json': None}}, 'state': {'properties': {'summary': None, 'confidence': None, 'last_observed_at': None, 'last_changed_at': None, 'domain_json': None}}, 'domain_schema_hint_json': None}}, 'invalid_time_fields': {'items': None}}}, 'system': {'properties': {'schedule_id': None, 'name': None, 'management_class': None, 'system_schedule_kind': None, 'objective_id': None, 'instruction_preview': None, 'action': {'properties': {'type': None}}, 'timing': {'one_of': 'kind', 'variants': {'interval': {'properties': {'kind': None, 'interval_ms': None}}, 'cron': {'properties': {'kind': None, 'expression': None, 'time_zone': None}}, 'once': {'properties': {'kind': None, 'at': None}}}}, 'next_fire_at': None, 'paused_until': None, 'expires_at': None, 'enabled': None, 'timing_revision': None, 'seen_version': None, 'worker': {'properties': {'agent_type': None, 'agent_id': None, 'automatic_creation': None, 'review_agent_type': None, 'upgrade_required': None, 'desired_agent_type': None, 'reassignment_pending': None, 'not_running_since': None, 'not_running_explanation': {'one_of': 'type', 'variants': {'inline': {'properties': {'type': None, 'text': None}}, 'blob': {'properties': {'type': None, 'ref': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}}}}}}}, 'repeat_count': None, 'run_notes': {'properties': {'schedule_kind': None, 'policy': {'properties': {'notify': None, 'notify_on_failure': None, 'evidence_required': None, 'custom_json': None}}, 'state': {'properties': {'summary': None, 'confidence': None, 'last_observed_at': None, 'last_changed_at': None, 'domain_json': None}}, 'domain_schema_hint_json': None}}, 'invalid_time_fields': {'items': None}}}}}}, 'total': None, 'next_offset': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'schedules.pause': KindSpec(
@@ -3841,13 +3842,13 @@ KINDS: dict[str, KindSpec] = {
 }
 
 STATE_RECORDS: dict[str, StateSpec] = {
-    'agent': StateSpec(name='agent', bucket='UA1_AGENTS', key='<team>.<agent>', signer='host', signer_roles=('lead_host', 'worker_host'), writers=('lead_host', 'worker_host'), ttl_seconds=None, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.AgentStateAdapter, body_shape={'properties': {'team': None, 'agent': None, 'agent_type': None, 'display_name': None, 'session': None, 'state': None, 'accepting_work': None, 'since': None}}),
+    'agent': StateSpec(name='agent', bucket='UA1_AGENTS', key='<team>.<agent>', signer='host', signer_roles=('lead_host', 'worker_host'), writers=('lead_host', 'worker_host'), ttl_seconds=180, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.AgentStateAdapter, body_shape={'properties': {'team': None, 'agent': None, 'agent_type': None, 'display_name': None, 'session': None, 'state': None, 'accepting_work': None, 'since': None}}),
     'agent_session': StateSpec(name='agent_session', bucket='UA1_CERTS', key='session.<installation>.<team>.<session>', signer='host', signer_roles=('team_services',), writers=('team_services', 'edge_adapter'), ttl_seconds=None, max_lifetime_seconds=604800, fresh_seconds=None, body_model=models.AgentSessionStateAdapter, body_shape={'properties': {'session': None, 'installation': None, 'team': None, 'agent': None, 'agent_type': None, 'agent_role': None, 'runtime': None, 'placement_revision': None, 'started_at': None, 'ends_at': None}}),
     'agreement': StateSpec(name='agreement', bucket='UA1_CERTS', key='agreement.<peer>', signer='authority', signer_roles=(), writers=('installation_authority',), ttl_seconds=None, max_lifetime_seconds=31622400, fresh_seconds=None, body_model=models.AgreementStateAdapter, body_shape={'properties': {'agreement_id': None, 'installation': None, 'peer': None, 'authority_keys': {'items': {'properties': {'key_id': None, 'public_key': None}}}, 'teams': {'items': None}, 'kinds': {'items': None}, 'issued_at': None, 'expires_at': None}}),
     'block_list': StateSpec(name='block_list', bucket='UA1_BLOCK_LIST_{team}', key='<team>', signer='host', signer_roles=('team_services',), writers=('team_services',), ttl_seconds=None, max_lifetime_seconds=604800, fresh_seconds=900, body_model=models.BlockListStateAdapter, body_shape={'properties': {'team': None, 'blocks': {'items': {'properties': {'block_id': None, 'subject': {'one_of': 'kind', 'variants': {'team': {'properties': {'kind': None}}, 'agent_type': {'properties': {'kind': None, 'agent_type': None}}, 'agent': {'properties': {'kind': None, 'agent': None}}, 'person': {'properties': {'kind': None, 'person': None}}, 'schedule': {'properties': {'kind': None, 'schedule_id': None}}}}, 'tool_id': None, 'operation': None, 'request': {'properties': {'root_task_id': None, 'person': None}}}}}, 'people': {'items': {'properties': {'person': None, 'standing': None}}}}}),
     'certificate': StateSpec(name='certificate', bucket='UA1_CERTS', key='host.<installation>.<runtime>.<membership_epoch>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), ttl_seconds=None, max_lifetime_seconds=7776000, fresh_seconds=None, body_model=models.CertificateStateAdapter, body_shape={'properties': {'certificate_id': None, 'installation': None, 'runtime': None, 'teams': {'items': None}, 'roles': {'items': None}, 'membership_epoch': None, 'revocation_epoch': None, 'application_key': {'properties': {'key_id': None, 'public_key': None}}, 'nats_public_key': None, 'agent_types': {'items': None}, 'session_limit': None, 'connection_class': None, 'tools': {'items': None}, 'protocol': None, 'deployment': None, 'profile_sha256': None, 'software': {'properties': {'name': None, 'version': None}}, 'issued_at': None, 'expires_at': None, 'replaces': None}}),
     'host': StateSpec(name='host', bucket='UA1_HOSTS', key='<runtime>', signer='host', signer_roles=('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler'), writers=('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler'), ttl_seconds=30, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.HostStateAdapter, body_shape={'properties': {'runtime': None, 'certificate': {'properties': {'certificate_id': None, 'membership_epoch': None, 'sha256': None}}, 'session_limit': None, 'sessions_active': None, 'protocol': None, 'contract_sha256': None, 'state': None, 'health': None, 'components': {'items': {'properties': {'component': None, 'state': None, 'code': None}}}, 'placement_labels': {'items': None}, 'outbox_depth': None, 'revocation_epoch_seen': None, 'started_at': None, 'heartbeat_at': None, 'software': {'properties': {'name': None, 'version': None}}}}),
-    'placement': StateSpec(name='placement', bucket='UA1_PLACEMENT', key='<team>.<agent>', signer='host', signer_roles=('team_services',), writers=('team_services',), ttl_seconds=None, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.PlacementStateAdapter, body_shape={'properties': {'team': None, 'agent': None, 'agent_type': None, 'host': None, 'host_epoch': None, 'definition_sha256': None, 'required_labels': {'items': None}, 'placed_at': None, 'reason': None, 'previous_host': None}}),
+    'placement': StateSpec(name='placement', bucket='UA1_PLACEMENT', key='<team>.<agent>', signer='host', signer_roles=('team_services',), writers=('team_services',), ttl_seconds=None, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.PlacementStateAdapter, body_shape={'properties': {'team': None, 'agent': None, 'agent_type': None, 'host': None, 'host_epoch': None, 'definition_sha256': None, 'required_labels': {'items': None}, 'placed_at': None, 'reason': None, 'previous_host': None, 'handed_over': None}}),
     'revocations': StateSpec(name='revocations', bucket='UA1_CERTS', key='revocations.<installation>', signer='authority', signer_roles=(), writers=('installation_authority', 'edge_adapter'), ttl_seconds=None, max_lifetime_seconds=86400, fresh_seconds=None, body_model=models.RevocationsStateAdapter, body_shape={'properties': {'installation': None, 'revocation_epoch': None, 'entries': {'items': {'properties': {'certificate_id': None, 'runtime': None, 'key_id': None, 'key_expires_at': None, 'membership_epoch': None, 'revoked_at': None, 'reason': None}}}, 'expires_at': None}}),
     'team_view': StateSpec(name='team_view', bucket='UA1_TEAM_VIEW_{team}', key='<team>.<entry>.<id>', signer='host', signer_roles=('team_services',), writers=('team_services',), ttl_seconds=None, max_lifetime_seconds=None, fresh_seconds=None, body_model=models.TeamViewStateAdapter, body_shape={'one_of': 'entry', 'variants': {'roster': {'properties': {'entry': None, 'agent': None, 'display_name': None, 'agent_type': None, 'role': None, 'availability': None, 'updated_at': None}}, 'task': {'properties': {'entry': None, 'task_id': None, 'request_id': None, 'number': None, 'holder': None, 'requester': None, 'state': None, 'custody_token': None, 'custody_window': {'one_of': 'renewed_by', 'variants': {'host_record': {'properties': {'renewed_by': None, 'seconds': None}}, 'reconnection': {'properties': {'renewed_by': None, 'ends_at': None}}}}, 'since': None, 'objective_id': None}}, 'request': {'properties': {'entry': None, 'request_id': None, 'topology': None, 'intent_version': None, 'lead': None, 'person': None, 'state': None, 'opened_at': None}}, 'objective': {'properties': {'entry': None, 'objective_id': None, 'title': None, 'state': None, 'owner': None, 'updated_at': None}}, 'topologies': {'properties': {'entry': None, 'allowed': {'items': None}, 'default': None}}}}),
 }

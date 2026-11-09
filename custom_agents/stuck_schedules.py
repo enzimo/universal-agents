@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
+import logging
 from typing import Any
 
 from custom_agents.access_runtime import send_runtime_notice_once
@@ -101,10 +102,20 @@ def not_running(store: Any, schedule: Any, *, now: datetime) -> tuple[str, str] 
     """Since when and why a schedule is not running (its reason code), or None.
 
     The one rule behind both the notices and the Schedules card in Settings
-    (``manager_control_runtime``), so they always agree.
+    (``team_services.schedules``), so they always agree.
     """
     row = store.get_row(schedule.schedule_id)
-    if not row or not overdue_unclaimed(row, team_id=str(schedule.claim_team_id or ""), now=now):
+    if not row:
+        return None
+    try:
+        overdue = overdue_unclaimed(row, team_id=str(schedule.claim_team_id or ""), now=now)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "A saved schedule time is invalid; its running status could not be determined. "
+            "event=schedule_invalid_time schedule_id=%s", schedule.schedule_id,
+        )
+        return None
+    if not overdue:
         return None
     return str(row["next_fire_at"]), schedule_block_reason(store, schedule)
 

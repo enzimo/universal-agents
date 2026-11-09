@@ -29,7 +29,7 @@ from custom_agents.stale_schedules import (
     classify,
 )
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import AccessNoticeKind, PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import AccessNoticeKind, PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
@@ -82,7 +82,7 @@ def world(tmp_path: Path):
 def _people(world, **standings: PersonStanding) -> None:
     roles = {PersonStanding.ACTIVE: ("member",)}
     records = [
-        TeamPersonV1(team_id=TEAM, person_id=person, standing=standing, roles=roles.get(standing, ()), changed_at_utc=NOW)
+        TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person, standing=standing, roles=roles.get(standing, ()), changed_at_utc=NOW)
         for person, standing in {ADMIN: PersonStanding.ACTIVE, **standings}.items()
     ]
     records[0] = records[0].model_copy(update={"roles": ("admin",)})

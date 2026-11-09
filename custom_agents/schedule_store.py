@@ -1082,6 +1082,10 @@ class ScheduleStore:
         except (SystemScheduleMutationDenied, ScheduleWriteConflict, OutcomeAlreadyStored):
             raise
         except Exception:
+            if command_outcome is not None:
+                # Commands must distinguish an absent row from failed storage. CommandOnce
+                # also re-reads the outcome after a lost commit acknowledgement.
+                raise
             self._logger.exception(
                 "A schedule change failed in storage. event=schedule_write_failed schedule_id=%s action=%s",
                 schedule_id,
@@ -1483,11 +1487,26 @@ class ScheduleStore:
 
     def get_scheduled_message(self, schedule_id: str) -> Optional["ScheduledMessage"]:
         try:
-            row = self._row(schedule_id)
-            return _row_message(row, self._logger) if row is not None else None
+            return self.read_scheduled_message(schedule_id)
         except Exception as e:
             self._logger.error(f"Failed to load scheduled message {schedule_id}: {e}")
             return None
+
+    def read_scheduled_message(self, schedule_id: str) -> Optional["ScheduledMessage"]:
+        """Read one schedule; only an absent row is None. Command callers must see storage errors."""
+
+        row = self._row(schedule_id)
+        return _row_message(row, self._logger) if row is not None else None
+
+    def list_scheduled_messages(self, *, team_id: str) -> list["ScheduledMessage"]:
+        """A read-only snapshot for one team's commands, without pruning or a second read per row.
+
+        Storage and decoding failures propagate. Ordering by id keeps ordinary scheduler
+        advances from moving rows between offset pages.
+        """
+
+        rows = (row for row in self.all_rows() if row.get("claim_team_id") == team_id)
+        return [_row_message(row, self._logger) for row in sorted(rows, key=lambda row: row["schedule_id"])]
 
     def _row(self, schedule_id: str) -> Optional[dict[str, Any]]:
         """One schedule row by its column names (``get_schedule_row`` returns them in ``SCHEDULE_ROW_FIELDS`` order)."""
@@ -1639,6 +1658,10 @@ class ScheduleStore:
     ) -> bool:
         """Pause a schedule until a time, or clear its pause (``_change_controls``)."""
 
+        if paused_until is not None:
+            moment = datetime.fromisoformat(paused_until.replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                raise ValueError("A schedule pause time must include its UTC offset.")
         return self._change_controls(
             schedule_id,
             {"paused_until": paused_until},

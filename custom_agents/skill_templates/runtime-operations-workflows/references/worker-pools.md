@@ -34,6 +34,12 @@ A specialist type you create is a worker type at once: it is listed in your
 routing context, its queue and pool work like any other, and no restart is
 needed.
 
+When the runtime reports that this process is draining for another message
+contract, it starts no workers and refuses new delegations. Finish work locally
+where possible, or tell the person it needs the restarted team. Do not retry
+delegation or raise pool limits to work around the drain. Already queued work
+needs a team lead running the installation's version.
+
 To send a task to one specific running worker (it needs context only that
 worker has, or only it is set up for the work), also set `target_agent_name` to
 its full name as `inspect_worker_pools` or `inspect_delegated_work` shows it.

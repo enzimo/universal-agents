@@ -16,6 +16,12 @@ automatically when no instance exists. See [Quickstart](quickstart.md).
 The build and raw-container workflows below are intended for development and
 custom deployments.
 
+Use the team launcher for the Tasks controls and live context dump setting. A
+manually started agent without `--host-runtime` has no message session for those
+controls and logs an explanation at startup. Configured startup agent type names
+must fit the message contract: 1 to 24 letters, digits, `_` or `-`, starting with
+a letter or digit. Longer or invalid names are refused when configuration loads.
+
 Both images include the pinned X and Hugging Face CLIs and their agent skills.
 See [X and Hugging Face](hub-cli.md) for broker/Sealbox setup, supported operations,
 and credential isolation.
@@ -342,6 +348,55 @@ When Kubernetes profiles are enabled, the execution artifact directory must be
 backed by the same PVC that the profile names. Mount it at
 `/data/state/execution_artifacts` in the controller. Use a second PVC for workload data; do not mount the artifact
 PVC read-write into workload containers.
+
+### Message host trust
+
+After the message streams, the container starts the installation authority
+(`installation_authority` in the process tables). It signs the certificates that
+the message hosts use to sign their messages, and the list of revoked hosts. The
+container waits until the authority has signed its own certificate and a current
+list (`event=installation_authority_started`) before it starts anything else. If
+the authority cannot start, or is not ready within a minute, the container stops
+the services it started and refuses to start
+(`event=installation_authority_start_failed`). The authority's own log line
+`event=installation_authority_start_refused` says why and what to do.
+
+The authority creates the `UA1_*` key-value buckets in NATS on its first start.
+With an external NATS server, the instance's NATS login must therefore be allowed
+to create and update JetStream streams and key-value buckets; a login limited to
+the team's own streams makes the start fail.
+
+The trust records live in the instance's `trust/` folder, readable only by their
+owner:
+
+- `trust/authority/`: the authority's private key. It decides the installation's id.
+- `trust/hosts/<host>/`: each host's private keys and the records it keeps across
+  restarts. `trust/hosts/authority/issued.json` is the authority's record of what it
+  issued.
+- `trust/bootstrap.json`: the authority's public key, its certificate and the
+  newest list of revoked hosts, which every host starts from.
+- `trust/expected-hosts.json`: the hosts the container starts, which the authority
+  approves without asking anyone.
+
+Back up `trust/` together with the NATS data (`services/nats`) while the container
+is stopped, and restore them together. To recover:
+
+- **The NATS data was lost or reset, and `trust/` was kept.** Start the container.
+  The authority writes its records again from `trust/` and the hosts join again.
+- **`trust/authority/` was lost, or you deleted it to replace a key you no longer
+  trust.** The next start creates a new installation with a new id, and every host
+  joins it. Certificates of the old installation stop counting.
+- **The authority refuses to start because the stored list of revoked hosts does
+  not verify** (`RevocationsUnverified`). Something other than the authority wrote
+  that record. Restore `trust/` and the NATS data from the same backup. Without a
+  backup, delete the key the log names (`revocations.<installation id>`) from the
+  `UA1_CERTS` bucket, for example with `nats kv del UA1_CERTS
+  revocations.<installation id>` (the `nats` command-line tool is not included in
+  the container). The authority then starts a new, empty list, which forgets every
+  revocation.
+- **The authority refuses to start because a record is dated later than the
+  machine's clock** (`AuthorityClockBehind`). Correct the clock; nothing needs to
+  be deleted.
 
 ## Run Headless
 
@@ -860,6 +915,7 @@ Verify:
 - The team lead or an agent stops with "Stream ... is missing; start the topology owner first": the container sets up the streams before any service starts, so they were removed from NATS while the runtime ran, for example by a restart of an external NATS server with `transport.storage: memory`. Restart the container to set them up again.
 - The container takes about 40 seconds longer to start after it was stopped uncleanly (killed, or the machine lost power), and the log says "Still waiting for the team services": the team services wait until the stopped container's hold on the team's lock runs out, and the team lead and the gateway start once they serve. A normal stop releases the lock at once. If the wait ends after 98 seconds with "Headless launch refused", another container serving the same team on the same NATS server holds the lock; stop it.
 - Multiple instances under `/data`: set `TEAM_INSTANCE_ROOT` or `TEAM_INSTANCE_CONFIG`.
+- The container stops with `event=installation_authority_start_failed`: read the authority's `event=installation_authority_start_refused` line and follow [Message host trust](#message-host-trust). With an external NATS server, also check that its login may create streams and key-value buckets.
 - Generated site links unreachable: publish the website port and set `network.public_origin` plus `interactive_apps.plugins.builtin.internal_website.settings.public_port` to browser-reachable values.
 - Auth links unreachable: publish the broker port and set `network.public_origin` plus `security_layer.broker_public_port` to browser-reachable values.
 - WhatsApp webhook rejected: verify `whatsapp.public_base_url`, webhook path, and Twilio signature validation.

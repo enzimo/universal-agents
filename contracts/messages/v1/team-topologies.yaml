@@ -23,12 +23,19 @@ edges:
   out: an outside agent through an edge adapter, or another team or installation
 
 fixed_rules:
+  - a task's requester may ask the task's holder about that task (requester_kinds) whatever the requester's role, because every agent watches the subtasks it delegated
   - access requests and decisions go to the team services, never to a model
   - the output of work a person gave a worker directly (a run of the person's own schedule, or system work with a configured route) goes to the person
   - notifications for delegated work come from the lead
   - a receiver refuses a message whose edge its topology does not allow, and the sender gets delivery.refused
   - a message from an agent that does not hold the task it names is refused
   - only the lead receives work, answers and other messages from outside agents
+
+# Kinds a task's requester sends to the task's holder about that task, on the down edge,
+# whatever the requester's role: any agent may delegate, and the subtask watchdog of the
+# agent that delegated asks the holder whether it still has the task (decision 70). Each
+# lists down in its topology_edge.
+requester_kinds: [task.probe]
 
 topologies:
   hub_and_spoke:

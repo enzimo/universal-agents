@@ -18,7 +18,7 @@ import pytest_asyncio
 from access_control.people import PERSON_ROLE_ADMIN
 from custom_agents.dead_letter_watch import DeadLetterWatchState, report_dead_letters
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
@@ -94,6 +94,7 @@ def _lead(adapter, tmp_path, *, chat: bool):
     )
     AccessRepository(manager.storage_settings).record_person(
         TeamPersonV1(
+            person_ref=new_person_ref(),
             team_id=team_id,
             person_id=config.user.canonical_user_id,
             roles=(PERSON_ROLE_ADMIN,),

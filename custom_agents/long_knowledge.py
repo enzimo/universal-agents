@@ -3,12 +3,15 @@
 Web Chat's Knowledge page carries text inline, at most
 ``knowledge_base.records.INLINE_TEXT_MAX`` (32,768) characters, while agents
 read and write whole pages up to ``agent.knowledge.limits.max_body_chars``
-(at most 500,000). The team services refuse what Web Chat cannot show and
-change nothing (``team_services.knowledge``), so no text is lost or cut; this
-note tells administrators how much stored knowledge people cannot open in Web
-Chat: pages, earlier revisions, proposals waiting for review and open notes.
-Counts only, never names or text: personal pages and proposals belong to their
-person.
+(at most 500,000); and one page, with its open notes, links and backlinks, must
+fit in one reply (``custom_messages.wire.sizes``). The team services refuse
+what Web Chat cannot show and change nothing (``team_services.knowledge``), so no
+text is lost or cut; this note tells administrators how much stored knowledge
+people cannot open in Web Chat: pages, earlier revisions, proposals waiting for
+review and open notes with longer text, and pages probably too large for one
+reply (their text and open notes together; links, backlinks and JSON escapes are
+not counted, so it is an estimate). Counts only, never names or text: personal
+pages and proposals belong to their person.
 
 Who counts, and why the team lead. The knowledge base is in the manager's
 database, which the team services serve to Web Chat. The team services have no
@@ -34,6 +37,7 @@ import time
 from typing import Any, Callable, Optional
 
 from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES
 from knowledge_base.records import INLINE_TEXT_MAX, LongTextCounts
 from runtime_settings.knowledge import KnowledgeWriteLimits
 
@@ -96,7 +100,8 @@ class LongKnowledgeCount:
     def _count(self) -> None:
         counts: Optional[LongTextCounts] = None
         try:
-            counts = self._repository.count_long_texts(team_id=self._team_id, longer_than=INLINE_TEXT_MAX)
+            counts = self._repository.count_long_texts(team_id=self._team_id, longer_than=INLINE_TEXT_MAX,
+                                                       larger_than_bytes=REPLY_BODY_MAX_BYTES)
         except Exception:  # noqa: BLE001 - logged; the last count stays and the next interval tries again
             logger.exception(
                 "Could not count the knowledge too long for Web Chat; the Status page keeps the last count. "
@@ -137,22 +142,34 @@ def long_knowledge_finding(counts: LongTextCounts, *, source: str) -> StatusFind
         _counted(counts.open_notes, "open note", "open notes"),
     ]
     found = [part for part in parts if part]
-    listed = ", ".join(found[:-1]) + (" and " if len(found) > 1 else "") + found[-1]
+    long_total = counts.total - counts.too_large_pages
+    findings = []
+    if found:
+        listed = ", ".join(found[:-1]) + (" and " if len(found) > 1 else "") + found[-1]
+        findings.append(f"{listed} {'have' if long_total > 1 else 'has'} longer text.")
+    if counts.too_large_pages:
+        large = counts.too_large_pages
+        findings.append(f"{_counted(large, 'page is', 'pages are')} probably larger than that with "
+                        f"{'its' if large == 1 else 'their'} open notes.")
+    several = counts.total > 1
     return StatusFindingV1(
         finding_id=FINDING_ID,
         severity=StatusSeverity.NOTE,
         title="Some knowledge is too long to open in Web Chat",
         summary=(
-            f"Web Chat's Knowledge page shows at most {INLINE_TEXT_MAX:,} characters of text. {listed} "
-            f"{'have' if counts.total > 1 else 'has'} longer text, so people cannot open, change or decide "
-            f"{'them' if counts.total > 1 else 'it'} in Web Chat: such requests are refused and change nothing. "
-            "Nothing was cut: agents still read and change the whole text with their knowledge tools, the "
-            "knowledge curator can still publish or reject proposals, and a team transfer carries all of it."
+            f"Web Chat's Knowledge page shows at most {INLINE_TEXT_MAX:,} characters of text, and a page with its "
+            f"open notes, links and backlinks of at most about {round(REPLY_BODY_MAX_BYTES / 1000):,} KB. "
+            f"{' '.join(findings)} People cannot open, change or decide {'them' if several else 'it'} in Web Chat: "
+            "such requests are refused and change nothing. Nothing was cut: agents still read and change the whole "
+            "text with their knowledge tools, the knowledge curator can still publish or reject proposals, and a "
+            "team transfer carries all of it."
         ),
         action=(
             "Nothing is required. To make a page open in Web Chat, ask an agent to split it into smaller linked "
-            "pages. Pages stay within Web Chat's limit while agent.knowledge.limits.max_body_chars is "
-            f"{INLINE_TEXT_MAX:,} or less (the default is {default_limit:,})."
+            "pages, or to resolve its open notes. Page texts stay within Web Chat's character limit while "
+            f"agent.knowledge.limits.max_body_chars is {INLINE_TEXT_MAX:,} or less (the default is "
+            f"{default_limit:,}); text in scripts that take several bytes per character, and long open notes, can "
+            "still make a page too large."
         ),
         source=source,
     )

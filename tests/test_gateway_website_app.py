@@ -221,7 +221,8 @@ class _FakeGateway:
     ):
         self.context_debug_controls.append({"enabled": enabled, "mode": mode, **kwargs})
         return SimpleNamespace(
-            text=f"Context debug dump settings applied: enabled={str(enabled).lower()} mode={mode}.",
+            text=f"Context debug dump is {str(enabled).lower()} (mode {mode}).",
+            live_applied=True,
             conversation_id=kwargs.get("conversation_id") or "conv_debug",
             correlation_id="corr_debug",
             task_id=None,

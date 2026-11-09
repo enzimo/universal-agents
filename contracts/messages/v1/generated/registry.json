@@ -370,7 +370,7 @@
       "authority": "none",
       "body": "bodies/agent.exit.schema.json",
       "class": "request_reply",
-      "description": "Stop an agent after its current step.",
+      "description": "Stop an agent after its current step. Only the team lead's session may ask, and never for its own agent; anyone else is answered not_allowed.",
       "expiry_seconds": 30,
       "idempotency": [
         "/audience/id",
@@ -384,7 +384,9 @@
       "rendering": "none",
       "reply": {
         "body": "bodies/agent.exit.reply.schema.json",
-        "errors": []
+        "errors": [
+          "not_allowed"
+        ]
       },
       "routing": "named",
       "senders": [
@@ -403,7 +405,7 @@
       "authority": "none",
       "body": "bodies/agent.pause.schema.json",
       "class": "request_reply",
-      "description": "Pause one agent at its next safe point; it keeps its queued work.",
+      "description": "Pause one agent at its next safe point; it keeps its queued work. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.",
       "expiry_seconds": 30,
       "idempotency": [
         "/audience/id",
@@ -418,7 +420,8 @@
       "reply": {
         "body": "bodies/agent.pause.reply.schema.json",
         "errors": [
-          "agent_exiting"
+          "agent_exiting",
+          "not_allowed"
         ]
       },
       "routing": "named",
@@ -439,7 +442,7 @@
       "authority": "none",
       "body": "bodies/agent.resume.schema.json",
       "class": "request_reply",
-      "description": "Resume a paused agent.",
+      "description": "Resume a paused agent. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.",
       "expiry_seconds": 30,
       "idempotency": [
         "/audience/id",
@@ -454,7 +457,8 @@
       "reply": {
         "body": "bodies/agent.resume.reply.schema.json",
         "errors": [
-          "agent_exiting"
+          "agent_exiting",
+          "not_allowed"
         ]
       },
       "routing": "named",
@@ -738,7 +742,8 @@
       "reply": {
         "body": "bodies/debug.dump.reply.schema.json",
         "errors": [
-          "not_allowed"
+          "not_allowed",
+          "runtime_error"
         ]
       },
       "routing": "team",
@@ -6225,14 +6230,15 @@
     "agent": {
       "body": "state/agent.schema.json",
       "bucket": "UA1_AGENTS",
-      "description": "An agent's state, written by the host it is placed on when the state changes.",
+      "description": "An agent's state, written on change and refreshed by the host it is placed on.",
       "key": "<team>.<agent>",
       "signer": "host",
       "signer_roles": [
         "lead_host",
         "worker_host"
       ],
-      "write_rule": "written on change, at most once per 2 seconds; readers accept it only from the placement's host",
+      "ttl_seconds": 180,
+      "write_rule": "written on change, at most once per 2 seconds, and refreshed every 60 seconds with current trust; expires within 180 seconds so abandoned or unverifiable records do not accumulate; exiting is written immediately before session closure and conditional removal; readers accept it only from the placement's host with its current session and matching type",
       "writers": [
         "lead_host",
         "worker_host"

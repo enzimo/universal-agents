@@ -206,8 +206,13 @@ from assistant_gateway.team_services_client import (
     AccessStorePersonReferences,
     MessageHostTeamServices,
     gateway_delivery_refs,
+    new_request_id,
 )
-from assistant_gateway.application.team_commands import GatewayTeamCommandService, GatewayTeamServices
+from assistant_gateway.application.team_commands import (
+    GatewayPersonReferences,
+    GatewayTeamCommandService,
+    GatewayTeamServices,
+)
 from assistant_gateway.ports.repositories import (
     DeliveryRepository,
     IdentityRepository,
@@ -630,14 +635,15 @@ def _agent_presence_observer(
 
 
 def _team_commands(
-    config: GatewayInstanceConfig,
     runtime: object,
     team_services: GatewayTeamServices | None,
     *,
-    id_generator: GatewayIdGenerator,
+    references: GatewayPersonReferences,
 ) -> GatewayTeamCommandService:
     """People's commands that the team services answer (protocol 1, svc.team), one family
-    at a time (assistant_gateway.application.team_commands); tests pass ``team_services``."""
+    at a time (assistant_gateway.application.team_commands); tests pass ``team_services``.
+    ``references`` is the gateway's people copy writer, which makes a person's copy current
+    before their command (assistant_gateway.people_directory_sync)."""
 
     return GatewayTeamCommandService(
         team_services=team_services
@@ -645,8 +651,8 @@ def _team_commands(
             getattr(runtime, "message_host", None),
             timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
         ),
-        references=_person_references(config),
-        id_generator=id_generator,
+        references=references,
+        request_ids=new_request_id,
         logger=logger,
     )
 
@@ -987,7 +993,7 @@ class UserGateway:
             delivery=self._delivery_service,
             manager=self._manager_client,
             team_commands=_team_commands(
-                config, resolved_manager_runtime, team_services, id_generator=self._id_generator
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
             ),
             delivery_refs=gateway_delivery_refs(config),
             id_generator=self._id_generator,
@@ -1209,7 +1215,7 @@ class UserGateway:
             responses=self._response_coordinator,
             id_generator=self._id_generator,
             team_commands=_team_commands(
-                config, resolved_manager_runtime, team_services, id_generator=self._id_generator
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
             ),
             local_responses=self._local_responses,
             logger=logger,
@@ -1283,7 +1289,7 @@ class UserGateway:
             sessions=self._session_service,
             submission=self._interactive_submission_service,
             team_commands=_team_commands(
-                config, resolved_manager_runtime, team_services, id_generator=self._id_generator
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
             ),
             pinned_memory=RuntimePinnedMemoryCodec(),
             private_authorizer=self._private_authorizer,
@@ -1368,7 +1374,7 @@ class UserGateway:
             event_output=self._event_output,
             operational_controls=self._operational_controls,
             team_commands=_team_commands(
-                config, resolved_manager_runtime, team_services, id_generator=self._id_generator
+                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
             ),
             schedules=self._schedule_application,
             memory_operations=self._command_operations,
@@ -1427,8 +1433,9 @@ class UserGateway:
             # People's Knowledge page; the team services answer it (team_services.knowledge).
             knowledge=GatewayKnowledgePages(
                 team_commands=_team_commands(
-                    config, resolved_manager_runtime, team_services, id_generator=self._id_generator
+                    resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
                 ),
+                # Naming editors only reads the people copy; commands make it current first.
                 references=_person_references(config),
                 display_name=self.access_inbox.display_name,
                 enabled=config.agent.knowledge.enabled,

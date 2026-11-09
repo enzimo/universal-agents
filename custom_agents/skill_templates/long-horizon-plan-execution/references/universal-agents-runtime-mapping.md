@@ -44,6 +44,12 @@ its worker type's queue until a free worker takes it; the runtime starts
 workers and does not probe or time out a task that is still waiting, so do not
 start workers or delegate it again. A missing reply is a
 transport or responsiveness observation, not evidence that the task completed.
+
+When a process is draining because its message contract differs from the
+installation's, it starts no workers and refuses new delegations. Finish locally
+where possible, or tell the person the work needs the restarted team. Do not
+repeat a delegation or change pool limits to work around the drain.
+
 For a missing sign-in, account link or team sign-in app, TeamLead calls
 `set_up_tools` at once, without asking the person first. Trusted code asks for
 missing access, opens every page in the person's chat (routed to the
