@@ -517,8 +517,7 @@ async def _probe_subtask_task_status(
     ``TaskProbeNotPossible`` says why instead of "no answer".
     """
 
-    from custom_agents.agent_requests import AgentUnreachable, ask_each, cannot_ask, team_view
-    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+    from custom_agents.agent_requests import ask_each, cannot_ask, team_view
 
     if not self.team_id:
         return None
@@ -526,18 +525,7 @@ async def _probe_subtask_task_status(
     blocked = cannot_ask(self, need_view=holder_agent_id is None)
     if blocked is not None:
         raise TaskProbeNotPossible(blocked.reason, clears=blocked.clears)
-    view = team_view()
-    names: dict[str, tuple[Optional[str], Optional[str]]] = {}
-    if holder_agent_id is not None:
-        known = view.agent(holder_agent_id) if view is not None else None
-        names[holder_agent_id] = (known.display_name if known else None, known.agent_type if known else None)
-    elif view is not None:
-        target_name = getattr(subtask_info.meta, "to_agent_name", None)
-        target_type = getattr(subtask_info.meta, "to_named_agent_type", None)
-        named = view.named(target_name) if target_name else None
-        for item in ([named] if named is not None else view.of_type(str(target_type or ""))):
-            if item.agent != str(self.id):
-                names[item.agent] = (item.display_name, item.agent_type)
+    names = _probe_targets(self, team_view(), subtask_info, holder_agent_id)
     if not names:
         return None
     timeout = max(0.1, float(self.subtask_status_probe_timeout_seconds or 5.0))
@@ -545,17 +533,7 @@ async def _probe_subtask_task_status(
     answers = await ask_each(self, "task.probe", {"task_id": task_id}, sorted(names), timeout=timeout)
     statuses: list[Optional[TaskStatus]] = []
     for target, reply in answers.items():
-        if isinstance(reply, AgentUnreachable):
-            raise TaskProbeNotPossible(str(reply), clears=reply.clears)
-        if isinstance(reply, (ServiceUnavailable, RequestRefused)):
-            self._logger.info("[%s] A task probe got no answer. event=subtask_task_probe_unanswered task_id=%s "
-                              "target_agent_id=%s reason=%s", self.id, task_id, target, reply)
-            statuses.append(None)
-            continue
-        if isinstance(reply, Exception):
-            self._logger.warning("[%s] Asking an agent about a delegated task failed; it counts as no answer from "
-                                 "that agent. event=subtask_task_probe_failed task_id=%s target_agent_id=%s "
-                                 "error_type=%s error=%s", self.id, task_id, target, type(reply).__name__, reply)
+        if _probe_reply_failed(self, task_id, target, reply):
             statuses.append(None)
             continue
         name, agent_type = names[target]
@@ -564,6 +542,42 @@ async def _probe_subtask_task_status(
         return statuses[0]
     # A worker that does not hold the task says so; wait for the one that does.
     return next((status for status in statuses if status is not None and status.is_known_task), None)
+
+
+def _probe_targets(agent: Any, view: Any, subtask_info: TaskInfo,
+                   holder_agent_id: Optional[str]) -> dict[str, tuple[Optional[str], Optional[str]]]:
+    """Whom to ask, with each one's name and type: the holder, or else the named worker or every worker of the type."""
+
+    if holder_agent_id is not None:
+        known = view.agent(holder_agent_id) if view is not None else None
+        return {holder_agent_id: (known.display_name if known else None, known.agent_type if known else None)}
+    if view is None:
+        return {}
+    target_name = getattr(subtask_info.meta, "to_agent_name", None)
+    target_type = getattr(subtask_info.meta, "to_named_agent_type", None)
+    named = view.named(target_name) if target_name else None
+    candidates = [named] if named is not None else view.of_type(str(target_type or ""))
+    return {item.agent: (item.display_name, item.agent_type) for item in candidates if item.agent != str(agent.id)}
+
+
+def _probe_reply_failed(agent: Any, task_id: str, target: str, reply: Any) -> bool:
+    """Whether a target's reply is an error, logged with the ids; ``TaskProbeNotPossible`` when this side cannot ask."""
+
+    from custom_agents.agent_requests import AgentUnreachable
+    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+
+    if isinstance(reply, AgentUnreachable):
+        raise TaskProbeNotPossible(str(reply), clears=reply.clears)
+    if isinstance(reply, (ServiceUnavailable, RequestRefused)):
+        agent._logger.info("[%s] A task probe got no answer. event=subtask_task_probe_unanswered task_id=%s "
+                           "target_agent_id=%s reason=%s", agent.id, task_id, target, reply)
+        return True
+    if isinstance(reply, Exception):
+        agent._logger.warning("[%s] Asking an agent about a delegated task failed; it counts as no answer from "
+                              "that agent. event=subtask_task_probe_failed task_id=%s target_agent_id=%s "
+                              "error_type=%s error=%s", agent.id, task_id, target, type(reply).__name__, reply)
+        return True
+    return False
 
 
 def _probe_answer(subtask_info: TaskInfo, holder_agent_id: Optional[str], probe_id: str, target: str,
@@ -930,22 +944,28 @@ async def _watchdog_probe(
     try:
         return True, await agent._probe_subtask_task_status(subtask_info=subtask_info, holder_agent_id=holder_agent_id)
     except TaskProbeNotPossible as blocked:
-        task_id = subtask_info.task.task_id
         waits = blocked.clears and (overdue_seconds is None or overdue_seconds <= timeout_seconds)
-        then = ("the watchdog asks again at its next pass" if waits
-                else "it counts as no answer, so the watchdog decides on the subtask now")
-        message = ("[%s] This process cannot ask about a delegated task yet; %s. event=%s agent_id=%s "
-                   "task_id=%s subtask_id=%s reason=%s overdue_seconds=%s")
-        event = "subtask_task_probe_deferred" if waits else "subtask_task_probe_not_possible"
-        key = f"probe_not_possible:{task_id}:{event}:{blocked.reason}"
-        # Warned once per subtask and reason (the agent's memory of subtask warnings), then logged at debug.
-        warned = getattr(agent, "_untracked_subtask_warnings", None)
-        log = agent._logger.debug if warned is not None and key in warned else agent._logger.warning
-        if warned is not None:
-            warned.add(key)
-        log(message, agent.id, then, event, agent.id, parent_task_id, task_id, blocked.reason,
-            None if overdue_seconds is None else int(overdue_seconds))
+        _log_probe_not_possible(agent, parent_task_id, subtask_info.task.task_id, blocked.reason, waits=waits,
+                                overdue_seconds=overdue_seconds)
         return (False, None) if waits else (True, None)
+
+
+def _log_probe_not_possible(agent: Any, parent_task_id: str, task_id: str, reason: str, *, waits: bool,
+                            overdue_seconds: Optional[float]) -> None:
+    """Log that the watchdog could not ask: a warning once per subtask and reason, then at debug."""
+
+    then = ("the watchdog asks again at its next pass" if waits
+            else "it counts as no answer, so the watchdog decides on the subtask now")
+    event = "subtask_task_probe_deferred" if waits else "subtask_task_probe_not_possible"
+    key = f"probe_not_possible:{task_id}:{event}:{reason}"
+    # The agent's memory of warnings already given about its subtasks.
+    warned = getattr(agent, "_untracked_subtask_warnings", None)
+    log = agent._logger.debug if warned is not None and key in warned else agent._logger.warning
+    if warned is not None:
+        warned.add(key)
+    log("[%s] This process cannot ask about a delegated task yet; %s. event=%s agent_id=%s task_id=%s subtask_id=%s "
+        "reason=%s overdue_seconds=%s", agent.id, then, event, agent.id, parent_task_id, task_id, reason,
+        None if overdue_seconds is None else int(overdue_seconds))
 
 
 async def _recover_stalled_subtasks(self) -> None:

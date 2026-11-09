@@ -111,14 +111,21 @@ def sync_directory(agent: Any, view: Mapping[str, TeamAgent]) -> None:
         earlier = directory.get(agent_id)
         if earlier is None or earlier.model_dump(include=_RECORD_FIELDS) != entry.model_dump(include=_RECORD_FIELDS):
             directory[agent_id] = entry
-    holders: dict[str, list[str]] = {}
-    for agent_id, item in sorted(others.items()):
-        if item.display_name:
-            holders.setdefault(item.display_name, []).append(agent_id)
+    holders = _name_holders(others)
     names = agent._agent_id_by_name
     names.clear()
     names.update({name: ids[0] for name, ids in holders.items() if len(ids) == 1})
-    _note_ambiguous_names(agent, {name: tuple(ids) for name, ids in holders.items() if len(ids) > 1})
+    _note_ambiguous_names(agent, {name: ids for name, ids in holders.items() if len(ids) > 1})
+
+
+def _name_holders(view: Mapping[str, TeamAgent]) -> dict[str, tuple[str, ...]]:
+    """Each display name in ``view`` with the ids of the live agents that hold it, in id order."""
+
+    holders: dict[str, list[str]] = {}
+    for agent_id, item in sorted(view.items()):
+        if item.display_name:
+            holders.setdefault(item.display_name, []).append(agent_id)
+    return {name: tuple(ids) for name, ids in holders.items()}
 
 
 def _note_ambiguous_names(agent: Any, ambiguous: dict[str, tuple[str, ...]]) -> None:
