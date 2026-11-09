@@ -25,6 +25,7 @@ from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
 from custom_messages.enums import ControlType, MessageMetaType, ProgressState
 from custom_messages.wire.frame import body_model
 from custom_tools.providers._runtime import _send_control_instruction_payload
+from custom_transport.protocol1.live import ServiceUnavailable
 from tests.team_services_support import checked_reply
 
 
@@ -177,12 +178,14 @@ async def test_the_watchdog_asks_the_holder_or_else_each_worker_of_the_type(monk
         assert (asker.id, kind, body) == ("lead_1", "task.probe", {"task_id": "sub_1"})
         asked.append(target)
         if target == "worker_3":
-            raise AgentUnreachable("no session")
+            raise ServiceUnavailable("task.probe", target, "no responders")
         known = target == "worker_2"
         return {"outcome": "ok", "known": known, "current": known, "executing": known, "exiting": False,
                 **({"state": "in_progress"} if known else {})}
 
     monkeypatch.setattr(agent_requests, "ask_agent", ask_agent)
+    # This process can ask (agent_requests.cannot_ask); its view is the stand-in below.
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", SimpleNamespace(cannot_ask=lambda agent_id: None))
     monkeypatch.setattr(agent_requests, "team_view", lambda: _View(_member("worker_1", "Researcher-1"),
                                                                 _member("worker_2", "Researcher-2"),
                                                                 _member("worker_3", "Researcher-3")))

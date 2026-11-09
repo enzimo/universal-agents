@@ -94,7 +94,7 @@ from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
-from custom_agents.agent_requests import AgentUnreachable, process_host
+from custom_agents.agent_requests import AgentUnreachable, AskBlocked, process_host
 from custom_transport.protocol1.team_agents import TeamAgent, TeamAgents
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
@@ -504,12 +504,33 @@ class AgentProcessHost:
             return await coroutine
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, self.loop))  # type: ignore[arg-type]
 
-    def _sender_session(self, sender_agent: str) -> None:
-        sender = self.agents.get(sender_agent)
+    def cannot_ask(self, sender_agent: str) -> Optional[AskBlocked]:
+        """Why this process cannot sign a request for ``sender_agent`` now, or None (``agent_requests.cannot_ask``).
+
+        Read from any thread: it only reads the host's state. Waiting for the join or for the
+        agent's session clears by itself; a process on another contract never joins or opens
+        a session again, and a type no certificate can carry never gets one (module docstring).
+        """
+
+        if self._draining is not None or (self.host is not None and self.host.installation_contract is not None):
+            return AskBlocked("this process runs another message contract than its installation and is draining",
+                              clears=False)
         if self.host is None or self.host.live is None or self._joined is None or not self._joined.is_set():
-            raise AgentUnreachable("this process has not joined yet")
-        if sender is None or sender.session is None:
-            raise AgentUnreachable(f"agent {sender_agent} has no session yet")
+            return AskBlocked("this process has not joined the team's messaging yet", clears=True)
+        sender = self.agents.get(sender_agent)
+        if sender is None:
+            return AskBlocked(f"agent {sender_agent} is not attached to this process's host yet", clears=True)
+        if sender.session is None:
+            if sender.refusal is not None and sender.refusal.code == TYPE_NOT_CERTIFIABLE_CODE:
+                return AskBlocked(f"agent {sender_agent} cannot have a session: {sender.refusal.message}",
+                                  clears=False)
+            return AskBlocked(f"agent {sender_agent} has no session yet", clears=True)
+        return None
+
+    def _sender_session(self, sender_agent: str) -> None:
+        blocked = self.cannot_ask(sender_agent)
+        if blocked is not None:
+            raise AgentUnreachable(blocked.reason, clears=blocked.clears)
 
     async def ask(self, kind: str, body: Mapping[str, Any], target_agent: str, *, sender_agent: str,
                   timeout: Optional[float] = None) -> dict[str, Any]:
