@@ -217,3 +217,100 @@ async def test_a_failing_watchdog_step_does_not_end_the_scheduler_pass(monkeypat
 
     assert handbacks.await_count == 1
     assert "event=subtask_watchdog_pass_failed agent_id=manager_id" in caplog.text
+
+
+# -- whether the real host can ask, and whether that clears (AgentProcessHost.cannot_ask) ---------
+
+
+def _refused(code: str):
+    from custom_agents.agent_host import _Refusal
+
+    return _Refusal(code, f"refused: {code}", datetime(2026, 11, 9, tzinfo=timezone.utc))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("case", "clears"), [
+    ("not_joined", True),
+    ("not_attached", True),
+    ("no_session", True),
+    ("limit_reached", True),
+    ("type_not_certifiable", False),
+    ("other_contract", False),
+    ("draining", False),
+    ("session_open", None),
+])
+async def test_the_real_host_says_whether_an_agent_can_ask_and_whether_that_clears(case, clears) -> None:
+    import asyncio
+
+    from custom_agents.agent_host import REFUSAL_CODES, TYPE_NOT_CERTIFIABLE_CODE
+    from tests.test_agent_host_sessions import _hosted, _process
+
+    process, _ = _process()
+    process.host.installation_contract = None
+    hosted = _hosted("lead_1")
+    if case != "not_attached":
+        process.agents["lead_1"] = hosted
+    if case == "not_joined":
+        process._joined.clear()
+    elif case == "limit_reached":
+        hosted.refusal = _refused(REFUSAL_CODES["limit_reached"])
+    elif case == "type_not_certifiable":
+        hosted.refusal = _refused(TYPE_NOT_CERTIFIABLE_CODE)
+    elif case == "other_contract":
+        process.host.installation_contract = "f" * 64
+    elif case == "draining":
+        process._draining = asyncio.get_running_loop().create_future()
+    elif case == "session_open":
+        hosted.session = "s-lead_1-1"
+
+    blocked = process.cannot_ask("lead_1")
+
+    if clears is None:
+        assert blocked is None
+    else:
+        assert blocked is not None and blocked.clears is clears and blocked.reason
+        with pytest.raises(agent_requests.AgentUnreachable) as raised:
+            process._sender_session("lead_1")
+        assert raised.value.clears is clears
+
+
+@pytest.mark.asyncio
+async def test_a_session_lost_between_the_check_and_the_ask_still_means_cannot_ask(host, monkeypatch) -> None:
+    async def ask_agent(asker, kind, body, target, *, timeout=None):
+        raise agent_requests.AgentUnreachable("agent lead_1 has no session yet", clears=True)
+
+    monkeypatch.setattr(agent_requests, "ask_agent", ask_agent)
+
+    with pytest.raises(TaskProbeNotPossible) as raised:
+        await _probe_subtask_task_status(_watchdog(), subtask_info=_subtask(), holder_agent_id="w2")
+
+    assert raised.value.clears is True and "no session yet" in raised.value.reason
+
+
+@pytest.mark.asyncio
+async def test_cancelling_ask_each_cancels_every_ask_still_running(monkeypatch) -> None:
+    import asyncio
+
+    started: list[str] = []
+    cancelled: list[str] = []
+
+    async def ask_agent(asker, kind, body, target, *, timeout=None):
+        started.append(target)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(target)
+            raise
+        return {}
+
+    monkeypatch.setattr(agent_requests, "ask_agent", ask_agent)
+    asking = asyncio.create_task(agent_requests.ask_each(_watchdog(), "agent.status", {"level": "basic"},
+                                                         ["w1", "w2", "w3"], timeout=30))
+    while len(started) < 3:
+        await asyncio.sleep(0)
+    asking.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asking
+
+    assert sorted(cancelled) == ["w1", "w2", "w3"]

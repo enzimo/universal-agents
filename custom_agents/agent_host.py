@@ -94,7 +94,7 @@ from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
-from custom_agents.agent_requests import AgentUnreachable, AskBlocked, process_host
+from custom_agents.agent_requests import AgentUnreachable, AskBlocked, SessionlessAgent, process_host
 from custom_transport.protocol1.team_agents import TeamAgent, TeamAgents
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
@@ -121,6 +121,17 @@ TYPE_NOT_GRANTED_CODE = "session_type_not_granted"
 TYPE_NOT_CERTIFIABLE_CODE = "agent_type_not_certifiable"
 # More agents without a session than a host record lists: the last component stands for the rest.
 MORE_AGENTS_COMPONENT, MORE_AGENTS_CODE = "more-agents", "sessions_refused"
+# Each code above in words, for people who see an agent without a session (a restart's review).
+WITHOUT_SESSION_REASONS = {
+    REFUSAL_CODES["not_allowed"]: "its type is not allowed on its host",
+    REFUSAL_CODES["already_placed"]: "it is placed on another host",
+    REFUSAL_CODES["limit_reached"]: "its host already runs as many agents as it may",
+    REFUSAL_CODES["runtime_error"]: "the team services could not open its session",
+    SESSION_REFUSED_CODE: "its session was refused",
+    TYPE_NOT_GRANTED_CODE: "its host was not granted its type",
+    TYPE_NOT_CERTIFIABLE_CODE: "its type's name cannot have a session",
+    MORE_AGENTS_CODE: "more agents without a session than its host lists by name",
+}
 _NOT_IN_TOKEN = re.compile(r"[^A-Za-z0-9_-]")
 # Renew each agent's session daily; sessions last 7 days (team_services.sessions).
 SESSION_RENEW_SECONDS = 24 * 3600.0
@@ -526,6 +537,21 @@ class AgentProcessHost:
                                   clears=False)
             return AskBlocked(f"agent {sender_agent} has no session yet", clears=True)
         return None
+
+    async def agents_without_session(self) -> list[SessionlessAgent]:
+        """The agents the team's live hosts list as running without a session (their records' components).
+
+        Read on the host's loop, where the team's view is kept (``TeamAgents.host_components``);
+        callable from any loop. Empty before the view is read.
+        """
+
+        async def read() -> list[SessionlessAgent]:
+            if self.team_agents is None:
+                return []
+            return [SessionlessAgent(item.host, item.component, str(item.code), WITHOUT_SESSION_REASONS[str(item.code)])
+                    for item in self.team_agents.host_components() if item.code in WITHOUT_SESSION_REASONS]
+
+        return await self._on_host_loop(read())
 
     def _sender_session(self, sender_agent: str) -> None:
         blocked = self.cannot_ask(sender_agent)

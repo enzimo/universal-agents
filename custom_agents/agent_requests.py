@@ -44,6 +44,21 @@ class AskBlocked:
     clears: bool
 
 
+@dataclass(frozen=True)
+class SessionlessAgent:
+    """An agent a live host runs without a session, as that host's record lists it.
+
+    ``component`` is the host's own name for it (``<agent type>-<agent id>``, cut to 64
+    characters, or ``more-agents`` standing for the rest); ``code`` and ``why`` say why it
+    has no session. Such an agent answers no request, so nobody can ask what it runs.
+    """
+
+    host: str
+    component: str
+    code: str
+    why: str
+
+
 NO_HOST = AskBlocked("this process runs no message host (started without the launcher)", clears=False)
 VIEW_NOT_READY = AskBlocked("this process has not read the team's agents yet", clears=True)
 
@@ -103,7 +118,9 @@ async def ask_each(agent: Any, kind: str, body: Mapping[str, Any], targets: Iter
 
     Nothing is raised for a target: an ask still running at the deadline is cancelled and
     given ``ServiceUnavailable`` (no answer in time), and any other error is returned as it
-    was raised, so the caller decides per target (module docstring).
+    was raised, so the caller decides per target (module docstring). When the caller is
+    cancelled meanwhile, every ask still running is cancelled and awaited before the
+    cancellation goes on, so none outlives it.
     """
 
     from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, ServiceUnavailable
@@ -112,10 +129,13 @@ async def ask_each(agent: Any, kind: str, body: Mapping[str, Any], targets: Iter
             for target in dict.fromkeys(targets)}
     if not asks:
         return {}
-    _done, late = await asyncio.wait(asks.values(), timeout=timeout)
-    for ask in late:
-        ask.cancel()
-    await asyncio.gather(*late, return_exceptions=True)
+    try:
+        await asyncio.wait(asks.values(), timeout=timeout)
+    finally:
+        late = [ask for ask in asks.values() if not ask.done()]
+        for ask in late:
+            ask.cancel()
+        await asyncio.gather(*late, return_exceptions=True)
     results: dict[str, Union[dict[str, Any], Exception]] = {}
     for target, ask in asks.items():
         if ask.cancelled():
@@ -125,6 +145,15 @@ async def ask_each(agent: Any, kind: str, body: Mapping[str, Any], targets: Iter
         results[target] = ask.result() if error is None else (
             error if isinstance(error, Exception) else RuntimeError(repr(error)))
     return results
+
+
+async def agents_without_session() -> list[SessionlessAgent]:
+    """The agents the team's live hosts run without a session (``AgentProcessHost.agents_without_session``)."""
+
+    host = process_host()
+    if host is None:
+        return []
+    return list(await host.agents_without_session())
 
 
 async def announce(agent: Any, kind: str, body: Mapping[str, Any]) -> None:

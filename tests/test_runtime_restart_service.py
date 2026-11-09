@@ -529,7 +529,7 @@ def test_an_all_restart_waits_while_the_team_cannot_be_seen(agent) -> None:
     status = service.status(plan["change_id"])
 
     assert status["status"] == "pending" and status["still_applies"] is False
-    assert "cannot see the team's other agents" in status["refusal_reason"]
+    assert "cannot ask the team's other agents" in status["refusal_reason"]
     with pytest.raises(TeamUnseen):
         service.describe(plan["change_id"])
     with pytest.raises(TeamUnseen):
@@ -756,3 +756,39 @@ with pytest.MonkeyPatch.context() as patch:
         assert service.status(plans["second"])["status"] == "dispatched"
         assert any(item.approval_note == "Reload the gateway too"
                    for item in restarts_dispatched_for_task(holder, "task_restart"))
+
+
+def _rewrite_as_schema_3(agent, change_id: str) -> None:
+    """The plan as 0.9 wrote it: schema 3, other agents without ``answered`` and with ``last_seen_at``."""
+
+    import os
+
+    path = resolve_runtime_restart_paths(agent).plans / f"{change_id}.json"
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    plan["schema_version"] = 3
+    for item in plan["impact_snapshot"]["known_team_agents"]:
+        item.pop("answered", None)
+        item["last_seen_at"] = None
+    os.chmod(path, 0o600)
+    path.write_text(json.dumps(plan), encoding="utf-8")
+
+
+def test_a_plan_staged_by_an_earlier_version_is_refused_in_plain_words(agent) -> None:
+    from custom_agents.runtime_restart_service import PLAN_FROM_OTHER_RELEASE, RestartPlanFromOtherRelease
+
+    service = RuntimeRestartService(agent)
+    plan = service.stage(scope="all", reason="Reload")
+    call = _ask(agent, plan["change_id"])
+    _rewrite_as_schema_3(agent, plan["change_id"])  # waiting in the Inbox at the upgrade
+    _approve(agent, call, note="ok")
+
+    result = _resume(agent, plan["change_id"], call)
+
+    assert result["status"] == "refused" and PLAN_FROM_OTHER_RELEASE in result["reason"]
+    for leak in ("validation error", "errors.pydantic.dev", "schema_version", "known_team_agents", "[type="):
+        assert leak not in result["reason"]
+    assert _published(agent) == []
+    for read in (service.status, service.describe, service.load_plan):
+        with pytest.raises(RestartPlanFromOtherRelease) as refused:
+            read(plan["change_id"])
+        assert str(refused.value) == PLAN_FROM_OTHER_RELEASE

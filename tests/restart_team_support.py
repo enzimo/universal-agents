@@ -2,7 +2,8 @@
 
 ``FakeTeam`` stands in for this process's host (``custom_agents.agent_host.AgentProcessHost``)
 behind ``custom_agents.agent_requests``: ``team_agents`` is the view of the team's records, and
-``ask`` answers the team lead's ``agent.status`` request as each agent would now. Install it with
+``ask`` answers the team lead's ``agent.status`` request as each agent would now; ``blocked`` says why
+the lead cannot ask, and ``sessionless`` lists the agents hosts run without a session. Install it with
 ``configure_process_host``. ``status_answer`` builds the answer with the real handler's code
 (``custom_agents.live_controls.status_reply``), so it has the contract's fields.
 """
@@ -15,6 +16,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Optional
 
+from custom_agents.agent_requests import AskBlocked, SessionlessAgent
 from custom_agents.live_controls import status_reply
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.enums import MessageMetaType
@@ -62,6 +64,9 @@ class FakeTeam:
         self.records: dict[str, TeamAgent] = {}
         self.answers: dict[str, _Answer] = {}
         self.asked: list[Asked] = []
+        # Why the team lead cannot ask (``AgentProcessHost.cannot_ask``), and the agents hosts run without a session.
+        self.blocked: Optional[AskBlocked] = None
+        self.sessionless: list[SessionlessAgent] = []
         ready = asyncio.Event()
         ready.set()
         self.team_agents = SimpleNamespace(ready=ready, live=lambda: MappingProxyType(dict(self.records)))
@@ -91,6 +96,12 @@ class FakeTeam:
 
     def silence(self, agent_id: str) -> None:
         self.answers.pop(agent_id, None)
+
+    def cannot_ask(self, sender_agent: str) -> Optional[AskBlocked]:
+        return self.blocked
+
+    async def agents_without_session(self) -> list[SessionlessAgent]:
+        return list(self.sessionless)
 
     async def ask(self, kind: str, body: dict[str, Any], target_agent: str, *, sender_agent: str,
                   timeout: Optional[float] = None) -> dict[str, Any]:

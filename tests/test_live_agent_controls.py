@@ -169,7 +169,7 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
         [silent] = snapshot.known_team_agents
         assert (silent.answered, silent.is_executing) == (False, None)
         assert snapshot.interrupted_work() == {
-            "worker_1:not-answering": "Researcher-1 did not answer, so its work is unknown"}
+            "worker_1#not-answering": "Researcher-1 did not answer, so its work is unknown"}
         released.set()
         worker_host.handlers["agent.status"] = LIVE_CONTROL_HANDLERS["agent.status"]
         worker.current_task = None

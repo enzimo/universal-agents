@@ -24,7 +24,8 @@ import pytest
 from pydantic import ValidationError
 
 import custom_agents.runtime_restart_service as restart
-from custom_agents.agent_requests import configure_process_host
+from custom_agents.agent_host import WITHOUT_SESSION_REASONS
+from custom_agents.agent_requests import AgentUnreachable, AskBlocked, SessionlessAgent, configure_process_host
 from custom_agents.runtime_restart_service import (
     RuntimeRestartPlan,
     _outside_approval,
@@ -84,6 +85,7 @@ def test_other_agents_work_is_named_by_task_from_their_answers(team: FakeTeam) -
         "agent_id": ADA, "named_agent_type": "CodeWritingAgent", "name": "Ada", "answered": True,
         "is_executing": True, "current_task_id": "task_ada", "current_task_age_seconds": 42,
         "top_level_queue_depth": 2, "waiting_top_level_task_count": 0, "deferred_message_count": 3,
+        "host": "", "without_session": None,
     }
     assert (bo.answered, bo.is_executing, bo.current_task_id) == (True, False, "")
     assert snapshot.interrupted_work() == {"task_ada": "running on Ada"}
@@ -117,7 +119,7 @@ def test_an_agent_that_does_not_answer_is_shown_as_not_answering(team: FakeTeam,
     # Its work is unknown, not idle: nothing the answer would fill reads as false or zero.
     assert ada.answered is False
     assert (ada.is_executing, ada.top_level_queue_depth, ada.deferred_message_count) == (None, None, None)
-    assert snapshot.interrupted_work() == {f"{ADA}:not-answering": "Ada did not answer, so its work is unknown"}
+    assert snapshot.interrupted_work() == {f"{ADA}#not-answering": "Ada did not answer, so its work is unknown"}
     assert "event=runtime_restart_agent_not_answering" in caplog.text and f"target_agent_id={ADA}" in caplog.text
     review = _review(snapshot)
     assert "Restart all; no task is known to be running, queued or waiting; 1 agent did not answer" in review
@@ -152,7 +154,7 @@ def test_the_approval_digest_ignores_ages_counts_and_clocks(team: FakeTeam) -> N
 
     assert first.known_team_agents != second.known_team_agents, "the snapshot records what changed"
     assert first.captured_at_utc != second.captured_at_utc
-    assert first.approval_payload()["interrupted_tasks"] == ["agent_bo:not-answering", "task_ada"]
+    assert first.approval_payload()["interrupted_tasks"] == ["agent_bo#not-answering", "task_ada"]
     assert _state_digest(first) == _state_digest(second)
     _ada_runs(team, "task_other")
     assert _state_digest(_capture()) != _state_digest(first)
@@ -198,7 +200,7 @@ def test_without_the_teams_view_an_all_restart_is_not_captured(caplog) -> None:
     configure_process_host(None)
 
     with caplog.at_level(logging.WARNING, logger="custom_agents.runtime_restart_service"):
-        with pytest.raises(restart.TeamUnseen, match="cannot see the team's other agents"):
+        with pytest.raises(restart.TeamUnseen, match="cannot ask the team's other agents"):
             _capture()
 
     assert "event=runtime_restart_team_unseen" in caplog.text
@@ -229,5 +231,90 @@ def test_a_plan_from_another_release_is_refused_with_a_plain_message(team: FakeT
     )
     stored = plan.model_dump(mode="json") | {"schema_version": 3}
 
-    with pytest.raises(ValidationError, match="schema version 3, written by another release.*Stage a fresh restart plan"):
+    with pytest.raises(ValidationError, match="planned by another version of Universal Agents"):
         RuntimeRestartPlan.model_validate(stored)
+
+
+# -- when the team lead cannot ask, and agents nobody can ask ------------------------------
+
+
+@pytest.mark.parametrize("blocked", [
+    AskBlocked("agent agent_lead has no session yet", clears=True),
+    AskBlocked("this process has not joined the team's messaging yet", clears=True),
+])
+def test_when_the_lead_cannot_ask_yet_an_all_restart_is_refused_with_why(team: FakeTeam, caplog, blocked) -> None:
+    _ada_runs(team, "task_ada")
+    team.blocked = blocked
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.runtime_restart_service"):
+        with pytest.raises(restart.TeamUnseen) as refused:
+            _capture()
+
+    assert blocked.reason in str(refused.value) and "Try again in a minute" in str(refused.value)
+    assert team.asked == [], "nobody is asked, so nobody is listed as not answering"
+    assert f"event=runtime_restart_team_unseen agent_id={LEAD_ID}" in caplog.text
+
+
+def test_a_session_lost_while_asking_refuses_the_capture(team: FakeTeam) -> None:
+    team.fail(ADA, AgentUnreachable("agent agent_lead has no session yet"))
+
+    with pytest.raises(restart.TeamUnseen, match="no session yet"):
+        _capture()
+
+
+def _without_session(host: str, component: str, code: str = "session_limit_reached") -> SessionlessAgent:
+    return SessionlessAgent(host, component, code, WITHOUT_SESSION_REASONS[code])
+
+
+def test_an_agent_a_host_runs_without_a_session_is_listed_as_not_answering(team: FakeTeam, caplog) -> None:
+    _ada_runs(team, "task_ada")
+    approved = _capture()
+    team.sessionless = [_without_session("agent-Researcher-1", "Researcher-agent_bo")]
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.runtime_restart_service"):
+        current = _capture()
+
+    key = "agent-Researcher-1#Researcher-agent_bo#no-session"
+    assert key in current.interrupted_work() and key not in current.interrupted_tasks()
+    review = _review(current)
+    assert "Researcher-agent_bo on host agent-Researcher-1 (no session: its host already runs as many agents" in review
+    assert "event=runtime_restart_agent_without_session" in caplog.text
+    # It appeared after planning: its work was never approved. Planned with it, it keeps the approval.
+    assert "do not answer now" in _outside_approval(approved, current)
+    assert _outside_approval(current, _capture()) == ""
+    team.sessionless = []
+    assert _outside_approval(current, _capture()) == "", "it got a session and runs nothing: fewer interruptions"
+
+
+def test_two_hosts_listing_more_agents_without_a_session_keep_separate_entries(team: FakeTeam) -> None:
+    _ada_runs(team, None)
+    team.sessionless = [_without_session("lead", "more-agents", "sessions_refused"),
+                        _without_session("agent-Researcher-1", "more-agents", "sessions_refused")]
+
+    silent = [agent.not_answering_key for agent in _capture().agents_not_answering()]
+
+    assert silent == ["lead#more-agents#no-session", "agent-Researcher-1#more-agents#no-session"]
+    assert "more agents without a session than its host lists by name" in _review(_capture())
+
+
+def test_a_component_named_like_a_live_agent_does_not_hide_that_agent_stopping(team: FakeTeam) -> None:
+    _ada_runs(team, "task_ada")
+    team.sessionless = [_without_session("agent-Researcher-1", ADA)]  # a host names a component like Ada's id
+    approved = _capture()
+
+    _ada_runs(team, SILENT)
+
+    assert "Ada" in _outside_approval(approved, _capture())
+
+
+def test_a_reported_task_id_cannot_switch_off_the_recheck_for_another_agent(team: FakeTeam) -> None:
+    """SEC-3: Bo reports a task id shaped like Ada's 'not answering' key, then Ada stops answering."""
+
+    team.join("agent_bo", "Bo")
+    for planted in (f"{ADA}:not-answering", f"{ADA}:unknown-task"):
+        team.answer("agent_bo", worker_status("agent_bo", "Bo", current_task_id=planted))
+        _ada_runs(team, "task_ada")
+        approved = _capture()
+        _ada_runs(team, SILENT)
+
+        assert "Ada" in _outside_approval(approved, _capture()), planted
