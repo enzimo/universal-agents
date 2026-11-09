@@ -48,7 +48,9 @@ own loop, here. Nothing else writes these two maps.
   basic ``agent.status`` within the subtask probe's timeout. An agent that is still in the
   view but does not answer (its process crashed, and its host's record has not expired yet),
   that is exiting or that takes no work is refused at once, instead of the subtask waiting
-  for the watchdog.
+  for the watchdog. Only the team lead asks: the contract lets only the lead's host, the
+  team services and the gateway send ``agent.status``. Every other requester gets the same
+  wait and the view's checks (it takes work, it is of the type asked for), without the ask.
 - **No database writes.** The team lead no longer copies other agents' status into the
   shared ``agent_states`` table; every agent refreshes its own row there.
 """
@@ -219,11 +221,15 @@ async def _still_waiting(agent: Any, task_id: str, departed: TeamAgent) -> bool:
 
 
 async def live_named_agent(agent: Any, named_agent_type: Optional[str], target_agent_name: str, *,
-                           start_seconds: float = NAMED_AGENT_START_SECONDS) -> Optional[AgentStatus]:
-    """The named agent, when it is live, takes work and answers its status now; None otherwise (module docstring)."""
+                           start_seconds: Optional[float] = None, ask: bool = True) -> Optional[AgentStatus]:
+    """The named agent, when it is live, takes work and (with ``ask``) answers its status now; None otherwise.
+
+    Module docstring: only the team lead may ask, so other requesters pass ``ask=False``.
+    """
 
     from custom_agents.agent_requests import ask_agent
 
+    start_seconds = NAMED_AGENT_START_SECONDS if start_seconds is None else start_seconds
     loop = asyncio.get_running_loop()
     deadline = loop.time() + start_seconds
     status = live_agent_status(agent, named_agent_type, target_agent_name, quiet=True)
@@ -236,6 +242,8 @@ async def live_named_agent(agent: Any, named_agent_type: Optional[str], target_a
                            "target_agent_name=%s target_named_agent_type=%s waited_seconds=%s", agent.id, agent.id,
                            target_agent_name, named_agent_type, start_seconds)
         return None
+    if not ask:
+        return status
     timeout = max(0.1, float(getattr(agent, "subtask_status_probe_timeout_seconds", None) or 5.0))
     try:
         reply = await ask_agent(agent, "agent.status", {"level": "basic"}, str(status.self_id), timeout=timeout)

@@ -600,3 +600,37 @@ async def test_the_leads_delegation_by_name_asks_the_worker_and_by_type_does_not
     assert asked.await_count == 1
     assert (await _probe_live_named_agent_type(lead, "Researcher")).self_id == "worker_1"
     assert asked.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_worker_delegating_by_name_waits_for_a_just_started_worker_without_asking(monkeypatch) -> None:
+    """C14: any requester gets the bounded wait; only the lead may ask for a status."""
+
+    from custom_agents.delegation_runtime import exact_delegation_route
+
+    asked = AsyncMock()
+    view = _Growing(0.3, member("worker_9", "Researcher-9"))
+    monkeypatch.setattr(agent_requests, "team_view", lambda: view)
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    requester = directory_owner(agent_id="worker_5", is_lead=False)
+
+    assert await exact_delegation_route(requester, "Researcher", "Researcher-9") == "worker_9"
+    asked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [member("worker_1", "Researcher-1", state="paused", accepting=False),
+                                    member("worker_1", "Researcher-1", state="starting", accepting=False),
+                                    member("worker_1", "Researcher-1", agent_type="Writer")])
+async def test_a_worker_delegating_by_name_passes_over_one_that_takes_no_work_or_is_another_type(
+        monkeypatch, caplog, target) -> None:
+    from custom_agents.delegation_runtime import exact_delegation_route
+
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(target))
+    monkeypatch.setattr(team_directory, "VIEW_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(team_directory, "NAMED_AGENT_START_SECONDS", 0.1)
+    requester = directory_owner(agent_id="worker_5", is_lead=False)
+
+    with caplog.at_level(logging.ERROR):
+        assert await exact_delegation_route(requester, "Researcher", "Researcher-1") is None
+    assert "event=exact_delegation_target_unavailable" in caplog.text

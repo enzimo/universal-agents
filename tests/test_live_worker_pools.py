@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_agents.delegated_work_runtime import delegated_tasks
-from custom_agents.team_directory import NAMED_AGENT_START_SECONDS
+from custom_agents.team_directory import NAMED_AGENT_START_SECONDS, live_agent_status
 from custom_agents.structured_llm_messages import (
     DelegateTaskAction,
     StructuredAgentTurnDecision,
@@ -522,13 +522,14 @@ async def test_live_a_named_worker_gets_the_task_while_another_worker_is_free() 
                     agent_tasks.append((worker, await _start_agent(worker)))
                 agent_tasks.append((manager, await _start_agent(manager)))
                 deadline = asyncio.get_running_loop().time() + 30
-                while workers[1].id not in manager.known_agents.agent_map:
-                    assert asyncio.get_running_loop().time() < deadline, "the lead never saw the named worker's record"
+                # What a by-name delegation waits for (custom_agents.team_directory.live_named_agent): the
+                # worker's record says it takes work, after its start and recovery, not only that it is there.
+                while live_agent_status(manager, WORKER_TYPE, workers[1].name) is None:
+                    assert asyncio.get_running_loop().time() < deadline, "the named worker never took work"
                     await asyncio.sleep(0.1)
-                # A by-name delegation right after a worker starts waits this long for its record at most
-                # (custom_agents.team_directory): here the process host also joins first, the slowest case.
+                # It waits this long at most: here the process host also joins first, the slowest case.
                 appeared_after = asyncio.get_running_loop().time() - started
-                logging.getLogger(__name__).warning("A started worker reached the lead's directory after %.2f s. "
+                logging.getLogger(__name__).warning("A started worker took work in the lead's view after %.2f s. "
                                                     "event=live_named_worker_appeared", appeared_after)
                 assert appeared_after < NAMED_AGENT_START_SECONDS
                 await _publish_envelope(channel, manager.id, _user_request(root_task_id, manager.id, user_queue.name))

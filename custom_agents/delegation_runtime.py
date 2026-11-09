@@ -160,12 +160,25 @@ async def exact_delegation_route(
     of the worker that answered, so a restarted worker is reached under its new id
     and no other worker is substituted, and a worker that does not answer is refused
     at once. With ``named_agent_type`` the worker must also be of that type. Other
-    agents use the name in their own directory, from the same records; the contract
-    lets only the lead's host, the team services and the gateway ask for a status.
+    agents get the same bounded wait and the records' checks (it takes work, it is
+    of that type) without asking: the contract lets only the lead's host, the team
+    services and the gateway ask for a status.
     """
 
     if not self.is_team_lead:
-        return self._agent_id_by_name.get(target_agent_name)
+        from custom_agents.team_directory import live_named_agent
+
+        found = await live_named_agent(self, named_agent_type, target_agent_name, ask=False)
+        if found is None:
+            self._logger.error(
+                "[%s] Exact delegation target %s (%s) is not live or takes no work; refusing to "
+                "substitute a different worker. event=exact_delegation_target_unavailable",
+                self.id,
+                target_agent_name,
+                named_agent_type,
+            )
+            return None
+        return str(found.self_id)
     verified_status = await self._probe_live_named_agent_type(named_agent_type, target_agent_name)
     if verified_status is None:
         self._logger.error(
