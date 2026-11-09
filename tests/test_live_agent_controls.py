@@ -60,6 +60,7 @@ def stand_in(agent_id: str, name: str, agent_type: str, *, is_lead: bool, pendin
         is_executing=False, current_task=None, _should_exit=asyncio.Event(), _runtime_loop=asyncio.get_running_loop(),
         known_agents=AgentStatusMap(), _agent_id_by_name={}, _logger=logging.getLogger(f"test.{agent_id}"),
         _fail_subtask_and_reconcile_parent=AsyncMock(), tasks={},
+        _delegated_task_repository=SimpleNamespace(get=lambda team_id, task_id: None),
     )
 
     async def pause():
@@ -105,7 +106,9 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
 
-        subtask = SimpleNamespace(task=SimpleNamespace(task_id="sub_1"), meta=SimpleNamespace(to_agent_name="Researcher-1"))
+        # Asked of Researcher-1 by name: sent to its own mailbox, and no worker took it yet (no record).
+        subtask = SimpleNamespace(task=SimpleNamespace(task_id="sub_1"), header=SimpleNamespace(to_routing_path="worker_1"),
+                                  meta=SimpleNamespace(to_agent_name="Researcher-1"))
         lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True, pending=[subtask])
         worker = stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False)
         lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),

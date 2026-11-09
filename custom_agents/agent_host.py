@@ -95,7 +95,7 @@ from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, Message
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
 from custom_agents.agent_requests import AgentUnreachable, AskBlocked, SessionlessAgent, process_host
-from custom_transport.protocol1.team_agents import TeamAgent, TeamAgents
+from custom_transport.protocol1.team_agents import TeamAgents
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
@@ -296,9 +296,8 @@ class AgentProcessHost:
     _background: set[asyncio.Task[Any]] = field(default_factory=set)
     _pending_closes: dict[str, tuple[str, str]] = field(default_factory=dict)
     _cleanup_needed: bool = True
-    # The team's live agents (module docstring), and the view the agents' directories last got.
+    # The team's live agents (module docstring).
     team_agents: Optional[TeamAgents] = None
-    _view_before: Mapping[str, TeamAgent] = field(default_factory=dict)
     event_handlers: dict[str, AgentHandler] = field(default_factory=dict)
 
     # -- the agent's side (called on the agent's own loop) --------------------------------
@@ -460,33 +459,62 @@ class AgentProcessHost:
         return {}
 
     def _team_changed(self, changed: frozenset[str]) -> None:
-        """On the host's loop: bring every attached agent's directory up to date (``custom_agents.team_directory``).
+        """On the host's loop: every attached agent's directory takes the view, and hears who left for good.
 
-        An agent that left the view left saying so when its record's last state was exiting
-        (``TeamAgents.departure_reason``).
+        Each agent gets the whole view as a plain callback on its own loop, in the order the
+        views were read, so a later view always wins (``custom_agents.team_directory``). An
+        agent in ``changed`` that is not live and left for good (``TeamAgents.left_for_good``,
+        heard once, possibly after it left) is handed to each other agent as a task of its
+        own, which never touches the directory.
         """
 
-        from custom_agents.team_directory import apply_team_change
+        from custom_agents.team_directory import agent_exited, sync_directory
 
-        assert self.team_agents is not None
-        before, after = self._view_before, self.team_agents.live()
-        self._view_before = after
-        exited = frozenset(agent_id for agent_id in changed if agent_id not in after
-                           and self.team_agents.departure_reason(agent_id) == "exiting")
+        team_agents = self.team_agents
+        assert team_agents is not None
+        view = team_agents.live()
+        left = [(departed, team_agents.departure_reason(agent_id) or "")
+                for agent_id in sorted(changed)
+                if agent_id not in view and team_agents.left_for_good(agent_id)
+                and (departed := team_agents.departed_agent(agent_id)) is not None]
         for hosted in list(self.agents.values()):
-            self._on_agent_loop(hosted, lambda agent=hosted.agent: apply_team_change(agent, before, after, changed, exited),
-                                what="team_directory")
+            self._call_on_agent_loop(hosted, lambda agent=hosted.agent: sync_directory(agent, view),
+                                     what="team_directory")
+            for departed, reason in left:
+                if departed.agent != str(hosted.agent.id):
+                    self._on_agent_loop(
+                        hosted, lambda agent=hosted.agent, departed=departed, reason=reason:
+                        agent_exited(agent, departed, reason), what="team_exit")
 
     def _sync_directory(self, hosted: _HostedAgent) -> None:
         """A newly attached agent gets the whole current view."""
 
-        from custom_agents.team_directory import apply_team_change
+        from custom_agents.team_directory import sync_directory
 
         if self.team_agents is None or not self.team_agents.ready.is_set():
             return  # the view's first reading tells every attached agent
         live = self.team_agents.live()
-        self._on_agent_loop(hosted, lambda: apply_team_change(hosted.agent, {}, live, frozenset(live), frozenset()),
-                            what="team_directory")
+        self._call_on_agent_loop(hosted, lambda: sync_directory(hosted.agent, live), what="team_directory")
+
+    def _call_on_agent_loop(self, hosted: _HostedAgent, function: Callable[[], Any], *, what: str) -> None:
+        """Run ``function`` on the agent's own loop as a plain callback: callbacks run in the order they are handed."""
+
+        agent_loop = getattr(hosted.agent, "_runtime_loop", None)
+
+        def call() -> None:
+            try:
+                function()
+            except Exception:
+                self.logger.exception("An agent could not take a team update. event=agent_host_agent_update_failed "
+                                      "runtime=%s agent=%s what=%s", self.profile.runtime, hosted.agent.id, what)
+
+        if agent_loop is None or agent_loop is asyncio.get_running_loop():
+            call()
+        elif not agent_loop.is_closed():
+            try:
+                agent_loop.call_soon_threadsafe(call)
+            except RuntimeError:  # its loop closed meanwhile: the agent has gone
+                pass
 
     def _on_agent_loop(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]], *, what: str) -> None:
         agent_loop = getattr(hosted.agent, "_runtime_loop", None)

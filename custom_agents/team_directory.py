@@ -4,21 +4,37 @@ Each agent keeps who else is on its team in memory: ``known_agents.agent_map`` (
 ``AgentStatus`` summary) and ``_agent_id_by_name`` (the name the model and messages use, to
 the id). Presence messages filled them until step 7b; now this process's host reads the
 team's live agents from their records (``custom_transport.protocol1.team_agents``) and
-hands every change to each agent it runs (``custom_agents.agent_host``), on the agent's own
-loop, here.
+hands each new view to every agent it runs (``custom_agents.agent_host``), on the agent's
+own loop, here. Nothing else writes these two maps.
 
 - **What an entry says.** Only what the records say: id, type, name, team lead or not,
-  paused, busy, and whether it accepts work. Details an agent reports about itself (its
-  current task, tools, skills, findings) are asked with ``agent.status`` when needed.
+  paused, busy, and whether it accepts work. ``last_seen_at`` is when this directory took
+  the entry as it stands, not a time the other agent wrote: an entry is kept as it is
+  while its record does not change. Details an agent reports about itself (its current
+  task, tools, skills, findings) are asked with ``agent.status`` when needed.
+- **In order, whole.** Each update replaces the directory with the whole view it was read
+  from, synchronously, and the host hands the views to an agent's loop in the order it read
+  them. So a later view always wins: an older update can never put back an agent that
+  left, or remove one that came back (``sync_directory``).
+- **One name, one agent.** A name held by two live agents names neither until one of them
+  leaves, as ``TeamAgents.named`` refuses it; the collision is logged once with both ids.
+  Nobody can take over another agent's name by giving a second agent the same one.
 - **An agent whose host runs another message contract** (contract README "Versions") stays
   in the directory, so control requests about the tasks it holds (``task.probe``, pause,
   resume, exit, status) still go to it, but it takes no new work: its entry says it does
   not accept work, and delegation passes it over (``TeamAgent.takes_work``).
-- **Leaving.** An agent that drops out of the view leaves the directory. When its record
-  said it was exiting, the team lead fails the subtasks it asked that agent for by name,
-  as it did when presence announced an exit. An agent whose host only stopped reporting
-  is not given up for: the host may be unreachable for a while, and the subtask watchdog
-  handles work that never comes back.
+- **Leaving for good.** When an agent left for good (``TeamAgents.left_for_good``: it said it
+  was exiting, or its session was closed), every agent that asked it for work by name
+  fails, at once, each such subtask that still waits in the departed agent's own mailbox
+  and that nobody ever took: nothing will read that mailbox again (agent ids are new at
+  every start) and the subtask is in no saved state. The subtask's route names the
+  mailbox (``header.to_routing_path`` is the agent id a by-name delegation was sent to),
+  and the requester's delegated-task record says whether anyone took it. A subtask a
+  worker took is left alone: a restarted agent takes over what it held from saved state
+  and reports it again, and one handed back goes to another worker; custody recovery and
+  the subtask watchdog handle those. An agent whose host only stopped reporting has not
+  left for good: the host may be unreachable for a while, and the watchdog handles work
+  that never comes back.
 - **No database writes.** The team lead no longer copies other agents' status into the
   shared ``agent_states`` table; every agent refreshes its own row there.
 """
@@ -34,10 +50,15 @@ from custom_messages.enums import MessageMetaType
 from custom_transport.protocol1.team_agents import TeamAgent
 
 _LOGGER = logging.getLogger(__name__)
+# Each agent's names held by more than one live agent now, with their holders, so a collision is logged once.
+_AMBIGUOUS_NAMES: dict[str, dict[str, tuple[str, ...]]] = {}
+# The fields an entry takes from the record; an entry whose fields are unchanged is kept as it is.
+_RECORD_FIELDS = {"self_id", "team_id", "name", "named_agent_type", "agent_role", "is_team_lead", "is_paused",
+                  "is_executing", "is_busy", "accepting_work", "is_exiting"}
 
 
 def directory_status(item: TeamAgent, team_id: Optional[str]) -> AgentStatus:
-    """The directory entry for one live agent, from its record."""
+    """The directory entry for one live agent, from its record (``last_seen_at``: when this directory took it)."""
 
     return AgentStatus(
         self_id=item.agent,
@@ -56,54 +77,105 @@ def directory_status(item: TeamAgent, team_id: Optional[str]) -> AgentStatus:
     )
 
 
-async def apply_team_change(agent: Any, before: Mapping[str, TeamAgent], after: Mapping[str, TeamAgent],
-                            changed: frozenset[str], exited: frozenset[str]) -> None:
-    """Bring the agent's directory up to date with the view (module docstring)."""
+def sync_directory(agent: Any, view: Mapping[str, TeamAgent]) -> None:
+    """Make the agent's directory the whole ``view`` (module docstring); run on the agent's own loop."""
 
+    own = str(agent.id)
+    team_id = getattr(agent, "team_id", None)
+    others = {agent_id: item for agent_id, item in view.items() if agent_id != own}
     directory = agent.known_agents.agent_map
+    for agent_id in [agent_id for agent_id in directory if agent_id not in others]:
+        del directory[agent_id]
+    for agent_id, item in others.items():
+        entry = directory_status(item, team_id)
+        earlier = directory.get(agent_id)
+        if earlier is None or earlier.model_dump(include=_RECORD_FIELDS) != entry.model_dump(include=_RECORD_FIELDS):
+            directory[agent_id] = entry
+    holders: dict[str, list[str]] = {}
+    for agent_id, item in sorted(others.items()):
+        if item.display_name:
+            holders.setdefault(item.display_name, []).append(agent_id)
     names = agent._agent_id_by_name
-    for agent_id in sorted(changed):
-        if agent_id == str(agent.id):
-            continue
-        now, earlier = after.get(agent_id), before.get(agent_id)
-        if now is not None:
-            directory[agent_id] = directory_status(now, getattr(agent, "team_id", None))
-            if earlier is not None and earlier.display_name and earlier.display_name != now.display_name:
-                names.pop(earlier.display_name, None)
-            if now.display_name:
-                names[now.display_name] = agent_id
-            continue
-        directory.pop(agent_id, None)
-        if earlier is not None and earlier.display_name and names.get(earlier.display_name) == agent_id:
-            names.pop(earlier.display_name, None)
-        if agent_id in exited and earlier is not None:
-            await agent_exited(agent, earlier)
+    names.clear()
+    names.update({name: ids[0] for name, ids in holders.items() if len(ids) == 1})
+    _note_ambiguous_names(agent, {name: tuple(ids) for name, ids in holders.items() if len(ids) > 1})
 
 
-async def agent_exited(agent: Any, departed: TeamAgent) -> None:
-    """An agent said it was leaving: the team lead fails the subtasks it asked that agent for by name."""
+def _note_ambiguous_names(agent: Any, ambiguous: dict[str, tuple[str, ...]]) -> None:
+    """Log each name two live agents hold, once while it lasts, and when it names one agent again."""
 
-    name = departed.display_name
-    agent._logger.warning("[%s] Agent '%s' (%s) exited. event=team_agent_exited agent_type=%s", agent.id,
-                          name or departed.agent, departed.agent, departed.agent_type)
-    if not getattr(agent, "is_team_lead", False) or not name:
-        return
+    own = str(agent.id)
+    earlier = _AMBIGUOUS_NAMES.get(own, {})
+    for name, ids in ambiguous.items():
+        if earlier.get(name) != ids:
+            agent._logger.warning("[%s] Live agents share a name, so it names none of them until only one is left. "
+                                  "event=team_directory_name_ambiguous agent_id=%s name=%s agent_ids=%s",
+                                  own, own, name, ",".join(ids))
+    for name in earlier.keys() - ambiguous.keys():
+        agent._logger.info("[%s] A shared name names one agent again. event=team_directory_name_unique agent_id=%s "
+                           "name=%s", own, own, name)
+    if ambiguous:
+        _AMBIGUOUS_NAMES[own] = ambiguous
+    else:
+        _AMBIGUOUS_NAMES.pop(own, None)
+
+
+async def agent_exited(agent: Any, departed: TeamAgent, reason: str) -> None:
+    """``departed`` left for good: fail what this agent sent to its mailbox that nobody took (module docstring)."""
+
+    agent._logger.warning("[%s] Agent '%s' (%s) left for good. event=team_agent_left_for_good agent_id=%s "
+                          "departed_agent_id=%s departed_agent_type=%s reason=%s", agent.id,
+                          departed.display_name or departed.agent, departed.agent, agent.id, departed.agent,
+                          departed.agent_type, reason)
     task_manager = agent.task_manager
-    pending = [
+    in_its_mailbox = [
         subtask_info
         for subtask_info in await task_manager.operations_runtime.run(task_manager.get_pending_subtasks)
-        if getattr(subtask_info.meta, "to_agent_name", None) == name
+        if getattr(getattr(subtask_info, "header", None), "to_routing_path", None) == departed.agent
     ]
-    for subtask_info in pending:
-        parent_task_id = await task_manager.operations_runtime.run(task_manager.get_parent_task_id,
-                                                                   subtask_info.task.task_id)
+    for subtask_info in in_its_mailbox:
+        task_id = subtask_info.task.task_id
+        taken = await _taken(agent, task_id, departed)
+        if taken is not False:
+            continue
+        parent_task_id = await task_manager.operations_runtime.run(task_manager.get_parent_task_id, task_id)
         if not parent_task_id:
             continue
+        agent._logger.warning("[%s] A subtask waited in the mailbox of an agent that left for good; it is failed. "
+                              "event=team_agent_left_subtask_failed agent_id=%s task_id=%s subtask_id=%s "
+                              "departed_agent_id=%s reason=%s", agent.id, agent.id, parent_task_id, task_id,
+                              departed.agent, reason)
         await agent._fail_subtask_and_reconcile_parent(
             parent_task_id=parent_task_id,
             subtask_info=subtask_info,
-            error_message=f"Delegated subtask failed because assigned agent {name} exited before replying.",
+            error_message=(f"Delegated subtask failed because agent {departed.display_name or departed.agent} "
+                           "left before taking it."),
         )
+
+
+async def _taken(agent: Any, task_id: str, departed: TeamAgent) -> Optional[bool]:
+    """Whether any worker took the subtask (its delegated-task record); None when that cannot be read.
+
+    A subtask with no record (delegated before records existed) counts as never taken.
+    """
+
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    try:
+        record = await agent.task_manager.operations_runtime.run(delegated_tasks(agent).get, str(agent.team_id),
+                                                                 task_id)
+    except Exception:
+        agent._logger.exception("[%s] Whether a subtask was taken could not be read; it is left to the subtask "
+                                "watchdog. event=team_agent_left_subtask_unread agent_id=%s subtask_id=%s "
+                                "departed_agent_id=%s", agent.id, agent.id, task_id, departed.agent)
+        return None
+    if record is not None and (record.holder_agent_id is not None or record.holders):
+        agent._logger.info("[%s] A subtask the departed agent's mailbox held was taken by a worker; custody recovery "
+                           "and the watchdog handle it. event=team_agent_left_subtask_kept agent_id=%s subtask_id=%s "
+                           "departed_agent_id=%s holder_agent_id=%s", agent.id, agent.id, task_id, departed.agent,
+                           record.holder_agent_id)
+        return True
+    return False
 
 
 def live_agent_status(agent: Any, named_agent_type: Optional[str],
@@ -111,7 +183,8 @@ def live_agent_status(agent: Any, named_agent_type: Optional[str],
     """A live agent of the type (or with the name) that accepts work, from the view; None when there is none.
 
     This answers what the delegation probe asked over the operational subject until step 7b:
-    the records already say who is live, so nothing is sent.
+    the records already say who is live, so nothing is sent. A name two live agents share
+    finds nobody (``TeamAgents.named``).
     """
 
     from custom_agents.agent_requests import team_view
