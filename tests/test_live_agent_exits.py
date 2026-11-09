@@ -94,28 +94,30 @@ async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool)
         lead_connection = await nats.connect(proxy_url, inbox_prefix=f"_INBOX.{LEAD_HOST_RUNTIME}".encode(),
                                              allow_reconnect=True, reconnect_time_wait=0.5, max_reconnect_attempts=-1)
         stack.push_async_callback(lead_connection.close)
-        lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_connection,
-                         state=("idle", True))
-        worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
-                           nc=await connect(stack, broker_url, WORKER_RUNTIME), state=("idle", True))
-        await _until(lambda: "worker_1" in lead.known_agents.agent_map, timeout=30)
-        if connection_down:
-            proxy.cut()
-            await asyncio.sleep(0.2)
-        await asyncio.wrap_future(worker_host.detach("worker_1"))  # exiting, session closed, record removed
-        if connection_down:
-            await asyncio.sleep(2.0)
-            proxy.refusing = False
-        await _until(lambda: "worker_1" not in lead.known_agents.agent_map, timeout=60)
-        await _until(lambda: lead._fail_subtask_and_reconcile_parent.await_count > 0, timeout=30)
-        await asyncio.sleep(1.0)  # nothing more arrives
-        failed = lead._fail_subtask_and_reconcile_parent.await_count
-        await lead_host.stop()
-        await worker_host.stop()
-        stop.set()
-        await asyncio.gather(serving, return_exceptions=True)
-        proxy.server.close()
-        return failed
+        try:
+            lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_connection,
+                             state=("idle", True))
+            worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
+                               nc=await connect(stack, broker_url, WORKER_RUNTIME), state=("idle", True))
+            await _until(lambda: "worker_1" in lead.known_agents.agent_map, timeout=30)
+            if connection_down:
+                proxy.cut()
+                await asyncio.sleep(0.2)
+            await asyncio.wrap_future(worker_host.detach("worker_1"))  # exiting, session closed, record removed
+            if connection_down:
+                await asyncio.sleep(2.0)
+                proxy.refusing = False
+            await _until(lambda: "worker_1" not in lead.known_agents.agent_map, timeout=60)
+            await _until(lambda: lead._fail_subtask_and_reconcile_parent.await_count > 0, timeout=30)
+            await asyncio.sleep(1.0)  # nothing more arrives
+            return lead._fail_subtask_and_reconcile_parent.await_count
+        finally:
+            # Stopped also when a check above fails, so the test ends rather than hangs.
+            await lead_host.stop()
+            await worker_host.stop()
+            stop.set()
+            await asyncio.gather(serving, return_exceptions=True)
+            proxy.server.close()
 
 
 @pytest.mark.asyncio
