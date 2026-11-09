@@ -168,7 +168,8 @@ async def test_session_role_is_bound_to_its_agent_host_type_and_current_lifetime
         session["body"]["ends_at"] = format_timestamp(NOW - timedelta(seconds=1))
         await records.feed("agent_session", session["key"], _signed(session))
         await _until(lambda: reader.lead() is None)
-        assert reader.departure_reason("lead") == "session_or_placement_changed"
+        # Its session ended: the team services record the end when its host closes it, so it left for good.
+        assert reader.departure_reason("lead") == "session_closed" and reader.left_for_good("lead")
 
 
 @pytest.mark.asyncio
@@ -307,3 +308,194 @@ def test_a_host_on_another_contract_cannot_sign_another_hosts_identity():
     with pytest.raises(FrameRefused, match="invalid_body") as refused:
         trust_store().verify(_signed(document), record="host", now=NOW)
     assert refused.value.at == "/key"
+
+
+
+# -- leaving for good, also when the evidence comes late (A11) ------------------------------------
+
+
+def _closed_lead_session():
+    session = json.loads((EXAMPLES / "trust" / "sessions" / "lead.json").read_bytes())
+    session["sequence"] += 1
+    session["body"]["ends_at"] = format_timestamp(NOW - timedelta(seconds=1))
+    return session["key"], _signed(session)
+
+
+def _heard(reader, changes):
+    """What a listener hears: the ids that changed, and which of them left for good, read in the callback."""
+
+    def heard(changed):
+        changes.append((changed, frozenset(agent for agent in changed
+                                           if reader.agent(agent) is None and reader.left_for_good(agent))))
+
+    reader.listen(heard)
+
+
+@pytest.mark.asyncio
+async def test_an_exit_seen_only_as_the_records_deletion_is_known_from_the_closed_session():
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        last = reader.agent("lead")
+        # A reader that was disconnected while the agent exited sees only the deletion.
+        await records.feed("agent", KEY, None)
+        assert reader.agent("lead") is None and reader.departure_reason("lead") == "record_removed"
+        assert not reader.left_for_good("lead")
+        await records.feed("agent_session", *_closed_lead_session())
+
+        await _until(lambda: reader.left_for_good("lead"))
+        assert reader.departure_reason("lead") == "session_closed" and reader.departed_agent("lead") == last
+        await asyncio.sleep(0.1)  # several more checks
+        assert [exited for _, exited in changes if "lead" in exited] == [frozenset({"lead"})], "heard once"
+
+
+@pytest.mark.asyncio
+async def test_an_exit_whose_placement_deletion_is_read_first_is_still_recognised():
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        await records.feed("placement", KEY, None)
+        assert reader.departure_reason("lead") == "placement_removed" and not reader.left_for_good("lead")
+        # The exiting record arrives after the placement went, so it is not accepted; the session's end is.
+        await records.feed("agent", KEY, _signed(_agent(sequence=101, state="exiting")))
+        await records.feed("agent_session", *_closed_lead_session())
+
+        await _until(lambda: reader.left_for_good("lead"))
+        await asyncio.sleep(0.1)
+        assert [exited for _, exited in changes if "lead" in exited] == [frozenset({"lead"})]
+
+
+@pytest.mark.asyncio
+async def test_an_exit_while_the_record_watch_reopens_is_recognised():
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        records.values["agent"].pop(KEY)  # it exited and its record went while the watch was down
+        await records.queues["agent"].put(ConnectionError("watch connection lost"))
+        await records.queues["agent"].join()
+        await _until(lambda: reader.agent("lead") is None)
+        await records.feed("agent_session", *_closed_lead_session())
+
+        await _until(lambda: reader.left_for_good("lead"))
+        assert reader.agent("lead") is None
+
+
+@pytest.mark.asyncio
+async def test_an_exiting_record_after_the_agent_went_quiet_is_heard_once():
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        # Its host stops reporting; the agent drops out but has not left for good.
+        later = NOW + timedelta(seconds=31)
+        host.clock = lambda: later
+        await _until(lambda: reader.agent("lead") is None)
+        assert reader.departure_reason("lead") == "host_unavailable" and not reader.left_for_good("lead")
+        # Its host is back and writes that the agent is exiting, still placed there.
+        await records.feed("agent", KEY, _signed(_agent(sequence=101, state="exiting")))
+
+        await _until(lambda: reader.left_for_good("lead"))
+        assert reader.departure_reason("lead") == "exiting"
+        await asyncio.sleep(0.1)
+        assert [exited for _, exited in changes if "lead" in exited] == [frozenset({"lead"})]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_whose_host_only_stopped_reporting_has_not_left_for_good():
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        later = NOW + timedelta(seconds=31)
+        host.clock = lambda: later
+        await _until(lambda: reader.agent("lead") is None)
+        await asyncio.sleep(0.1)
+
+        assert reader.departure_reason("lead") == "host_unavailable" and not reader.left_for_good("lead")
+        assert not any(exited for _, exited in changes)
+
+
+@pytest.mark.asyncio
+async def test_a_forged_exit_from_another_host_is_not_an_exit():
+    """SEC-1: an exiting record signed by a host other than the agent's placement host changes nothing."""
+
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        forged = _agent(sequence=101, state="exiting")
+        forged["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
+        await records.feed("agent", KEY, _signed(forged))
+        await asyncio.sleep(0.1)
+
+        assert reader.lead() is not None and not reader.left_for_good("lead") and changes == []
+
+
+def _worker_host_record(host):
+    host_record = _example("host/lead-host.json")
+    host_record["key"] = "worker-host-1"
+    host_record["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
+    certificate = host.live.trust.store.host_certificate(INSTALL, "worker-host-1", 3)
+    held = host.live.trust.store.held_record("certificate", f"host.{INSTALL}.worker-host-1.3")
+    host_record["body"].update(runtime="worker-host-1", certificate={"certificate_id": certificate.certificate_id,
+                               "membership_epoch": 3, "sha256": held[1]}, session_limit=certificate.session_limit)
+    return _signed(host_record)
+
+
+@pytest.mark.asyncio
+async def test_a_record_naming_the_leads_session_from_another_host_does_not_make_an_agent_lead(caplog):
+    """SEC-1: a worker host's record that names the lead's session is refused; the lead stays the lead."""
+
+    async with _reading() as (reader, records, host):
+        await records.feed("host", "worker-host-1", _worker_host_record(host))
+        placement = _example("placement/lead.json")
+        placement["key"] = f"{TEAM}.impostor"
+        placement["body"].update(agent="impostor", agent_type="researcher", host="worker-host-1")
+        await records.feed("placement", placement["key"], _signed(placement))
+        impostor = _agent(agent="impostor", agent_type="researcher", session="s-lead-1")
+        impostor["key"] = placement["key"]
+        impostor["writer"].update(runtime="worker-host-1", key_id="test-worker-key-1")
+        await records.feed("agent", impostor["key"], _signed(impostor))
+        await asyncio.sleep(0.1)
+
+        assert reader.agent("impostor") is None
+        assert reader.lead().agent == "lead" and [item.agent for item in reader.live().values() if item.is_lead] == ["lead"]
+        assert "code=wrong_issuer" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("meanwhile", ["newer", "deleted"])
+async def test_a_retry_waiting_for_trust_never_overwrites_a_newer_record_or_revives_a_deleted_one(meanwhile):
+    """EVID-5: a refused record retried while its certificate is fetched is dropped once the key has moved on."""
+
+    from custom_messages.wire.refusals import FrameRefused
+
+    async with _reading() as (reader, records, host):
+        store = host.live.trust.store
+        stale = _signed(_agent(sequence=101, state="paused"))
+        original, fetched, release = store.verify, [], asyncio.Event()
+
+        def verify(raw, **kwargs):
+            if raw == stale and not release.is_set():
+                raise FrameRefused("unknown_key", at="/writer/key_id")
+            return original(raw, **kwargs)
+
+        async def fetch(raw):
+            fetched.append(raw)
+            if len(fetched) > 1:  # the retry at a later check waits while its certificate is read
+                await release.wait()
+            return True
+
+        store.verify, host.fetch_trust = verify, fetch
+        await records.feed("agent", KEY, stale)
+        await _until(lambda: len(fetched) > 1)  # the retry is waiting now
+        if meanwhile == "newer":
+            await records.feed("agent", KEY, _signed(_agent(sequence=102, state="busy")))
+            assert reader.agent("lead").state == "busy"
+        else:
+            await records.feed("agent", KEY, None)
+            assert reader.agent("lead") is None
+        release.set()
+        await asyncio.sleep(0.1)
+
+        if meanwhile == "newer":
+            assert reader.agent("lead").state == "busy" and reader._agents["lead"].sequence == 102
+        else:
+            assert reader.agent("lead") is None and "lead" not in reader._agents

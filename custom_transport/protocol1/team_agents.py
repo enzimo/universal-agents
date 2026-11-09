@@ -28,6 +28,20 @@ How it reads:
   every few seconds and listeners hear about agents whose liveness changed then.
 - The view is rebuilt on the reader's loop and replaced as a whole, so callers on other
   threads (the agents of the team lead's process) read a consistent snapshot without locks.
+- **Leaving for good.** An agent that drops out of the view has left for good
+  (``left_for_good``) when its record's last state said it was exiting, or when its
+  session has ended: the team services re-sign a session with its end when its host closes
+  it, as an agent exits or as the host's next start cleans up after a crash. A host that
+  only stopped reporting leaves the session open, and the agent may come back. The
+  evidence often arrives after the agent has left the view: a reader that reconnects sees
+  only the record's deletion, since the bucket keeps one value per key, and the placement's
+  deletion can be read before the exiting record, which is then never accepted. So the last
+  view entry of a departed agent is kept for ``DEPARTED_KEEP_SECONDS``
+  (``departed_agent``), and listeners hear its id once more when the session record shows
+  it ended, or when the exiting record arrives. The evidence is the team services' signed
+  session record, or an exiting record from the agent's last host with its last session;
+  another host cannot forge either. A closed session ends that run of the agent, not its
+  work: work it had claimed lives in saved state, which the restarted agent takes over.
 - Failed watches reopen, and a refusal that can pass later is verified again at each check:
   the writer's certificate or session is not readable yet while hosts join
   (``unknown_key``), revocations are not current yet, or a record is dated just ahead of
@@ -70,6 +84,12 @@ from custom_transport.protocol1.state_records import require_record_key
 # no change in the bucket.
 RECHECK_SECONDS = 5.0
 _GONE_STATES = frozenset({"exiting", "stopped"})
+# Why an agent left, when it left for good (module docstring): its record said it was
+# exiting, or its session was closed.
+EXITING, SESSION_CLOSED = "exiting", "session_closed"
+LEFT_FOR_GOOD = frozenset({EXITING, SESSION_CLOSED})
+# How long a departed agent's last view entry is kept for evidence that it left for good.
+DEPARTED_KEEP_SECONDS = 600.0
 # Refusals that can pass later; the record is verified again at each check (module docstring).
 _RETRYABLE_REFUSALS = frozenset({"unknown_key", "revocations_not_current", "not_yet_valid"})
 _LOGGER = logging.getLogger(__name__)
@@ -108,6 +128,15 @@ class HostComponent:
     code: Optional[str]
 
 
+@dataclass
+class _Departed:
+    """A departed agent's last view entry, when it left, and whether listeners heard it left for good."""
+
+    last: TeamAgent
+    since: datetime
+    told: bool
+
+
 @dataclass(frozen=True)
 class _Held:
     sequence: int
@@ -135,6 +164,8 @@ class TeamAgents:
         self._pending: dict[tuple[str, str], bytes] = {}
         self._refusals: dict[tuple[str, str], str] = {}
         self._departures: dict[str, str] = {}
+        # Each departed agent's last view entry and when it left, while it is kept (module docstring).
+        self._departed: dict[str, _Departed] = {}
         # (host, its digest) of each host already logged as running another contract.
         self._other_contracts_logged: set[tuple[str, str]] = set()
         self._view: Mapping[str, TeamAgent] = MappingProxyType({})
@@ -204,8 +235,23 @@ class TeamAgents:
 
         return self._departures.get(agent_id)
 
+    def left_for_good(self, agent_id: str) -> bool:
+        """Whether a previously visible agent left for good: it said it was exiting, or its session ended."""
+
+        return self._departures.get(agent_id) in LEFT_FOR_GOOD
+
+    def departed_agent(self, agent_id: str) -> Optional[TeamAgent]:
+        """A departed agent's last view entry, while it is kept (``DEPARTED_KEEP_SECONDS``)."""
+
+        departed = self._departed.get(agent_id)
+        return departed.last if departed is not None else None
+
     def listen(self, listener: Callable[[frozenset[str]], None]) -> None:
-        """Call ``listener`` on the reader's loop with the ids whose view changed (appeared, changed or left)."""
+        """Call ``listener`` on the reader's loop with the ids whose view changed (appeared, changed or left).
+
+        A departed agent's id is heard once more when the reader learns, after it left, that
+        it left for good (module docstring); ``left_for_good`` says so then.
+        """
 
         self._listeners.append(listener)
 
@@ -277,8 +323,8 @@ class TeamAgents:
             name = key.removeprefix(f"{self.team}.") if record != "host" else key
             if raw is None:
                 previous = held.get(name)
-                if record == "agent" and previous is not None:
-                    self._departures[name] = "exiting" if previous.record.body.state in _GONE_STATES else "record_removed"
+                if record == "agent" and previous is not None and not self.left_for_good(name):
+                    self._departures[name] = EXITING if previous.record.body.state in _GONE_STATES else "record_removed"
                 held.pop(name, None)
                 self._pending.pop((record, key), None)
                 self._deleted.add((record, key))
@@ -407,15 +453,59 @@ class TeamAgents:
             item = self._live_agent(agent_id, held, now)
             if item is not None:
                 view[agent_id] = item
-        for agent_id in self._view.keys() - view.keys():
-            self._departures[agent_id] = self._absence_reason(agent_id)
+        leaving = self._view.keys() - view.keys()
+        for agent_id in leaving:
+            last = self._view[agent_id]
+            reason = self._absence_reason(agent_id)
+            if reason not in LEFT_FOR_GOOD:
+                reason = self._left_for_good_evidence(agent_id, last, now) or reason
+            self._departures[agent_id] = reason
+            self._departed[agent_id] = _Departed(last, now, told=reason in LEFT_FOR_GOOD)
         for agent_id in view:
             self._departures.pop(agent_id, None)
-        self._publish(view)
+            self._departed.pop(agent_id, None)
+        self._publish(view, self._late_departures(leaving, now))
 
-    def _publish(self, view: dict[str, TeamAgent]) -> None:
-        changed = frozenset(agent_id for agent_id in set(view) | set(self._view)
-                            if view.get(agent_id) != self._view.get(agent_id))
+    def _late_departures(self, leaving: set[str], now: datetime) -> frozenset[str]:
+        """Departed agents found to have left for good only now (module docstring); old entries are dropped."""
+
+        late: set[str] = set()
+        for agent_id, departed in list(self._departed.items()):
+            if agent_id in leaving:
+                continue
+            if not departed.told:
+                reason = self._left_for_good_evidence(agent_id, departed.last, now)
+                if reason is not None:
+                    self._departures[agent_id] = reason
+                    departed.told = True
+                    late.add(agent_id)
+                    self._logger.info("A departed agent turned out to have left for good. "
+                                      "event=team_agents_left_for_good_late team=%s agent=%s reason=%s",
+                                      self.team, agent_id, reason)
+                    continue
+            if (now - departed.since).total_seconds() > DEPARTED_KEEP_SECONDS:
+                self._departed.pop(agent_id, None)
+        return frozenset(late)
+
+    def _left_for_good_evidence(self, agent_id: str, last: TeamAgent, now: datetime) -> Optional[str]:
+        """Why ``agent_id``, which left the view as ``last``, left for good, or None while nothing says so.
+
+        Only its last host's exiting record for its last session (it passed the placement
+        check when it was accepted), or its last session's end as the team services signed it.
+        """
+
+        held = self._agents.get(agent_id)
+        if held is not None and held.record.body.state in _GONE_STATES and held.record.signer is not None \
+                and held.record.signer.runtime == last.host and str(held.record.body.session) == last.session:
+            return EXITING
+        session = self._host.live.trust.store.agent_session(self._host.identity.installation, self.team, last.session)
+        if session is not None and session.agent == agent_id and session.runtime == last.host and session.ends_at <= now:
+            return SESSION_CLOSED
+        return None
+
+    def _publish(self, view: dict[str, TeamAgent], late: frozenset[str] = frozenset()) -> None:
+        changed = late | frozenset(agent_id for agent_id in set(view) | set(self._view)
+                                   if view.get(agent_id) != self._view.get(agent_id))
         self._view = MappingProxyType(view)
         if changed:
             for listener in list(self._listeners):
