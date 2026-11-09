@@ -288,13 +288,13 @@ kinds:
     rendering: none
 
   agent.pause:
-    description: Pause one agent at its next safe point; it keeps its queued work.
+    description: Pause one agent at its next safe point; it keeps its queued work. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/agent.pause.schema.json
     reply:
       body: bodies/agent.pause.reply.schema.json
-      errors: [agent_exiting]
+      errors: [agent_exiting, not_allowed]
     senders: [lead_host, team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
@@ -2681,13 +2681,13 @@ kinds:
     covered_change: {record_kind: staged_change, seen_version: required}
 
   agent.resume:
-    description: Resume a paused agent.
+    description: Resume a paused agent. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/agent.resume.schema.json
     reply:
       body: bodies/agent.resume.reply.schema.json
-      errors: [agent_exiting]
+      errors: [agent_exiting, not_allowed]
     senders: [lead_host, team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
@@ -2701,13 +2701,13 @@ kinds:
     rendering: none
 
   agent.exit:
-    description: Stop an agent after its current step.
+    description: Stop an agent after its current step. Only the team lead's session may ask, and never for its own agent; anyone else is answered not_allowed.
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/agent.exit.schema.json
     reply:
       body: bodies/agent.exit.reply.schema.json
-      errors: []
+      errors: [not_allowed]
     senders: [lead_host]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30

@@ -29,10 +29,13 @@ from custom_transport.protocol1.live import ServiceUnavailable
 from tests.team_services_support import checked_reply
 
 
-def frame(body: dict, *, role: str = "lead") -> SimpleNamespace:
-    issuer = SimpleNamespace(runtime="lead", agent="lead_1")
-    return SimpleNamespace(raw={"body": body}, session=SimpleNamespace(agent_role=role),
-                           frame=SimpleNamespace(issuer=issuer))
+def frame(body: dict, *, role: str = "lead", agent: str = "lead_1", runtime: str = "lead",
+          roles: tuple[str, ...] = ("lead_host", "worker_host"), session: bool = True) -> SimpleNamespace:
+    """What a handler reads from a verified request: its body, the sender's session and certificate."""
+
+    issuer = SimpleNamespace(runtime=runtime, agent=agent if session else None)
+    return SimpleNamespace(raw={"body": body}, session=SimpleNamespace(agent_role=role, agent=agent) if session else None,
+                           certificate=SimpleNamespace(roles=frozenset(roles)), frame=SimpleNamespace(issuer=issuer))
 
 
 def stand_in_agent(**overrides) -> SimpleNamespace:
@@ -116,6 +119,35 @@ async def test_pause_resume_and_exit_say_what_they_did() -> None:
     assert (await live_controls.agent_pause(agent, request))["outcome"] == "agent_exiting"
     for kind, handler in (("agent.pause", live_controls.agent_pause), ("agent.exit", live_controls.agent_exit)):
         checked_reply(kind, await handler(agent, request))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("request_frame", "obeyed"), [
+    # SEC-2: a worker agent in the team lead's own process, on the lead's host certificate.
+    (dict(role="worker", agent="worker_7"), set()),
+    # GEN-3: the agent's own session, even when it is the lead.
+    (dict(role="lead", agent="worker_1"), set()),
+    # The team services send without an agent session; they may pause and resume, not stop.
+    (dict(session=False, runtime="team-services", roles=("team_services",)), {"pause", "resume"}),
+    # Another host's request without an agent session.
+    (dict(session=False, runtime="gateway", roles=("gateway",)), set()),
+    # The team lead's own session.
+    (dict(), {"pause", "resume", "exit"}),
+])
+async def test_pause_resume_and_exit_are_obeyed_only_from_the_lead_or_the_team_services(
+        request_frame, obeyed, caplog) -> None:
+    for action, kind, handler in (("pause", "agent.pause", live_controls.agent_pause),
+                                  ("resume", "agent.resume", live_controls.agent_resume),
+                                  ("exit", "agent.exit", live_controls.agent_exit)):
+        agent = stand_in_agent(paused=action == "resume")
+        with caplog.at_level(logging.WARNING):
+            reply = checked_reply(kind, await handler(agent, frame({"request_id": "control-1"}, **request_frame)))
+        done = getattr(agent, {"pause": "pause", "resume": "resume", "exit": "exit_agent"}[action])
+        if action in obeyed:
+            assert reply["outcome"] == "ok" and done.await_count == 1
+        else:
+            assert reply["outcome"] == "not_allowed" and reply["message"] and done.await_count == 0
+            assert f"event=agent_control_refused agent_id=worker_1 action={action}" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -208,21 +240,117 @@ async def test_the_watchdog_asks_the_holder_or_else_each_worker_of_the_type(monk
 
 @pytest.mark.asyncio
 async def test_the_leads_control_tool_reports_what_the_agent_answered(monkeypatch) -> None:
-    sent: list[tuple[str, str]] = []
+    from custom_messages.wire.refusals import FrameRefused
+    from custom_tools.providers._runtime import control_reply_seconds
+    from custom_transport.protocol1.live import RequestRefused
+
+    sent: list[tuple[str, str, float]] = []
+    answers = {
+        "worker_1": {"outcome": "ok", "state": "already_paused"},
+        "worker_2": {"outcome": "not_allowed", "message": "Only the team lead may ask this."},
+        "worker_gone": ServiceUnavailable("agent.exit", "ctl.agent.worker_gone", "no responders"),
+        "worker_slow": ServiceUnavailable("agent.exit", "ctl.agent.worker_slow", "no answer in time"),
+        "worker_failed": RequestRefused("agent.pause", "handler_failed", ""),
+        "worker_old": RequestRefused("agent.pause", "unsupported", "/kind"),
+        "worker_bad": FrameRefused("bad_signature"),
+        "worker_unasked": AgentUnreachable("agent lead_1 has no session yet"),
+    }
 
     async def ask_agent(asker, kind, body, target, *, timeout=None):
         body_model(kind)[0].validate_python(body)
-        sent.append((kind, target))
-        if target == "worker_gone":
-            raise AgentUnreachable("no responders")
-        return {"outcome": "ok", "state": "already_paused"}
+        sent.append((kind, target, timeout))
+        answer = answers[target]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     monkeypatch.setattr(agent_requests, "ask_agent", ask_agent)
-    lead = SimpleNamespace(id="lead_1", _agent_id_by_name={"Researcher-1": "worker_1"})
+    lead = SimpleNamespace(id="lead_1", name="TeamLead", _agent_id_by_name={"Researcher-1": "worker_1"})
 
-    answered = await _send_control_instruction_payload(lead, "Researcher-1", "pause")
-    gone = await _send_control_instruction_payload(lead, "worker_gone", "exit")
+    async def ask(target: str, instruction: str = "pause") -> str:
+        return await _send_control_instruction_payload(lead, target, instruction)
 
-    assert sent == [("agent.pause", "worker_1"), ("agent.exit", "worker_gone")]
-    assert answered == "Researcher-1: already paused."
-    assert gone.startswith("worker_gone did not answer") and "nothing was changed" in gone
+    assert await ask("Researcher-1") == "Researcher-1: already paused."
+    assert await ask("worker_2") == "worker_2 did not pause: Only the team lead may ask this.. Nothing was changed there."
+    assert "nothing was changed" in await ask("worker_gone", "exit")
+    assert "nothing was changed" in await ask("worker_old")
+    assert "could not be asked (agent lead_1 has no session yet); nothing was changed" in await ask("worker_unasked")
+    # FAIL-6: a lost reply, a handler that failed part way or an unreadable answer may still be followed by the change.
+    for target, instruction in (("worker_slow", "exit"), ("worker_failed", "pause"), ("worker_bad", "pause")):
+        said = await ask(target, instruction)
+        assert f"whether it will {instruction} is unknown" in said and "nothing was changed" not in said, said
+    # The request may take its whole lifetime.
+    assert {timeout for _, _, timeout in sent} == {control_reply_seconds()} == {30.0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["lead_1", "TeamLead", "Me"])
+async def test_the_control_tool_never_controls_the_calling_agent(monkeypatch, target) -> None:
+    """GEN-3: by id, by name, or by a name that resolves to its id; nothing is sent."""
+
+    asked = AsyncMock()
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    lead = SimpleNamespace(id="lead_1", name="TeamLead", _agent_id_by_name={"Me": "lead_1"})
+
+    said = await _send_control_instruction_payload(lead, target, "exit")
+
+    assert said.startswith(f"{target} is you") and "Nothing was sent" in said and "plan_runtime_restart" in said
+    asked.assert_not_awaited()
+
+
+def test_the_control_tool_waits_longer_than_the_request_may_take(monkeypatch) -> None:
+    """FAIL-6: the tool's own wait never ends first; when it would, it says the outcome is unknown."""
+
+    from custom_tools.providers import agent_management
+    from custom_tools.providers._runtime import control_reply_seconds
+    from tests.task_work_support import set_agent_ref
+
+    waits: list[float] = []
+
+    def run(agent, coroutine, *, timeout=15.0):
+        coroutine.close()
+        waits.append(timeout)
+        if len(waits) > 1:
+            raise TimeoutError(f"the send did not finish within {timeout:g} s and was cancelled")
+        return "Researcher-1: paused."
+
+    monkeypatch.setattr(agent_management, "_run_agent_coroutine", run)
+    set_agent_ref(SimpleNamespace(id="lead_1", name="TeamLead", _agent_id_by_name={}))
+    try:
+        assert agent_management.send_control_instruction("Researcher-1", "pause") == "Researcher-1: paused."
+        timed_out = agent_management.send_control_instruction("Researcher-1", "exit")
+    finally:
+        set_agent_ref(None)
+
+    assert waits[0] > control_reply_seconds()
+    assert "whether it will exit is unknown" in timed_out
+
+
+@pytest.mark.asyncio
+async def test_a_worker_session_on_the_leads_host_cannot_pause_or_stop_an_agent() -> None:
+    """SEC-2 with real frame verification: the contract lets the lead's host send these, but not this session."""
+
+    import copy
+
+    from custom_messages.wire.trust import sign_state
+    from tests.message_contract_support import TRUST, example_frame, private_key, resign, trust_store, verify
+
+    session = json.loads((TRUST / "sessions" / "lead.json").read_text())
+    session["key"] = "session.install_example.team_example.s-helper-1"
+    session["sequence"] = 2
+    session["body"].update(session="s-helper-1", agent="helper-on-lead", agent_role="worker", placement_revision=9)
+    trust = trust_store(extra_documents=[json.dumps(sign_state(session, private_key(session["writer"]["key_id"]))).encode()])
+    agent = stand_in_agent()
+    for kind, example, message_id in (("agent.pause", "basic", "01928f3a-7b2c-74d5-8000-00000000aa01"),
+                                      ("agent.exit", "full", "01928f3a-7b2c-74d5-8000-00000000aa02")):
+        frame_document = copy.deepcopy(example_frame(kind, example))
+        frame_document["issuer"].update(agent="helper-on-lead", session="s-helper-1")
+        frame_document["message_id"] = message_id
+        verified = verify(resign(frame_document), frame_document, trust=trust)
+        assert verified.session.agent_role == "worker" and "lead_host" in verified.certificate.roles
+
+        reply = checked_reply(kind, await live_controls.LIVE_CONTROL_HANDLERS[kind](agent, verified))
+
+        assert reply["outcome"] == "not_allowed"
+    agent.pause.assert_not_awaited()
+    agent.exit_agent.assert_not_awaited()

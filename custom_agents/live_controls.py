@@ -14,7 +14,14 @@ signatures, replay) happened before.
   "People, tasks, agent status and steering"). Tools are left out: the contract names tools
   by their catalog ids, which the agent's tool list does not carry.
 - **Pause, resume and exit** do what the control instructions did (``UniversalAgent.pause``,
-  ``.resume``, ``.exit_agent``); an exiting agent is not paused or resumed.
+  ``.resume``, ``.exit_agent``); an exiting agent is not paused or resumed. The contract lets
+  the team lead's host send them, but that host also runs the lead's thread workers, so
+  each request is obeyed only when it comes from the team lead's own session, or from the
+  team services for pause and resume (no agent session), checked against the sender's
+  current session. An agent never pauses, resumes or stops itself this way, not even the
+  lead: stopping the lead's agent would end the manager process without the person's
+  approval a restart needs. Anything else is answered ``not_allowed`` and logged
+  (``event=agent_control_refused``).
 - **Task probes** answer whether the agent holds the task, its state and whether it runs now.
 """
 
@@ -40,6 +47,34 @@ _PRESSURES = {"low", "moderate", "high", "critical", "unknown"}
 def _from_lead(verified: VerifiedFrame) -> bool:
     session = verified.session
     return session is not None and session.agent_role == "lead"
+
+
+# Who may send pause, resume and exit (module docstring): the team lead's session, and for
+# pause and resume also the team services, which send without an agent session.
+_TEAM_SERVICES_ROLE = "team_services"
+_SERVICES_MAY_SEND = frozenset({"pause", "resume"})
+
+
+def _control_refusal(agent: Any, verified: VerifiedFrame, action: str) -> Optional[dict[str, Any]]:
+    """The ``not_allowed`` answer when this control must not be obeyed (module docstring); None to obey it."""
+
+    session = verified.session
+    certificate = verified.certificate
+    if session is None:
+        if action in _SERVICES_MAY_SEND and certificate is not None and _TEAM_SERVICES_ROLE in certificate.roles:
+            return None
+        why = "Only the team lead or the team services may ask this."
+    elif str(session.agent) == str(agent.id):
+        why = "An agent does not pause, resume or stop itself through a control request."
+    elif session.agent_role == "lead":
+        return None
+    else:
+        why = "Only the team lead may ask this."
+    issuer = verified.frame.issuer
+    agent._logger.warning("[%s] An agent control was refused. event=agent_control_refused agent_id=%s action=%s "
+                          "from_runtime=%s from_agent=%s from_role=%s", agent.id, agent.id, action, issuer.runtime,
+                          getattr(issuer, "agent", None), getattr(session, "agent_role", None))
+    return {"outcome": "not_allowed", "message": why}
 
 
 def _per_mille(ratio: Any) -> Optional[int]:
@@ -126,6 +161,9 @@ def _exiting(agent: Any) -> bool:
 
 
 async def agent_pause(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
+    refused = _control_refusal(agent, verified, "pause")
+    if refused is not None:
+        return refused
     if _exiting(agent):
         return {"outcome": "agent_exiting", "message": "The agent is exiting."}
     if agent.paused:
@@ -136,6 +174,9 @@ async def agent_pause(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
 
 
 async def agent_resume(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
+    refused = _control_refusal(agent, verified, "resume")
+    if refused is not None:
+        return refused
     if _exiting(agent):
         return {"outcome": "agent_exiting", "message": "The agent is exiting."}
     if not agent.paused:
@@ -146,6 +187,9 @@ async def agent_resume(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
 
 
 async def agent_exit(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
+    refused = _control_refusal(agent, verified, "exit")
+    if refused is not None:
+        return refused
     if _exiting(agent):
         return {"outcome": "ok", "state": "already_exiting"}
     _log_control(agent, verified, "exit")

@@ -24,8 +24,10 @@ if TYPE_CHECKING:
 
 
 from custom_tools.providers._runtime import (
+    CONTROL_WAIT_MARGIN_SECONDS,
     _run_agent_coroutine,
     _send_control_instruction_payload,
+    control_reply_seconds,
 )
 from custom_tools.providers.diagnostics import (
     build_runtime_pressure_snapshot,
@@ -482,15 +484,21 @@ def send_control_instruction(target_agent: str, instruction: str) -> str:
     if agent is None:
         return "Error: Agent reference not set"
 
+    normalized_instruction = instruction.lower()
     try:
-        normalized_instruction = instruction.lower()
+        # Waits longer than the request may take, so the request's own deadline answers first.
         return _run_agent_coroutine(
             agent,
             _send_control_instruction_payload(
                 agent, target_agent, normalized_instruction
             ),
+            timeout=control_reply_seconds() + CONTROL_WAIT_MARGIN_SECONDS,
         )
-
+    except TimeoutError as e:
+        return (
+            f"{target_agent} did not answer in time ({e}), so whether it will "
+            f"{normalized_instruction} is unknown. Check its state with query_agent_state(live=true)."
+        )
     except Exception as e:
         return f"Error sending control instruction: {e}"
 

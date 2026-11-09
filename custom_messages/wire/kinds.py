@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '30ef60ccb5b2a8321a0e155b0b69517e72a69d50a674285bcd602ef44e607315'
+CONTRACT_SHA256 = 'd81e56d0a7723dda59211be7782fe16334b1b651039fefe7c1b2e2cf64f40e07'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -192,7 +192,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentExitBodyAdapter,
         reply_model=models.AgentExitReplyAdapter,
-        reply_errors=(),
+        reply_errors=('not_allowed',),
         senders=('lead_host',),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -210,7 +210,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.pause': KindSpec(
@@ -221,7 +221,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentPauseBodyAdapter,
         reply_model=models.AgentPauseReplyAdapter,
-        reply_errors=('agent_exiting',),
+        reply_errors=('agent_exiting', 'not_allowed'),
         senders=('lead_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -239,7 +239,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.resume': KindSpec(
@@ -250,7 +250,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentResumeBodyAdapter,
         reply_model=models.AgentResumeReplyAdapter,
-        reply_errors=('agent_exiting',),
+        reply_errors=('agent_exiting', 'not_allowed'),
         senders=('lead_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -268,7 +268,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.status': KindSpec(

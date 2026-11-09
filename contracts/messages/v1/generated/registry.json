@@ -370,7 +370,7 @@
       "authority": "none",
       "body": "bodies/agent.exit.schema.json",
       "class": "request_reply",
-      "description": "Stop an agent after its current step.",
+      "description": "Stop an agent after its current step. Only the team lead's session may ask, and never for its own agent; anyone else is answered not_allowed.",
       "expiry_seconds": 30,
       "idempotency": [
         "/audience/id",
@@ -384,7 +384,9 @@
       "rendering": "none",
       "reply": {
         "body": "bodies/agent.exit.reply.schema.json",
-        "errors": []
+        "errors": [
+          "not_allowed"
+        ]
       },
       "routing": "named",
       "senders": [
@@ -403,7 +405,7 @@
       "authority": "none",
       "body": "bodies/agent.pause.schema.json",
       "class": "request_reply",
-      "description": "Pause one agent at its next safe point; it keeps its queued work.",
+      "description": "Pause one agent at its next safe point; it keeps its queued work. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.",
       "expiry_seconds": 30,
       "idempotency": [
         "/audience/id",
@@ -418,7 +420,8 @@
       "reply": {
         "body": "bodies/agent.pause.reply.schema.json",
         "errors": [
-          "agent_exiting"
+          "agent_exiting",
+          "not_allowed"
         ]
       },
       "routing": "named",
@@ -439,7 +442,7 @@
       "authority": "none",
       "body": "bodies/agent.resume.schema.json",
       "class": "request_reply",
-      "description": "Resume a paused agent.",
+      "description": "Resume a paused agent. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.",
       "expiry_seconds": 30,
       "idempotency": [
         "/audience/id",
@@ -454,7 +457,8 @@
       "reply": {
         "body": "bodies/agent.resume.reply.schema.json",
         "errors": [
-          "agent_exiting"
+          "agent_exiting",
+          "not_allowed"
         ]
       },
       "routing": "named",
