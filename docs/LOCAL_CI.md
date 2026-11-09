@@ -59,9 +59,11 @@ PRs. The managed local runners accept explicitly approved repositories and
 same-repository work under the installed public-job policy described below.
 
 The documentation job installs RTK 0.51.0 from its upstream Linux release with a
-pinned SHA-256 through a JavaScript action before running any shell steps. Those
-steps retain the RTK shell wrapper. Python 3.13 and Node.js 24.20.0 are set up by
-pinned actions. Hosted runners do not use the local cleanup hooks, build caches,
+pinned SHA-256 through a JavaScript action before running any shell steps. The
+download makes up to four attempts for temporary HTTP and network failures, with a
+30-second deadline per attempt. Checksum mismatches and permanent HTTP errors
+stop before extraction. Shell steps retain the RTK wrapper. Python 3.13 and
+Node.js 24.20.0 are set up by pinned actions. Hosted runners do not use the local cleanup hooks, build caches,
 `UA_CI_PYTHON`, or the local Python relocation helper. Their machines are disposable.
 
 In the repository's **Settings > Pages > Build and deployment**, set **Source** to
