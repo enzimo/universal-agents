@@ -19,7 +19,8 @@ supported, because it may not read what a newer one saved.
 - **From 0.9.11 or earlier:** first approve or decline a restart waiting in
   the Inbox, or, with authorization off, waiting for your agreement in the
   chat. A restart planned by those releases cannot be approved after the
-  upgrade; Team Architect has to plan it again and ask you again.
+  upgrade: approving it then only says it was planned by another version, and
+  Team Architect has to plan it again and ask you again.
 - **PostgreSQL:** an instance that keeps its data in PostgreSQL gets the same
   upgrade steps, but release tests check them on SQLite only. Back up the
   database first.
