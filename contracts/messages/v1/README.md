@@ -121,7 +121,11 @@ directly reports to the person whatever the agent's role. A kind whose `topology
 only hosts send it, or it goes back to a refused frame's sender (`delivery.refused`);
 `edge_allowed` allows it. A kind that lead or worker hosts send to an agent, worker pool or
 edge address names its edges, and the generator refuses `none` there: the lead's
-`agent.pause`, `agent.resume`, `agent.exit`, `agent.status` and `task.probe` travel `down`.
+`agent.pause`, `agent.resume`, `agent.exit` and `agent.status` travel `down`. So does
+`task.probe`, which a task's requester sends to the task's holder whatever the requester's
+role: any agent may delegate, and its subtask watchdog asks the holder whether it still has
+the task (decision 70). `team-topologies.yaml` lists such kinds as `requester_kinds`, a fixed
+rule `edge_allowed` applies in every topology; worker hosts are among `task.probe`'s senders.
 Messages that hosts send without an agent (gateway, scheduler, team services) are not
 topology checks either.
 

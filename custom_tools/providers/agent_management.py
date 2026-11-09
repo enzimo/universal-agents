@@ -97,16 +97,32 @@ def get_known_agents() -> str:
     )
 
 
-async def _live_status(agent: Any, target_id: str, level: str) -> dict[str, Any]:
-    """One agent's own status answer (``agent.status``), or why it could not be asked."""
+# How long query_agent_state(live=true) waits for the agents' answers, all asked at once.
+LIVE_STATUS_SECONDS = 10.0
 
-    from custom_agents.agent_requests import AgentUnreachable, ask_agent
-    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
 
-    try:
-        return await ask_agent(agent, "agent.status", {"level": level}, target_id, timeout=10.0)
-    except (AgentUnreachable, ServiceUnavailable, RequestRefused) as error:
-        return {"outcome": "unavailable", "message": str(error)}
+async def _live_statuses(agent: Any, targets: dict[str, str], level: str) -> dict[str, dict[str, Any]]:
+    """Each target's own status answer (``agent.status``), asked at once under one deadline, or why it has none.
+
+    ``targets`` maps what the caller asked for (a name or an id) to the agent id. One target's
+    failure, whatever it is, is reported for that target only (``agent_requests.ask_each``).
+    """
+
+    from custom_agents.agent_requests import ask_each, cannot_ask
+
+    blocked = cannot_ask(agent, need_view=False)
+    if blocked is not None:
+        return {asked: {"outcome": "unavailable", "message": blocked.reason} for asked in targets}
+    answers = await ask_each(agent, "agent.status", {"level": level}, set(targets.values()), timeout=LIVE_STATUS_SECONDS)
+    found: dict[str, dict[str, Any]] = {}
+    for asked, target_id in targets.items():
+        answer = answers[target_id]
+        if isinstance(answer, Exception):
+            logger.info("An agent's live status could not be read. event=agent_live_status_unavailable agent_id=%s "
+                        "target_agent_id=%s error_type=%s error=%s", agent.id, target_id, type(answer).__name__, answer)
+            answer = {"outcome": "unavailable", "message": f"{type(answer).__name__}: {answer}"}
+        found[asked] = answer
+    return found
 
 
 @tool
@@ -138,7 +154,9 @@ def query_agent_state(
 
     Args:
         live: When "true", "1", or "yes", also ask each matching agent (or `target_agent`) for its
-            status now and include its answers under "live_status".
+            status now, all at once, waiting at most 10 seconds in all, and include each answer under
+            "live_status"; an agent that could not be asked or did not answer gets
+            {"outcome": "unavailable", "message": <why>}.
         target_agent: Optional explicit agent ID/name to ask when `live=true`.
         info_level: Detail of the live answer when `live=true` - "basic" or "full" (full adds diagnostics).
 
@@ -181,9 +199,10 @@ def query_agent_state(
             else:
                 live_targets = [status.self_id for status in agent_state_store.query(filters) if status.self_id]
             level = "full" if info_level == "full" else "basic"
-            for raw_target in live_targets:
-                target_id = agent._agent_id_by_name.get(raw_target, raw_target)
-                live_answers[raw_target] = _run_agent_coroutine(agent, _live_status(agent, target_id, level))
+            targets = {raw: agent._agent_id_by_name.get(raw, raw) for raw in live_targets}
+            # All at once, within LIVE_STATUS_SECONDS, however many there are (A21).
+            live_answers = _run_agent_coroutine(agent, _live_statuses(agent, targets, level),
+                                                timeout=LIVE_STATUS_SECONDS + CONTROL_WAIT_MARGIN_SECONDS)
 
         if agent_state_store is None:
             if live_requested and target_agent:
