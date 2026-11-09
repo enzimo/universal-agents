@@ -105,6 +105,9 @@ class _View:
     def live(self):
         return self._live
 
+    def departed_agents(self):
+        return {}
+
 
 def _member(agent: str, name: str, *, lead: bool = False) -> TeamAgent:
     return TeamAgent(agent=agent, agent_type="TeamArchitect" if lead else "Researcher", display_name=name,

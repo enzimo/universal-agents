@@ -246,6 +246,9 @@ class _Reader:
     def departed_agent(self, agent_id):
         return self.departed.get(agent_id)
 
+    def departed_agents(self):
+        return {agent: item for agent, item in self.departed.items() if self.left_for_good(agent)}
+
 
 @contextmanager
 def _own_loop() -> Iterator[asyncio.AbstractEventLoop]:
@@ -278,6 +281,24 @@ def _host_with(owner: SimpleNamespace, reader: _Reader):
 async def _settle(loop: asyncio.AbstractEventLoop, seconds: float = 0.6) -> None:
     await asyncio.sleep(seconds)
     await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop))
+
+
+@pytest.mark.asyncio
+async def test_a_late_requester_receives_retained_exits_once() -> None:
+    reader = _Reader()
+    reader.show({"worker_1": member("worker_1", "Researcher-1")})
+    changed = reader.show({}, worker_1="session_closed")
+    with _own_loop() as loop:
+        owner = directory_owner(pending=[subtask("sub_1", "worker_1")])
+        owner._runtime_loop = loop
+        host = _host_with(owner, reader)
+        hosted = host.agents[owner.id]
+        host._sync_directory(hosted)
+        # Catch-up or a repeated attachment must not launch another reconciliation.
+        host._team_changed(changed)
+        host._sync_directory(hosted)
+        await _settle(loop)
+        owner._fail_subtask_and_reconcile_parent.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -400,18 +421,20 @@ async def test_a_handed_back_subtask_another_worker_runs_is_not_failed_when_its_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("requeued", [True, False])
-async def test_a_handback_the_requester_has_not_finished_handling_fails_nothing(requester, requeued) -> None:
+@pytest.mark.parametrize(("requeued", "claim_received"), [(True, True), (False, True), (True, False)])
+async def test_a_handback_the_requester_has_not_finished_handling_fails_nothing(requester, requeued, claim_received) -> None:
     """C02: its handback is requeued but nobody has taken it yet, or not processed at all when the exit is seen."""
 
-    _claim(requester, "worker_b")
+    if claim_received:
+        _claim(requester, "worker_b")
     if requeued:
         requester._delegated_task_repository.mark_requeued(team_id="team_one", task_id="task_sub",
-                                                           publish_sequence=None, from_holder_agent_id="worker_b")
+                                                           publish_sequence=57, from_holder_agent_id="worker_b")
 
     await agent_exited(requester, WORKER_B, "exiting")
 
     requester._fail_subtask_and_reconcile_parent.assert_not_awaited()
+    requester.team_comms.delete_work_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

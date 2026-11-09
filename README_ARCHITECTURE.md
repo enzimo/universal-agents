@@ -4926,6 +4926,13 @@ saved state and reports it again, and a handed-back one goes to another worker. 
 whose host only stopped reporting is not given up for; the subtask watchdog handles work that
 never comes back.
 
+A fresh reader also recognises agents that exited while its process was down, using the
+retained signed closed sessions without needing the old agent record or placement. A
+requester attached after catch-up receives the retained exits once too. Beyond the session
+retention period the watchdog still decides overdue work. A handback records its worker in
+the delegated task's holder history even if the worker's claim never arrived: its new
+message belongs to the type queue and must never be withdrawn as an abandoned by-name task.
+
 Agents ask each other on `ctl.agent.<agent>`, signed with the asking agent's session, through
 `custom_agents.agent_requests` (`ask_agent`, `ask_each`, `announce`, `team_view`, which hold
 this process's host apart from the host's own module so the import graph stays free of

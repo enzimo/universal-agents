@@ -79,9 +79,12 @@ async def _until(check):
 
 
 @asynccontextmanager
-async def _reading(*, store=None):
+async def _reading(*, store=None, closed_before_start=False):
     store = store or trust_store()
     records = _Records(store)
+    if closed_before_start:
+        key, raw = _closed_lead_session()
+        records.values["agent_session"][key] = raw
 
     async def fetch(raw):
         return False
@@ -93,10 +96,11 @@ async def _reading(*, store=None):
     task = asyncio.create_task(reader.run(stop))
     try:
         await asyncio.wait_for(reader.ready.wait(), 2)
-        await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
-        await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
-        await records.feed("agent", KEY, _signed(_agent()))
-        await _until(lambda: reader.lead() is not None)
+        if not closed_before_start:
+            await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
+            await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+            await records.feed("agent", KEY, _signed(_agent()))
+            await _until(lambda: reader.lead() is not None)
         yield reader, records, host
     finally:
         stop.set()
@@ -329,6 +333,21 @@ def _heard(reader, changes):
                                            if reader.agent(agent) is None and reader.left_for_good(agent))))
 
     reader.listen(heard)
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_reader_recognises_an_exit_before_it_started():
+    async with _reading(closed_before_start=True) as (reader, records, host):
+        assert not reader.live()
+        assert reader.left_for_good("lead")
+        departed = reader.departed_agent("lead")
+        assert (departed.agent, departed.host, departed.session) == ("lead", "lead-host-1", "s-lead-1")
+        changes = []
+        _heard(reader, changes)
+        # Re-reading the same signed evidence never announces the exit twice.
+        await records.feed("agent_session", *_closed_lead_session())
+        await asyncio.sleep(0.1)
+        assert changes == []
 
 
 @pytest.mark.asyncio

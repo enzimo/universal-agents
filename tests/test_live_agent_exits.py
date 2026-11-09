@@ -69,7 +69,7 @@ class _Proxy:
         self.open.clear()
 
 
-async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool) -> int:
+async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool, process_down: bool = False) -> int:
     """How many subtasks the lead failed after its worker exited, with its connection down or up meanwhile."""
 
     layout = InstanceLayout.at(tmp_path / "instance")
@@ -100,10 +100,19 @@ async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool)
             worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
                                nc=await connect(stack, broker_url, WORKER_RUNTIME), state=("idle", True))
             await _until(lambda: "worker_1" in lead.known_agents.agent_map, timeout=30)
+            if process_down:
+                await lead_host.stop()
             if connection_down:
                 proxy.cut()
                 await asyncio.sleep(0.2)
             await asyncio.wrap_future(worker_host.detach("worker_1"))  # exiting, session closed, record removed
+            if process_down:
+                # A fresh host and requester have no in-memory history of the worker.
+                # Pending subtasks are the work recovered by the restarted lead.
+                lead = stand_in("lead_2", "TeamLead", "TeamArchitect", is_lead=True, pending=[subtask])
+                lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
+                lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION,
+                                 nc=await connect(stack, broker_url, LEAD_HOST_RUNTIME), state=("idle", True))
             if connection_down:
                 await asyncio.sleep(2.0)
                 proxy.refusing = False
@@ -121,8 +130,8 @@ async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("connection_down", [False, True])
+@pytest.mark.parametrize(("connection_down", "process_down"), [(False, False), (True, False), (False, True)])
 async def test_the_lead_fails_what_a_worker_left_untaken_also_when_it_missed_the_exit(
-    broker: str, tmp_path: Path, connection_down: bool,  # noqa: F811 - the shared live NATS fixture
+    broker: str, tmp_path: Path, connection_down: bool, process_down: bool,  # noqa: F811 - shared fixture
 ) -> None:
-    assert await _exit_while(broker, tmp_path, connection_down=connection_down) == 1
+    assert await _exit_while(broker, tmp_path, connection_down=connection_down, process_down=process_down) == 1

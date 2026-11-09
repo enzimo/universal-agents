@@ -232,6 +232,8 @@ class _HostedAgent:
     session: Optional[str] = None
     subscription: Any = None
     subscription_failures: int = 0
+    # A catch-up notification and attach-time replay must not process one exit twice.
+    notified_exits: set[str] = field(default_factory=set)
     # Why its session was last refused, until one opens (module docstring).
     refusal: Optional[_Refusal] = None
     # Openings that got an answer: the next one has a new request id.
@@ -468,7 +470,7 @@ class AgentProcessHost:
         own, which never touches the directory.
         """
 
-        from custom_agents.team_directory import agent_exited, sync_directory
+        from custom_agents.team_directory import sync_directory
 
         team_agents = self.team_agents
         assert team_agents is not None
@@ -481,10 +483,17 @@ class AgentProcessHost:
             self._call_on_agent_loop(hosted, lambda agent=hosted.agent: sync_directory(agent, view),
                                      what="team_directory")
             for departed, reason in left:
-                if departed.agent != str(hosted.agent.id):
-                    self._on_agent_loop(
-                        hosted, lambda agent=hosted.agent, departed=departed, reason=reason:
-                        agent_exited(agent, departed, reason), what="team_exit")
+                self._notify_exit(hosted, departed, reason)
+
+    def _notify_exit(self, hosted: _HostedAgent, departed: Any, reason: str) -> None:
+        """Deliver an exit once per attached requester, including catch-up and attach-time replay."""
+
+        from custom_agents.team_directory import agent_exited
+
+        if departed.agent == str(hosted.agent.id) or departed.agent in hosted.notified_exits:
+            return
+        hosted.notified_exits.add(departed.agent)
+        self._on_agent_loop(hosted, lambda: agent_exited(hosted.agent, departed, reason), what="team_exit")
 
     def _sync_directory(self, hosted: _HostedAgent) -> None:
         """A newly attached agent gets the whole current view."""
@@ -495,6 +504,8 @@ class AgentProcessHost:
             return  # the view's first reading tells every attached agent
         live = self.team_agents.live()
         self._call_on_agent_loop(hosted, lambda: sync_directory(hosted.agent, live), what="team_directory")
+        for departed in self.team_agents.departed_agents().values():
+            self._notify_exit(hosted, departed, self.team_agents.departure_reason(departed.agent) or "")
 
     def _call_on_agent_loop(self, hosted: _HostedAgent, function: Callable[[], Any], *, what: str) -> None:
         """Run ``function`` on the agent's own loop as a plain callback: callbacks run in the order they are handed."""
