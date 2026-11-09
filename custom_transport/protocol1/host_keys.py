@@ -8,9 +8,10 @@ is missing before it starts the processes (``ensure_*``); each process then load
 its own (``load_*``). Private keys never leave these files: no message, database row
 or log line carries them.
 
-Files are written whole and atomically, readable only by their owner, and created
-exclusively, so two processes starting at once can never each keep a different key
-for one host. Every process runs as the same operating-system user inside one
+Files are written whole and atomically, readable only by their owner, in owner-only
+folders, and created exclusively (``private_files``), so two processes starting at once
+can never each keep a different key for one host. A key object never prints its secret
+parts (``repr``). Every process runs as the same operating-system user inside one
 container, so this keeps keys apart by path, not by permission: a broken-into process
 could read another host's key file. The authorization plan records this residual risk;
 remote hosts (message contract phase 5) keep their keys on their own machines.
@@ -20,10 +21,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
-import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +31,12 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 from custom_messages.wire.encoding import b64url, b64url_decode
 from custom_transport.protocol1 import nkeys
+from custom_transport.protocol1.private_files import NotAPrivateFile, read_private_file, write_private_file
 from runtime_settings.instance_layout import InstanceLayout
 
 HOST_KEYS_FILENAME = "keys.json"
 AUTHORITY_KEY_FILENAME = "authority-key.json"
 _KEY_FILE_VERSION = 1
-_TEMPORARY_PREFIX = ".key-write-"
 
 
 class KeyFileError(RuntimeError):
@@ -69,8 +68,8 @@ class HostKeys:
 
     runtime: str
     key_id: str
-    application_key: Ed25519PrivateKey
-    nats_seed: bytes
+    application_key: Ed25519PrivateKey = field(repr=False)
+    nats_seed: bytes = field(repr=False)
 
     @property
     def public_key(self) -> Ed25519PublicKey:
@@ -95,7 +94,7 @@ class AuthorityKeys:
 
     installation: str
     key_id: str
-    private_key: Ed25519PrivateKey
+    private_key: Ed25519PrivateKey = field(repr=False)
 
     @property
     def public_key_text(self) -> str:
@@ -103,48 +102,28 @@ class AuthorityKeys:
 
 
 def _write_exclusively(path: Path, document: dict[str, Any]) -> bool:
-    """Publish a complete 0600 file only if none exists; return whether this call wrote it."""
+    """Publish a complete 0600 key file only if none exists; return whether this call wrote it."""
 
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    temporary = path.with_name(f"{_TEMPORARY_PREFIX}{secrets.token_hex(8)}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            # link refuses an existing name, so a concurrent writer's key is kept.
-            os.link(temporary, path, follow_symlinks=False)
-        except FileExistsError:
-            return False
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-        return True
-    finally:
-        os.unlink(temporary)
+    content = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    created = write_private_file(path, content, exclusive=True)
+    # The key's own folder is closed even when something else made it first.
+    path.parent.chmod(0o700)
+    return created
 
 
 def _read_private(path: Path) -> dict[str, Any]:
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        raw = read_private_file(path)
     except FileNotFoundError as error:
         raise KeyFileError(f"Key file {path} is missing; the launcher creates it before starting this process.") from error
+    except NotAPrivateFile as error:
+        raise KeyFileError(f"Key file {path} must be a regular file readable only by its owner (mode 0600): {error}.") from error
     except OSError as error:
         raise KeyFileError(f"Key file {path} cannot be opened: {error}") from error
-    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-        mode = os.fstat(handle.fileno()).st_mode
-        if not stat.S_ISREG(mode) or mode & 0o077:
-            raise KeyFileError(f"Key file {path} must be a regular file readable only by its owner (mode 0600).")
-        try:
-            document = json.load(handle)
-        except ValueError as error:
-            raise KeyFileError(f"Key file {path} is damaged: {error}") from error
+    try:
+        document = json.loads(raw)
+    except ValueError as error:
+        raise KeyFileError(f"Key file {path} is damaged: {error}") from error
     if not isinstance(document, dict) or document.get("version") != _KEY_FILE_VERSION:
         raise KeyFileError(f"Key file {path} has an unknown format.")
     return document
@@ -194,9 +173,14 @@ def load_host_keys(layout: InstanceLayout, runtime: str) -> HostKeys:
 
 
 def ensure_authority_keys(layout: InstanceLayout, installation: str) -> tuple[AuthorityKeys, bool]:
-    """The installation authority's key, created when missing; only the launcher calls this."""
+    """The installation authority's key, created when missing; only the launcher calls this.
+
+    An existing key of another installation is refused, not returned: the bundle and
+    every certificate would name the wrong installation.
+    """
 
     path = layout.trust_authority_dir / AUTHORITY_KEY_FILENAME
+    created = False
     if not path.exists():
         private_key = Ed25519PrivateKey.generate()
         document = {
@@ -206,8 +190,10 @@ def ensure_authority_keys(layout: InstanceLayout, installation: str) -> tuple[Au
             "seed": b64url(_private_seed(private_key)),
         }
         created = _write_exclusively(path, document)
-        return load_authority_keys(layout), created
-    return load_authority_keys(layout), False
+    authority = load_authority_keys(layout)
+    if authority.installation != installation:
+        raise KeyFileError(f"Key file {path} belongs to installation {authority.installation!r}, not {installation!r}.")
+    return authority, created
 
 
 def load_authority_keys(layout: InstanceLayout) -> AuthorityKeys:

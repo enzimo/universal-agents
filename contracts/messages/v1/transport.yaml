@@ -256,8 +256,8 @@ key_value:
       installation_authority: ["{self}"]
       scheduler: ["{self}"]
   UA1_AGENTS:
-    description: one record per agent (availability, busy, idle, paused, exiting), written only on change
-    per_key_ttl_seconds: 0
+    description: one record per agent, written on change and refreshed every minute; abandoned records expire within three minutes
+    per_key_ttl_seconds: 180
     readers: [gateway, lead_host, worker_host, team_services, edge_adapter, installation_authority, scheduler]
     writers:
       lead_host: ["{team}.{agent}"]

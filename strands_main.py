@@ -900,6 +900,11 @@ def run_with_args(args: argparse.Namespace) -> None:
             process_host_for(args.host_runtime, layout, team_id, is_lead=args.is_lead, agent_type=args.agent_type,
                              worker_pools=cfg.get('agent.worker_pools') or {})
         )
+    else:
+        configure_process_host(None)
+        logger.warning("This manual agent has no message host. Its Tasks controls and live context dump setting "
+                       "are unavailable. Start the team through the launcher for those controls. "
+                       "event=agent_host_not_prepared agent_type=%s", args.agent_type)
     task_history_db_path = resolve_task_history_db_path(
         args.task_history_db_path or storage_sqlite_path or agent_runtime_settings['task_history_db_path'],
         instance_root=instance_root,

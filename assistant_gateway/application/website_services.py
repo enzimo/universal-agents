@@ -1312,7 +1312,7 @@ class WebsiteOperationsApplication:
         for schedule in response.schedules:
             actions: tuple[Literal["pause", "resume", "disable", "remove"], ...] = (
                 ("resume", "remove")
-                if not schedule.enabled or schedule.paused_until
+                if not schedule.enabled or schedule.paused_until or "paused_until" in schedule.invalid_time_fields
                 else ("pause", "disable", "remove")
             )
             if schedule.management_class == ScheduleManagementClass.SYSTEM and not may_change_system:

@@ -284,7 +284,11 @@ longer text, and refuses to save over it, revert it, archive it, publish it or
 withdraw it. Nothing is changed and nothing is cut: agents still read and change
 the whole text, the Knowledge Curator still reviews long proposals, and a team
 transfer carries all of it. If you type more than 32,768 characters, nothing is
-saved and your text stays in the editor. Administrators see how much knowledge
+saved and your text stays in the editor. A page can also be too large for Web
+Chat as a whole, with its open notes, links and pages linking to it, mostly
+when a team raises the note limit or writes in a script that takes several
+bytes per character: Web Chat then says so the same way, and refuses a note or
+edit that would make a page too large. Administrators see how much knowledge
 is too long for Web Chat as a note on the Status page.
 
 ### Conversations
@@ -451,6 +455,12 @@ saved threads. Archive does not permanently delete transcript messages. Direct
 external-platform registration and `/user link` must
 be run on the platform whose identity is being linked. Broader session, memory,
 and topic commands are kept out of the browser command list.
+
+In channels that support topic commands, `/topics` lists your tags,
+`/tag_thread <tag[,tag]> [--private]` tags the current thread, and
+`/switch_topic <tag>` continues a matching thread. Tags use at most 64
+characters after normalization, with at most 20 tags per tagging command.
+Older oversized tags are left out of lists with a warning in the team log.
 
 The local CLI also supports `/reply <message-ref> <text>` and prints local
 `[msg_n]` references for that purpose. Other chat channels show plain replies

@@ -232,6 +232,10 @@ records its arguments; they do not start real sandboxes.
 Run the relevant live NATS or PostgreSQL validation when a change affects
 messaging, persistence, routing, recovery, or deployment wiring.
 
+Use a UTF-8 PostgreSQL test database and check `SHOW server_encoding` before
+running the tests. A scratch database initialized as `SQL_ASCII` makes psycopg
+return text as bytes, which can look like contract or ownership failures.
+
 Protocol 1 contract changes also run `tests/test_message_contract.py` and the
 isolated `tests/test_live_message_contract.py` with NATS 2.15.1 or later, named by
 `LIVE_TEST_NATS_SERVER` or found on PATH. The latter starts its own broker so
@@ -244,6 +248,12 @@ skipping. Regenerate the contract sources with
 records and vectors, then run its `--check` mode. See
 `contracts/messages/v1/README.md` for the language-neutral validation and
 signing rules.
+
+Agent-record changes need real NATS coverage in `tests/test_live_agent_records.py`
+and `tests/test_live_agent_hosts.py`: verify signed identity, watch reconnects,
+expiry, conditional removal and detach during session replacement. Scripted
+failure tests cover refused repairs and cancellation, which must not prevent
+unrelated agents refreshing their records.
 
 PostgreSQL connection strings in logs and error messages go through
 `storage.postgres_connection.redact_postgres_dsn`. It uses psycopg's libpq parser

@@ -197,3 +197,20 @@ def build_collector_runtime_settings(config: GatewayInstanceConfig):
         storage=config.activity_collector_storage_settings,
         team_id=config.manager.team_id,
     )
+
+
+def lead_memory_config(config: GatewayInstanceConfig) -> dict[str, Any]:
+    """The team lead's memory settings: the team's, with its agent type's overrides applied.
+
+    The team lead's process owned the pinned memory store, so its settings
+    (``agent_types.<lead type>.agent.memory``) decide the store's limits wherever
+    the store is written for the team: the team services' memory commands and the
+    team transfer's memory import.
+    """
+
+    from config_loader import resolve_agent_type_settings
+    from custom_agents.memory_plugins.config import normalize_memory_config
+
+    runtime = resolve_agent_type_settings(build_runtime_config_from_instance_config(config),
+                                          config.gateway.named_agent_type)
+    return normalize_memory_config(runtime.get("memory_config"))

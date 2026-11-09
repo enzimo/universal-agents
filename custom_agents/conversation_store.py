@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any, Optional
+from datetime import datetime
 
 from default_values import STORAGE_DEFAULTS
 from storage.backends import STORAGE_BACKEND_SQLITE
 from storage.config import StorageSettings, resolve_storage_settings
+from storage.operation_outcomes import CommandOutcome, StoredOutcome
 from storage.conversation_repository import (
     create_conversation_repository,
     default_synopsis,
@@ -296,6 +298,24 @@ class ConversationStore:
             source=source,
             created_by_agent_id=created_by_agent_id,
         )
+
+    def tag_thread_with_tags(self, *, conversation_id: str, tags: list[str], team_id: Optional[str] = None,
+                             canonical_user_id: Optional[str] = None, source: str = "manual",
+                             created_by_agent_id: Optional[str] = None,
+                             command_outcome: Optional[CommandOutcome] = None) -> list[dict[str, Any]]:
+        return self._repository.tag_thread_with_tags(
+            conversation_id=conversation_id, tags=tags, team_id=team_id, canonical_user_id=canonical_user_id,
+            source=source, created_by_agent_id=created_by_agent_id, command_outcome=command_outcome,
+        )
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        return self._repository.stored_command_outcome(command_outcome)
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        return self._repository.save_command_refusal(command_outcome, reply)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        return self._repository.purge_command_outcomes(now)
 
     def untag_thread(self, *, conversation_id: str, tag: str) -> bool:
         return self._repository.untag_thread(conversation_id=conversation_id, tag=tag)

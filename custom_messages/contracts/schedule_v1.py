@@ -465,7 +465,7 @@ def schedule_listing_digest(schedule: ScheduledMessage) -> str:
     changes when a writer explicitly changes timing, so a delayed retime
     cannot replace another retime while normal runs leave the digest valid.
     The gateway lists
-    schedules with it and the manager's store checks it in the write
+    schedules with it and the schedule store checks it in the write
     transaction (``custom_agents.schedule_store``).
     """
 

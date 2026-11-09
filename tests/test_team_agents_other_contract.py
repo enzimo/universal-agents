@@ -24,8 +24,14 @@ OURS, THEIRS = "1" * 64, "2" * 64
 
 
 def _reader() -> TeamAgents:
-    host = SimpleNamespace(clock=lambda: NOW, live=SimpleNamespace(trust=SimpleNamespace(
-        store=SimpleNamespace(contract_sha256=OURS))))
+    def session(installation, team, name):
+        agent = name.removeprefix("s-").removesuffix("-1")
+        return SimpleNamespace(agent=agent, runtime=f"agent-{agent.upper()}", agent_type="Researcher",
+                               agent_role="worker", covers=lambda now: True, ends_at=NOW + timedelta(days=1))
+
+    host = SimpleNamespace(clock=lambda: NOW, identity=SimpleNamespace(installation="installation_one"),
+                           live=SimpleNamespace(trust=SimpleNamespace(
+                               store=SimpleNamespace(contract_sha256=OURS, agent_session=session))))
     return TeamAgents(host, TEAM, logger=logging.getLogger("test.team_agents"))
 
 
@@ -46,11 +52,13 @@ def _host_record(runtime: str, *, theirs: str | None) -> _Held:
 def _agent_record(agent: str, runtime: str) -> _Held:
     body = SimpleNamespace(state="idle", session=f"s-{agent}-1", agent_type="Researcher", display_name=MISSING,
                            accepting_work=True, since=format_timestamp(NOW))
-    return _Held(1, "digest", SimpleNamespace(body=body, signer=_signer(runtime)))  # type: ignore[arg-type]
+    return _Held(1, "digest", SimpleNamespace(body=body, signer=_signer(runtime), document=SimpleNamespace(
+        expires_at=format_timestamp(NOW + timedelta(minutes=3)))))  # type: ignore[arg-type]
 
 
 def _placement(runtime: str) -> _Held:
-    return _Held(1, "digest", SimpleNamespace(body=SimpleNamespace(host=runtime, host_epoch=2)))  # type: ignore[arg-type]
+    return _Held(1, "digest", SimpleNamespace(body=SimpleNamespace(host=runtime, host_epoch=2,
+                                                                 agent_type="Researcher")))  # type: ignore[arg-type]
 
 
 def test_an_agent_on_a_host_of_another_contract_stays_in_the_view_and_takes_no_new_work(caplog) -> None:

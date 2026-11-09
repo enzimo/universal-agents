@@ -38,6 +38,7 @@ from custom_messages.contracts.control_v1 import (
     KnowledgeCommandResultPayload,
     KnowledgeReviewFlagPayload,
 )
+from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES
 from knowledge_base.records import INLINE_TEXT_MAX
 from knowledge_base.service import DraftInput, knowledge_service_for
 from knowledge_base.vocabulary import ContributionStatus
@@ -45,7 +46,10 @@ from runtime_settings.knowledge import knowledge_settings
 from storage.config import StorageSettings, resolve_storage_settings
 from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES, create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
+from storage.operation_outcomes import is_receipt
+from team_services.outcomes import AnswerUnknown
 from team_services.knowledge import (
+    KNOWLEDGE_KINDS,
     NOTE_TEXT,
     PAGE_TEXT,
     PROPOSAL_TEXT,
@@ -84,11 +88,6 @@ class Answer:
                            "flags": [flag.model_dump() for flag in self.review_flags]})
 
 
-class _Ids:
-    def new_correlation_id(self) -> str:
-        return f"cmd-{uuid4().hex}"
-
-
 class _InProcess:
     """The team services' port, answering with the knowledge handlers in process."""
 
@@ -107,7 +106,7 @@ class Team:
                  knowledge: Optional[dict] = None) -> None:
         storage = storage or resolve_storage_settings(
             {"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
-        access = access_store_at(tmp_path)
+        access = self.access = access_store_at(tmp_path)
         now = datetime.now(timezone.utc)
         for person in PEOPLE:
             access.record_person(TeamPersonV1(team_id=TEAM, person_id=person, person_ref=reference_of(person),
@@ -124,7 +123,7 @@ class Team:
         references = AccessStorePersonReferences(access.settings, TEAM)
         self.pages = GatewayKnowledgePages(
             team_commands=GatewayTeamCommandService(team_services=_InProcess(self.operations), references=references,
-                                                    id_generator=_Ids()),
+                                                    request_ids=lambda: f"cmd-{uuid4().hex}"),
             references=references, display_name=lambda person_id: f"Name of {person_id}", enabled=enabled,
         )
 
@@ -462,37 +461,366 @@ def _answer(team: Team, payload: KnowledgeCommandPayload, *, person: str = "alic
 
 
 @pytest.mark.asyncio
-async def test_a_retried_change_is_carried_out_once_and_answered_alike(team: Team) -> None:
+async def test_an_agent_type_longer_than_the_contract_carries_is_shown_as_agent(team: Team, caplog) -> None:
+    """The runtime allows agent types of up to 64 characters until phase 3 (plan decision 56); the contract 24."""
+
+    long_type = "ResearchAndDevelopmentSpecialist"
+    worker = team.worker("worker_1", agent_type=long_type)
+    team.service.write(worker, "team/findings", DraftInput(title="Findings", body="Checked the queue."))
+    team.service.add_note(worker, "team/findings", "Check again tomorrow.")
+    proposed = team.service.add_note(team.worker("worker_2", person="alice", agent_type=long_type), "team/findings",
+                                     "Add the dashboards.").contribution
+    with caplog.at_level(logging.WARNING, logger="test.team_knowledge"):
+        read = await team.send("bob", action=A.READ, page="findings")
+        history = await team.send("bob", action=A.HISTORY, page="findings")
+        noted = await team.send("bob", action=A.ADD_NOTE, page="findings", note="Thanks.")
+        proposals = await team.send("alice", action=A.LIST_CONTRIBUTIONS)
+        proposal = await team.send("alice", action=A.READ_CONTRIBUTION, contribution_id=proposed.contribution_id)
+
+    assert read.result.page.last_editor.label == "Agent"
+    assert [note.editor.label for note in read.result.page.open_notes] == ["Agent"]
+    assert [revision.editor.label for revision in history.result.revisions] == ["Agent"]
+    assert noted.success is True and noted.result.page.revision == 1
+    assert [item.agent_type for item in proposals.result.contributions] == ["Agent"]
+    assert proposal.result.contribution.agent_type == "Agent"
+    # Logged once per process, with the type, not on every read.
+    assert caplog.text.count("event=team_knowledge_agent_type_not_shown") == 1 and long_type in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_person_who_left_the_team_is_shown_as_a_team_member(team: Team) -> None:
+    await team.write("carol", title="Runbook", body="Check the workers.")
+    await team.send("carol", action=A.ADD_NOTE, page="runbook", note="Check the queue.")
+    now = datetime.now(timezone.utc)
+    # The gateway's people copy drops a person removed from the team.
+    team.access.replace_people(TEAM, [
+        TeamPersonV1(team_id=TEAM, person_id=person, person_ref=reference_of(person), standing=PersonStanding.ACTIVE,
+                     roles=("member",), changed_at_utc=now) for person in ("alice", "bob")
+    ], at=now)
+    read = await team.send("bob", action=A.READ, page="runbook")
+    history = await team.send("bob", action=A.HISTORY, page="runbook")
+
+    assert read.result.page.last_editor.label == "A team member"
+    assert [note.editor.label for note in read.result.page.open_notes] == ["A team member"]
+    assert [revision.editor.label for revision in history.result.revisions] == ["A team member"]
+
+
+@pytest.mark.asyncio
+async def test_more_flagged_places_than_a_reply_carries_still_ask_for_confirmation(team: Team) -> None:
+    body = "\n".join(f"Write to vendor{number}@example.com" for number in range(120))
+    held = await team.write("alice", title="Vendors", body=body)
+    saved = await team.write("alice", title="Vendors", body=body, confirm_review=True)
+
+    assert (held.success, held.error_code, len(held.review_flags)) == (False, "review_required", 100)
+    assert held.error_message.startswith("Only the first 100 of 120 flagged places are listed.")
+    assert [(flag.field, flag.line) for flag in held.review_flags[:2]] == [("body", 1), ("body", 2)]
+    assert saved.success is True and [flag.kind for flag in saved.result.review_flags] == ["email_address"]
+
+
+@pytest.mark.asyncio
+async def test_a_list_of_all_spaces_with_type_and_tag_filters(team: Team) -> None:
+    await team.write("alice", title="Deploys", body="Deploy on Tuesdays.", tags=["ops"])
+    team.service.write(team.worker("sys"), "team/rollback", DraftInput(title="Rollback", body="Undo the deploy.",
+                                                                        page_type="how-to", tags=["ops"]))
+    await team.write("alice", "personal", title="My checklist", body="Mine.", tags=["ops"])
+    await team.write("bob", "personal", title="Bob's checklist", body="His.", tags=["ops"])
+
+    def listed(**filters: Any) -> dict:
+        body = {"request_id": f"cmd-{uuid4().hex}", "space": "all", "status": "active", "offset": 0, "limit": 20,
+                **filters}
+        return checked_reply("knowledge.list", team.operations.answer(stand_in_frame(
+            TEAM, "knowledge.list", body, person_ref=reference_of("alice"), request_id=body["request_id"])))
+
+    every, how_to, tagged = listed(), listed(page_type="how-to"), listed(tag="Ops")
+
+    assert sorted(page["page"] for page in every["pages"]) == ["deploys", "my-checklist", "rollback"]
+    assert every["total"] == 3
+    assert ([page["page"] for page in how_to["pages"]], how_to["total"]) == (["rollback"], 1)
+    assert tagged["total"] == 3 and {page["space"] for page in tagged["pages"]} == {"team", "personal"}
+
+
+@pytest.mark.asyncio
+async def test_a_history_counts_the_newest_fifty_revisions(team: Team) -> None:
+    await team.write("alice", title="Runbook", body="Revision 1.")
+    for revision in range(2, 56):
+        await team.write("alice", page="runbook", base_revision=revision - 1, body=f"Revision {revision}.")
+
+    def history(offset: int, limit: int) -> dict:
+        request_id = f"cmd-{uuid4().hex}"
+        body = {"request_id": request_id, "space": "team", "page": "runbook", "offset": offset, "limit": limit}
+        return checked_reply("knowledge.history", team.operations.answer(stand_in_frame(
+            TEAM, "knowledge.history", body, person_ref=reference_of("alice"), request_id=request_id)))
+
+    first, last, past = history(0, 20), history(40, 20), history(50, 10)
+
+    assert (len(first["revisions"]), first["total"], first["next_offset"]) == (20, 50, 20)
+    assert (len(last["revisions"]), last["total"], "next_offset" in last) == (10, 50, False)
+    assert last["revisions"][-1]["revision"] == 6
+    assert (past["revisions"], past["total"], "next_offset" in past) == ([], 50, False)
+
+
+@pytest.mark.asyncio
+async def test_tags_are_sent_as_the_service_stores_them_and_an_empty_note_is_not_sent(team: Team) -> None:
+    saved = await team.write("alice", title="Runbook", body="Check the workers.",
+                             tags=["A" * 90, "Ops Team", "ops team", "🙂"])
+    empty = await team.send("alice", action=A.ADD_NOTE, page="runbook", note="   ")
+
+    assert saved.success is True and saved.result.page.tags == ["a" * 80, "ops-team"]
+    assert (empty.error_code, empty.error_message) == ("invalid_request", "A note needs text. Write the note, then add it.")
+    assert (await team.send("alice", action=A.READ, page="runbook")).result.page.open_notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_request_the_contract_refuses_is_not_sent_and_answered_plainly(team: Team, monkeypatch, caplog) -> None:
+    from assistant_gateway.application import knowledge_pages
+
+    real = knowledge_pages.knowledge_request
+    monkeypatch.setattr(knowledge_pages, "knowledge_request",
+                        lambda payload: (real(payload)[0], {**real(payload)[1], "tags": ["x" * 81]}))
+    with caplog.at_level(logging.ERROR, logger="assistant_gateway.application.knowledge_pages"):
+        refused = await team.write("alice", title="Runbook", body="Check the workers.")
+
+    assert (refused.error_code, refused.error_message) == ("invalid_request", knowledge_pages.NOT_SENDABLE_TEXT)
+    assert "event=web_knowledge_request_not_sendable" in caplog.text and "tags" in caplog.text
+
+
+def _stored_outcomes(team: Team) -> list[dict[str, Any]]:
+    """Every stored outcome, as the table keeps it (storage.operation_outcomes)."""
+
+    with team.repository._connect() as conn:
+        rows = conn.execute("SELECT kind, reply_json, person_id FROM protocol1_operation_outcomes").fetchall()
+    return [{"kind": row["kind"], "reply": json.loads(row["reply_json"]), "person": row["person_id"]} for row in rows]
+
+
+def _frame(payload: KnowledgeCommandPayload, *, person: str = "alice", request_id: str) -> Any:
+    kind, body = knowledge_request(payload)
+    return stand_in_frame(TEAM, kind, {"request_id": request_id, **body}, person_ref=reference_of(person),
+                          request_id=request_id)
+
+
+@pytest.mark.asyncio
+async def test_another_persons_command_under_a_reused_key_is_refused_and_shown_nothing(team: Team) -> None:
+    await team.write("alice", "personal", title="Diary", body="Private thoughts.")
+    await team.write("bob", title="Runbook", body="Check the workers.")
+    first = _answer(team, KnowledgeCommandPayload(action=A.ADD_NOTE, space="personal", page="diary",
+                                                  note="A private note."), request_id="cmd-shared")
+    # bob's own note, sent (by a defect) under the same request id: the same kind and retry key.
+    taken = _answer(team, KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="Bob's note."),
+                    person="bob", request_id="cmd-shared")
+
+    assert first["outcome"] == "ok"
+    assert taken["outcome"] == "invalid_request" and "already used" in taken["message"]
+    assert "private" not in json.dumps(taken).lower()
+    assert (await team.send("bob", action=A.READ, page="runbook")).result.page.open_notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_of_a_person_who_may_not_act_is_stored(team: Team) -> None:
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    now = datetime.now(timezone.utc)
+
+    def standing(state: PersonStanding) -> None:
+        roles = ("member",) if state is PersonStanding.ACTIVE else ()
+        team.access.record_person(TeamPersonV1(team_id=TEAM, person_id="carol", person_ref=reference_of("carol"),
+                                               standing=state, roles=roles, changed_at_utc=now))
+
+    note = KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="Carol's note.")
+    standing(PersonStanding.DISABLED)
+    refused = _answer(team, note, person="carol", request_id="cmd-carol")
+    standing(PersonStanding.ACTIVE)
+    # The repeat (the gateway's second try under the same id) gets the same answer, not a carried-out note.
+    again = _answer(team, note, person="carol", request_id="cmd-carol")
+
+    assert refused["outcome"] == "not_allowed" and again == refused
+    assert (await team.send("alice", action=A.READ, page="runbook")).result.page.open_notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_that_cannot_be_stored_asks_for_a_retry(team: Team, monkeypatch) -> None:
+    def broken(*_args: Any) -> None:
+        raise ConnectionError("the database went away")
+
+    monkeypatch.setattr(team.repository, "save_command_refusal", broken)
+    edit = KnowledgeCommandPayload(action=A.WRITE, page="runbook", base_revision=1, body="Check all workers.")
+
+    reply = _answer(team, edit, request_id="cmd-edit")
+
+    assert reply["outcome"] == "runtime_error" and "Nothing was changed" in reply["message"]
+
+
+@pytest.mark.asyncio
+async def test_old_stored_outcomes_are_purged_by_the_knowledge_upkeep(team: Team) -> None:
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    family = team.operations.family()
+    with team.repository._connect() as conn:
+        conn.execute("UPDATE protocol1_operation_outcomes SET stored_at_utc = ?", ("2026-01-01T00:00:00+00:00",))
+        conn.commit()
+
+    await family.upkeep()
+
+    assert _stored_outcomes(team) == [] and set(family.handlers) == set(KNOWLEDGE_KINDS)
+
+
+@pytest.mark.asyncio
+async def test_a_retried_change_is_carried_out_once_and_answered_alike(team: Team, caplog) -> None:
     await team.write("alice", title="Runbook", body="Check the workers.")
     edit = KnowledgeCommandPayload(action=A.WRITE, page="runbook", base_revision=1, body="Check all workers.")
     first = _answer(team, edit, request_id="cmd-edit")
-    # The page is now at revision 2: without the stored reply, the retry would be stale.
-    again = _answer(team, edit, request_id="cmd-edit")
+    # The page is now at revision 2: without the stored outcome, the retry would be stale.
+    with caplog.at_level(logging.INFO, logger="test.team_knowledge"):
+        again = _answer(team, edit, request_id="cmd-edit")
     note = KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="Check the queue too.")
     noted = _answer(team, note, request_id="cmd-note")
     noted_again = _answer(team, note, request_id="cmd-note")
 
     assert first["outcome"] == "ok" and again == first
+    # The stored outcome answers before the command runs again: nothing is refused or failed on the way.
+    assert "event=operation_outcome_from_receipt" in caplog.text
+    assert "event=team_knowledge_refused" not in caplog.text
+    assert "event=operation_outcome_found_after_failure" not in caplog.text
     assert noted_again == noted and [n["note_id"] for n in noted["page"]["open_notes"]] == [noted["note"]["note_id"]]
     read = await team.send("alice", action=A.READ, page="runbook")
     assert read.result.page.revision == 2 and len(read.result.page.open_notes) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_change_whose_reply_was_not_stored_yet_is_answered_from_its_receipt(team: Team, monkeypatch) -> None:
-    await team.write("alice", title="Runbook", body="Check the workers.")
-    edit = KnowledgeCommandPayload(action=A.WRITE, page="runbook", base_revision=1, body="Check all workers.")
-    # The process stops after the change commits and before its full reply is stored: only the receipt is kept.
-    monkeypatch.setattr(team.repository, "complete_command_outcome", lambda *_args: None)
-    first = _answer(team, edit, request_id="cmd-edit")
-    monkeypatch.undo()
-    retried = _answer(team, edit, request_id="cmd-edit")
+async def test_a_change_stores_only_its_receipt_never_the_text(team: Team) -> None:
+    """No copy of page text stays in the outcomes table, which a person's departure does not reach."""
 
-    assert first["outcome"] == "ok"
-    assert retried["page"]["content"]["text"] == "Check all workers." and retried["page"]["seen_version"] == "2"
-    assert (await team.send("alice", action=A.READ, page="runbook")).result.page.revision == 2
-    # The rebuilt reply is now stored.
-    assert _answer(team, edit, request_id="cmd-edit") == retried
+    await team.write("alice", "personal", title="Diary", body="Private thoughts.")
+    await team.write("alice", "personal", page="diary", base_revision=1, body="More private thoughts.")
+    await team.send("alice", action=A.ADD_NOTE, space="personal", page="diary", note="A private note.")
+    await team.write("alice", title="Runbook", body="Check the workers.\nWrite to ops@example.com",
+                     confirm_review=True)
+    await team.send("alice", action=A.ARCHIVE, page="runbook", base_revision=1)
+    await team.send("alice", action=A.REVERT, page="runbook", revision=1, base_revision=2)
+    worker = team.worker("worker_1", person="alice")
+    proposal = team.service.add_note(worker, "team/runbook", "A proposed note.").contribution
+    other = team.service.add_note(worker, "team/runbook", "Another proposed note.").contribution
+    await team.send("alice", action=A.PUBLISH_CONTRIBUTION, contribution_id=proposal.contribution_id)
+    await team.send("alice", action=A.WITHDRAW_CONTRIBUTION, contribution_id=other.contribution_id)
+
+    outcomes = _stored_outcomes(team)
+
+    kinds = sorted(outcome["kind"] for outcome in outcomes)
+    assert kinds == sorted(["knowledge.write"] * 3 + ["knowledge.add_note", "knowledge.archive", "knowledge.revert",
+                                                       "knowledge.publish_contribution",
+                                                       "knowledge.withdraw_contribution"])
+    assert all(is_receipt(outcome["reply"]) and outcome["person"] == "alice" for outcome in outcomes)
+    stored = json.dumps(outcomes)
+    for text in ("Private thoughts", "A private note", "Check the workers", "ops@example.com", "proposed note"):
+        assert text not in stored
+    # The confirmed review kinds are kept, so a reply built later names them too.
+    assert {"review_kinds": ["email_address"]}.items() <= next(
+        outcome["reply"]["receipt"] for outcome in outcomes if outcome["reply"]["receipt"].get("review_kinds")
+    ).items()
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_change_is_answered_from_its_receipt_with_the_page_as_it_is_now(team: Team) -> None:
+    flagged = "Check the workers.\nWrite to ops@example.com"
+    await team.write("alice", title="Runbook", body=flagged, confirm_review=True)
+    edit = KnowledgeCommandPayload(action=A.WRITE, page="runbook", base_revision=1, body="Check all workers.\n" + flagged,
+                                   confirm_review=True)
+    first = _answer(team, edit, request_id="cmd-edit")
+    await team.write("bob", page="runbook", base_revision=2, body="Check every worker.", confirm_review=True)
+    again = _answer(team, edit, request_id="cmd-edit")
+
+    assert (first["outcome"], first["page"]["seen_version"]) == ("ok", "2")
+    # Carried out once: the repeat shows bob's later revision, with the flags alice confirmed.
+    assert (again["outcome"], again["page"]["seen_version"]) == ("ok", "3")
+    assert again["page"]["content"]["text"] == "Check every worker."
+    assert again["review_flags"] == first["review_flags"] and [flag["kind"] for flag in first["review_flags"]] == [
+        "email_address"]
+    history = await team.send("alice", action=A.HISTORY, page="runbook")
+    assert [revision.revision for revision in history.result.revisions] == [3, 2, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_note_names_its_own_note_after_many_newer_notes(team: Team) -> None:
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    note = KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="The first note.")
+    first = _answer(team, note, request_id="cmd-note")
+    for number in range(55):
+        await team.send("bob", action=A.ADD_NOTE, page="runbook", note=f"Later note {number}.")
+    again = _answer(team, note, request_id="cmd-note")
+
+    assert again["note"] == first["note"] and again["note"]["content"]["text"] == "The first note."
+    assert again["page"]["open_notes"][0]["content"]["text"] == "Later note 54."
+
+
+@pytest.mark.asyncio
+async def test_a_change_found_stored_after_its_commit_failed_is_answered_from_its_receipt(
+    team: Team, monkeypatch, caplog
+) -> None:
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    original = team.repository.apply_page_change
+
+    def acknowledgement_lost(*args: Any, **kwargs: Any) -> Any:
+        original(*args, **kwargs)
+        raise ConnectionError("the commit's acknowledgement was lost")
+
+    monkeypatch.setattr(team.repository, "apply_page_change", acknowledgement_lost)
+    edit = KnowledgeCommandPayload(action=A.WRITE, page="runbook", base_revision=1, body="Check all workers.")
+    with caplog.at_level(logging.WARNING, logger="test.team_knowledge"):
+        reply = _answer(team, edit, request_id="cmd-edit")
+
+    assert (reply["outcome"], reply["page"]["seen_version"]) == ("ok", "2")
+    assert "event=operation_outcome_found_after_failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_refused_change_stays_refused_when_repeated(team: Team) -> None:
+    edit = KnowledgeCommandPayload(action=A.WRITE, page="runbook", base_revision=1, body="Check all workers.")
+    refused = _answer(team, edit, request_id="cmd-edit")
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    again = _answer(team, edit, request_id="cmd-edit")
+
+    assert refused["outcome"] == "not_found" and again == refused
+    assert (await team.send("alice", action=A.READ, page="runbook")).result.page.body == "Check the workers."
+
+
+@pytest.mark.asyncio
+async def test_a_change_whose_reply_cannot_be_built_is_answered_as_unknown(tmp_path: Path, caplog) -> None:
+    """The change is made, so the request is never answered as refused (team_services.outcomes)."""
+
+    team = Team(tmp_path, knowledge=LONG_PAGES)
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    original = team.repository.add_note
+
+    def agent_lengthens_the_page_first(*args: Any, **kwargs: Any) -> Any:
+        # Between the note's check and its transaction an agent makes the page longer than Web Chat shows.
+        if not hasattr(agent_lengthens_the_page_first, "done"):
+            agent_lengthens_the_page_first.done = True  # type: ignore[attr-defined]
+            team.service.write(team.worker("sys"), "team/runbook", DraftInput(body=long_text("runbook")), base_revision=1)
+        return original(*args, **kwargs)
+
+    team.repository.add_note = agent_lengthens_the_page_first  # type: ignore[method-assign]
+    frame = _frame(KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="Check the queue."),
+                   request_id="cmd-note")
+    with caplog.at_level(logging.ERROR, logger="test.team_knowledge"), pytest.raises(AnswerUnknown):
+        team.operations.answer(frame)
+    with pytest.raises(AnswerUnknown):
+        team.operations.answer(frame)
+
+    assert "event=team_knowledge_reply_after_change_failed" in caplog.text
+    # Never treated as a failed (unchanged) request.
+    assert "event=team_knowledge_command_failed" not in caplog.text
+    page = team.repository.get_page_by_id(_stored_outcomes(team)[-1]["reply"]["receipt"]["page_id"])
+    assert [note.body for note in team.repository.list_notes(page.page_id, status=None, limit=50)] == [
+        "Check the queue."]
+
+
+@pytest.mark.asyncio
+async def test_a_change_that_stores_no_receipt_is_answered_as_unknown(team: Team, monkeypatch) -> None:
+    await team.write("alice", title="Runbook", body="Check the workers.")
+    original = team.repository.add_note
+    monkeypatch.setattr(team.repository, "add_note",
+                        lambda *args, **kwargs: original(*args, **{**kwargs, "command_outcome": None}))
+
+    with pytest.raises(AnswerUnknown):
+        team.operations.answer(_frame(KnowledgeCommandPayload(action=A.ADD_NOTE, page="runbook", note="Noted."),
+                                      request_id="cmd-note"))
 
 
 # -- text longer than Web Chat can carry (team_services.knowledge) ----------------------
@@ -684,3 +1012,97 @@ def test_web_chat_and_the_team_services_use_the_contracts_inline_text_limit() ->
 
     contract = next(arg.max_length for arg in get_args(LongText)[1:] if getattr(arg, "max_length", None))
     assert knowledge_wire.INLINE_TEXT_MAX == INLINE_TEXT_MAX == contract == 32768
+
+
+# -- replies larger than one frame carries (team_services.knowledge) ---------------------
+#
+# Texts within 32,768 characters can still make one reply larger than a frame carries
+# (custom_messages.wire.sizes): a page with long open notes, in a script of three bytes
+# per character, or lists where a team raised the title, summary and tag limits. Lists
+# come in parts that the gateway joins; a page that does not fit is refused plainly and a
+# change that would not fit is rolled back. On SQLite and PostgreSQL.
+
+WIDE_LIMITS = {"limits": {**LONG_PAGES["limits"], "max_title_chars": 1000, "max_summary_chars": 4000,
+                          "max_tags": 100, "page_edits_per_agent": 100}}
+# Three bytes per character in UTF-8.
+WIDE = "界"
+
+
+@pytest.fixture(params=BACKENDS)
+def wide(request, tmp_path: Path) -> Iterator[Team]:
+    with knowledge_storage(request.param, tmp_path) as storage:
+        yield Team(tmp_path, storage=storage, knowledge=WIDE_LIMITS)
+
+
+def _direct(team: Team, kind: str, body: dict, *, person: str = "alice") -> dict:
+    request_id = f"cmd-{uuid4().hex}"
+    return checked_reply(kind, team.operations.answer(stand_in_frame(
+        TEAM, kind, {"request_id": request_id, **body}, person_ref=reference_of(person), request_id=request_id)))
+
+
+@pytest.mark.asyncio
+async def test_a_page_list_too_large_for_one_reply_comes_in_parts_and_the_browser_gets_whole_pages(wide: Team) -> None:
+    for number in range(20):
+        saved = await wide.write("alice", title=f"{number:02d} " + WIDE * 990, body="Short.", summary=WIDE * 3990,
+                                 tags=[f"tag-{number}-{tag}-" + "x" * 60 for tag in range(100)])
+        assert saved.success is True
+
+    part = _direct(wide, "knowledge.list", {"space": "team", "status": "active", "offset": 0, "limit": 20})
+    rest = _direct(wide, "knowledge.list", {"space": "team", "status": "active", "offset": part["next_offset"],
+                                            "limit": 20 - part["next_offset"]})
+    whole = await wide.send("bob", action=A.LIST)
+
+    assert 0 < len(part["pages"]) < 20 and part["next_offset"] == len(part["pages"]) and part["total"] == 20
+    assert (len(whole.result.pages), whole.result.total) == (20, 20)
+    assert [page.page for page in whole.result.pages] == [page["page"] for page in part["pages"] + rest["pages"]]
+
+
+@pytest.mark.asyncio
+async def test_a_history_too_large_for_one_reply_comes_in_parts(wide: Team) -> None:
+    worker = wide.worker("sys")
+    page = wide.service.write(worker, "team/runbook", DraftInput(title="Runbook", body="Revision 1.")).page
+    for revision in range(2, 31):
+        wide.service.write(worker, "team/runbook", DraftInput(title=f"Runbook {revision} " + WIDE * 980,
+                                                              body=f"Revision {revision}."),
+                           base_revision=revision - 1, change_summary=WIDE * 3990)
+
+    part = _direct(wide, "knowledge.history", {"space": "team", "page": page.slug, "offset": 0, "limit": 50})
+    whole = await wide.send("alice", action=A.HISTORY, page="runbook")
+
+    assert len(part["revisions"]) < 30 and part["next_offset"] == len(part["revisions"]) and part["total"] == 30
+    assert [revision.revision for revision in whole.result.revisions] == list(range(30, 0, -1))
+
+
+@pytest.mark.asyncio
+async def test_a_page_too_large_for_one_reply_is_refused_plainly_and_a_change_that_would_not_fit_saves_nothing(
+    wide: Team,
+) -> None:
+    worker = wide.worker("sys")
+    wide.service.write(worker, "team/handbook", DraftInput(title="Handbook", body=WIDE * 10_000))
+    for number in range(2):
+        wide.service.add_note(worker, "team/handbook", f"{number} " + WIDE * 32_000)
+    opened = await wide.send("alice", action=A.READ, page="handbook")
+    before = stored(wide)
+
+    grown = await wide.write("alice", page="handbook", base_revision=1, body=WIDE * 32_000)
+    noted = await wide.send("alice", action=A.ADD_NOTE, page="handbook", note=WIDE * 30_000)
+    after_refusals = stored(wide)
+    wide.service.add_note(worker, "team/handbook", WIDE * 30_000)
+    too_large = await wide.send("alice", action=A.READ, page="handbook")
+    archived = await wide.send("alice", action=A.ARCHIVE, page="handbook", base_revision=1)
+    proposal = wide.service.add_note(wide.worker("worker_a", person="alice"), "team/handbook", "Short note.")
+    proposed = await wide.send("alice", action=A.READ_CONTRIBUTION, contribution_id=proposal.contribution.contribution_id)
+
+    assert opened.success is True
+    for refused in (grown, noted):
+        assert (refused.success, refused.error_code) == (False, "runtime_error")
+        assert refused.error_message.startswith("After this change the page, with its open notes, links and "
+                                                "backlinks, would be too large for Web Chat to show: ")
+        assert refused.error_message.endswith(f"bytes, more than the {REPLY_BODY_MAX_BYTES:,} one reply carries. "
+                                              f"{NOTHING_CUT} Agents can still read and change all of it, for "
+                                              "example to split the page into smaller linked pages.")
+    assert after_refusals == before
+    assert too_large.error_code == "runtime_error"
+    assert too_large.error_message.startswith("This page, with its open notes, links and backlinks, is too large ")
+    assert (archived.error_code, (await wide.send("bob", action=A.LIST)).result.total) == ("runtime_error", 1)
+    assert proposed.error_message.startswith("This proposal, with the team page it changes, is too large ")
