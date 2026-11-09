@@ -229,7 +229,9 @@ jobs:
   postgres-live:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, Linux, X64, ua-test, ua-linux]
-    timeout-minutes: 30
+    # Shared-disk contention can push the full profile past the old 30-minute
+    # total budget. Include dependency setup and mandatory runner cleanup.
+    timeout-minutes: 45
     steps:
       - name: Require managed local runner
         run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_PUBLIC_JOB_POLICY_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
@@ -285,4 +287,4 @@ jobs:
         # Every test marked postgres: the Postgres variants of the storage,
         # runtime recovery, snapshot and schedule-worker transaction tests,
         # and the knowledge store and curation tests.
-        run: python -m pytest tests -m postgres -q --tb=short --show-capture=no
+        run: python -m pytest tests -m postgres -q -x --tb=short --show-capture=no --durations=20

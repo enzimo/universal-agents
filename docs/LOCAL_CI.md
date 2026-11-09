@@ -29,6 +29,11 @@ previous one-hour deadline. It stops at the first failure so its traceback is
 reported before a later deadline can hide it, and reports the slowest tests
 after completion.
 
+The PostgreSQL job allows 45 minutes for setup, the complete database profile
+and mandatory cleanup. Shared-disk contention exhausted its former 30-minute
+budget while tests were still passing and progressing. It reports the slowest
+tests and stops at the first failure so a later job timeout cannot hide it.
+
 Pytest gives each RTK subprocess an in-memory usage-statistics database through
 `RTK_DB_PATH=:memory:`. This keeps SQLite commits and unrelated usage-history
 locks out of shell execution and cancellation deadlines on a busy build disk.
