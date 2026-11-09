@@ -27,7 +27,7 @@ from typing import Any
 from custom_messages.contracts.runtime_snapshot_v3 import decode_runtime_snapshot
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_agents.agent_liveness import LivenessPurpose, latest_launch, owner_liveness, retain_decisions
-from custom_agents.contract_drain import is_contract_draining
+from custom_agents.contract_drain_state import is_contract_draining
 
 logger = logging.getLogger(__name__)
 

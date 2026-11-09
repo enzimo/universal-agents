@@ -20,6 +20,7 @@ Writes a JSON evidence file; exits non-zero when a check fails.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -28,7 +29,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Iterator
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -89,13 +90,9 @@ def _resolved_file(path: Path, label: str) -> Path:
 def _lead(config: GatewayInstanceConfig, config_path: Path, binary: Path) -> Any:
     """TeamArchitect working for the instance owner, with authorization on.
 
-    Team messages (the skill catalog refresh) are recorded instead of sent.
+    Its team events (the skill catalog refresh's ``skills.changed``) are recorded in
+    ``sent_team_events`` while ``recording_team_events`` is active, instead of sent.
     """
-
-    sent: list[Any] = []
-
-    async def send_operational_message(envelope: Any) -> None:
-        sent.append(envelope)
 
     agent = change_agent(
         config,
@@ -105,11 +102,41 @@ def _lead(config: GatewayInstanceConfig, config_path: Path, binary: Path) -> Any
         skills_dir=str(config.workspace_path / "skills"),
         additional_skill_directories=[],
         plugins=[],
-        _send_operational_message=send_operational_message,
-        sent_team_messages=sent,
+        sent_team_events=[],
     )
     agent.authorization_config = {"enabled": True, "cedar_binary_path": str(binary)}
     return agent
+
+
+@contextmanager
+def recording_team_events(agent: Any) -> Iterator[list[tuple[str, dict[str, Any]]]]:
+    """Record the agent's team events instead of sending them (``custom_agents.agent_requests.announce``).
+
+    Each event's body is checked against the contract, as the live host would before signing it.
+    """
+
+    from custom_agents import agent_requests
+    from custom_messages.wire.frame import body_model
+
+    async def announce(sender: Any, kind: str, body: Any) -> None:
+        assert sender is agent, "only the lead announces skill changes here"
+        body_model(kind)[0].validate_python(dict(body))
+        agent.sent_team_events.append((kind, dict(body)))
+
+    original = agent_requests.announce
+    agent_requests.announce = announce
+    try:
+        yield agent.sent_team_events
+    finally:
+        agent_requests.announce = original
+
+
+def _told(agent: Any, operation: str, result: dict[str, Any]) -> bool:
+    """Whether the last team event announced this change to the team (``skills.changed``)."""
+
+    expected = {"operation": operation, "change_id": result.get("change_id"), "skill_name": result.get("skill_name"),
+                "installed_tree_sha256": result.get("installed_tree_sha256")}
+    return bool(agent.sent_team_events) and agent.sent_team_events[-1] == ("skills.changed", expected)
 
 
 def _grant_team_skills(agent: Any) -> None:
@@ -167,7 +194,11 @@ def _install_with_person_approval(agent: Any, plan: dict[str, Any], checks: dict
     checks["activation_attestation_verified"] = (
         verify_managed_skill_attestation(agent, installed) == result.get("installed_tree_sha256")
     )
-    checks["running_skills_refreshed_and_team_told"] = result.get("runtime_skill_refresh", {}).get("status") == "completed"
+    checks["running_skills_refreshed_and_team_told"] = (
+        result.get("runtime_skill_refresh", {}).get("status") == "completed"
+        and len(agent.sent_team_events) == 1
+        and _told(agent, "install", result)
+    )
     again = run_apply_change(agent, plan["change_id"], call)
     checks["approval_used_once"] = again.get("status") == "refused" and "already applied" in str(again.get("reason"))
     return {"request_id": request.request_id, "applied": applied}
@@ -191,7 +222,8 @@ def _remove_with_held_access(agent: Any, skill_name: str, installed_path: Path, 
     )
     checks["team_told_of_the_removal"] = (
         result.get("runtime_skill_refresh", {}).get("team_notification") == "published"
-        and len(agent.sent_team_messages) == 2
+        and len(agent.sent_team_events) == 2
+        and _told(agent, "uninstall", result)
     )
     notices = _administrator_notices(agent)
     checks["administrators_told_of_both_changes"] = [notice.kind for notice in notices] == [
@@ -227,53 +259,54 @@ def run_canary(
         config.workspace.skill_installation.scanner_executable = str(scanner)
         config_path = config.save(root / "instance_config.yaml")
         agent = _lead(config, config_path, binary)
-        try:
-            plan = SkillInstallationService(agent).stage(repository_url=repository_url, skill_path=skill_path)
-            checks["github_repository_resolved_to_commit"] = bool(re.fullmatch(r"[0-9a-f]{40}", plan["commit_sha"]))
-            checks["nested_skill_path_selected_exactly"] = plan["skill_relative_path"] == skill_path
-            checks["static_scan_safe_and_complete"] = (
-                plan["status"] == "safe_pending_approval"
-                and plan["scan"]["mode"] == "static_no_llm"
-                and plan["scan"]["severity"] == "LOW"
-                and plan["scan"]["recommendation"] == "SAFE"
-                and plan["scan"]["score"] <= 20
-            )
-            checks["scan_report_exposed_before_approval"] = Path(plan["scan_report_artifact"]).is_file()
-            _require(all(checks.values()), f"Acquisition or static scan checks failed: {checks}")
+        with recording_team_events(agent):
+            try:
+                plan = SkillInstallationService(agent).stage(repository_url=repository_url, skill_path=skill_path)
+                checks["github_repository_resolved_to_commit"] = bool(re.fullmatch(r"[0-9a-f]{40}", plan["commit_sha"]))
+                checks["nested_skill_path_selected_exactly"] = plan["skill_relative_path"] == skill_path
+                checks["static_scan_safe_and_complete"] = (
+                    plan["status"] == "safe_pending_approval"
+                    and plan["scan"]["mode"] == "static_no_llm"
+                    and plan["scan"]["severity"] == "LOW"
+                    and plan["scan"]["recommendation"] == "SAFE"
+                    and plan["scan"]["score"] <= 20
+                )
+                checks["scan_report_exposed_before_approval"] = Path(plan["scan_report_artifact"]).is_file()
+                _require(all(checks.values()), f"Acquisition or static scan checks failed: {checks}")
 
-            installed = _install_with_person_approval(agent, plan, checks)
-            installed_result = installed["applied"]["result"]
-            removal = _remove_with_held_access(
-                agent, plan["skill_name"], Path(installed_result["installed_path"]), checks
-            )
-            scan_evidence = dict(plan["scan"])
-            scan_evidence.pop("report_path", None)
-            evidence.update(
-                {
-                    "resolved_source": {
-                        "repository_url": plan["repository_url"],
-                        "commit_sha": plan["commit_sha"],
-                        "skill_name": plan["skill_name"],
-                        "skill_relative_path": plan["skill_relative_path"],
-                        "tree_sha256": plan["artifact_tree_sha256"],
-                    },
-                    "scan": scan_evidence,
-                    "scan_issues": plan["scan_issues"],
-                    "install": {
-                        "change_id": plan["change_id"],
-                        "access_request_id": installed["request_id"],
-                        "receipt_id": installed_result.get("receipt_id"),
-                        "installed_tree_sha256": installed_result.get("installed_tree_sha256"),
-                        "runtime_skill_refresh": installed_result.get("runtime_skill_refresh"),
-                    },
-                    "removal": removal,
-                }
-            )
-        finally:
-            service = access_runtime.runtime_access(agent).service
-            if service is not None:
-                service.cedar.close()
-            access_runtime._runtime_access.cache_clear()
+                installed = _install_with_person_approval(agent, plan, checks)
+                installed_result = installed["applied"]["result"]
+                removal = _remove_with_held_access(
+                    agent, plan["skill_name"], Path(installed_result["installed_path"]), checks
+                )
+                scan_evidence = dict(plan["scan"])
+                scan_evidence.pop("report_path", None)
+                evidence.update(
+                    {
+                        "resolved_source": {
+                            "repository_url": plan["repository_url"],
+                            "commit_sha": plan["commit_sha"],
+                            "skill_name": plan["skill_name"],
+                            "skill_relative_path": plan["skill_relative_path"],
+                            "tree_sha256": plan["artifact_tree_sha256"],
+                        },
+                        "scan": scan_evidence,
+                        "scan_issues": plan["scan_issues"],
+                        "install": {
+                            "change_id": plan["change_id"],
+                            "access_request_id": installed["request_id"],
+                            "receipt_id": installed_result.get("receipt_id"),
+                            "installed_tree_sha256": installed_result.get("installed_tree_sha256"),
+                            "runtime_skill_refresh": installed_result.get("runtime_skill_refresh"),
+                        },
+                        "removal": removal,
+                    }
+                )
+            finally:
+                service = access_runtime.runtime_access(agent).service
+                if service is not None:
+                    service.cedar.close()
+                access_runtime._runtime_access.cache_clear()
 
     evidence["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     evidence["passed"] = all(checks.values())

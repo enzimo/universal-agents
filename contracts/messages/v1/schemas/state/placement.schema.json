@@ -48,6 +48,10 @@
     },
     "previous_host": {
       "$ref": "../common.schema.json#/$defs/runtime_id"
+    },
+    "handed_over": {
+      "const": true,
+      "description": "The team services kept this placement on an explicit handed_over close. It survives deletion of the ended session; unmarked placements without any retained matching session are abandoned."
     }
   },
   "required": [

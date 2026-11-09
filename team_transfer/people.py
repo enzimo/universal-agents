@@ -19,7 +19,10 @@ Why these choices:
   (owner's decision 2026-10-05). The raw token never leaves the browser.
   Invites and link codes are one-time and stay behind.
 - The gateway's copy of the people in the access store (``access_people``) is
-  rebuilt at every gateway start, so it is not carried.
+  written again from the gateway's records at every gateway start, so it is not
+  carried. Its opaque person references (``person_ref``, plan decision 64) stay
+  behind with it: a moved team's people get new ones in the new instance, and
+  nothing outside the old instance keeps them.
 
 The import refuses the whole section when no active owner would remain, and
 refuses a person whose role this version does not know or whose chat account

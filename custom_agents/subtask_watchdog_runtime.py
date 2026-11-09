@@ -485,6 +485,19 @@ async def _complete_local_task_finalization_after_dispatch(
     return True
 
 
+class TaskProbeNotPossible(Exception):
+    """This process cannot ask about a delegated task yet (``custom_agents.agent_requests.cannot_ask``).
+
+    ``clears`` says whether the reason passes by itself (the join, the asking agent's
+    session, the team's view); the watchdog waits for those, within a limit
+    (``_recover_stalled_subtasks``), and counts the others as nobody answering.
+    """
+
+    def __init__(self, reason: str, *, clears: bool) -> None:
+        super().__init__(reason)
+        self.reason, self.clears = reason, clears
+
+
 async def _probe_subtask_task_status(
     self, *, subtask_info: TaskInfo, holder_agent_id: Optional[str] = None
 ) -> Optional[TaskStatus]:
@@ -492,66 +505,102 @@ async def _probe_subtask_task_status(
 
     With ``holder_agent_id`` (from the task's claim) only that worker is asked. Without it
     every live worker of the task's type (or the named worker) is asked, from the team's
-    agent records (``custom_agents.agent_host.team_view``), and only an answer from one that
-    knows the task counts: before 2026-10-04 the first reply won, so an idle worker's
+    agent records (``custom_agents.agent_requests.team_view``), and only an answer from one
+    that knows the task counts: before 2026-10-04 the first reply won, so an idle worker's
     "unknown" could fail a task another worker was running. The answer keeps today's
     ``TaskStatus`` form for the watchdog's decision and its history entry.
+
+    All targets are asked at once under one deadline (``agent_requests.ask_each``). A target
+    that does not answer, refuses, or whose answer fails in any other way counts as no
+    answer from that target, logged with the task and target ids; the others' answers are
+    kept, and nothing is raised for a target. When this process cannot ask at all yet,
+    ``TaskProbeNotPossible`` says why instead of "no answer".
     """
 
-    from custom_agents.agent_requests import AgentUnreachable, ask_agent, team_view
-    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+    from custom_agents.agent_requests import ask_each, cannot_ask, team_view
 
     if not self.team_id:
         return None
     task_id = subtask_info.task.task_id
-    view = team_view()
-    names: dict[str, tuple[Optional[str], Optional[str]]] = {}
-    if holder_agent_id is not None:
-        known = view.agent(holder_agent_id) if view is not None else None
-        names[holder_agent_id] = (known.display_name if known else None, known.agent_type if known else None)
-    elif view is not None:
-        target_name = getattr(subtask_info.meta, "to_agent_name", None)
-        target_type = getattr(subtask_info.meta, "to_named_agent_type", None)
-        named = view.named(target_name) if target_name else None
-        for item in ([named] if named is not None else view.of_type(str(target_type or ""))):
-            if item.agent != str(self.id):
-                names[item.agent] = (item.display_name, item.agent_type)
+    blocked = cannot_ask(self, need_view=holder_agent_id is None)
+    if blocked is not None:
+        raise TaskProbeNotPossible(blocked.reason, clears=blocked.clears)
+    names = _probe_targets(self, team_view(), subtask_info, holder_agent_id)
     if not names:
         return None
     timeout = max(0.1, float(self.subtask_status_probe_timeout_seconds or 5.0))
     probe_id = new_id("task_status")
-
-    async def ask(target: str) -> Optional[TaskStatus]:
-        try:
-            reply = await ask_agent(self, "task.probe", {"task_id": task_id}, target, timeout=timeout)
-        except (AgentUnreachable, ServiceUnavailable, RequestRefused) as error:
-            self._logger.info("[%s] A task probe got no answer. event=subtask_task_probe_unanswered task_id=%s "
-                              "target_agent_id=%s reason=%s", self.id, task_id, target, error)
-            return None
-        state = reply.get("state")
+    answers = await ask_each(self, "task.probe", {"task_id": task_id}, sorted(names), timeout=timeout)
+    statuses: list[Optional[TaskStatus]] = []
+    for target, reply in answers.items():
+        if _probe_reply_failed(self, task_id, target, reply):
+            statuses.append(None)
+            continue
         name, agent_type = names[target]
-        return TaskStatus(
-            task_status_id=probe_id,
-            status_type=MessageMetaType.RESPONSE,
-            task_id=task_id,
-            parent_task_id=subtask_info.task.parent_task_id,
-            target_agent_id=holder_agent_id,
-            responder_agent_id=target,
-            responder_agent_name=name,
-            responder_named_agent_type=agent_type,
-            is_known_task=bool(reply.get("known")),
-            is_current_task=bool(reply.get("current")),
-            task_state=ProgressState(state) if state else None,
-            last_task_update_at=reply.get("last_update_at"),
-            is_executing=bool(reply.get("executing")),
-            is_exiting=bool(reply.get("exiting")),
-        )
-
-    answers = await asyncio.gather(*(ask(target) for target in sorted(names)))
+        statuses.append(_probe_answer(subtask_info, holder_agent_id, probe_id, target, name, agent_type, reply))
     if holder_agent_id is not None:
-        return answers[0]
+        return statuses[0]
     # A worker that does not hold the task says so; wait for the one that does.
-    return next((answer for answer in answers if answer is not None and answer.is_known_task), None)
+    return next((status for status in statuses if status is not None and status.is_known_task), None)
+
+
+def _probe_targets(agent: Any, view: Any, subtask_info: TaskInfo,
+                   holder_agent_id: Optional[str]) -> dict[str, tuple[Optional[str], Optional[str]]]:
+    """Whom to ask, with each one's name and type: the holder, or else the named worker or every worker of the type."""
+
+    if holder_agent_id is not None:
+        known = view.agent(holder_agent_id) if view is not None else None
+        return {holder_agent_id: (known.display_name if known else None, known.agent_type if known else None)}
+    if view is None:
+        return {}
+    target_name = getattr(subtask_info.meta, "to_agent_name", None)
+    target_type = getattr(subtask_info.meta, "to_named_agent_type", None)
+    named = view.named(target_name) if target_name else None
+    candidates = [named] if named is not None else view.of_type(str(target_type or ""))
+    return {item.agent: (item.display_name, item.agent_type) for item in candidates if item.agent != str(agent.id)}
+
+
+def _probe_reply_failed(agent: Any, task_id: str, target: str, reply: Any) -> bool:
+    """Whether a target's reply is an error, logged with the ids; ``TaskProbeNotPossible`` when this side cannot ask."""
+
+    from custom_agents.agent_requests import AgentUnreachable
+    from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+
+    if isinstance(reply, AgentUnreachable):
+        raise TaskProbeNotPossible(str(reply), clears=reply.clears)
+    if isinstance(reply, (ServiceUnavailable, RequestRefused)):
+        agent._logger.info("[%s] A task probe got no answer. event=subtask_task_probe_unanswered task_id=%s "
+                           "target_agent_id=%s reason=%s", agent.id, task_id, target, reply)
+        return True
+    if isinstance(reply, Exception):
+        agent._logger.warning("[%s] Asking an agent about a delegated task failed; it counts as no answer from "
+                              "that agent. event=subtask_task_probe_failed task_id=%s target_agent_id=%s "
+                              "error_type=%s error=%s", agent.id, task_id, target, type(reply).__name__, reply)
+        return True
+    return False
+
+
+def _probe_answer(subtask_info: TaskInfo, holder_agent_id: Optional[str], probe_id: str, target: str,
+                  name: Optional[str], agent_type: Optional[str], reply: dict[str, Any]) -> TaskStatus:
+    """One ``task.probe`` reply in the watchdog's ``TaskStatus`` form."""
+
+    state = reply.get("state")
+    return TaskStatus(
+        task_status_id=probe_id,
+        status_type=MessageMetaType.RESPONSE,
+        task_id=subtask_info.task.task_id,
+        parent_task_id=subtask_info.task.parent_task_id,
+        target_agent_id=holder_agent_id,
+        responder_agent_id=target,
+        responder_agent_name=name,
+        responder_named_agent_type=agent_type,
+        is_known_task=bool(reply.get("known")),
+        is_current_task=bool(reply.get("current")),
+        task_state=ProgressState(state) if state else None,
+        last_task_update_at=reply.get("last_update_at"),
+        is_executing=bool(reply.get("executing")),
+        is_exiting=bool(reply.get("exiting")),
+    )
 
 
 def _task_status_extends_subtask_wait(self, status: Optional[TaskStatus]) -> bool:
@@ -873,6 +922,52 @@ async def _warn_untracked_subtask(agent: Any, task_id: str) -> None:
     )
 
 
+async def _watchdog_probe(
+    agent: Any,
+    subtask_info: TaskInfo,
+    holder_agent_id: Optional[str],
+    *,
+    parent_task_id: str,
+    overdue_seconds: Optional[float],
+    timeout_seconds: float = 0.0,
+) -> tuple[bool, Optional[TaskStatus]]:
+    """Probe a delegated task for the watchdog: whether to decide on it now, and the answer.
+
+    When this process cannot ask yet for a reason that clears by itself (its join, its
+    session or the team's view is not there yet), the watchdog waits rather than read it
+    as no answer: a lead that has just restarted must not fail work that still runs. The
+    wait is bounded: once the subtask is overdue by one more timeout, the watchdog decides
+    as if nobody answered. A reason that never clears counts as no answer at once, as
+    before. Each case is logged with the ids, as a warning once per subtask and reason.
+    """
+
+    try:
+        return True, await agent._probe_subtask_task_status(subtask_info=subtask_info, holder_agent_id=holder_agent_id)
+    except TaskProbeNotPossible as blocked:
+        waits = blocked.clears and (overdue_seconds is None or overdue_seconds <= timeout_seconds)
+        _log_probe_not_possible(agent, parent_task_id, subtask_info.task.task_id, blocked.reason, waits=waits,
+                                overdue_seconds=overdue_seconds)
+        return (False, None) if waits else (True, None)
+
+
+def _log_probe_not_possible(agent: Any, parent_task_id: str, task_id: str, reason: str, *, waits: bool,
+                            overdue_seconds: Optional[float]) -> None:
+    """Log that the watchdog could not ask: a warning once per subtask and reason, then at debug."""
+
+    then = ("the watchdog asks again at its next pass" if waits
+            else "it counts as no answer, so the watchdog decides on the subtask now")
+    event = "subtask_task_probe_deferred" if waits else "subtask_task_probe_not_possible"
+    key = f"probe_not_possible:{task_id}:{event}:{reason}"
+    # The agent's memory of warnings already given about its subtasks.
+    warned = getattr(agent, "_untracked_subtask_warnings", None)
+    log = agent._logger.debug if warned is not None and key in warned else agent._logger.warning
+    if warned is not None:
+        warned.add(key)
+    log("[%s] This process cannot ask about a delegated task yet; %s. event=%s agent_id=%s task_id=%s subtask_id=%s "
+        "reason=%s overdue_seconds=%s", agent.id, then, event, agent.id, parent_task_id, task_id, reason,
+        None if overdue_seconds is None else int(overdue_seconds))
+
+
 async def _recover_stalled_subtasks(self) -> None:
     timeout_seconds = self.subtask_timeout_seconds
     if timeout_seconds is None or timeout_seconds <= 0:
@@ -944,9 +1039,12 @@ async def _recover_stalled_subtasks(self) -> None:
         threshold,
         cycle_started_at,
     ) in pre_timeout_probe_due:
-        status = await self._probe_subtask_task_status(
-            subtask_info=subtask_info, holder_agent_id=_holder(holders, subtask_info)
+        asked, status = await _watchdog_probe(
+            self, subtask_info, _holder(holders, subtask_info), parent_task_id=parent_task_id,
+            overdue_seconds=None,
         )
+        if not asked:
+            continue
         now_ts = datetime.now(timezone.utc).isoformat()
         await self._record_subtask_timeout_probe(
             parent_task_id=parent_task_id,
@@ -966,9 +1064,12 @@ async def _recover_stalled_subtasks(self) -> None:
             or getattr(subtask_info.meta, "to_named_agent_type", None)
             or subtask_info.header.to_routing_path
         )
-        status = await self._probe_subtask_task_status(
-            subtask_info=subtask_info, holder_agent_id=_holder(holders, subtask_info)
+        asked, status = await _watchdog_probe(
+            self, subtask_info, _holder(holders, subtask_info), parent_task_id=parent_task_id,
+            overdue_seconds=age_seconds - float(timeout_seconds), timeout_seconds=float(timeout_seconds),
         )
+        if not asked:
+            continue
         timeout_probe_ts = datetime.now(timezone.utc).isoformat()
         await self._record_subtask_timeout_probe(
             parent_task_id=parent_task_id,

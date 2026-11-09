@@ -12,9 +12,10 @@ messages that hosts send without an agent are not topology checks.
 
 from __future__ import annotations
 
-from custom_messages.wire.kinds import KINDS, TOPOLOGIES
+from custom_messages.wire.kinds import KINDS, REQUESTER_KINDS, TOPOLOGIES
 
 PERSON = "person"
+DOWN = "down"
 # A kind that is not a topology check: sent to the team services, or only by hosts.
 NOT_CHECKED = "none"
 
@@ -26,7 +27,10 @@ def edge_allowed(kind: str, topology: str, sender_role: str, edge: str, *, given
     allow it for the role. ``given_by_person`` is true for work a person gave the
     sender directly, a run of the person's own schedule or system work with a
     configured route: its output goes to the person whatever the role
-    (team-topologies.yaml fixed rules).
+    (team-topologies.yaml fixed rules). A kind in ``requester_kinds``
+    (``task.probe``) goes down from a task's requester to its holder whatever
+    the requester's role: any agent may delegate and watches what it
+    delegated (decision 70).
     """
 
     edges = KINDS[kind].topology_edges
@@ -36,4 +40,6 @@ def edge_allowed(kind: str, topology: str, sender_role: str, edge: str, *, given
         return False
     if edge == PERSON and given_by_person:
         return True
+    if edge == DOWN and kind in REQUESTER_KINDS:
+        return True  # a task's requester asks its holder about it, whatever its role (team-topologies.yaml)
     return edge in TOPOLOGIES[topology].get(sender_role, ())

@@ -26,3 +26,14 @@ def test_agent_creation_without_any_team_identity_fails_before_spawning(caplog) 
     assert "event=agent_creation_team_id_missing" in caplog.text
 
 
+
+
+def test_an_agent_definition_that_still_sets_process_broadcasts_keeps_starting(tmp_path) -> None:
+    """In-place upgrade: the removed field is ignored, as every unknown field of an agent's settings is."""
+
+    from tests.test_turn_action_outbox import _make_agent
+
+    agent = _make_agent(tmp_path, process_broadcasts=True)
+
+    assert "process_broadcasts" not in UniversalAgent.model_fields
+    assert not hasattr(agent, "process_broadcasts")

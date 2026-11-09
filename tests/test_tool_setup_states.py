@@ -42,6 +42,7 @@ from custom_messages.contracts.access_v2 import (
     PersonStanding,
     TeamPersonV1,
     ToolSetupState,
+    new_person_ref,
 )
 from secure_tool_broker import google_workspace
 from secure_tool_broker.service import SecureToolBrokerService
@@ -356,9 +357,9 @@ def test_the_periodic_check_updates_states_and_tells_each_problem_once(world) ->
     store.replace_people(
         TEAM,
         [
-            TeamPersonV1(team_id=TEAM, person_id=PERSON, standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW),
-            TeamPersonV1(team_id=TEAM, person_id="user-3", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW),
-            TeamPersonV1(team_id=TEAM, person_id="user-gone", standing=PersonStanding.DISABLED, changed_at_utc=NOW),
+            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=PERSON, standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW),
+            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id="user-3", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW),
+            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id="user-gone", standing=PersonStanding.DISABLED, changed_at_utc=NOW),
         ],
         at=NOW,
     )

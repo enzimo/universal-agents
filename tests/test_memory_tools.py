@@ -255,6 +255,17 @@ def test_topic_tags_refuses_another_persons_conversation_and_checks_inputs(agent
     assert unused["error"] == "topic_tags(action='list') does not take conversation_id."
 
 
+def test_topic_tag_limits_apply_to_agent_tools_before_any_write(agent) -> None:
+    for action, fields in (("tag_thread", {}), ("tag_turn", {"turn_index": 2})):
+        for tags, message in ((["first", "x" * 65], "64 characters or fewer"),
+                              ([f"tag-{i}" for i in range(21)], "between 1 and 20")):
+            refused = call(topic_tags, action=action, conversation_id="conv_mine", tags=tags, **fields)
+            assert message in refused["error"]
+    store = agent._conversation_store
+    assert store.list_thread_tags("conv_mine") == []
+    assert store.list_turn_tags(conversation_id="conv_mine", turn_index=2) == []
+
+
 # -- access is decided per action ------------------------------------------------------
 
 

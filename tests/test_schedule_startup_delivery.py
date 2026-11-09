@@ -154,7 +154,6 @@ async def test_startup_finishes_manager_data_cleanups_after_recovery_before_read
     agent = startup_probe(tmp_path)
     agent.is_team_lead = is_team_lead
     agent.named_agent_type = "TeamArchitect" if is_team_lead else "Worker"
-    agent.process_broadcasts = False
     agent.user_name_postfix = "user"
     agent.user_queue_postfix = "user"
     agent._worker_ready = False

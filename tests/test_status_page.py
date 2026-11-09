@@ -347,14 +347,14 @@ async def test_well_known_providers_in_use_need_their_own_key(tmp_path) -> None:
 
 
 def test_people_without_their_own_model_are_a_warning_and_own_models_a_note() -> None:
-    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
     from custom_messages.contracts.person_settings_v1 import PersonModelProfileV1, PersonSettingsV1
     from assistant_gateway.status_page import person_settings_findings
     from model_providers.endpoints import EndpointKind
 
     at = datetime(2026, 10, 2, tzinfo=timezone.utc)
     people = [
-        TeamPersonV1(team_id="t", person_id=person, standing=standing, changed_at_utc=at)
+        TeamPersonV1(person_ref=new_person_ref(), team_id="t", person_id=person, standing=standing, changed_at_utc=at)
         for person, standing in (
             ("usr_alice", PersonStanding.ACTIVE),
             ("usr_bob", PersonStanding.ACTIVE),

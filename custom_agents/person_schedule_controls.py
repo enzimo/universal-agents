@@ -64,7 +64,8 @@ def person_schedule_permit(
     )
 
 
-def schedule_worker_assignment(store: ScheduleStore, schedule: ScheduledMessage, owner: str) -> ScheduleWorkerAssignmentV1:
+def schedule_worker_assignment(store: ScheduleStore, schedule: ScheduledMessage, owner: str,
+                               *, now: Optional[datetime] = None) -> ScheduleWorkerAssignmentV1:
     """Project a schedule already authorized for this owner, in its saved team.
 
     Owner-wide inventory can include another team in shared storage. The viewing
@@ -77,7 +78,7 @@ def schedule_worker_assignment(store: ScheduleStore, schedule: ScheduledMessage,
 
     # A system timer an on-demand worker runs names its agent type (memory review: MemReviewAgent).
     system_timer = local_system_timer_spec(schedule)
-    stuck = not_running(store, schedule, now=datetime.now(timezone.utc))
+    stuck = not_running(store, schedule, now=now if now is not None else datetime.now(timezone.utc))
     binding = (
         store.worker_records.get_binding(schedule.schedule_id, team_id=schedule.claim_team_id, owner_id=owner)
         if schedule.claim_team_id else None

@@ -133,6 +133,7 @@ def test_commands_carry_no_person_or_authority_fields() -> None:
         KnowledgeCommandPayload,
         ManagerRuntimeWorkCommand,
         PersonStandingCommandV1,
+        RetiredGatewayCommand,
     )
 
     # The Knowledge page's request names nobody: the team services act for the token's person.
@@ -141,5 +142,6 @@ def test_commands_carry_no_person_or_authority_fields() -> None:
     for model in (
         ManagerRuntimeWorkCommand,
         PersonStandingCommandV1,
+        RetiredGatewayCommand,
     ):
         assert "principal" not in model.model_fields, model.__name__

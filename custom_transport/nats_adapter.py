@@ -60,6 +60,7 @@ from release_version import release_version
 
 _CONSUMER_DELETE_TIMEOUT_SECONDS = 3.0
 # Consumer roles. A worker queue is shared by every worker of one type.
+TEAM_LEAD_CONSUMER_ROLE = "team_lead"
 NAMED_WORKER_CONSUMER_ROLE = "named_worker"
 # What happened to an unreadable Core NATS message: nothing can give it back.
 _DROPPED = "dropped"

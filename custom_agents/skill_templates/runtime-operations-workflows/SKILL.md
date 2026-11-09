@@ -153,6 +153,26 @@ a person asks about such a notice, look at the task's history and current state
 (`list_task_queue`), explain it in plain words, and if they want it stopped,
 give them `/stop task <task_id>`; do not resend or recreate the request.
 
+When an agent leaves the team for good (it stopped, or its process restarted
+after a crash), a subtask you sent to it by name that it never took fails at once
+("... left before taking it"): decide again, for example delegate it to the type
+or to another named worker. A subtask it had already taken is not failed: its
+restarted run takes it over, or it was handed back and another worker takes it.
+An agent that only stopped answering is not given up on; the subtask watchdog
+checks it again and times the subtask out if it never comes back. A by-name
+delegation waits a few seconds for a worker you just started; one that is listed
+but does not answer, is exiting or takes no work is refused at once, so pick
+another worker instead of retrying it.
+
+`send_control_instruction` pauses, resumes or stops another agent, never
+yourself (to restart the manager, plan a restart). Agents obey it only from the
+team lead, so another agent that calls it is told "not allowed". Read its answer:
+"nothing was changed there" means the change did not happen; "whether it will
+... is unknown" means the agent may still act on it, so check with
+`query_agent_state(live="true")` before asking again. That tool asks every
+target at once, waits about ten seconds in all, and gives each target's own answer
+or why it has none.
+
 After a host suspension or a long gap in the task monitor's checks, allow the
 runtime's one-minute heartbeat refresh window. Use `event=liveness_monitor_paused`
 to identify that wait in runtime logs. Startup agents and TeamLead are judged by
@@ -676,9 +696,9 @@ refuses it); only the person turns it on.
 A runtime restart can interrupt active work. Never infer restart authority from
 a settings change, skill installation, ordinary chat agreement, or a model
 boolean. Never request a restart merely to make a newly installed skill appear;
-managed skill installation refreshes TeamArchitect immediately, notifies idle
-specialists, and repairs busy or missed refreshes on the next idle presence
-heartbeat.
+managed skill installation refreshes TeamArchitect immediately, tells every
+agent with the `skills.changed` event, and an agent that missed it catches up
+when it is next asked for its status or at its next own catalog check.
 
 1. Call `plan_runtime_restart(reason=..., scope=...)` with exact scope
    `manager`, `gateway`, or `all`. Review the returned affected processes,
@@ -692,8 +712,10 @@ heartbeat.
    agreement and pass `confirmed=true`. The person approves interrupting the
    tasks the plan lists: every task you hold (running, queued or waiting) and,
    for `all`, the work other agents are running, plus whatever the agents that
-   did not answer are running (`<agent id>:not-answering`; tell the person
-   which agents did not answer). A worker's work on a task you delegated
+   did not answer are running (`<agent id>#not-answering`; tell the person
+   which agents did not answer) and the agents a host runs without a session,
+   which nobody can ask (`<host>#<component>#no-session`, with the reason in
+   `without_session`). A worker's work on a task you delegated
    counts as that task. Plan-step and recovery tasks also count
    as their original request, so ordinary progress needs no new approval.
 3. Applying captures the runtime state again. The approval still holds when
@@ -701,9 +723,11 @@ heartbeat.
    same task. When a new task arrived that the restart would interrupt (a
    message, a scheduled run, a worker's own task), or an agent that answered
    no longer answers, the restart is refused and names them;
-   stage a fresh plan and ask again. When your process cannot see the team's
-   agents yet, an `all` restart is refused; try again in a minute. Plans last
-   one hour.
+   stage a fresh plan and ask again. When you cannot ask the other agents yet
+   (your process has not joined, your session is not open, or the team's agents
+   are not read yet), an `all` restart is refused with that reason; try again in
+   a minute. A plan staged before an upgrade is refused with a plain message;
+   stage it again. Plans last one hour.
 4. Use `get_runtime_restart_status(change_id)` to check dispatch. `requested`
    means the supervisor has not accepted it yet; `dispatched` includes the
    supervisor's receipt. For a plan not yet applied, `still_applies` and

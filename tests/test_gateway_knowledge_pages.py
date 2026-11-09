@@ -11,6 +11,7 @@ review flags.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +24,20 @@ from assistant_gateway.application.knowledge_pages import (
     GatewayKnowledgePages,
 )
 from assistant_gateway.application.knowledge_wire import INLINE_TEXT_MAX
-from assistant_gateway.application.team_commands import GatewayTeamCommandService
+from assistant_gateway.application.team_commands import (
+    GatewayTeamCommandService,
+    PersonCopyNotCurrent,
+    TeamCommandRefused,
+    TeamServicesNoAnswer,
+    TeamServicesUnavailable,
+)
+from assistant_gateway.interactive_apps.website_handlers.knowledge import (
+    CHANGE_UNKNOWN_TEXT,
+    READ_FAILED_TEXT,
+    REQUEST_REFUSED_TEXT,
+    TEAM_SERVICES_SILENT_READ_TEXT,
+    TEAM_SERVICES_SILENT_TEXT,
+)
 from assistant_gateway.store import GatewayStateStore
 from tests.test_gateway_website_app import (
     InternalWebsiteInteractiveApp,
@@ -42,11 +56,17 @@ class _TeamServices:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict, str]] = []
         self.reply: dict = {"outcome": "ok", "pages": [], "total": 0}
+        # Raised instead of answering: the team services refused the request itself or did not answer.
+        self.error: Exception | None = None
+        # Answered in turn before ``reply``, for lists that come in parts.
+        self.replies: list[dict] = []
 
     async def command(self, kind: str, body: dict, *, person_ref: str, request_id: str) -> dict:
         assert body["request_id"] == request_id
         self.calls.append((kind, body, person_ref))
-        return self.reply
+        if self.error is not None:
+            raise self.error
+        return self.replies.pop(0) if self.replies else self.reply
 
     def refuse(self, outcome: str, message: str, **fields) -> None:
         self.reply = {"outcome": outcome, "message": message, **fields}
@@ -58,11 +78,6 @@ class _References:
 
     def person_id(self, person_ref: str) -> str | None:
         return next((person for person, reference in REFERENCES.items() if reference == person_ref), None)
-
-
-class _Ids:
-    def new_correlation_id(self) -> str:
-        return "cmd-1"
 
 
 def _page(editor: dict) -> dict:
@@ -89,7 +104,7 @@ def site(tmp_path: Path):
     names = {"user_beta": "Beatrix", "user_gamma": "user_gamma"}
     references = _References()
     gateway.knowledge = GatewayKnowledgePages(
-        team_commands=GatewayTeamCommandService(team_services=team, references=references, id_generator=_Ids()),
+        team_commands=GatewayTeamCommandService(team_services=team, references=references, request_ids=lambda: "cmd-1"),
         references=references, display_name=lambda pid: names.get(pid, pid), enabled=True,
     )
     app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
@@ -209,6 +224,77 @@ async def test_refusals_keep_their_code_words_and_review_flags(site) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "change", "message"),
+    [
+        (TeamCommandRefused("knowledge.add_note", "handler_failed"), True, CHANGE_UNKNOWN_TEXT),
+        (TeamCommandRefused("knowledge.list", "handler_failed"), False, READ_FAILED_TEXT),
+        (TeamCommandRefused("knowledge.add_note", "revocations_not_current"), True, REQUEST_REFUSED_TEXT),
+        (TeamServicesNoAnswer("The team services did not answer in time."), True, TEAM_SERVICES_SILENT_TEXT),
+        (TeamServicesNoAnswer("The team services did not answer in time."), False, TEAM_SERVICES_SILENT_READ_TEXT),
+        (PersonCopyNotCurrent(), True, str(PersonCopyNotCurrent())),
+        (TeamServicesUnavailable("You are not a member of this team, so the command was not sent."), True,
+         "You are not a member of this team, so the command was not sent."),
+    ],
+    ids=["change-handler-failed", "read-handler-failed", "change-refused", "change-unanswered", "read-unanswered",
+         "copy-not-current", "not-a-member"],
+)
+async def test_a_refused_or_unanswered_request_is_explained_in_plain_words(site, caplog, error, change, message) -> None:
+    """``handler_failed`` leaves a change's result unknown; other refusals came before anything ran."""
+
+    site.team.error = error
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        headers = await _signed_in(client)
+        with caplog.at_level(logging.WARNING):
+            if change:
+                response = await client.post("/api/web-chat/knowledge/pages/team/deploys/notes", headers=headers,
+                                             json={"session_key": SESSION_KEY, "note": "Check the calendar."})
+            else:
+                response = await client.get(f"/api/web-chat/knowledge/pages?session_key={SESSION_KEY}")
+        payload = await response.json()
+
+    assert response.status == 503
+    assert payload["error"] == {"code": "runtime_error", "message": message}
+    # The internal code reaches the log, not the person.
+    code = getattr(error, "code", None)
+    if code is not None:
+        assert code not in payload["error"]["message"] and f"code={code}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_offset_past_the_contracts_limit_is_refused_before_sending(site) -> None:
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        await _signed_in(client)
+        last = await client.get(f"/api/web-chat/knowledge/pages?session_key={SESSION_KEY}&offset=100000")
+        past = await client.get(f"/api/web-chat/knowledge/pages?session_key={SESSION_KEY}&offset=100001")
+        past_payload = await past.json()
+
+    assert (last.status, past.status, past_payload["error"]["code"]) == (200, 400, "invalid_request")
+    assert [body["offset"] for _kind, body, _person in site.team.calls] == [100000]
+
+
+@pytest.mark.asyncio
+async def test_a_list_that_comes_in_parts_reaches_the_browser_whole(site) -> None:
+    def summary(number: int) -> dict:
+        return {"space": "team", "page": f"page-{number:02d}", "title": f"Page {number}", "page_type": "reference",
+                "summary": "", "tags": [], "status": "active", "seen_version": "1",
+                "updated_at": "2026-10-10T12:00:00.000Z"}
+
+    site.team.replies = [
+        {"outcome": "ok", "pages": [summary(n) for n in range(0, 8)], "total": 25, "next_offset": 8},
+        {"outcome": "ok", "pages": [summary(n) for n in range(8, 20)], "total": 25, "next_offset": 20},
+    ]
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        await _signed_in(client)
+        response = await client.get(f"/api/web-chat/knowledge/pages?session_key={SESSION_KEY}")
+        payload = await response.json()
+
+    assert [page["page"] for page in payload["pages"]] == [f"page-{n:02d}" for n in range(20)]
+    assert payload["total"] == 25
+    assert [(body["offset"], body["limit"]) for _kind, body, _person in site.team.calls] == [(0, 20), (8, 12)]
+
+
+@pytest.mark.asyncio
 async def test_the_proposal_count_answers_only_the_number_for_the_persons_own_thread(site) -> None:
     site.team.reply = {"outcome": "ok", "total": 3}
     async with TestClient(TestServer(site.app.build_app())) as client:
@@ -294,3 +380,10 @@ async def test_text_longer_than_web_chat_carries_is_refused_plainly(site) -> Non
     assert kind == "knowledge.write" and body["content"]["text"] == exact
     assert refused_read.status == 503
     assert refused_payload["error"] == {"code": "runtime_error", "message": too_long}
+
+
+def test_every_knowledge_action_becomes_a_contract_body() -> None:
+    from assistant_gateway.application import knowledge_wire
+    from custom_messages.contracts.control_v1 import KnowledgeCommandAction
+
+    assert set(knowledge_wire._BODIES) == set(KnowledgeCommandAction)
