@@ -30,12 +30,16 @@ def main():
     parser.add_argument("--sccache", required=True, type=Path, help="Provisioned sccache 0.17.0 binary")
     parser.add_argument("--cache-gib", type=int, default=20, help="Total retained cache budget per runner")
     parser.add_argument("--cache-days", type=int, default=7, help="Expire scopes unused for this many days")
+    parser.add_argument("--compiler-cache-gib", type=int, default=3, help="Compiler cache limit per scope")
+    parser.add_argument("--build-jobs", type=int, default=2, help="Cargo workers allowed per job")
     parser.add_argument("--cache-server-port", type=int, default=48227, help="Dedicated Windows sccache port")
     args = parser.parse_args()
     if not set(args.public_repository).issubset(args.repository):
         parser.error("Every public repository must also be named by --repository")
     if not args.sccache.is_file() or args.cache_gib < 1 or args.cache_days < 1:
         parser.error("Provide an installed sccache binary and positive cache limits")
+    if not 1 <= args.compiler_cache_gib <= args.cache_gib or args.build_jobs < 1:
+        parser.error("Compiler cache must fit the total cache budget; build jobs must be positive")
     if not 1024 <= args.cache_server_port <= 65535:
         parser.error("Cache server port must be between 1024 and 65535")
     if args.colima_profile == "default":
@@ -60,8 +64,8 @@ def main():
             "Run the installer with system Python, outside the disposable work directory"
         )
     destination.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(Path(__file__).with_name("ci_hook.py"), destination / "ci_hook.py")
-    shutil.copyfile(Path(__file__).with_name("build_cache.py"), destination / "build_cache.py")
+    for name in ("ci_hook.py", "build_cache.py", "runner_metrics.py"):
+        shutil.copyfile(Path(__file__).with_name(name), destination / name)
     config = destination / "config.json"
     config.write_text(
         json.dumps(
@@ -74,11 +78,14 @@ def main():
                 "min_free_gib": 30,
                 "colima_profile": args.colima_profile,
                 "reserve_paths": [str(path.resolve()) for path in args.reserve_path],
+                "build_jobs": args.build_jobs,
+                "metrics": {"interval_seconds": 5, "keep_days": 7},
                 "build_cache": {
                     "sccache": str(args.sccache.resolve()),
                     "max_bytes": args.cache_gib * 1024**3,
                     "max_age_days": args.cache_days,
                     "server_port": args.cache_server_port,
+                    "compiler_gib": args.compiler_cache_gib,
                 },
             },
             indent=2,

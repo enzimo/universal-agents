@@ -7,15 +7,15 @@ import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
-from typing import Any
 
 import pytest
 
 import assistant_gateway.config as config_module
 import file_locking
 from assistant_gateway.config import GatewayInstanceConfig
-from config_file_updates import ConfigFileConflict, config_revision, replace_config_file
+from config_file_updates import ConfigFileConflict, config_revision
 from custom_agents.runtime_settings_service import RuntimeSettingsService
+from tests.config_file_updates_support import contending_write
 
 
 def _config(tmp_path: Path) -> GatewayInstanceConfig:
@@ -26,15 +26,6 @@ def _config(tmp_path: Path) -> GatewayInstanceConfig:
     return config
 
 
-def _contending_write(path: str, revision: str, value: bytes, ready: Any, results: Any) -> None:
-    ready.wait(timeout=10)
-    try:
-        replace_config_file(Path(path), value, expected_revision=revision)
-        results.put("saved")
-    except ConfigFileConflict:
-        results.put("conflict")
-
-
 def test_two_processes_cannot_both_replace_the_same_revision(tmp_path: Path) -> None:
     path = tmp_path / "instance_config.yaml"
     path.write_bytes(b"original")
@@ -43,7 +34,7 @@ def test_two_processes_cannot_both_replace_the_same_revision(tmp_path: Path) -> 
     results = context.Queue()
     revision = config_revision(path.read_bytes())
     workers = [
-        context.Process(target=_contending_write, args=(str(path), revision, value, ready, results))
+        context.Process(target=contending_write, args=(str(path), revision, value, ready, results))
         for value in (b"first", b"second")
     ]
     try:

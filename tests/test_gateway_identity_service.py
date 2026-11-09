@@ -199,15 +199,28 @@ def test_identity_service_owns_token_and_link_code_workflows(
     )
 
 
+@pytest.mark.parametrize(
+    ("seen_at_utc", "expected_last_seen"),
+    [
+        ("2026-07-27T12:00:00+00:00", "Jul 27, 2026 at 7:00:00 AM CDT"),
+        ("2026-01-27T12:00:00+00:00", "Jan 27, 2026 at 6:00:00 AM CST"),
+    ],
+)
 def test_identity_service_renders_user_timestamps_in_requester_timezone(
     tmp_path: Path,
+    seen_at_utc: str,
+    expected_last_seen: str,
 ) -> None:
-    service, _store = _service(tmp_path)
+    service, store = _service(tmp_path)
     actor = service.resolve_canonical_user(
         channel_name="telegram",
         external_user_id="tg_admin",
     )
     assert actor is not None
+    # Resolving the actor touches last_seen with the repository's real clock.
+    store.update_gateway_user_last_seen(
+        actor.user.canonical_user_id, seen_at_utc=seen_at_utc
+    )
 
     listed = service.render_user_list(actor=actor)
     token_text = service.create_web_token(
@@ -216,10 +229,9 @@ def test_identity_service_renders_user_timestamps_in_requester_timezone(
         channel_name="telegram",
     )
 
-    assert "last_seen: " in listed
+    assert f"last_seen: {expected_last_seen}" in listed
     assert "last_seen_at_utc" not in listed
     assert "+00:00" not in listed
-    assert "CDT" in listed
     assert "Expires: Aug 3, 2026 at 7:00:00 AM CDT" in token_text
 
 

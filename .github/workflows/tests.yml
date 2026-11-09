@@ -31,14 +31,14 @@ defaults:
 jobs:
   docs-image-build:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    runs-on: [self-hosted, Linux, X64, ua-heavy, ua-linux]
     strategy:
       matrix:
         dockerfile: [Dockerfile, Dockerfile.bundle]
     timeout-minutes: 30
     steps:
       - name: Require managed local runner
-        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_PUBLIC_JOB_POLICY_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
+        run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_PUBLIC_JOB_POLICY_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1' || process.env.UA_CI_IMAGE_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -49,17 +49,17 @@ jobs:
         with:
           name: ${{ env.UA_CI_BUILDER }}
       - name: Build the image documentation stage
-        run: docker buildx build --builder "$UA_CI_BUILDER" --load --label "com.universalagents.ci.job=$UA_CI_ID" --target user-docs-builder --file "${{ matrix.dockerfile }}" --tag "ua-ci-docs:$UA_CI_ID" .
+        run: '"$UA_CI_PYTHON" .github/runner/image_cache.py --dockerfile "${{ matrix.dockerfile }}" --target user-docs-builder --tag "ua-ci-docs:$UA_CI_ID"'
       - name: Verify generated documentation
         run: docker run --rm --label "com.universalagents.ci.job=$UA_CI_ID" "ua-ci-docs:$UA_CI_ID" python -c "from pathlib import Path; assert Path('/app/user_docs/site/index.html').is_file(); assert Path('/app/user_docs/site/search/search_index.json').is_file()"
       - name: Build the Rust tools image stage
-        run: docker buildx build --builder "$UA_CI_BUILDER" --load --label "com.universalagents.ci.job=$UA_CI_ID" --target rust-tools-builder --file "${{ matrix.dockerfile }}" --tag "ua-ci-rust:$UA_CI_ID" .
+        run: '"$UA_CI_PYTHON" .github/runner/image_cache.py --dockerfile "${{ matrix.dockerfile }}" --target rust-tools-builder --tag "ua-ci-rust:$UA_CI_ID"'
       - name: Verify the container document converter
         run: docker run --rm --label "com.universalagents.ci.job=$UA_CI_ID" "ua-ci-rust:$UA_CI_ID" /src/target/release/anydoc --version
 
   runtime-install:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    runs-on: [self-hosted, Linux, X64, ua-light, ua-linux]
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
@@ -90,7 +90,7 @@ jobs:
 
   fast:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    runs-on: [self-hosted, Linux, X64, ua-test, ua-linux]
     # Setup, the full suite, and mandatory cleanup took 63 minutes on the
     # shared runner. Leave time for cleanup after successful verification.
     timeout-minutes: 75
@@ -156,7 +156,7 @@ jobs:
 
   photon-sidecar:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    runs-on: [self-hosted, Linux, X64, ua-light, ua-linux]
     timeout-minutes: 30
     steps:
       - name: Require managed local runner
@@ -179,7 +179,7 @@ jobs:
 
   nats-live:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    runs-on: [self-hosted, Linux, X64, ua-test, ua-linux]
     timeout-minutes: 30
     steps:
       - name: Require managed local runner
@@ -228,8 +228,10 @@ jobs:
 
   postgres-live:
     if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
-    timeout-minutes: 30
+    runs-on: [self-hosted, Linux, X64, ua-test, ua-linux]
+    # Shared-disk contention can push the full profile past the old 30-minute
+    # total budget. Include dependency setup and mandatory runner cleanup.
+    timeout-minutes: 45
     steps:
       - name: Require managed local runner
         run: node -e "if (process.env.UA_CI_HOOK_VERSION !== '1' || process.env.UA_CI_PUBLIC_JOB_POLICY_VERSION !== '1' || process.env.UA_CI_BUILD_CACHE_VERSION !== '1') throw new Error('Install the reviewed CI cleanup hooks before running jobs')"
@@ -285,4 +287,4 @@ jobs:
         # Every test marked postgres: the Postgres variants of the storage,
         # runtime recovery, snapshot and schedule-worker transaction tests,
         # and the knowledge store and curation tests.
-        run: python -m pytest tests -m postgres -q --tb=short --show-capture=no
+        run: python -m pytest tests -m postgres -q -x --tb=short --show-capture=no --durations=20

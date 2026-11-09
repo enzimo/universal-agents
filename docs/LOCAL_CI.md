@@ -1,7 +1,8 @@
 # Local CI
 
-Tests, dependency audits, source releases, and AMD64 container
-builds use `[self-hosted, Linux, X64, ua-build, ua-linux]`. ARM64 container
+AMD64 container builds use `[self-hosted, Linux, X64, ua-heavy, ua-linux]`.
+Tests and heavier dependency checks use `ua-test`; small checks and release
+coordination use `ua-light`, with the same Linux architecture labels. ARM64 container
 builds use `[self-hosted, macOS, ARM64, ua-build, ua-macos]` with a native
 ARM64 Docker daemon. A final Linux job combines both immutable platform digests
 before applying version tags and the release attestation policy. Native builds pass
@@ -28,6 +29,17 @@ previous one-hour deadline. It stops at the first failure so its traceback is
 reported before a later deadline can hide it, and reports the slowest tests
 after completion.
 
+The PostgreSQL job allows 45 minutes for setup, the complete database profile
+and mandatory cleanup. Shared-disk contention exhausted its former 30-minute
+budget while tests were still passing and progressing. It reports the slowest
+tests and stops at the first failure so a later job timeout cannot hide it.
+
+Pytest gives each RTK subprocess an in-memory usage-statistics database through
+`RTK_DB_PATH=:memory:`. This keeps SQLite commits and unrelated usage-history
+locks out of shell execution and cancellation deadlines on a busy build disk.
+The tests still execute real RTK commands under the configured sandbox and keep
+their existing timeout assertions. This setting applies only during tests.
+
 The runtime produces Linux amd64 and arm64 container images that run under
 Docker on Windows, macOS, and Linux. Native desktop installers belong to the
 sibling Universal Agents Desktop repository. Linux CI can run inside WSL 2,
@@ -36,7 +48,7 @@ GitHub Linux container actions directly.
 
 The shared host setup uses the `Universal Agents` organization runner group
 for explicitly approved repositories, with allowlists enforced by installed hooks.
-One Windows host runs a Windows runner and two Linux runners; the Linux runners
+One Windows host runs a Windows runner and three Linux runners; the Linux runners
 use a dedicated `Ubuntu-24.04` WSL 2 distribution and its own Docker daemon. A
 Mac runs the ARM64 runner.
 Mac and Linux runner registration and group access require organization runner
@@ -52,9 +64,11 @@ PRs. The managed local runners accept explicitly approved repositories and
 same-repository work under the installed public-job policy described below.
 
 The documentation job installs RTK 0.51.0 from its upstream Linux release with a
-pinned SHA-256 through a JavaScript action before running any shell steps. Those
-steps retain the RTK shell wrapper. Python 3.13 and Node.js 24.20.0 are set up by
-pinned actions. Hosted runners do not use the local cleanup hooks, build caches,
+pinned SHA-256 through a JavaScript action before running any shell steps. The
+download makes up to four attempts for temporary HTTP and network failures, with a
+30-second deadline per attempt. Checksum mismatches and permanent HTTP errors
+stop before extraction. Shell steps retain the RTK wrapper. Python 3.13 and
+Node.js 24.20.0 are set up by pinned actions. Hosted runners do not use the local cleanup hooks, build caches,
 `UA_CI_PYTHON`, or the local Python relocation helper. Their machines are disposable.
 
 In the repository's **Settings > Pages > Build and deployment**, set **Source** to
@@ -401,7 +415,7 @@ check these limits at job admission and completion, evicting whole scopes in
 least-recently-used order. They also evict caches when a filesystem falls below
 the existing 30 GiB reserve, including the WSL backing drive. These are retention
 limits, not a filesystem quota during an active job. Each compiler cache also
-has sccache's 3 GiB limit. Expiry is enforced when the runner next handles work.
+has a configurable sccache limit, 3 GiB by default. Expiry is enforced when the runner next handles work.
 
 Repositories and refs use separate hashed cache directories. Only main pushes
 and manual main builds share the main cache. Pull requests, feature branches,
@@ -544,3 +558,101 @@ GH_TOKEN=<token> rtk proxy python3 scripts/propose_desktop_compatibility.py vX.Y
 
 Check the printed file and pull request text, then run the same command
 without `--dry-run`.
+
+## Separate Linux job lanes
+
+Register three Linux runners with separate application, work, hook, state and
+cache directories. Keep the existing native Windows and macOS runners. The
+Linux labels select work by its resource needs:
+
+| Label | Work |
+| --- | --- |
+| `ua-heavy` | Container image validation/publication and native Linux installers |
+| `ua-test` | Runtime test profiles, security checks, Rust audits and desktop core checks |
+| `ua-light` | Repository checks, runtime-install checks, Node sidecar checks, Python/Node audits and release coordination |
+
+Linux workflow jobs require their lane label instead of `ua-build`. Each Linux
+runner also has `self-hosted, Linux, X64, ua-linux`. The existing build and test
+runners may keep `ua-build` for other approved repositories. The lightweight
+runner must omit `ua-build`, `ua-heavy` and `ua-test`, so older build workflows
+cannot consume its reserved slot. Add labels only after hooks are installed.
+Local runner preflight explicitly exercises all three lanes.
+
+On a shared Windows/WSL machine, capacity is a physical-host constraint. An extra
+runner does not add CPU or RAM. Start the lightweight runner with a systemd
+service limit, for example a drop-in containing:
+
+```ini
+[Service]
+CPUAccounting=yes
+MemoryAccounting=yes
+CPUQuota=100%
+MemoryHigh=1536M
+MemoryMax=2G
+```
+
+This permits one logical CPU's worth of lightweight work and caps that service's
+memory. Docker daemon processes live outside this service's cgroup, so the limit
+is not a Docker build quota. Route image builds to the heavy lane. Leave native
+Windows UI tests in the signed-in desktop account.
+
+## Cache profiles and image stages
+
+Choose the cache budget for each runner's storage. Keep WSL caches on its ext4
+filesystem and put the WSL backing disk on the large build drive. Preserve the
+`--reserve-path` check for that drive. Do not place compiler caches on an NTFS
+mount inside WSL.
+
+These example profiles suit an ample-storage build host and a conservative laptop:
+
+| Runner profile | Combined retained cache | Compiler cache per repository/ref | Unused scope expiry | Cargo workers |
+| --- | ---: | ---: | ---: | ---: |
+| Linux heavy | 128 GiB | 8 GiB | 14 days | 2 |
+| Linux test | 64 GiB | 8 GiB | 14 days | 2 |
+| Linux lightweight | 16 GiB | 2 GiB | 7 days | 1 |
+| Native Windows | 64 GiB | 8 GiB | 14 days | 2 |
+| Laptop macOS | 10 GiB | 3 GiB | 7 days | 2 |
+
+Set these through `install_hooks.py --cache-gib`, `--compiler-cache-gib`,
+`--cache-days` and `--build-jobs`. The defaults remain 20 GiB combined, 3 GiB per
+compiler cache, seven days and two Cargo workers. Compiler limits must fit the
+combined budget. Reinstall the reviewed hooks on every runner when upgrading
+this contract; editing the checkout does not update the installed hooks.
+
+The combined retention budget includes compiler output, npm/pip downloads and
+local BuildKit layer snapshots. Existing repository/ref isolation applies to all
+of them: a pull request cannot populate main's cache, and runners never share a
+cache root. Admission and completion evict least-recently-used scopes by size,
+age or low disk space. These remain retention limits, not an active-job disk
+quota. A build can temporarily need its input cache, a new export and its loaded
+image at once; keep the 30 GiB free-space gate and monitor peak disk use.
+
+`image_cache.py` builds the documentation and Rust tools stages using a local OCI
+cache exported outside the checkout. Cache keys distinguish Dockerfile, target
+and native architecture within the hook's repository/ref scope. Each build exports
+to a fresh snapshot, then promotes it after success. Failed builds preserve the
+previous snapshot; interrupted promotions are recovered before reuse. This avoids
+accumulating old unreferenced OCI blobs. The builder, images and worktree remain
+disposable, and cache retention never preserves Docker credentials or Python
+virtual environments. Publication's existing registry-cache policy is unchanged.
+
+Preflight proves an actual cached `RUN` layer after deleting and recreating its
+Buildx builder, then leaves its job-owned resources for the completed hook to
+reclaim. A cold first build is expected; compare subsequent builds of the same
+inputs and scope to measure the benefit.
+
+## Resource observations
+
+Installed hooks sample CPU and memory pressure while each job runs and log a
+JSON summary at completion. Seven days of summaries are retained in the hooks'
+`metrics` directory, outside disposable job state. They include elapsed job time,
+sample count, sampled peak host CPU and memory use, and whether an interrupted
+job was recovered. A stopped or failed sampler is reported as incomplete.
+
+Linux WSL readings cover the WSL VM, while native Windows readings cover the
+physical Windows host and include competing WSL work. macOS readings cover the
+laptop. These readings describe shared host pressure during a job; they do not
+attribute all memory or CPU to that job, and sampling can miss brief peaks.
+GitHub job creation/start timestamps supply queue time separately. Use both
+before increasing worker counts, VM memory or runner concurrency. Keep laptop
+cache limits and its single-runner concurrency conservative.
