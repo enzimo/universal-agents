@@ -66,7 +66,14 @@ from custom_messages.enums import ChangeRefusal
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 from .change_ledger import ChangeRefused, PlannedChange, check_change, ensure_ledger_tables, record_change, save_review
 from .config import StorageSettings
-from .operation_outcomes import CommandOutcome, CommandOutcomeWrites, ensure_outcome_table
+from .operation_outcomes import (
+    CommandOutcome,
+    StoredOutcome,
+    ensure_outcome_table,
+    purge_expired,
+    save_refusal,
+    stored_outcome,
+)
 from .pinned_memory_changes import MemoryWriter, planned_creation, planned_removal, planned_update
 from .postgres_connection import (
     PINNED_MEMORY_WRITE_LOCK_KEY,
@@ -100,6 +107,17 @@ class PinnedMemoryNotFoundError(ValueError):
 
     A ``ValueError`` like the repository's other refusals; the team services answer
     it as ``not_found`` rather than ``invalid_request``.
+    """
+
+
+class PinnedMemoryInputError(ValueError):
+    """The command itself is wrong (a missing field, bad tags, a time that cannot be read,
+    an event that cannot be undone); nothing was changed.
+
+    A ``ValueError`` like the repository's other refusals. The team services answer it as
+    ``invalid_request`` and store that answer; any other ``ValueError`` from the store is a
+    fault in stored data or in the code, answered ``runtime_error`` and logged
+    (``team_services.memory``).
     """
 
 
@@ -276,7 +294,11 @@ class PinnedMemoryRepository(Protocol):
         command_outcome: Optional[CommandOutcome] = None,
     ) -> dict[str, Any]: ...
 
-    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> None: ...
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]: ...
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]: ...
+
+    def purge_command_outcomes(self, now: datetime) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -292,7 +314,7 @@ class _Undo:
     writer: MemoryWriter
 
 
-class _RelationalPinnedMemoryRepository(CommandOutcomeWrites):
+class _RelationalPinnedMemoryRepository:
     _dialect: SqlDialect
     _logger: logging.Logger
 
@@ -328,6 +350,27 @@ class _RelationalPinnedMemoryRepository(CommandOutcomeWrites):
         except ChangeRefused as refused:
             self._save_review(refused)
             raise
+
+    def save_command_refusal(self, command_outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        """Store a refused command's reply in a transaction of its own (``storage.operation_outcomes``).
+
+        Returns what is stored under the command's key now (``save_refusal``); a failed write raises.
+        """
+
+        with self._write() as conn:
+            return save_refusal(conn, self._dialect, command_outcome, reply)
+
+    def stored_command_outcome(self, command_outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        """The reply already stored for this command's retry key, read without the write lock."""
+
+        with self._connect() as conn:
+            return stored_outcome(conn, self._dialect, command_outcome.team_id, command_outcome.retry_key)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        """Delete stored replies past their retention (``storage.operation_outcomes``); how many were deleted."""
+
+        with self._write() as conn:
+            return purge_expired(conn, self._dialect, now)
 
     def _save_review(self, refused: ChangeRefused) -> None:
         if refused.review is None or repositories_are_read_only():
@@ -621,7 +664,7 @@ class _RelationalPinnedMemoryRepository(CommandOutcomeWrites):
             if event is None:
                 raise PinnedMemoryNotFoundError(f"Memory event {event_id!r} was not found.")
             if event.event_type == "undo":
-                raise ValueError("Cannot undo an undo event.")
+                raise PinnedMemoryInputError("Cannot undo an undo event.")
             handler = _UNDO_HANDLERS.get(event.event_type)
             if handler is None:
                 raise ValueError(f"Unsupported memory event type for undo: {event.event_type}")
@@ -759,7 +802,7 @@ class _RelationalPinnedMemoryRepository(CommandOutcomeWrites):
             raise self._stale_undo(event, f"{label} was restored and changed after it. Undo its latest change instead.")
         before = dict(json.loads(event.before_json or "{}"))
         if not before:
-            raise ValueError("Cannot undo removal because the event has no prior fact snapshot.")
+            raise PinnedMemoryInputError("Cannot undo removal because the event has no prior fact snapshot.")
         return before
 
     def _has_later_event(self, conn: Any, event: PinnedMemoryEventRow) -> bool:
@@ -893,10 +936,10 @@ class _RelationalPinnedMemoryRepository(CommandOutcomeWrites):
     ) -> PinnedMemoryWriteResult:
         fact = str(fact_text or "").strip()
         if not fact:
-            raise ValueError("fact_text must be non-empty.")
+            raise PinnedMemoryInputError("fact_text must be non-empty.")
         normalized_source_key = str(source_key or "").strip() or None
         if normalized_source_key is not None and len(normalized_source_key) > 240:
-            raise ValueError("source_key must contain at most 240 characters.")
+            raise PinnedMemoryInputError("source_key must contain at most 240 characters.")
         # The free number is read under the write lock, so a create at the
         # same moment waits and then sees this one's number as taken.
         with self._checked_write(command_outcome) as conn:
@@ -1007,7 +1050,7 @@ class _RelationalPinnedMemoryRepository(CommandOutcomeWrites):
             before = dict(row)
             next_fact = str(fact_text if fact_text is not None else row["fact_text"]).strip()
             if not next_fact:
-                raise ValueError("fact_text must be non-empty.")
+                raise PinnedMemoryInputError("fact_text must be non-empty.")
             next_tags = _json_dumps(tags if tags is not None else json.loads(row["tags_json"] or "[]"), default=[])
             next_metadata = _json_dumps(metadata if metadata is not None else json.loads(row["metadata_json"] or "{}"), default={})
             next_invalid_after_utc = (

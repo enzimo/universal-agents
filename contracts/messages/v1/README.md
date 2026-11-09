@@ -121,7 +121,11 @@ directly reports to the person whatever the agent's role. A kind whose `topology
 only hosts send it, or it goes back to a refused frame's sender (`delivery.refused`);
 `edge_allowed` allows it. A kind that lead or worker hosts send to an agent, worker pool or
 edge address names its edges, and the generator refuses `none` there: the lead's
-`agent.pause`, `agent.resume`, `agent.exit`, `agent.status` and `task.probe` travel `down`.
+`agent.pause`, `agent.resume`, `agent.exit` and `agent.status` travel `down`. So does
+`task.probe`, which a task's requester sends to the task's holder whatever the requester's
+role: any agent may delegate, and its subtask watchdog asks the holder whether it still has
+the task (decision 70). `team-topologies.yaml` lists such kinds as `requester_kinds`, a fixed
+rule `edge_allowed` applies in every topology; worker hosts are among `task.probe`'s senders.
 Messages that hosts send without an agent (gateway, scheduler, team services) are not
 topology checks either.
 
@@ -1135,7 +1139,7 @@ A queued message can wait days, for example while a host is cut off.
 - **Longest lifetime.** A record is written at its document's `issued_at`. A certificate, agent session, agreement or revocations record ends no later than its record's `max_lifetime_seconds` (registry `state_records`: 90 days, 7 days, 366 days and a day) after it is written; a later end is refused (`invalid_body` at the body's end). A record that must last longer is renewed. A rewrite is written no earlier than the version it replaces. A receiver keeps a trust record with its clock (`TrustStore.add(data, now=...)`) and refuses one dated ahead of it by more than the clock tolerance (`not_yet_valid` at `/issued_at`), so the lifetime counts from a time that has come.
 - **Forgetting.** A receiver forgets an agent session or agreement once its newest version was written longer ago than its `max_lifetime_seconds` plus `replay_ledger_retention_seconds` and the clock tolerance (`TrustStore.forget(now)`, at least daily). A certificate is kept an agent session's `max_lifetime_seconds` and the clock tolerance longer, since a session it signed may arrive as late as the certificate's end. By then every version of the record has ended and every frame it vouched for has expired, so the store stays bounded. A forgotten record is not taken back: the store ignores a record it would forget when it holds none under that key, so an older version cannot return either.
 - **Revoked certificates are kept.** The revocations record is never forgotten, nor is any certificate it lists, so a join or rotation that names a revoked key stays refused while its entry lasts; the record's 2,000 entries bound them. A certificate whose entry left the record is forgotten like any other. Once a certificate that is not revoked is forgotten, its key id is no longer known, and a join or rotation that names it is judged as a new key. Writers delete a record from `UA1_CERTS` once receivers forget it, and keep revoked certificates there.
-- **State reports outlive certificates.** Agent, placement and team-view records do not expire, but a receiver that forgot the certificate that signed one refuses it as `unknown_key`. Their writers write them again under a current certificate before an old one is forgotten, for example when a renewal's overlap ends.
+- **State reports and certificates.** Placement and team-view records do not expire, but a receiver that forgot the certificate that signed one refuses it as `unknown_key`. Their writers write them again under a current certificate before an old one is forgotten, for example when a renewal's overlap ends. Agent records instead expire within three minutes and are refreshed every minute under current certificates.
 
 ## Installation traffic
 
@@ -1229,8 +1233,10 @@ session record:
 - **`sessions.close`** records a session's actual end when its agent exits, fails or is
   handed over: the team services sign the session again with that end, so it covers nothing
   dated after it, and remove the placement unless the agent was handed over (the new host's
-  open replaces it). Closing a session that has already ended answers `ok` with its recorded
-  end and changes nothing.
+  open replaces it). Before ending a handed-over session, the team services mark its
+  placement `handed_over: true`, so it survives the session's later deletion. Closing a
+  session that has already ended answers `ok` with its recorded end and retries any
+  unfinished placement cleanup without ending the session again.
 
 Renew and close answer `not_found` for a session that does not place its agent on the asking
 host, so no host renews or ends another host's sessions. Where hosts have their own NATS
@@ -1238,9 +1244,13 @@ credentials, an open that adds an agent is followed by a certificate renewal who
 names the agent's subjects ("Credentials follow placement"); until then the host cannot read
 the agent's queues or write its agent record.
 
-**Restarts.** A host that starts again first closes the sessions an earlier run of it left
-open (it finds them in `UA1_CERTS` under its runtime id), then opens sessions for the agents
-it now runs. A session it cannot close ends with its end time.
+**Restarts.** A host scans verified sessions in `UA1_CERTS` for its own runtime and closes
+those its earlier run left behind. Failed reads and closes retry during upkeep. Sessions
+of agents attached to this run are excluded, including an opening whose reply is pending.
+A session it cannot close ends with its end time. Team services remove an unmarked
+placement with no retained matching session, under their session mutation lock and with
+compare-and-set, after completing all session reads. This recovers interrupted openings
+and placements whose sessions were forgotten; an explicit handover stays.
 
 **Repeating a session operation.** The session operations keep no stored outcome ("Stored
 outcomes"): their outcome is the records in `UA1_PLACEMENT` and `UA1_CERTS`, and no
@@ -1249,8 +1259,8 @@ Each one is safe to repeat instead:
 - a host that lost an open's reply asks again and gets a new session for the same agent on
   itself (above);
 - the team services write the placement before the session, so a failure between the two
-  leaves the agent placed on the asking host without a session, which the host's next open
-  completes;
+  leaves an abandoned placement; the next open on that host or team-service upkeep removes
+  it before counting session capacity;
 - a repeated renewal signs the session again; a repeated close changes nothing.
 
 The host asks for itself, so these requests name no agent (one signed as an agent is refused
@@ -1282,7 +1292,7 @@ The registry's `state_records` section names each record's bucket, key form, sig
 - **Writer.** The record is signed by its writer's host certificate, valid when the record was written, not revoked, and with one of the record's `signer_roles`. The reader holds a current revocations record of the writer's installation (`revocations_not_current`), whoever the writer is: only the authority's installation traffic needs none. Only hosts of the reader's own installation write state reports (`wrong_issuer`): agreements carry durable work only, and a peer's host keeps its own state in its own installation.
 - **Epochs.** The writer's certificate meets the reader's minimum epochs (`epoch_too_old`).
 - **Time.** A record that has expired, or is dated ahead of the reader's clock by more than the clock tolerance, is refused (`expired`, `not_yet_valid`). A record of a bucket with a per-key lifetime (`ttl_seconds`: host liveness, 30 seconds) states an expiry within it (`invalid_body`), so a copy kept elsewhere is never read as current. A report with a longest lifetime (the block list, 7 days) states its expiry, within that lifetime of being written (`invalid_body` at `/expires_at`).
-- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within 30 seconds, but agent, placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
+- **Sequence.** The reader passes the sequence and digest of the record it holds for the key, if any. An older sequence, or other content under the same sequence, is refused (`replayed`), so a reader that holds a newer record never reads an older one written back to the bucket. A reader that holds nothing, after a restart for example, takes the newest record it reads: host liveness records expire within 30 seconds and agent records within three minutes. Placement and team-view records do not expire, so a reader that must not go back keeps the highest sequence it has seen across restarts.
 
 A reader refuses a state report with the first failing check, in the registry's order:
 1. `too_large`, `malformed` (the document's form, and a record of another type than the one read: `TrustStore.verify` takes the record type its bucket holds);
@@ -1296,7 +1306,7 @@ Trust records (`TrustStore.add`) follow the same order without the reader's chec
 
 What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
-- **Agent records.** The key is `<team>.<agent>` of the body, and the team is one the writer's certificate serves. A reader accepts an agent record only from the host its placement names; the reader checks that, since it needs the placement. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person.
+- **Agent records.** The key is `<team>.<agent>` of the body, and the team is one the writer's certificate serves. A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
 - **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
@@ -1307,7 +1317,7 @@ role may, and only the records' signatures protect them. Each bucket in `transpo
 names its `readers` and, per writer role, the keys that role may write, as templates
 membership code fills like subjects:
 `{self}` is the host's runtime id, `{team}` each team it serves, `{agent}` each agent it
-runs, `{installation}` its own installation and `{peer}` each installation an agreement
+runs, including an earlier agent whose record it still owns and must remove, `{installation}` its own installation and `{peer}` each installation an agreement
 names. The generated permissions follow:
 - a reader gets the bucket's stream information, its direct reads (the bucket serves
   last-value gets as `$JS.API.DIRECT.GET.<stream>.<subject>`), and what a watch needs:
@@ -1498,6 +1508,11 @@ same `request_id`. The agent's host verifies the person from the gateway's signa
 body names a person, and the team services never sign tokens. Command tokens are accepted
 only from these senders, so an agent host cannot use one on another operation.
 
+Task list rows must fit both the encoded frame limit and each field's character limit.
+Until blob transport is available, a waiting question longer than inline text allows is
+shown as a marked preview, with a structured warning; the saved full question is unchanged.
+The gateway displays that preview and retains the queue digest needed for removals.
+
 ### Knowledge
 
 These operations keep the knowledge service's current behavior. Their common page,
@@ -1545,7 +1560,9 @@ records the merged name that was followed. When reading an earlier revision,
 summary, tags and content come from that revision. History rows carry each
 revision's title, status, change kind, change summary, creation time and editor.
 The gateway keeps today's editor-name rewrite before sending records to the
-browser; person references are never browser display names.
+browser; person references are never browser display names. A person editor
+without a reference is a person the team's people records no longer hold, such
+as someone who left the team; the gateway shows "A team member".
 
 Every detailed page uses `type: inline` with those fields, or `type: blob`
 with an `application/json` reference to the complete inline page. This applies
@@ -1962,6 +1979,11 @@ The assignment keeps `automatic_creation` as `not_configured`, `enabled`, `disab
 `reassignment_pending`. `not_running_since` and `not_running_explanation` explain a stuck
 schedule. Automatic creation says whether startup is allowed; it does not prove that a
 worker started or has access. The reply's `next_offset` appears only when more rows remain.
+
+When a saved optional time cannot be decoded, the row omits that timestamp and names
+the field in `invalid_time_fields`. The worker explanation describes the problem.
+An invalid `paused_until` still offers Resume to clear the pause, and Remove. Listing
+never repairs the stored record. New pause commands require a valid timestamp.
 
 `schedules.get` reads one exact `schedule_id`. It maps the existing
 `list_scheduled_jobs(schedule_id=...)` detail read to `fn:schedule_runs`, action
@@ -2505,6 +2527,16 @@ registry entry lists ("Idempotency keys").
 - **Stored with the change.** The receiver of a change operation stores the final outcome
   under the team and the retry key, in the same transaction as the change, before it
   replies. A repeat of the key gets the stored reply and changes nothing.
+- **Or a receipt, when the reply shows records after the change.** A reply that shows
+  records as readers see them once the change is committed (a knowledge page with its
+  backlinks, open notes and proposals) cannot be built inside the change's transaction.
+  Its receiver may store a receipt instead: what the change did, by record id, and what
+  the requester confirmed (a knowledge write's review kinds), never the records' text. It
+  builds the reply from the receipt after the commit, for the first try and every repeat
+  alike, so a repeat gets the same outcome for the same records, shown as they are then.
+  When that reply cannot be built, the change is already made: the receiver answers the
+  request `handler_failed` ("Refused requests"), never with an outcome that says nothing
+  changed.
 - **Kept 7 days.** The receiver keeps an outcome for at least 7 days, the longest
   lifetime of an authority token (`authority_token_max_seconds`).
 - **Reads store nothing.** A read is keyed by `/message_id`, so every frame is a new read

@@ -1109,10 +1109,6 @@ async def _apply_objective_control(
     )
 
 
-# Task-list actions people send through the team services, which relay them to the agent's host.
-RELAYED_TASK_ACTIONS = frozenset({"list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"})
-
-
 async def handle_manager_runtime_work_command(
     agent: Any,
     *,
@@ -1131,10 +1127,6 @@ async def handle_manager_runtime_work_command(
     response.objectives = []
     response.cancellation_receipts = []
     person, refusal = verified_command_person(agent, msg_meta)
-    if command.action in RELAYED_TASK_ACTIONS:
-        # These come relayed by the team services now (custom_agents.relayed_task_controls).
-        refusal = "relayed_by_team_services"
-        person = None
     if not getattr(agent, "is_team_lead", False) or person is None:
         response.success = False
         response.message = refusal or "manager_required"

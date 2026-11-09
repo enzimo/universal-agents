@@ -303,6 +303,9 @@ class DelegatedTaskRepository:
         is gone or closed, or another worker already claimed the re-sent task
         (a fast claim, or a retried handback whose task was already re-sent).
         A claim recorded since must never be turned back into "queued".
+        The handback itself proves who held the task even when its claim was
+        lost. Keep that history so an exit cannot withdraw the re-sent message
+        as if it still waited, untaken, in the first worker's mailbox.
         """
 
         with self._connect() as conn:
@@ -322,6 +325,7 @@ class DelegatedTaskRepository:
                     "holder_agent_name": None,
                     "claimed_at_utc": None,
                     "publish_sequence": publish_sequence,
+                    "holders": list(dict.fromkeys([*current.holders, from_holder_agent_id])),
                     "updated_at_utc": _now(),
                 }
             )

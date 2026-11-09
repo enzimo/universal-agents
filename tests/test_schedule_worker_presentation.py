@@ -130,6 +130,11 @@ async def test_owner_scoped_assignment_reaches_website_without_changing_control_
     reply = checked_reply("schedules.list", operations.answer(
         stand_in_frame(TEAM, "schedules.list", body, person_ref=OWNER_REF, request_id="cmd-list")))
 
+    # The team address never lists another team's schedules, even for the same person.
+    if other_team:
+        assert reply == {"outcome": "ok", "schedules": [], "total": 0}
+        assert schedule_listing_digest(store.get_scheduled_message("job")) == schedule_listing_digest(schedule)
+        return
     # Only the person's own schedule is listed, with its worker assignment.
     assert [row["schedule_id"] for row in reply["schedules"]] == ["job"]
     response = GatewayScheduleListing(success=True, schedules=tuple(

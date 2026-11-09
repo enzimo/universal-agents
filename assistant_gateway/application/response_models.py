@@ -25,3 +25,4 @@ class GatewayResponse:
     attachments: tuple[UserNotificationAttachment, ...] = ()
     transcript_text: str | None = None
     transient_action: GatewayTransientAction | None = None
+    live_applied: bool | None = None

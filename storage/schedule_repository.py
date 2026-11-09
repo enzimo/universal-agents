@@ -8,6 +8,7 @@ from storage.schedule_occurrences import ensure_occurrence_schema, has_unfinishe
 from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 
 import logging
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,7 +28,9 @@ from .postgres_connection import (
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
 from .runtime_custody import DeferredMessageClaim, check_deferred_message
-from .operation_outcomes import CommandOutcome, CommandOutcomeWrites, ensure_outcome_table
+from .operation_outcomes import (
+    CommandOutcome, StoredOutcome, ensure_outcome_table, purge_expired, save_refusal, stored_outcome,
+)
 from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
@@ -239,7 +242,7 @@ _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
 }
 
 
-class _RelationalScheduleRepository(CommandOutcomeWrites):
+class _RelationalScheduleRepository:
     """Shared record operations for scheduled-message persistence."""
 
     _dialect: SqlDialect
@@ -354,6 +357,7 @@ class _RelationalScheduleRepository(CommandOutcomeWrites):
         with self._connect() as conn:
             conn.begin_write()
             if command_outcome is not None:
+                self._lock_command(conn, command_outcome)
                 # A person's command answered before changes nothing (storage.operation_outcomes).
                 command_outcome.raise_if_stored(conn, self._dialect)
             if deferred_message is not None:
@@ -375,12 +379,36 @@ class _RelationalScheduleRepository(CommandOutcomeWrites):
 
     @contextmanager
     def _write(self) -> Iterator[Any]:
-        """A write transaction of its own (stored refusals and completions, ``CommandOutcomeWrites``)."""
+        """A write transaction of its own for stored refusals and retention."""
 
         with self._connect() as conn:
             conn.begin_write()
             yield conn
             conn.commit()
+
+    def stored_command_outcome(self, outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        with self._connect() as conn:
+            return stored_outcome(conn, self._dialect, outcome.team_id, outcome.retry_key)
+
+    def save_command_refusal(self, outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        with self._write() as conn:
+            self._lock_command(conn, outcome)
+            return save_refusal(conn, self._dialect, outcome, reply)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        with self._write() as conn:
+            return purge_expired(conn, self._dialect, now)
+
+    def _lock_command(self, conn: Any, outcome: CommandOutcome) -> None:
+        """Serialize a retry key before reading its outcome, including commands naming different rows.
+
+        SQLite already holds its write lock. PostgreSQL's per-schedule lock alone
+        cannot protect the command key when a defective sender repeats it with another body.
+        Take this lock before any schedule lock; refusal writes take it too.
+        """
+        if self._dialect == POSTGRES:
+            key = json.dumps([outcome.team_id, outcome.retry_key], separators=(",", ":"))
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"schedule_command:{key}",))
 
     def _locked_row(self, conn: Any, schedule_id: str) -> Any:
         raise NotImplementedError

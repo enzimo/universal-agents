@@ -325,16 +325,46 @@ async def test_maintenance_can_start_worker_without_current_chat_task(lead):
         "goal": "Review cleanup",
         "tools": [],
     }
-    lead._probe_live_named_agent_type.side_effect = [
-        None,
-        SimpleNamespace(self_id="new-worker"),
-    ]
+    # No maintenance worker is live: one is started, and its start is enough. The occurrence
+    # waits in the type's queue for it, so the lead does not look for its record at once.
+    lead._probe_live_named_agent_type.side_effect = [None]
     schedule = prepare_internal_improvement_schedule_for_manager(
         lead, build_internal_improvement_schedule(lead)
     )
     assert await ensure_maintenance_worker(lead, schedule, "due-now")
+    assert lead._probe_live_named_agent_type.await_count == 1
     assert lead.starts[0].owner_canonical_user_id == "schedule-owner"
     assert lead.starts[0].named_agent_type == "InternalImprovementAgent"
+
+
+@pytest.mark.asyncio
+async def test_maintenance_waits_for_no_worker_when_one_is_live_and_stops_when_none_can_start(lead, monkeypatch):
+    from custom_agents import agent_instantiation_service
+    from custom_agents.internal_improvement_runtime import (
+        build_internal_improvement_schedule,
+        prepare_internal_improvement_schedule_for_manager,
+        ensure_maintenance_worker,
+    )
+
+    lead.bootstrap_config = {"canonical_user_id": "schedule-owner"}
+    schedule = prepare_internal_improvement_schedule_for_manager(lead, build_internal_improvement_schedule(lead))
+    lead._probe_live_named_agent_type.side_effect = [SimpleNamespace(self_id="running-worker")]
+    assert await ensure_maintenance_worker(lead, schedule, "due-now")
+    assert lead.starts == []
+
+    class _Refused:
+        def __init__(self, agent):
+            pass
+
+        def default_idle_ttl(self, agent_type):
+            return 600
+
+        def launch(self, **kwargs):
+            return SimpleNamespace(status="refused", reason="the team's worker limit is reached")
+
+    monkeypatch.setattr(agent_instantiation_service, "AgentInstantiationService", _Refused)
+    lead._probe_live_named_agent_type.side_effect = [None]
+    assert not await ensure_maintenance_worker(lead, schedule, "due-now")
 
 
 @pytest.mark.parametrize("new_blocker", [False, True])

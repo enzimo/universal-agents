@@ -164,7 +164,7 @@ def test_listed_rows_name_their_action_and_every_reply_meets_the_contracts_schem
     missing = team.ask("schedules.disable", {"schedule_id": "sched_none", "seen_version": "b" * 64}, request_id="cmd-5")
 
     assert [(row["schedule_id"], row["action"]) for row in listed["schedules"]] == [
-        ("sched_a", {"type": "task"}), ("hb_sched_team", {"type": "task"})]
+        ("hb_sched_team", {"type": "task"}), ("sched_a", {"type": "task"})]
     replies = {"schedules.list": [listed], "schedules.pause": [paused], "schedules.resume": [stale],
                "schedules.remove": [refused], "schedules.disable": [missing]}
     for kind, bodies in replies.items():
@@ -339,7 +339,7 @@ def _gateway(team: Team, *, owner: str = "ada") -> GatewayScheduleApplication:
         delivery=SimpleNamespace(remove_scheduled_target=lambda schedule_id: None),  # type: ignore[arg-type]
         manager=SimpleNamespace(manager_id="manager_1"),  # type: ignore[arg-type]
         team_commands=GatewayTeamCommandService(team_services=_InProcess(team.operations), references=references,
-                                                id_generator=_Ids()),
+                                                request_ids=_Ids().new_correlation_id),
         id_generator=SimpleNamespace(),  # type: ignore[arg-type]
         delivery_refs=team.refs,
     )

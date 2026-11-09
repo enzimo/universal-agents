@@ -19,8 +19,8 @@ draining an agent means:
    the replies to what it holds, and its controls are still read.
 2. **The turns in progress finish.** A running turn is not stopped.
 3. **What it has not finished goes back where this release has a way.** A pool worker (one
-   started with a launch record) starts no task it has not started yet and, once its
-   running turns ended, winds down as after a lost launch lease
+   started with a launch record) starts no task it has not started yet and, once startup
+   recovery and its running turns ended, winds down as after a lost launch lease
    (``custom_agents.lease_loss_wind_down``), naming its own cause in its logs and texts and
    counted as no interruption, nor as a lost worker by a delegated task's requester
    (``custom_agents.delegated_work_runtime``): the tasks it has not started go back to the
@@ -48,58 +48,38 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 
-# The consumer role of the team lead's own queue (``UniversalAgent._connect_nats``).
-TEAM_LEAD_CONSUMER_ROLE = "team_lead"
+from custom_agents.contract_drain_state import ContractDrain, is_pool_worker
+from custom_transport.nats_adapter import TEAM_LEAD_CONSUMER_ROLE
+
 # How often a pool worker checks whether its running turns ended before it winds down.
 TURN_POLL_SECONDS = 1.0
 _LOGGER = logging.getLogger(__name__)
 
 
-@dataclass
-class ContractDrain:
-    """Why and since when an agent drains (module docstring)."""
-
-    reason: str
-    started_at: datetime
-    # A pool worker starts no task it has not started (``lease_loss_wind_down.may_start_next_task``).
-    holds_back_unstarted: bool = False
-    left_queues: int = 0
-    task: Optional[asyncio.Task[Any]] = field(default=None, repr=False)
-
-
-def is_contract_draining(agent: Any) -> bool:
-    return getattr(agent, "_contract_drain", None) is not None
-
-
-def is_pool_worker(agent: Any) -> bool:
-    """A worker started with a launch record, which the team lead takes tasks back from."""
-
-    return getattr(agent, "_worker_launch", None) is not None
-
-
 async def drain_agent(agent: Any, reason: str) -> None:
     """Drain one agent (module docstring); on its own loop, once. Returns when it took no more new work."""
 
-    if is_contract_draining(agent):
-        return
+    state = getattr(agent, "_contract_drain", None)
     worker = is_pool_worker(agent)
-    state = ContractDrain(reason=reason, started_at=datetime.now(timezone.utc), holds_back_unstarted=worker)
-    agent._contract_drain = state
-    # Its record says at once that it takes no work (UniversalAgent._report_record_state, custom_agents.agent_host).
-    report = getattr(agent, "_report_record_state", None)
-    if callable(report):
-        report()
-    state.left_queues = await _leave_shared_queues(agent)
-    agent._logger.warning(
-        "This agent's process runs another message contract than its installation: it takes no new work and "
-        "finishes or hands back what it holds. event=agent_contract_drain_started agent_id=%s pool_worker=%s "
-        "queues_left=%s reason=%s", agent.id, worker, state.left_queues, reason)
-    if worker:
+    if state is None:
+        state = ContractDrain(reason=reason, started_at=datetime.now(timezone.utc), holds_back_unstarted=worker)
+        agent._contract_drain = state
+        report = getattr(agent, "_report_record_state", None)
+        if callable(report):
+            report()
+    # Startup may have been subscribing when the drain began; a repeat leaves those queues too.
+    state.left_queues += await _leave_shared_queues(agent)
+    if not state.announced:
+        agent._logger.warning(
+            "This agent's process runs another message contract than its installation: it takes no new work and "
+            "finishes or hands back what it holds. event=agent_contract_drain_started agent_id=%s pool_worker=%s "
+            "queues_left=%s reason=%s", agent.id, worker, state.left_queues, reason)
+        state.announced = True
+    if worker and state.task is None:
         from custom_agents.pending_work_runtime import start_owned_task
 
         state.task = start_owned_task(agent, partial(_wind_down_after_running_turns, agent, state),
@@ -117,20 +97,23 @@ async def _leave_shared_queues(agent: Any) -> int:
 
 
 async def _wind_down_after_running_turns(agent: Any, state: ContractDrain) -> None:
-    """A pool worker: once no turn runs, return what it has not started to the team lead (module docstring)."""
+    """After recovery and running turns finish, return unstarted work to the team lead."""
 
     from custom_agents.lease_loss_wind_down import start_lease_loss_wind_down
     from custom_agents.turn_registry import executing_task_ids
     from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_OTHER_CONTRACT
 
-    while executing_task_ids(agent) and not agent._should_exit.is_set():
+    while (not getattr(agent, "_worker_ready", False) or executing_task_ids(agent)) and not agent._should_exit.is_set():
         await asyncio.sleep(TURN_POLL_SECONDS)
     if not agent._should_exit.is_set():
         start_lease_loss_wind_down(agent, reason=state.reason, cause=WIND_DOWN_OTHER_CONTRACT)
 
 
 async def holds_work(agent: Any) -> bool:
-    """Whether the agent still holds a task it has not finished, or a request waiting to be admitted."""
+    """Keep startup attached until recovery can reveal its saved work, then inspect what it holds."""
+
+    if not getattr(agent, "_worker_ready", False):
+        return True
 
     task_manager = agent.task_manager
     unfinished = await task_manager.operations_runtime.run(partial(_unfinished_task_ids, task_manager))

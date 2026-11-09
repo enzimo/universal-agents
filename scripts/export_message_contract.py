@@ -360,6 +360,10 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         check_wake_alternatives(where, entry, schemas)
         check_reply_errors(where, entry, schemas)
         check_covered_change(where, entry, registry, schemas)
+    for kind in topologies.get("requester_kinds", []):
+        entry = registry["kinds"].get(kind)
+        if entry is None or "down" not in topology_edges(entry):
+            raise ContractError(f"team-topologies.yaml: requester_kinds names {kind}, which is not a kind sent down")
     check_shared_addresses(registry, transport)
     check_ledger_waits(registry)
     names: dict[str, str] = {}
@@ -2001,6 +2005,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"RETRY_OUTCOMES = frozenset({sorted(registry['retry_outcomes'])!r})\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
         f"TOPOLOGIES = { {name: {role: tuple(edges) for role, edges in spec['allowed_edges'].items()} for name, spec in topologies['topologies'].items()}!r}\n"
+        f"REQUESTER_KINDS = frozenset({sorted(topologies.get('requester_kinds', []))!r})\n"
         f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n"
         f"STATE_SHAPE = {shape(writer, registry['state_schema'], schemas[registry['state_schema']])!r}\n\n"
         "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"

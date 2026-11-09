@@ -725,7 +725,7 @@ class KnowledgeEditorAgent(WireModel):
 
 class KnowledgeEditorPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeEditorSystem(WireModel):
@@ -998,6 +998,7 @@ class PlacementState(WireModel):
     placed_at: Timestamp
     reason: Literal['initial', 'host_lost', 'rebalanced', 'drained', 'operator']
     previous_host: Union[RuntimeId, MISSING] = Field(default=MISSING)
+    handed_over: Union[Annotated[Literal[True], BeforeValidator(exact_type(bool))], MISSING] = Field(default=MISSING)
 
 
 class RevocationsStateEntriesItem(WireModel):
@@ -1234,6 +1235,11 @@ class AgentExitReplyOk(WireModel):
     state: Literal['exiting', 'already_exiting']
 
 
+class AgentExitReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class AgentPauseBody(WireModel):
     request_id: RecordId
     reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
@@ -1246,6 +1252,11 @@ class AgentPauseReplyOk(WireModel):
 
 class AgentPauseReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class AgentPauseReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1263,6 +1274,11 @@ class AgentResumeReplyOk(WireModel):
 
 class AgentResumeReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class AgentResumeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1638,6 +1654,11 @@ class DebugDumpReplyOk(WireModel):
 
 class DebugDumpReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class DebugDumpReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -2626,7 +2647,7 @@ class KnowledgeHistoryReplyOkRevisionsItemUpdatedByAgent(WireModel):
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedByPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedBySystem(WireModel):
@@ -6764,6 +6785,7 @@ class SchedulesListReplyOkSchedulesItemUser(WireModel):
     worker: SchedulesListReplyOkSchedulesItemUserWorker
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
     run_notes: Union[SchedulesListReplyOkSchedulesItemUserRunNotes, MISSING] = Field(default=MISSING)
+    invalid_time_fields: Union[Annotated[list[Literal['next_fire_at', 'paused_until', 'expires_at_utc']], Field(min_length=1, max_length=3)], MISSING] = Field(default=MISSING)
 
 
 class SchedulesListReplyOkSchedulesItemSystemTimingInterval(WireModel):
@@ -6834,6 +6856,7 @@ class SchedulesListReplyOkSchedulesItemSystem(WireModel):
     worker: SchedulesListReplyOkSchedulesItemSystemWorker
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
     run_notes: Union[SchedulesListReplyOkSchedulesItemSystemRunNotes, MISSING] = Field(default=MISSING)
+    invalid_time_fields: Union[Annotated[list[Literal['next_fire_at', 'paused_until', 'expires_at_utc']], Field(min_length=1, max_length=3)], MISSING] = Field(default=MISSING)
 
 
 class SchedulesListReplyOk(WireModel):
@@ -8951,11 +8974,11 @@ AccessReviewBodyAdapter = TypeAdapter(AccessReviewBody)
 AccessWithdrawBodyAdapter = TypeAdapter(AccessWithdrawBody)
 AccessWithdrawReplyAdapter = TypeAdapter(Annotated[Union[AccessWithdrawReplyOk, AccessWithdrawReplyNotFound, AccessWithdrawReplyNotOwnRequest], Field(discriminator='outcome')])
 AgentExitBodyAdapter = TypeAdapter(AgentExitBody)
-AgentExitReplyAdapter = TypeAdapter(Annotated[Union[AgentExitReplyOk], Field(discriminator='outcome')])
+AgentExitReplyAdapter = TypeAdapter(Annotated[Union[AgentExitReplyOk, AgentExitReplyNotAllowed], Field(discriminator='outcome')])
 AgentPauseBodyAdapter = TypeAdapter(AgentPauseBody)
-AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyAgentExiting], Field(discriminator='outcome')])
+AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyAgentExiting, AgentPauseReplyNotAllowed], Field(discriminator='outcome')])
 AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
-AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting], Field(discriminator='outcome')])
+AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting, AgentResumeReplyNotAllowed], Field(discriminator='outcome')])
 AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
@@ -8965,7 +8988,7 @@ CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)
 CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyCustodyWindowOpen, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest, CustodyDecideReplyNotAllowed], Field(discriminator='outcome')])
 CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)
 DebugDumpBodyAdapter = TypeAdapter(DebugDumpBody)
-DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed], Field(discriminator='outcome')])
+DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed, DebugDumpReplyRuntimeError], Field(discriminator='outcome')])
 DeliveryReceiptBodyAdapter = TypeAdapter(DeliveryReceiptBody)
 DeliveryRefusedBodyAdapter = TypeAdapter(DeliveryRefusedBody)
 DlqNoticeBodyAdapter = TypeAdapter(DlqNoticeBody)

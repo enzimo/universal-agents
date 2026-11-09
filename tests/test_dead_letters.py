@@ -30,7 +30,7 @@ from custom_agents.status_findings import agent_status_findings
 from custom_agents.stuck_work import ChatRoute
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.access_v2 import AccessNoticeKind
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.routing_v1 import GatewayContext
 from custom_messages.contracts.status_v1 import StatusSeverity
 from custom_transport.base import FetchPolicy
@@ -545,6 +545,7 @@ async def test_chat_uses_current_administrator_standing(
     if standing is not None:
         AccessRepository(lead.task_manager.storage_settings).record_person(
             TeamPersonV1(
+                person_ref=new_person_ref(),
                 team_id=lead.team_id,
                 person_id=config.user.canonical_user_id,
                 roles=roles,

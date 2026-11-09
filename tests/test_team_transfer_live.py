@@ -82,7 +82,8 @@ def run(base: Path) -> None:
     from assistant_gateway.instance_secrets import ensure_internal_credential_env_file
     from custom_messages.contracts.access_v2 import (
         AccessLevel, GrantV1, PersonStanding, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1, TeamPersonV1,
-    )
+        new_person_ref,
+)
     from storage.access_repository import AccessRepository
     from storage.gateway_state_repository import create_gateway_state_repository
 
@@ -108,8 +109,8 @@ def run(base: Path) -> None:
     people.create_channel_binding(canonical_user_id="usr_ana", channel_name="telegram", external_user_id="tg-1")
     store = AccessRepository(config.manager_storage_settings)
     store.replace_people("team_e2e", [
-        TeamPersonV1(team_id="team_e2e", person_id="usr_ana", standing=PersonStanding.ACTIVE, roles=("owner", "admin"), changed_at_utc=now),
-        TeamPersonV1(team_id="team_e2e", person_id="usr_ben", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=now),
+        TeamPersonV1(person_ref=new_person_ref(), team_id="team_e2e", person_id="usr_ana", standing=PersonStanding.ACTIVE, roles=("owner", "admin"), changed_at_utc=now),
+        TeamPersonV1(person_ref=new_person_ref(), team_id="team_e2e", person_id="usr_ben", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=now),
     ], at=now)
     store.create(GrantV1(grant_id="g_e2e", team_id="team_e2e", subject=SubjectRefV1(kind=SubjectKind.USER, id="usr_ben"),
                          target=TargetRefV1(kind=TargetKind.TOOL, id="fn:schedules"), level=AccessLevel.WRITE,

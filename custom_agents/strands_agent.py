@@ -8,7 +8,7 @@ This module provides the UniversalAgent class, which:
 - Supports the hub-and-spoke multi-agent architecture
 """
 
-from custom_agents.contract_drain import is_contract_draining
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.lease_loss_wind_down import divert_request_during_wind_down, is_winding_down
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
@@ -268,7 +268,7 @@ from custom_transport.base import (
     SubscriptionDelivery,
     TransportPublishOptions,
 )
-from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, NatsTransportAdapter
+from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, TEAM_LEAD_CONSUMER_ROLE, NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from custom_agents.task_runtime_coordinator import (
     RuntimeBatchInterrupted,
@@ -287,6 +287,7 @@ from custom_messages.contracts.control_v1 import (
     ControlInstruction,
     ManagerRuntimeWorkCommand,
     PersonStandingCommandV1,
+    RetiredGatewayCommand,
 )
 from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionRequest,
@@ -1098,6 +1099,8 @@ class UniversalAgent(BaseModel):
     _liveness_observation: LivenessObservation = PrivateAttr(default_factory=LivenessObservation)
     _scheduler_wake: Optional[asyncio.Event] = PrivateAttr(default=None)
     _agent_id_by_name: Dict[str, str] = PrivateAttr(default_factory=dict)
+    # Names two live agents share now, with their holders (custom_agents.team_directory).
+    _ambiguous_team_names: Dict[str, tuple[str, ...]] = PrivateAttr(default_factory=dict)
     _strands_agent: Optional[Agent] = PrivateAttr(default=None)
     _strands_model: Optional[Any] = PrivateAttr(default=None)
     # A person's own model for the current turn (custom_agents.person_model_runtime).
@@ -3938,6 +3941,17 @@ class UniversalAgent(BaseModel):
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )
+        elif isinstance(msg_content, RetiredGatewayCommand):
+            # A 0.9 gateway's command queued before an in-place upgrade: the person is
+            # told it was not carried out (custom_agents.retired_gateway_commands).
+            from custom_agents.retired_gateway_commands import answer_retired_gateway_command
+
+            await answer_retired_gateway_command(
+                self,
+                command=msg_content,
+                msg_header=msg_header,
+                msg_meta=msg_meta,
+            )
         elif isinstance(msg_content, TaskSteering):
             await handle_task_steering_message(
                 self,
@@ -4715,6 +4729,11 @@ class UniversalAgent(BaseModel):
     ) -> None:
         """Read this agent's type queue, shared by every agent of the type (ADR-019)."""
 
+        from custom_agents.contract_drain import drain_agent
+        from custom_agents.contract_drain_state import is_contract_draining
+
+        if is_contract_draining(self):
+            return
         named_type = str(self.named_agent_type)
         queue_name = self.named_agent_type_queue_map.get(named_type) or f"{self.team_id}_{named_type}"
         await adapter.subscribe_subject(
@@ -4726,8 +4745,11 @@ class UniversalAgent(BaseModel):
             consumer_role=NAMED_WORKER_CONSUMER_ROLE,
             owner_agent_id=self.id,
             fetch_policy=policy,
-            ready=ready,
+            ready=lambda: not is_contract_draining(self) and ready(),
         )
+        if is_contract_draining(self):
+            await drain_agent(self, self._contract_drain.reason)
+            return
         self._logger.info(
             "[%s] NATS type queue ready for %s. event=agent_type_queue_ready "
             "agent_type=%s fetch_policy=%s",
@@ -4754,8 +4776,9 @@ class UniversalAgent(BaseModel):
             # Prepare shared schedule state first; start the scheduler only after
             # bootstrap below, and retain any store opened by earlier setup.
             self._ensure_schedule_store()
-            # Before any subscription: the lead stores presence as it arrives,
-            # including the replay of every agent's last status at subscribe.
+            # Before any subscription: every agent refreshes its own status row
+            # here (custom_agents.agent_liveness); who else is on the team comes
+            # from the team's agent records (custom_agents.team_directory).
             self._agent_state_store = AgentStateStore(
                 db_path=self.task_manager._db_path,
                 logger=self._logger,
@@ -4795,7 +4818,10 @@ class UniversalAgent(BaseModel):
                 # target the requesting agent id and are correlated in memory.
                 self._operational_queue_name = self.id
 
-                if self.is_team_lead:
+                from custom_agents.contract_drain import drain_agent
+                from custom_agents.contract_drain_state import is_contract_draining
+
+                if self.is_team_lead and not is_contract_draining(self):
                     await adapter.subscribe_route(
                         name=f"{self.id}:lead",
                         routing_key=self.team_id,
@@ -4803,10 +4829,12 @@ class UniversalAgent(BaseModel):
                         durable_name=self._nats_mapper().durable_name(
                             f"lead_{self.team_id}"
                         ),
-                        consumer_role="team_lead",
+                        consumer_role=TEAM_LEAD_CONSUMER_ROLE,
                         owner_agent_id=self.id,
-                        ready=lambda: mailbox_has_room(self),
+                        ready=lambda: not is_contract_draining(self) and mailbox_has_room(self),
                     )
+                    if is_contract_draining(self):
+                        await drain_agent(self, self._contract_drain.reason)
 
 
             if self.is_team_lead and self.named_agent_type:
@@ -4878,6 +4906,7 @@ class UniversalAgent(BaseModel):
             # request during a resumed turn still reaches cleanup.
             schedule_pending_work(self)
 
+            report_agent_state(self)
             self._logger.info(
                 "[%s] NATS transport ready; waiting for messages until exit.", self.id
             )
@@ -5288,8 +5317,8 @@ class UniversalAgent(BaseModel):
         refresh_state = True
         try:
             # Admission must be exclusive before its first storage await. An
-            # empty probe must not publish busy/idle transitions: receiving
-            # those presence messages would trigger another empty probe.
+            # empty probe must not publish busy/idle transitions that did not
+            # happen: they go out as presence and as the agent's record.
             async with self._execution_lanes.hold(MAIN_LANE):
                 started = await task_message_runtime._check_and_process_next_task(
                     self, MAIN_LANE

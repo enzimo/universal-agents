@@ -1575,6 +1575,11 @@ class StartupAgentSettings(BaseModel):
             raise ValueError(
                 "gateway.startup_agents.named_agent_type must be non-empty."
             )
+        from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN
+
+        if not AGENT_TYPE_PATTERN.fullmatch(normalized):
+            raise ValueError("A startup agent type must use 1 to 24 letters, digits, '-' or '_', "
+                             "starting with a letter or digit, so its message host can name it.")
         return normalized
 
     @field_validator("count", mode="before")

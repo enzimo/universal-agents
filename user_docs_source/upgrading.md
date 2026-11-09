@@ -19,7 +19,8 @@ supported, because it may not read what a newer one saved.
 - **From 0.9.11 or earlier:** first approve or decline a restart waiting in
   the Inbox, or, with authorization off, waiting for your agreement in the
   chat. A restart planned by those releases cannot be approved after the
-  upgrade; Team Architect has to plan it again and ask you again.
+  upgrade: approving it then only says it was planned by another version, and
+  Team Architect has to plan it again and ask you again.
 - **PostgreSQL:** an instance that keeps its data in PostgreSQL gets the same
   upgrade steps, but release tests check them on SQLite only. Back up the
   database first.
@@ -57,6 +58,14 @@ one created and logs each addition (`event=storage_column_added`). If your
 `instance_config.yaml` or `config.yaml` is from an older format, startup offers
 to upgrade it or names the `assistant_cli.py migrate-config` command. If
 something from the old version cannot carry over, startup says what to do.
+
+A memory, Knowledge page or topic command sent from 0.9 just before the upgrade
+that was still waiting when the new version started is not carried out. You get
+a chat message that says so; send it again.
+
+Topic tags are limited to 64 characters after normalization. Existing longer
+tags stay stored but are left out of lists, and the team logs a warning. New
+oversized tags are refused, and each tagging command accepts at most 20 tags.
 
 ## Moving to another machine
 

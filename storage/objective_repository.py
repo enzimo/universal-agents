@@ -281,7 +281,9 @@ class _RelationalObjectiveRepository:
             """
         ).fetchall()
         updated = 0
-        for record_id, objective_data in rows:
+        for row in rows:
+            # By position: a PostgreSQL row is a mapping, and unpacking it gives its column names.
+            record_id, objective_data = row[0], row[1]
             try:
                 owner = str(
                     ObjectiveRecord.model_validate_json(

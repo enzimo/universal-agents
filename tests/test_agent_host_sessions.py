@@ -86,16 +86,26 @@ class _Records:
     def __init__(self) -> None:
         self.written: list[dict[str, Any]] = []
         self.removed: list[str] = []
+        self.values: dict[str, dict[str, Any]] = {}
 
-    def signed(self, record: str, key: str, body: dict[str, Any], *, sequence: int, issued_at: datetime) -> dict:
+    def signed(self, record: str, key: str, body: dict[str, Any], *, sequence: int, issued_at: datetime,
+               expires_at: Optional[datetime] = None) -> dict:
         return {"record": record, "key": key, "body": body}
 
     async def put(self, record: str, key: str, document: dict[str, Any]) -> int:
         self.written.append(document)
+        self.values[key] = document
         return 1
 
-    async def delete(self, record: str, key: str) -> None:
+    async def read_report(self, record: str, key: str, *, now: datetime):
+        if key not in self.values:
+            return None
+        return StoredRecord(1, SimpleNamespace(signer=SimpleNamespace(runtime="lead")))
+
+    async def delete(self, record: str, key: str, *, last_revision: int) -> bool:
         self.removed.append(key)
+        self.values.pop(key, None)
+        return True
 
 
 class _Host:
@@ -180,6 +190,36 @@ def _hosted(agent_id: str, agent_type: str = "Researcher") -> _HostedAgent:
 
 def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[str]:
     return [record.getMessage() for record in caplog.records if f"event={event} " in record.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_supervised_opening_retry_cannot_reattach_an_agent_that_left(monkeypatch) -> None:
+    from custom_agents import agent_host
+
+    monkeypatch.setattr(agent_host, "RETRY_SECONDS", (0.02,))
+    process, _ = _process()
+    answers = _Answers(process, [{"outcome": "ok", "session": _session("departed", "s-departed-1")},
+                                 {"outcome": "ok"}])
+    process._request = answers
+    failed = asyncio.Event()
+
+    async def fail_to_serve(*_args, **_kwargs):
+        failed.set()
+        raise ConnectionError("subscription interrupted")
+
+    process.host.live.serve = fail_to_serve
+    hosted = _hosted("departed")
+    opening = process._spawn(lambda: process._open(hosted), "open_session")
+    try:
+        await asyncio.wait_for(failed.wait(), 1)
+        await process._close("departed", "exited")
+        await asyncio.wait_for(opening, 1)
+        assert hosted.left.is_set()
+        assert not process.agents and not process._pending_closes
+        assert len(answers.ids()) == 1
+        assert len(answers.ids("sessions.close")) == 1
+    finally:
+        await process.stop()
 
 
 @pytest.mark.asyncio
@@ -406,46 +446,98 @@ async def test_a_refused_renewal_opens_a_new_session(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_start_closes_earlier_sessions_only_from_placements_that_verify(caplog) -> None:
-    """A malformed or forged placement, or one removed between listing and reading, never stops the start."""
-
+async def test_cleanup_uses_verified_sessions_even_after_the_placement_revision_changed(caplog) -> None:
     process, _ = _process()
-    placement = SimpleNamespace(body=SimpleNamespace(host="lead", agent="old_1"))
-    read: dict[str, Any] = {
-        f"{TEAM}.forged": FrameRefused("wrong_issuer", "only team_services hosts sign placement records", at="/writer"),
-        f"{TEAM}.removed": None,
-        f"{TEAM}.broken": RuntimeError("nats: timeout"),
-        f"{TEAM}.old_1": StoredRecord(7, placement),  # type: ignore[arg-type]
-        f"{TEAM}.elsewhere": StoredRecord(3, SimpleNamespace(body=SimpleNamespace(host="agent-x", agent="e"))),  # type: ignore[arg-type]
+    sessions = {
+        "s-old_1-7": SimpleNamespace(runtime="lead", agent="old_1", session="s-old_1-7"),
+        "elsewhere": SimpleNamespace(runtime="agent-x", agent="elsewhere", session="elsewhere"),
+        "live": SimpleNamespace(runtime="lead", agent="a1", session="live"),
     }
+    current = _hosted("a1")
+    current.session = "live"
+    process.agents["a1"] = current
 
-    async def read_report(record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
-        assert record == "placement"
-        found = read[key]
-        if isinstance(found, Exception):
-            raise found
-        return found
+    async def keys(record, prefix):
+        return [prefix + key for key in ["forged", "broken", "removed", *sessions]]
 
-    process.host.records = SimpleNamespace(read_report=read_report)  # type: ignore[union-attr]
+    async def take(record, key, *, now):
+        name = key.rsplit(".", 1)[-1]
+        if name == "forged":
+            raise FrameRefused("wrong_issuer", at="/writer")
+        if name == "broken":
+            raise RuntimeError("nats: timeout")
 
-    class _Bucket:
-        async def keys(self) -> list[str]:
-            return [*read, "other_team.z"]
-
-    class _JetStream:
-        async def key_value(self, bucket: str) -> _Bucket:
-            return _Bucket()
-
-    process.host.nc = SimpleNamespace(jetstream=lambda: _JetStream())  # type: ignore[union-attr]
-    answers = _Answers(process, [{"outcome": "ok", "ended_at": "2026-11-06T09:00:00.000Z"}])
-    process._request = answers  # type: ignore[method-assign]
-    with caplog.at_level(logging.WARNING, logger=agent_host.__name__):
+    process.host.records = SimpleNamespace(keys=keys, take_trust_record=take)
+    process.host.live.trust.store.agent_session = lambda installation, team, session: sessions.get(session)
+    answers = _Answers(process, [{"outcome": "ok"}])
+    process._request = answers
+    with caplog.at_level(logging.WARNING):
         await process._close_earlier_sessions()
-    assert answers.asked == [("sessions.close", {"request_id": "close-s-old_1-7", "session": "s-old_1-7",
-                                                 "reason": "failed"})]
-    refused = _events(caplog, "agent_host_record_refused")
-    assert len(refused) == 1 and f"key={TEAM}.forged" in refused[0] and "code=wrong_issuer" in refused[0]
-    assert _events(caplog, "agent_host_stale_session_close_failed")
+    assert answers.asked == [("sessions.close", {"request_id": "close-s-old_1-7", "session": "s-old_1-7", "reason": "failed"})]
+    assert process._cleanup_needed
+    assert "code=wrong_issuer" in caplog.text
+    assert "event=agent_host_stale_session_close_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_close_is_retried_while_the_host_keeps_running(caplog) -> None:
+    process, _ = _process()
+    hosted = _hosted("a1")
+    hosted.session = "s-a1-1"
+    process.agents["a1"] = hosted
+    answers = _Answers(process, [RuntimeError("nats: timeout"), {"outcome": "ok"}])
+    process._request = answers
+    with caplog.at_level(logging.WARNING):
+        await process._close("a1", "exited")
+    assert "a1" not in process.agents and "s-a1-1" in process._pending_closes
+    await process._try_close("s-a1-1")
+    assert not process._pending_closes
+    assert answers.ids("sessions.close") == ["close-s-a1-1", "close-s-a1-1"]
+    assert "upkeep will try again" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_refusal_backoff_keeps_running_after_four_days() -> None:
+    process, pauses = _process()
+    answers = _Answers(process, [{"outcome": "limit_reached"}] * 1100 + [{"outcome": "ok", "session": _session("a1", "s-1")}])
+    process._request = answers
+    await process._open(_hosted("a1"))
+    assert len(pauses) == 1100 and max(pauses) == 300
+    assert process.agents["a1"].session == "s-1"
+
+
+def test_startup_host_ids_are_bounded_and_distinguish_replica_labels():
+    from custom_agents.agent_host import agent_host_runtime, startup_agent_host_profile
+
+    labels = ["Writer#2", "Writer-2", "A" * 64, "A" * 63 + "B"]
+    runtimes = [agent_host_runtime(label) for label in labels]
+    assert len(set(runtimes)) == len(labels)
+    assert all(TOKEN_ID.fullmatch(runtime) for runtime in runtimes)
+    with pytest.raises(ValueError, match="cannot have a message session"):
+        startup_agent_host_profile(TEAM, runtimes[2], "A" * 64)
+
+
+def test_production_host_factory_uses_the_launchers_limit_and_the_current_catalog(tmp_path, monkeypatch):
+    from custom_agents.agent_host import process_host_for, startup_agent_host_profile
+    from custom_agents import agent_catalog
+    from runtime_settings.instance_layout import InstanceLayout
+    from docker.message_hosts import expected_host
+    from installation_authority.expected_hosts import write_expected_hosts
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    catalog = {"TeamArchitect", "Researcher"}
+    monkeypatch.setattr(agent_catalog, "load_agent_catalog", lambda: SimpleNamespace(agent_types=set(catalog)))
+    profile = HostProfile("lead", (TEAM,), ("lead_host", "worker_host"), (), 7)
+    write_expected_hosts(layout.trust_expected_hosts_path, {"lead": expected_host(layout, profile, agent_types_from_catalog=True)})
+    lead = process_host_for("lead", layout, TEAM, is_lead=True, agent_type="TeamArchitect", worker_pools={})
+    assert lead.profile.session_limit == 7 and set(lead.profile.agent_types) == catalog
+    assert {"tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump", "agent.status",
+            "agent.pause", "agent.resume", "agent.exit", "task.probe"} == lead.handlers.keys()
+    assert {"skills.changed"} == lead.event_handlers.keys()
+    catalog.add("Analyst")
+    assert set(lead._catalog_types()) == catalog
+    worker = process_host_for("agent-test", layout, TEAM, is_lead=False, agent_type="Researcher", worker_pools={})
+    assert worker.profile == startup_agent_host_profile(TEAM, "agent-test", "Researcher")
 
 
 @pytest.mark.asyncio
@@ -462,7 +554,7 @@ async def test_a_start_removes_only_the_earlier_agent_records_that_verify_as_its
     }
     records = process.host.records  # type: ignore[union-attr]
 
-    async def keys(record: str) -> list[str]:
+    async def keys(record: str, prefix: str) -> list[str]:
         return [*stored, "other_team.z"]
 
     async def read_report(record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:

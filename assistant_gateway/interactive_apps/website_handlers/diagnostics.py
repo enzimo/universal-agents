@@ -97,7 +97,7 @@ class WebsiteDiagnosticsHandlers:
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=str(exc)) from exc
         live_message = str(getattr(response, "text", "") or "")
-        live_applied = "Context debug dump settings applied:" in live_message
+        live_applied = bool(response.live_applied)
         return web.json_response(
             {
                 "status": "ok",

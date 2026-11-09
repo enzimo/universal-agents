@@ -26,8 +26,17 @@ running: the team's records say which agents are live, but not which task
 each runs. It sends each a full ``agent.status`` request, all at once, and
 waits at most ``TEAM_STATUS_TIMEOUT_SECONDS`` in total, however many agents
 there are. An agent that does not answer in time, refuses or cannot be
-reached is shown as not answering (``<agent id>:not-answering``), never as
+reached is shown as not answering (``<agent id>#not-answering``), never as
 idle: its work is unknown, and the person approves interrupting it as such.
+So is an agent a live host runs without a session, which nobody can ask; its
+host's record lists it (``<host>#<component>#no-session``, the component being
+the host's own name for it). Every key an agent's answer cannot set holds a
+``#``, which neither a contract task id (``record_id``) nor an agent id or host
+id may contain, so no agent can report a task id that equals another agent's
+key and switch off the re-check for it. When the team lead itself cannot ask
+yet (its process has not joined, its session is not open, the team's view is
+not read), the capture is refused with that reason instead of listing every
+other agent as not answering.
 The capture runs in a tool's worker thread (Strands runs synchronous tools
 there, and ``apply_change`` describes and applies plans there). The requests
 run on a private event loop in that thread and reach the other agents
@@ -62,7 +71,14 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from access_control.changes import ChangeApproval
 from custom_agents.access_runtime import acting_agent, runtime_access
-from custom_agents.agent_requests import ask_agent, team_view
+from custom_agents.agent_requests import (
+    AgentUnreachable,
+    SessionlessAgent,
+    agents_without_session,
+    ask_each,
+    cannot_ask,
+    team_view,
+)
 from custom_agents.governance.authorized_operations import (
     FilePlanStore,
     GovernanceAuditEvent,
@@ -103,15 +119,23 @@ if TYPE_CHECKING:
 # answering, so they are not loaded and TeamArchitect stages them again. Plans
 # last an hour, so only one staged just before an upgrade is affected.
 RUNTIME_RESTART_PLAN_SCHEMA_VERSION = 4
+# What a person or TeamArchitect reads for a plan another release staged; the stored
+# version is read before the plan is validated, so no validation detail reaches them.
+PLAN_FROM_OTHER_RELEASE = (
+    "This restart was planned by another version of Universal Agents, so it cannot be approved or applied "
+    "now. Ask TeamArchitect to plan the restart again."
+)
 RUNTIME_RESTART_PLAN_TTL_SECONDS = 60 * 60
 # How long the team lead waits for the other agents' answers when it captures
 # an ``all`` restart's impact. It asks them all at once, so this bounds the
 # whole capture however many agents there are (module docstring).
 TEAM_STATUS_TIMEOUT_SECONDS = 5.0
 # Interrupted-work keys for another agent's work that has no task id: it runs
-# work without saying which, or it did not answer at all.
+# work without saying which, it did not answer at all, or it has no session.
+# Each holds "#", which no reported task id can (module docstring).
 UNKNOWN_TASK = "unknown-task"
 NOT_ANSWERING = "not-answering"
+NO_SESSION = "no-session"
 RUNTIME_RESTART_CHANGE_KIND = "runtime_restart"
 _CHANGE_ID_PATTERN = re.compile(r"runtime_restart_[0-9a-f]{12}\Z")
 # Scopes that restart the manager process, and so the task that asked.
@@ -137,7 +161,12 @@ class RuntimeRestartAgentState(BaseModel):
     Its id, type and name come from the team's records. When it did not
     answer (``answered`` false), what it runs is unknown: the fields its
     answer fills stay ``None``, never false or zero, so nothing reads it as
-    idle, and the restart counts it as ``<agent id>:not-answering``.
+    idle, and the restart counts it as ``<agent id>#not-answering``.
+
+    An agent a live host runs without a session has no record: ``agent_id``
+    is then the host's own name for it (its component), ``host`` that host and
+    ``without_session`` why, in words; it counts as
+    ``<host>#<component>#no-session`` (module docstring).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -152,14 +181,29 @@ class RuntimeRestartAgentState(BaseModel):
     top_level_queue_depth: Optional[int] = None
     waiting_top_level_task_count: Optional[int] = None
     deferred_message_count: Optional[int] = None
+    host: str = ""
+    without_session: Optional[str] = None
 
     @property
     def label(self) -> str:
+        if self.without_session is not None:
+            return f"{self.agent_id} on host {self.host}"
         return self.name or self.agent_id
 
     @property
+    def unknown_work(self) -> str:
+        """Why its work is unknown, in words: it did not answer, or nobody can ask it."""
+
+        if self.without_session is not None:
+            return (f"{self.label} runs without a session ({self.without_session}), so nobody can ask what it is "
+                    "doing; its work is unknown")
+        return f"{self.label} did not answer, so its work is unknown"
+
+    @property
     def not_answering_key(self) -> str:
-        return f"{self.agent_id}:{NOT_ANSWERING}"
+        if self.without_session is not None:
+            return f"{self.host}#{self.agent_id}#{NO_SESSION}"
+        return f"{self.agent_id}#{NOT_ANSWERING}"
 
 
 class RuntimeRestartImpactSnapshot(BaseModel):
@@ -187,19 +231,20 @@ class RuntimeRestartImpactSnapshot(BaseModel):
         restart (their list is empty otherwise). Work an agent runs for a
         task the manager delegated counts as that task, so moving to its next
         part adds nothing. An agent that runs work without saying which
-        counts as ``<agent id>:unknown-task``, and one that did not answer as
-        ``<agent id>:not-answering``: whatever it runs is interrupted.
+        counts as ``<agent id>#unknown-task``, one that did not answer as
+        ``<agent id>#not-answering``, and one without a session as
+        ``<host>#<component>#no-session``: whatever it runs is interrupted.
         """
 
         work = {item.task_id: item.state for item in self.manager_tasks}
         delegated_by = {child.task_id: item.task_id for item in self.manager_tasks for child in item.subtasks}
         for agent in self.known_team_agents:
             if not agent.answered:
-                work[agent.not_answering_key] = f"{agent.label} did not answer, so its work is unknown"
+                work[agent.not_answering_key] = agent.unknown_work
                 continue
             if not agent.is_executing:
                 continue
-            running = agent.current_task_id or f"{agent.agent_id}:{UNKNOWN_TASK}"
+            running = agent.current_task_id or f"{agent.agent_id}#{UNKNOWN_TASK}"
             task_id = delegated_by.get(running, running)
             if task_id in work:
                 work[task_id] += f", {agent.label} on {running}"
@@ -208,7 +253,7 @@ class RuntimeRestartImpactSnapshot(BaseModel):
         return dict(sorted(work.items()))
 
     def agents_not_answering(self) -> tuple[RuntimeRestartAgentState, ...]:
-        """The other agents that did not answer the team lead, so their work is unknown."""
+        """The other agents whose work is unknown: they did not answer the team lead, or nobody can ask them."""
 
         return tuple(agent for agent in self.known_team_agents if not agent.answered)
 
@@ -265,10 +310,7 @@ class RuntimeRestartPlan(BaseModel):
     @classmethod
     def _validate_schema_version(cls, value: int) -> int:
         if int(value) != RUNTIME_RESTART_PLAN_SCHEMA_VERSION:
-            raise ValueError(
-                f"This restart plan has schema version {int(value)}, written by another release; only version "
-                f"{RUNTIME_RESTART_PLAN_SCHEMA_VERSION} is supported. Stage a fresh restart plan."
-            )
+            raise ValueError(PLAN_FROM_OTHER_RELEASE)
         return int(value)
 
     @field_validator("change_id")
@@ -329,8 +371,9 @@ def _outside_approval(approved: RuntimeRestartImpactSnapshot, current: RuntimeRe
     fixes; they are compared too, so a term added to the approval later is
     never left unchecked.
 
-    An agent that did not answer is its own entry (``<agent id>:not-answering``),
-    so for an ``all`` restart:
+    An agent that did not answer, or runs without a session, is its own entry
+    (``<agent id>#not-answering``, ``<host>#<component>#no-session``), so for an
+    ``all`` restart:
 
     - an agent that answered when planned and does not answer now is refused:
       the approval named what it was doing, and it may now run a task nobody
@@ -357,8 +400,8 @@ def _outside_approval(approved: RuntimeRestartImpactSnapshot, current: RuntimeRe
         why.append(f"New work started that this restart would interrupt: {', '.join(started)}.")
     if stopped_answering:
         why.append(
-            f"These agents do not answer now, so the restart may interrupt work nobody approved: "
-            f"{', '.join(stopped_answering)}."
+            f"These agents do not answer now or cannot be asked, so the restart may interrupt work nobody "
+            f"approved: {', '.join(stopped_answering)}."
         )
     why.append("The approval covers only the work listed when the restart was planned.")
     return " ".join(why)
@@ -423,42 +466,52 @@ def _task_state(task_info: Any, *, current_task_id: str, task_manager: Any) -> R
 
 
 class TeamUnseen(RuntimeError):
-    """This process cannot see the team's other agents, so an ``all`` restart's impact is unknown."""
+    """The team lead cannot ask the team's other agents now, so an ``all`` restart's impact is unknown."""
 
 
-_TEAM_UNSEEN = (
-    "The team lead cannot see the team's other agents yet (its process has not joined the team's "
-    "messaging), so it cannot tell what an 'all' restart would interrupt. Try again in a minute; "
-    "a 'manager' restart does not need this."
-)
+def _team_unseen(reason: str, *, clears: bool) -> str:
+    return (
+        f"The team lead cannot ask the team's other agents what they are running ({reason}), so it cannot "
+        f"tell what an 'all' restart would interrupt. {'Try again in a minute; a' if clears else 'A'} "
+        "'manager' restart does not need this."
+    )
 
 
 def _other_agents_now(agent: Any) -> tuple[RuntimeRestartAgentState, ...]:
-    """Every other live agent, as it answers the team lead now (module docstring).
+    """Every other live agent, as it answers the team lead now, and every agent running without a session.
 
     The live agents come from this process's view of the team's records. The
     team lead, ``agent``, is not asked: its own tasks come from its task
-    manager. Without the view the team is unknown, so an ``all`` restart is
-    refused rather than shown as interrupting no other agent's work.
+    manager. When it cannot ask yet, the team is unknown, so an ``all``
+    restart is refused rather than shown as interrupting no other agent's
+    work, or every other agent's (module docstring).
     """
 
-    view = team_view()
-    if view is None:
+    blocked = cannot_ask(agent, need_view=True)
+    if blocked is not None:
         logger.warning(
-            "An 'all' restart's impact was not captured: this process cannot see the team's agents. "
-            "event=runtime_restart_team_unseen agent_id=%s",
+            "An 'all' restart's impact was not captured: the team lead cannot ask the other agents yet. "
+            "event=runtime_restart_team_unseen agent_id=%s reason=%s",
             getattr(agent, "id", None),
+            blocked.reason,
         )
-        raise TeamUnseen(_TEAM_UNSEEN)
+        raise TeamUnseen(_team_unseen(blocked.reason, clears=blocked.clears))
+    view = team_view()
+    assert view is not None  # cannot_ask checked it
     others = sorted(
         (item for item in view.live().values() if item.agent != str(agent.id)), key=lambda item: item.agent
     )
-    answers = _ask_full_statuses(agent, others) if others else {}
-    return tuple(_agent_state(item, answers.get(item.agent)) for item in others)
+    answers, sessionless = _ask_team(agent, others)
+    return (
+        *(_agent_state(item, answers.get(item.agent)) for item in others),
+        *(_sessionless_state(item) for item in sessionless),
+    )
 
 
-def _ask_full_statuses(agent: Any, others: Sequence[TeamAgent]) -> dict[str, dict[str, Any]]:
-    """Each answer to the team lead's full ``agent.status`` request, by agent id; silent agents are left out.
+def _ask_team(
+    agent: Any, others: Sequence[TeamAgent]
+) -> tuple[dict[str, dict[str, Any]], list[SessionlessAgent]]:
+    """Each answer to the team lead's full ``agent.status`` request, by agent id, and the agents without a session.
 
     Runs the requests on a private loop in this worker thread. On an event
     loop it would block that loop, and on the team lead's own loop, which
@@ -468,7 +521,7 @@ def _ask_full_statuses(agent: Any, others: Sequence[TeamAgent]) -> dict[str, dic
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(_full_statuses(agent, others))
+        return asyncio.run(_team_now(agent, others))
     logger.error(
         "A restart's impact was captured on an event loop instead of a worker thread. "
         "event=runtime_restart_capture_on_event_loop agent_id=%s",
@@ -477,29 +530,30 @@ def _ask_full_statuses(agent: Any, others: Sequence[TeamAgent]) -> dict[str, dic
     raise RuntimeError("A restart's impact is captured from a tool's worker thread, never on an event loop.")
 
 
-async def _full_statuses(agent: Any, others: Sequence[TeamAgent]) -> dict[str, dict[str, Any]]:
-    asks = {
-        item.agent: asyncio.ensure_future(
-            ask_agent(agent, "agent.status", {"level": "full"}, item.agent, timeout=TEAM_STATUS_TIMEOUT_SECONDS)
-        )
-        for item in others
-    }
-    # One deadline for all of them, whatever the requests' own timeouts do.
-    _done, late = await asyncio.wait(asks.values(), timeout=TEAM_STATUS_TIMEOUT_SECONDS)
-    for ask in late:
-        ask.cancel()
-    await asyncio.gather(*late, return_exceptions=True)
+async def _team_now(
+    agent: Any, others: Sequence[TeamAgent]
+) -> tuple[dict[str, dict[str, Any]], list[SessionlessAgent]]:
+    # One deadline for all of them, however many there are.
+    replies = await ask_each(
+        agent, "agent.status", {"level": "full"}, [item.agent for item in others], timeout=TEAM_STATUS_TIMEOUT_SECONDS
+    )
     answers: dict[str, dict[str, Any]] = {}
-    for agent_id, ask in asks.items():
-        error = None if ask.cancelled() else ask.exception()
-        if ask.cancelled():
-            reason = f"no answer within {TEAM_STATUS_TIMEOUT_SECONDS:g} s"
-        elif error is not None:
-            reason = f"{type(error).__name__}: {error}"
-        elif ask.result().get("outcome") != "ok":
-            reason = f"answered {ask.result().get('outcome')}"
+    for agent_id, reply in replies.items():
+        if isinstance(reply, AgentUnreachable):
+            # The team lead lost its session or its process's join meanwhile: nobody could be asked.
+            logger.warning(
+                "An 'all' restart's impact was not captured: the team lead could no longer ask. "
+                "event=runtime_restart_team_unseen agent_id=%s reason=%s",
+                getattr(agent, "id", None),
+                reply,
+            )
+            raise TeamUnseen(_team_unseen(str(reply), clears=reply.clears))
+        if isinstance(reply, Exception):
+            reason = f"{type(reply).__name__}: {reply}"
+        elif reply.get("outcome") != "ok":
+            reason = f"answered {reply.get('outcome')}"
         else:
-            answers[agent_id] = ask.result()
+            answers[agent_id] = reply
             continue
         logger.warning(
             "Another agent did not answer the team lead's status request; the restart shows it as not answering. "
@@ -508,7 +562,23 @@ async def _full_statuses(agent: Any, others: Sequence[TeamAgent]) -> dict[str, d
             agent_id,
             reason,
         )
-    return answers
+    sessionless = await agents_without_session()
+    for item in sessionless:
+        logger.warning(
+            "A live host runs an agent without a session; the restart shows it as not answering. "
+            "event=runtime_restart_agent_without_session agent_id=%s host=%s component=%s code=%s",
+            getattr(agent, "id", None),
+            item.host,
+            item.component,
+            item.code,
+        )
+    return answers, sessionless
+
+
+def _sessionless_state(item: SessionlessAgent) -> RuntimeRestartAgentState:
+    """An agent a host runs without a session: not answering, with why (``RuntimeRestartAgentState``)."""
+
+    return RuntimeRestartAgentState(agent_id=item.component, host=item.host, without_session=item.why, answered=False)
 
 
 def _agent_state(item: TeamAgent, answer: Optional[dict[str, Any]]) -> RuntimeRestartAgentState:
@@ -620,7 +690,7 @@ def _restart_summary(plan: RuntimeRestartPlan, processes: str) -> str:
         work = "no tasks are running, queued or waiting"
     if silent:
         work += (
-            f"; {silent} agent{'s' if silent != 1 else ''} did not answer, so "
+            f"; {silent} agent{'s' if silent != 1 else ''} did not answer or cannot be asked, so "
             f"{'their' if silent != 1 else 'its'} work is unknown"
         )
     return summary_line(f"Restart {processes}; {work}.")
@@ -651,7 +721,8 @@ def _impact_summary(plan: RuntimeRestartPlan) -> str:
     work = plan.impact_snapshot.interrupted_tasks()
     if not work:
         if plan.impact_snapshot.agents_not_answering():
-            return "No task is known to be running, queued or waiting, but some agents did not answer."
+            return ("No task is known to be running, queued or waiting, but some agents did not answer or "
+                    "cannot be asked.")
         return "No tasks are running, queued or waiting, so the restart interrupts none."
     entries = [f"{task_id} ({doing})" for task_id, doing in work.items()]
     return _one_review_line(
@@ -662,9 +733,9 @@ def _impact_summary(plan: RuntimeRestartPlan) -> str:
 
 
 def _not_answering_summary(plan: RuntimeRestartPlan) -> str:
-    """The other agents that did not answer, as one review line; empty when every agent answered."""
+    """The other agents that did not answer, as one review line; empty when every agent asked answered."""
 
-    agents = plan.impact_snapshot.agents_not_answering()
+    agents = [agent for agent in plan.impact_snapshot.agents_not_answering() if agent.without_session is None]
     if not agents:
         return ""
     entries = [f"{agent.name} ({agent.agent_id})" if agent.name else agent.agent_id for agent in agents]
@@ -678,11 +749,32 @@ def _not_answering_summary(plan: RuntimeRestartPlan) -> str:
     )
 
 
-def _review_lines(plan: RuntimeRestartPlan) -> tuple[str, ...]:
-    """What the restart interrupts, for the person: the tasks, then the agents that did not answer."""
+def _without_session_summary(plan: RuntimeRestartPlan) -> str:
+    """The agents hosts run without a session, as one review line; empty when there are none."""
 
-    silent = _not_answering_summary(plan)
-    return (_impact_summary(plan), silent) if silent else (_impact_summary(plan),)
+    agents = [agent for agent in plan.impact_snapshot.agents_not_answering() if agent.without_session is not None]
+    if not agents:
+        return ""
+    entries = [f"{agent.label} ({agent.without_session})" for agent in agents]
+    return _one_review_line(
+        entries,
+        lambda names: (
+            f"Agents that run without a session, so nobody can ask what they are doing ({len(entries)}): {names}. "
+            "Their work is unknown; the restart interrupts whatever they are running."
+        ),
+        "agents",
+    )
+
+
+def _review_lines(plan: RuntimeRestartPlan) -> tuple[str, ...]:
+    """What the restart interrupts, for the person: the tasks, the agents that did not answer, those nobody can ask."""
+
+    return tuple(line for line in (_impact_summary(plan), _not_answering_summary(plan), _without_session_summary(plan))
+                 if line)
+
+
+class RestartPlanFromOtherRelease(ValueError):
+    """A stored restart plan has another schema version (``PLAN_FROM_OTHER_RELEASE``)."""
 
 
 class RuntimeRestartService:
@@ -701,6 +793,26 @@ class RuntimeRestartService:
             invalid_change_id_message="Invalid runtime restart change id.",
             missing_plan_message="Runtime restart plan was not found: {change_id}",
         )
+
+    @classmethod
+    def _stored_plan(cls, paths: RuntimeRestartPaths, change_id: str) -> RuntimeRestartPlan:
+        """The stored plan; one from another release is refused in plain words before it is validated."""
+
+        store = cls._plan_store(paths)
+        path = store.path_for(change_id)
+        try:
+            version = json.loads(path.read_text(encoding="utf-8")).get("schema_version")
+        except (OSError, ValueError, AttributeError):
+            version = None  # missing or unreadable: the store says so
+        if version is not None and version != RUNTIME_RESTART_PLAN_SCHEMA_VERSION:
+            logger.warning(
+                "A restart plan from another release was refused. event=runtime_restart_plan_other_release "
+                "change_id=%s schema_version=%s",
+                change_id,
+                version,
+            )
+            raise RestartPlanFromOtherRelease(PLAN_FROM_OTHER_RELEASE)
+        return store.load(change_id)
 
     def _authority_mode(self) -> str:
         return (
@@ -772,7 +884,7 @@ class RuntimeRestartService:
 
     def load_plan(self, change_id: str) -> RuntimeRestartPlan:
         paths = resolve_runtime_restart_paths(self.agent)
-        plan = self._plan_store(paths).load(str(change_id or "").strip())
+        plan = self._stored_plan(paths, str(change_id or "").strip())
         actor = acting_agent(self.agent)
         if plan.plan_digest != model_digest(plan):
             raise PermissionError("Runtime restart plan digest mismatch.")
@@ -917,7 +1029,7 @@ class RuntimeRestartService:
         request_path = paths.request_for_change(normalized)
         if request_path.is_file():
             return {"status": "requested", "request": json.loads(request_path.read_text(encoding="utf-8"))}
-        plan = self._plan_store(paths).load(normalized)
+        plan = self._stored_plan(paths, normalized)
         state = "pending" if plan.expires_at_utc > utc_now() else "expired"
         try:
             current_snapshot = capture_runtime_restart_impact(self.agent, plan.scope)

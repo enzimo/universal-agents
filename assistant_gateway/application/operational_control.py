@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
 from assistant_gateway.application.debug_controls import normalize_context_dump_mode
@@ -63,8 +63,6 @@ class GatewayStopControlRequest:
     target_objective_id: str | None = None
     expected_objective_digest: str | None = None
     inventory_digest: str | None = None
-    task_offset: int = 0
-    task_limit: int = 20
     command_text: str = "/stop"
     route: GatewayRequestRoute = GatewayRequestRoute()
     reason: str = "Stop requested by user."
@@ -310,8 +308,6 @@ class GatewayOperationalControlApplication:
             target_objective_id=request.target_objective_id,
             expected_objective_digest=request.expected_objective_digest,
             inventory_digest=request.inventory_digest,
-            task_offset=request.task_offset,
-            task_limit=request.task_limit,
             session_key=resolved.session_key,
             conversation_id=resolved.conversation_id,
             reason=request.reason,
@@ -449,6 +445,7 @@ class GatewayOperationalControlApplication:
             route=request.route,
         )
         person = str(resolved.route.canonical_user_id or "").strip()
+        live_applied = False
         try:
             reply = await self._team_commands.request(
                 "debug.dump", {"enabled": bool(request.enabled), "mode": normalized_mode}, person_id=person
@@ -459,14 +456,18 @@ class GatewayOperationalControlApplication:
                 "session_key=%s enabled=%s mode=%s error=%s",
                 resolved.session_key, bool(request.enabled), normalized_mode, error,
             )
-            text = f"The context dump setting was not changed: {error}"
+            text = "Could not confirm the live context dump setting. Refresh its status before trying again."
         else:
             if reply.get("outcome") == "ok":
+                live_applied = True
                 state = "on" if reply["enabled"] else "off"
                 text = f"Context debug dump is {state} (mode {reply['mode']})."
+            elif reply.get("outcome") == "runtime_error":
+                text = str(reply.get("message") or "Could not confirm the live context dump setting.")
             else:
                 text = f"The context dump setting was not changed: {reply.get('message') or reply.get('outcome')}"
-        return self._local_responses.create(text=text, conversation_id=resolved.conversation_id)
+        response = self._local_responses.create(text=text, conversation_id=resolved.conversation_id)
+        return replace(response, live_applied=live_applied)
 
     def _resolve(
         self,

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Awaitable, Callable, Optional
 from access_control.ownership import PRIVATE_UPDATE, objective_access
-from custom_agents.contract_drain import is_contract_draining
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.access_runtime import resolve_meta_identity, verified_meta_person_id
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run
@@ -1934,7 +1934,15 @@ async def _scheduler_pass(
     await agent.task_manager.operations_runtime.run(partial(renew_runtime_launch, agent))
     await agent._refresh_self_agent_state()
     await check_queue_pressure(agent)
-    await agent._recover_stalled_subtasks()
+    # A failing watchdog step must not skip the steps below on every pass while its cause lasts.
+    try:
+        await agent._recover_stalled_subtasks()
+    except Exception:
+        agent._logger.exception(
+            "The delegated-task watchdog failed in this pass; the pass goes on. "
+            "event=subtask_watchdog_pass_failed agent_id=%s",
+            agent.id,
+        )
     # A task taken over after a restart may wait on a decision whose notice
     # went to its previous agent; find such decisions in the access store.
     try:

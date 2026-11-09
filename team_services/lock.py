@@ -25,6 +25,12 @@ Taking the lock (``acquire``):
 - A create whose write reached NATS while its answer was lost leaves the key naming this
   instance: the next attempt finds its own name and takes the lock by updating from the
   key's revision, not as a takeover.
+- A lock value no instance can have written, a lease ending later than a whole lease from
+  now plus the clock tolerance or an empty value (another process on the shared NATS login,
+  or a holder whose clock ran ahead), names no live holder once the key has stayed at the
+  same revision for a lease plus the clock tolerance: a holder renews every 10 seconds,
+  which changes the revision. It is logged (``event=team_services_lock_invalid``) and taken
+  over then, rather than waited for forever.
 
 Keeping the lock (``keep``):
 - A renewal that finds another instance holding the lock has lost it: this instance
@@ -35,10 +41,19 @@ Keeping the lock (``keep``):
   keeps serving meanwhile: its unexpired lease still keeps every other instance out.
   Stopping the team services at the first failed renewal stopped the whole team, since
   the launcher stops every service when one exits.
-- When the lease runs out without a successful renewal, the instance stops
-  (``LockLost``, ``event=team_services_lock_lease_ended``): a standby may take over from
-  then on, so serving longer could let two instances serve. Each attempt is cut off
-  when the lease ends.
+- When the lease runs out without a successful renewal, the instance tries one last
+  compare-and-set at the revision it wrote, cut off well before a standby may take over
+  (the lease's end plus the clock tolerance). It succeeds only when no other instance
+  wrote the key since, so nobody else served: this instance keeps the lock and logs it
+  (``event=team_services_lock_lease_resumed``). That is what a laptop's sleep or a paused
+  machine looks like: the event loop's timers stop with the machine while the wall clock
+  runs on, so the lease looks ended at the first renewal after waking. Otherwise the
+  instance stops (``LockLost``, ``event=team_services_lock_lease_ended``): a standby may take
+  over from then on, so serving longer could let two instances serve. Each attempt is cut
+  off when the lease ends.
+- A NATS connection that closed for good (nats-py never reconnects it) stops the instance
+  at once (``LockConnectionClosed``, ``event=team_services_nats_closed``), so the launcher's
+  supervisor sees it instead of a lease that ran out.
 - A renewal whose write reached NATS while its answer was lost leaves the key at a
   revision this instance does not know, so the next compare-and-set fails although the
   lock is still its own. The renewal then reads the key: when it names this instance, it
@@ -62,6 +77,7 @@ from nats.js.errors import BadRequestError, InvalidKeyError, KeyNotFoundError, K
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS
 from custom_messages.wire.values import parse_timestamp
+from custom_transport.protocol1.state_records import wrong_revision
 
 LOCKS_BUCKET = "UA1_LOCKS"
 LEASE = timedelta(seconds=30)
@@ -73,13 +89,17 @@ _UNAVAILABLE = (NatsError, OSError, asyncio.TimeoutError)
 # Failures among those that trying again cannot cure: a closed client never reconnects, an invalid key stays invalid.
 _LASTING = (ConnectionClosedError, InvalidKeyError)
 _SKEW = timedelta(seconds=CLOCK_SKEW_SECONDS)
-# JetStream's error code for a write that names another last revision of the key.
-_WRONG_LAST_SEQUENCE = 10071
+# How long the last renewal at the lease's end may take: well inside the clock tolerance a standby waits.
+_LAST_RENEWAL = _SKEW / 2
 _LOGGER = logging.getLogger(__name__)
 
 
 class LockLost(RuntimeError):
     """Another instance took the lock, or the lease ran out unrenewed: this one must stop serving."""
+
+
+class LockConnectionClosed(LockLost):
+    """The NATS connection closed for good, so the lease can never be renewed: this instance stops."""
 
 
 def lock_key(team: str) -> str:
@@ -106,7 +126,36 @@ class SingleInstanceLock:
     # When the lease this instance last wrote ends; None until it holds the lock.
     lease_ends_at: Optional[datetime] = None
     instance: str = field(default_factory=lambda: secrets.token_hex(8))
+    # The NATS connection, to tell a closed one from a short outage (module docstring); None in tests.
+    nc: Any = None
+    # An invalid lock value (module docstring): its revision and when this instance first saw it there.
+    _invalid_seen: Optional[tuple[int, datetime]] = None
 
+    @classmethod
+    def on_connection(cls, nc: Any, team: str, runtime: str, clock: Callable[[], datetime],
+                      logger: logging.Logger = _LOGGER) -> "SingleInstanceLock":
+        """The lock on a host's NATS connection; its JetStream handle stays in this module (NATS_CLIENT_MODULES)."""
+
+        return cls(nc.jetstream(), team, runtime, clock, logger, nc=nc)
+
+    def _connection_closed(self) -> bool:
+        return bool(self.nc is not None and getattr(self.nc, "is_closed", False))
+
+    def _holder_lease(self, held: dict[str, Any], revision: int) -> datetime:
+        """When the lease another instance wrote ends; for an invalid value, when this instance may take it over."""
+
+        now = self.clock()
+        ends = parse_timestamp(held["lease_ends_at"]) if held else None
+        if ends is not None and ends <= now + LEASE + _SKEW:
+            self._invalid_seen = None
+            return ends
+        if self._invalid_seen is None or self._invalid_seen[0] != revision:
+            self._invalid_seen = (revision, now)
+            self.logger.warning("The team services lock holds a value no instance can have written; it is taken over "
+                                "once it stays unchanged for a lease. event=team_services_lock_invalid team=%s "
+                                "revision=%s lease_ends_at=%s", self.team, revision,
+                                format_timestamp(ends) if ends is not None else "none")
+        return self._invalid_seen[1] + LEASE
     def _lease(self) -> tuple[datetime, bytes]:
         """A new lease's end, and the value that writes it."""
 
@@ -139,9 +188,10 @@ class SingleInstanceLock:
             return await self.try_acquire()
         held = json.loads(entry.value) if entry.value else {}
         holder = f"{held.get('runtime', '')}/{held.get('instance', '')}"
-        ends = parse_timestamp(held["lease_ends_at"]) if held else self.clock()
-        if held.get("instance") != self.instance and self.clock() < ends + _SKEW:
-            return holder, ends
+        if held.get("instance") != self.instance:
+            ends = self._holder_lease(held, int(entry.revision))
+            if self.clock() < ends + _SKEW:
+                return holder, ends
         ends, value = self._lease()
         try:
             self.revision = int(await bucket.update(key, value, last=entry.revision))
@@ -239,14 +289,16 @@ class SingleInstanceLock:
             await _wait_or_stop(stop, wait)
             if stop.is_set():
                 return
+            if self._connection_closed():
+                self.logger.error("The NATS connection closed for good, so the team services lock cannot be renewed; "
+                                  "this instance stops. event=team_services_nats_closed team=%s instance=%s",
+                                  self.team, self.instance)
+                raise LockConnectionClosed(f"the NATS connection of team {self.team}'s services closed")
             left = self._lease_left()
             if left <= 0:
-                self.logger.error("The team services lock could not be renewed before its lease ran out, so this "
-                                  "instance stops serving; another instance may take over from now. "
-                                  "event=team_services_lock_lease_ended team=%s instance=%s failed_attempts=%s "
-                                  "lease_ended_at=%s", self.team, self.instance, failures,
-                                  format_timestamp(self.lease_ends_at) if self.lease_ends_at else "none")
-                raise LockLost(f"the lease on the lock of team {self.team} ran out without a successful renewal")
+                await self._renew_at_lease_end(failures)
+                failures, wait = 0, RENEW_EVERY.total_seconds()
+                continue
             try:
                 await asyncio.wait_for(self.renew(), timeout=left)
             except LockLost as lost:
@@ -254,6 +306,11 @@ class SingleInstanceLock:
                                   "event=team_services_lock_lost team=%s instance=%s reason=%s",
                                   self.team, self.instance, lost)
                 raise
+            except ConnectionClosedError as closed:
+                self.logger.error("The NATS connection closed for good, so the team services lock cannot be renewed; "
+                                  "this instance stops. event=team_services_nats_closed team=%s instance=%s",
+                                  self.team, self.instance)
+                raise LockConnectionClosed(f"the NATS connection of team {self.team}'s services closed") from closed
             except Exception as error:  # noqa: BLE001 - any other failure is tried again while the lease lasts
                 failures += 1
                 left = max(self._lease_left(), 0.0)
@@ -270,6 +327,29 @@ class SingleInstanceLock:
             failures = 0
             wait = RENEW_EVERY.total_seconds()
 
+    async def _renew_at_lease_end(self, failures: int) -> None:
+        """The last compare-and-set once the lease looks ended; ``LockLost`` unless it succeeds (module docstring)."""
+
+        ended_at = format_timestamp(self.lease_ends_at) if self.lease_ends_at else "none"
+        try:
+            await asyncio.wait_for(self.renew(), timeout=_LAST_RENEWAL.total_seconds())
+        except LockLost as lost:
+            self.logger.error("Another team services instance holds the lock, so this one stops serving. "
+                              "event=team_services_lock_lost team=%s instance=%s reason=%s", self.team, self.instance,
+                              lost)
+            raise
+        except Exception as error:  # noqa: BLE001 - any failure here means the lease ended unrenewed
+            self.logger.error("The team services lock could not be renewed before its lease ran out, so this "
+                              "instance stops serving; another instance may take over from now. "
+                              "event=team_services_lock_lease_ended team=%s instance=%s failed_attempts=%s "
+                              "lease_ended_at=%s error=%s: %s", self.team, self.instance, failures + 1, ended_at,
+                              type(error).__name__, error)
+            raise LockLost(f"the lease on the lock of team {self.team} ran out without a successful renewal") from error
+        self.logger.warning("The team services lock's lease looked ended, but the lock still named this instance at "
+                            "the revision it wrote, so nobody else served; it was renewed (a machine that slept or "
+                            "paused, or a slow start). event=team_services_lock_lease_resumed team=%s instance=%s "
+                            "lease_ended_at=%s failed_attempts=%s", self.team, self.instance, ended_at, failures)
+
     async def release(self) -> None:
         """Let a standby take over at once instead of after the lease; a lock another instance holds now stays."""
 
@@ -279,7 +359,6 @@ class SingleInstanceLock:
         except KeyNotFoundError:
             pass
         except BadRequestError as error:
-            # nats-py reports a delete under another revision as a bad request with JetStream's
-            # wrong-last-sequence code, not as the KeyWrongLastSequenceError it raises for updates.
-            if not isinstance(error, KeyWrongLastSequenceError) and error.err_code != _WRONG_LAST_SEQUENCE:
+            # nats-py reports a delete under another revision as a bad request (state_records.wrong_revision).
+            if not wrong_revision(error):
                 raise
