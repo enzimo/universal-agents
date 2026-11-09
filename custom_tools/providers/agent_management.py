@@ -79,11 +79,16 @@ def _refused_for_another_contract(result: AgentCreationResultV1) -> Optional[str
 @tool
 def get_known_agents() -> str:
     """
-    Get a map of all known agents and their current status.
+    Get the team's live agents as this agent knows them.
 
-    Returns information about other agents that this agent has received
-    status updates from. Useful for understanding what agents are available
-    for task delegation.
+    The list comes from the team's signed agent records: every other agent
+    whose host keeps reporting, with its type, name, whether it is the team
+    lead, paused or busy, and whether it takes new work. An agent that left,
+    or whose host stopped reporting, is not listed. Each entry's last_seen_at
+    is when this agent last took that entry as it now stands (its record last
+    changed), not a time the other agent wrote. What an agent is doing now
+    (its task, queue, skills or findings) is not here: ask it with
+    query_agent_state(live="true").
 
     Returns:
         JSON string containing a map of agent IDs to their AgentStatus objects.
@@ -268,8 +273,9 @@ def instantiate_agent(
     Create a new agent of the specified type.
 
     Instantiates a new specialist agent that will connect to the NATS
-    message bus and be available for task delegation. The new agent
-    will broadcast its status when it becomes operational.
+    message bus and be available for task delegation. Once it has started
+    and takes work, its record lists it for the team (get_known_agents),
+    usually within seconds; a delegation to it by name waits for that.
 
     Args:
         agent_type: The named agent type to instantiate (e.g., "CodeWritingAgent",

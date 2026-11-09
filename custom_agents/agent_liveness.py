@@ -92,8 +92,6 @@ from runtime_settings.stuck_tasks import StuckTaskSettings
 from storage.agent_launch_repository import ACTIVE_LAUNCH_STATES, AgentLaunchRepository
 
 _ENDED_LAUNCH_STATES = frozenset({AgentLaunchState.RETIRED, AgentLaunchState.FAILED})
-# A sender's own time may run this far ahead of the lead's clock before it is logged.
-STATUS_CLOCK_TOLERANCE = timedelta(seconds=5)
 # How often the team lead removes status rows of agents that are gone.
 AGENT_ROW_PRUNE_SECONDS = 60.0
 # What LocalAgentTeamRuntime.inspect_launch answers for a start whose process is gone.

@@ -603,10 +603,6 @@ class UniversalAgent(BaseModel):
         default=AGENT_DEFAULTS.max_broadcast_age_ms.value,
         description="Discard broadcast messages older than this threshold (in milliseconds).",
     )
-    process_broadcasts: Optional[bool] = Field(
-        default=None,
-        description="Whether to consume broadcasts. Defaults to True for Team Leads and False for others.",
-    )
     delete_fanout_on_exit: bool = Field(
         default_factory=lambda: (
             os.getenv(
@@ -4841,8 +4837,9 @@ class UniversalAgent(BaseModel):
             # Prepare shared schedule state first; start the scheduler only after
             # bootstrap below, and retain any store opened by earlier setup.
             self._ensure_schedule_store()
-            # Before any subscription: the lead stores presence as it arrives,
-            # including the replay of every agent's last status at subscribe.
+            # Before any subscription: every agent refreshes its own status row
+            # here (custom_agents.agent_liveness); who else is on the team comes
+            # from the team's agent records (custom_agents.team_directory).
             self._agent_state_store = AgentStateStore(
                 db_path=self.task_manager._db_path,
                 logger=self._logger,
@@ -5422,8 +5419,8 @@ class UniversalAgent(BaseModel):
         refresh_state = True
         try:
             # Admission must be exclusive before its first storage await. An
-            # empty probe must not publish busy/idle transitions: receiving
-            # those presence messages would trigger another empty probe.
+            # empty probe must not publish busy/idle transitions that did not
+            # happen: they go out as presence and as the agent's record.
             async with self._execution_lanes.hold(MAIN_LANE):
                 started = await task_message_runtime._check_and_process_next_task(
                     self, MAIN_LANE
