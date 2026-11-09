@@ -500,3 +500,103 @@ def test_without_a_view_nothing_is_found_and_that_is_logged(monkeypatch: pytest.
     with caplog.at_level(logging.WARNING):
         assert team_directory.live_agent_status(directory_owner(), "Researcher") is None
     assert "event=team_directory_unavailable" in caplog.text
+
+
+# -- a named agent to give work to (live_named_agent, A12) ------------------------------------------
+
+
+class _Growing(_View):
+    """A view whose named agent's record arrives a moment after the lookup starts, as after a launch."""
+
+    def __init__(self, arrives_after: float, *members: TeamAgent) -> None:
+        super().__init__()
+        self._later, self._at = {item.agent: item for item in members}, None
+        self._arrives_after = arrives_after
+
+    def _now(self):
+        import time
+
+        if self._at is None:
+            self._at = time.monotonic()
+        if time.monotonic() - self._at >= self._arrives_after:
+            self._members.update(self._later)
+
+    def named(self, name: str):
+        self._now()
+        return super().named(name)
+
+
+def _status_answer(**changes):
+    reply = {"outcome": "ok", "agent_type": "Researcher", "is_lead": False, "paused": False, "executing": False,
+             "has_capacity": True, "accepting_work": True, "exiting": False, "queued": 0, "waiting": 0, "deferred": 0}
+    reply.update(changes)
+    return reply
+
+
+@pytest.mark.asyncio
+async def test_a_named_worker_that_crashed_but_is_still_listed_is_refused_at_once(monkeypatch, caplog) -> None:
+    from custom_transport.protocol1.live import ServiceUnavailable
+
+    asked = AsyncMock(side_effect=ServiceUnavailable("agent.status", "ctl.agent.worker_1", "no responders"))
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    asker = directory_owner()
+    asker.subtask_status_probe_timeout_seconds = 0.5
+
+    with caplog.at_level(logging.WARNING):
+        found = await asyncio.wait_for(team_directory.live_named_agent(asker, "Researcher", "Researcher-1"), 2)
+
+    assert found is None
+    assert asked.await_args.args[1:4] == ("agent.status", {"level": "basic"}, "worker_1")
+    assert asked.await_args.kwargs == {"timeout": 0.5}
+    assert "event=named_agent_not_answering" in caplog.text and "target_agent_id=worker_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_worker_started_just_before_is_found_once_its_record_arrives(monkeypatch) -> None:
+    view = _Growing(0.3, member("worker_9", "Researcher-9"))
+    monkeypatch.setattr(agent_requests, "team_view", lambda: view)
+    monkeypatch.setattr(agent_requests, "ask_agent", AsyncMock(return_value=_status_answer()))
+
+    found = await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-9", start_seconds=5)
+
+    assert found is not None and found.self_id == "worker_9"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [_status_answer(exiting=True), _status_answer(accepting_work=False),
+                                    _status_answer(agent_type="Writer"),
+                                    {"outcome": "not_allowed", "message": "no"}])
+async def test_a_named_worker_that_cannot_take_the_task_is_refused(monkeypatch, answer) -> None:
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    monkeypatch.setattr(agent_requests, "ask_agent", AsyncMock(return_value=answer))
+
+    assert await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-1") is None
+
+
+@pytest.mark.asyncio
+async def test_a_name_nobody_has_is_refused_after_the_bounded_wait(monkeypatch, caplog) -> None:
+    asked = AsyncMock()
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    monkeypatch.setattr(team_directory, "VIEW_POLL_SECONDS", 0.01)
+
+    with caplog.at_level(logging.INFO):
+        found = await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-7", start_seconds=0.1)
+
+    assert found is None and asked.await_count == 0 and "event=named_agent_not_live" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_leads_delegation_by_name_asks_the_worker_and_by_type_does_not(monkeypatch) -> None:
+    from custom_agents.delegation_runtime import _probe_live_named_agent_type
+
+    asked = AsyncMock(return_value=_status_answer())
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    lead = directory_owner()
+
+    assert (await _probe_live_named_agent_type(lead, "Researcher", "Researcher-1")).self_id == "worker_1"
+    assert asked.await_count == 1
+    assert (await _probe_live_named_agent_type(lead, "Researcher")).self_id == "worker_1"
+    assert asked.await_count == 1

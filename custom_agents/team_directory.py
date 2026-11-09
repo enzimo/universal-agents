@@ -41,12 +41,21 @@ own loop, here. Nothing else writes these two maps.
   existed has no record and is failed as before. An agent whose host only stopped
   reporting has not left for good: the host may be unreachable for a while, and the
   watchdog handles work that never comes back.
+- **Finding a named agent to give work to** (``live_named_agent``). A by-name delegation goes
+  to the agent's own mailbox, so the agent must be there to take it. The lookup waits up to
+  ``NAMED_AGENT_START_SECONDS`` for the name to appear in the view, so an agent started just
+  before (``instantiate_agent``) is found once its record arrives, and then asks it for its
+  basic ``agent.status`` within the subtask probe's timeout. An agent that is still in the
+  view but does not answer (its process crashed, and its host's record has not expired yet),
+  that is exiting or that takes no work is refused at once, instead of the subtask waiting
+  for the watchdog.
 - **No database writes.** The team lead no longer copies other agents' status into the
   shared ``agent_states`` table; every agent refreshes its own row there.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
@@ -56,6 +65,11 @@ from custom_messages.enums import MessageMetaType
 from custom_transport.protocol1.team_agents import TeamAgent
 
 _LOGGER = logging.getLogger(__name__)
+# How long a by-name lookup waits for the agent's record to reach the view: a thread worker the
+# lead has just started connects, joins its host, opens its session and writes its record first
+# (measured in tests/test_live_worker_pools.py; module docstring). How often the view is read meanwhile.
+NAMED_AGENT_START_SECONDS = 10.0
+VIEW_POLL_SECONDS = 0.2
 # The fields an entry takes from the record; an entry whose fields are unchanged is kept as it is.
 _RECORD_FIELDS = {"self_id", "team_id", "name", "named_agent_type", "agent_role", "is_team_lead", "is_paused",
                   "is_executing", "is_busy", "accepting_work", "is_exiting"}
@@ -204,22 +218,61 @@ async def _still_waiting(agent: Any, task_id: str, departed: TeamAgent) -> bool:
     return True
 
 
+async def live_named_agent(agent: Any, named_agent_type: Optional[str], target_agent_name: str, *,
+                           start_seconds: float = NAMED_AGENT_START_SECONDS) -> Optional[AgentStatus]:
+    """The named agent, when it is live, takes work and answers its status now; None otherwise (module docstring)."""
+
+    from custom_agents.agent_requests import ask_agent
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + start_seconds
+    status = live_agent_status(agent, named_agent_type, target_agent_name, quiet=True)
+    while status is None and loop.time() < deadline:
+        await asyncio.sleep(VIEW_POLL_SECONDS)
+        status = live_agent_status(agent, named_agent_type, target_agent_name, quiet=True)
+    if status is None:
+        live_agent_status(agent, named_agent_type, target_agent_name)  # logs when the view is not known
+        agent._logger.info("[%s] No live agent has this name. event=named_agent_not_live agent_id=%s "
+                           "target_agent_name=%s target_named_agent_type=%s waited_seconds=%s", agent.id, agent.id,
+                           target_agent_name, named_agent_type, start_seconds)
+        return None
+    timeout = max(0.1, float(getattr(agent, "subtask_status_probe_timeout_seconds", None) or 5.0))
+    try:
+        reply = await ask_agent(agent, "agent.status", {"level": "basic"}, str(status.self_id), timeout=timeout)
+    except Exception as error:  # noqa: BLE001 - no answer, a refusal or a broken reply: it cannot take the task now
+        why = f"{type(error).__name__}: {error}"
+    else:
+        if reply.get("outcome") != "ok":
+            why = f"answered {reply.get('outcome')}"
+        elif reply.get("exiting") or not reply.get("accepting_work"):
+            why = "it is exiting" if reply.get("exiting") else "it takes no work now"
+        elif named_agent_type and reply.get("agent_type") != named_agent_type:
+            why = f"it is a {reply.get('agent_type')}"
+        else:
+            return status
+    agent._logger.warning("[%s] A named agent is in the team's records but cannot take work now; the delegation "
+                          "is refused. event=named_agent_not_answering agent_id=%s target_agent_id=%s "
+                          "target_agent_name=%s reason=%s", agent.id, agent.id, status.self_id, target_agent_name, why)
+    return None
+
+
 def live_agent_status(agent: Any, named_agent_type: Optional[str],
-                      target_agent_name: Optional[str] = None) -> Optional[AgentStatus]:
+                      target_agent_name: Optional[str] = None, *, quiet: bool = False) -> Optional[AgentStatus]:
     """A live agent of the type (or with the name) that accepts work, from the view; None when there is none.
 
-    This answers what the delegation probe asked over the operational subject until step 7b:
-    the records already say who is live, so nothing is sent. A name two live agents share
-    finds nobody (``TeamAgents.named``).
+    This answers from the records alone, so nothing is sent (``live_named_agent`` also asks a
+    named agent). A name two live agents share finds nobody (``TeamAgents.named``). ``quiet``
+    leaves out the warning that the view is not known yet, for callers that look again.
     """
 
     from custom_agents.agent_requests import team_view
 
     view = team_view()
     if view is None:
-        agent._logger.warning("[%s] The team's agents are not known yet (this process has not joined, or runs "
-                              "without the launcher). event=team_directory_unavailable target_named_agent_type=%s "
-                              "target_agent_name=%s", agent.id, named_agent_type, target_agent_name)
+        if not quiet:
+            agent._logger.warning("[%s] The team's agents are not known yet (this process has not joined, or runs "
+                                  "without the launcher). event=team_directory_unavailable target_named_agent_type=%s "
+                                  "target_agent_name=%s", agent.id, named_agent_type, target_agent_name)
         return None
     if target_agent_name:
         found = view.named(target_agent_name)
