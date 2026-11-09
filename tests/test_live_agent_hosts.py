@@ -468,7 +468,9 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
 
 
 @pytest.mark.asyncio
-async def test_live_cleanup_removes_exact_installation_and_team_keys_only(broker, tmp_path, monkeypatch):
+async def test_live_cleanup_removes_exact_installation_and_team_keys_only(
+    broker, tmp_path, monkeypatch,  # noqa: F811 - the shared live NATS fixture
+):
     from unittest.mock import AsyncMock
     from tests.protocol1_team_support import _remove_what_the_team_left
 
