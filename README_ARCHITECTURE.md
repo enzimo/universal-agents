@@ -1494,8 +1494,9 @@ available"), so the file delivered is the file that was checked. The Photon
 sidecar reads a path, so it gets a private 0600 copy under `state/` that is
 removed after the call.
 
-Published pages (how-tos, articles, apps from `publish_single_page_site`) are
-deliverables too, so they are written into the person's folder
+Published pages (how-tos, articles, apps and work reports from
+`publish_single_page_site`) are deliverables too, so they are written into the
+person's folder
 (`users/<person>/sites/<site_id>/`) rather than `state/`. The tool also writes a
 trusted record, `state/published_sites/<site_id>.json`, naming the page's
 folder, the person it was made for, and the SHA-256 of each file
@@ -1505,6 +1506,26 @@ what the Web Chat origin serves. Anyone with a page link can open it, which is
 why site ids end with a random part; the `/docs/sites/` index lists only the
 signed-in person's pages, and a page's chat works only in the page owner's
 signed-in Web Chat session and sends each message as that person.
+
+The `report` kind publishes the work report of a coder-critic-team run. Its
+spec is the `stats.json` the skill's `cct.py stats` wrote, and the page keeps
+the report's own design instead of the runtime theme, with no embedded chat.
+That design lives once, in the canonical skill in `../ua-skills`
+(`skills/coder-critic-team/references/report-design.md`), so every runtime
+shows the same report. `custom_tools/work_report/` therefore holds
+byte-identical copies of the skill's `scripts/render_report.py` and
+`assets/report.css`, and the tool passes the stylesheet in explicitly.
+`scripts/sync_work_report_renderer.py` copies them; with `--check` it fails on
+a stale copy or a missing canonical skill. A test runs that check when
+`../ua-skills` is checked out beside this repository and is skipped otherwise,
+because CI checks out only this repository; another test checks the script's
+own refusals without the sibling. The copied renderer validates every field it
+reads, so the tool refuses malformed statistics (`invalid_report_stats`)
+before writing anything; publishing, the record and updates are the same as
+for the other kinds. The site host adds no Content-Security-Policy to
+`/docs/sites/<site_id>/`, so the report's inline stylesheet applies; a CSP
+added there later must allow inline styles (`style-src 'unsafe-inline'`) or the
+report loses its design.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager

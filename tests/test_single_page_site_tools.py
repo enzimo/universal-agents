@@ -9,8 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from custom_tools import workspace_scope
+from custom_tools.work_report import WORK_REPORT_CSS_PATH
+from scripts import sync_work_report_renderer
 from tests.task_work_support import set_agent_ref
 from runtime_settings.instance_layout import InstanceLayout
+
+# A trimmed stats.json (schema 1) from the coder-critic-team sample run.
+WORK_REPORT_STATS = Path(__file__).parent / "fixtures" / "work_report" / "stats.json"
 
 
 class _FakeTaskManager:
@@ -326,7 +331,7 @@ def test_publish_single_page_site_exposes_typed_site_kind_contract() -> None:
     site_kind_schema = publish_single_page_site.tool_spec["inputSchema"]["json"]["properties"]["site_kind"]
 
     assert site_kind_schema["default"] == "article"
-    assert site_kind_schema["enum"] == ["article", "comparison", "how_to", "app"]
+    assert site_kind_schema["enum"] == ["article", "comparison", "how_to", "app", "report"]
     assert "These are choices, not requirements" in publish_single_page_site.tool_spec["description"]
 
 
@@ -512,3 +517,169 @@ def test_agent_supplied_values_cannot_end_the_page_script(tmp_path: Path, monkey
     assert "<script>alert(document.cookie)</script>" not in html_text
     assert "\\u003c/script\\u003e" in html_text
     assert '"signInUrl": "/webchat"' in html_text
+
+
+def _work_report_stats() -> dict:
+    return json.loads(WORK_REPORT_STATS.read_text(encoding="utf-8"))
+
+
+def _publish_report_as(monkeypatch: pytest.MonkeyPatch, person: str | None, spec: dict) -> dict:
+    from custom_tools.single_page_site_tools import publish_single_page_site
+
+    monkeypatch.setattr(workspace_scope, "task_person_id", lambda _agent: person)
+    result = publish_single_page_site(json.dumps(spec), site_kind="report")
+    payload = _payload(result)
+    # Every refusal is the tool's usual error result.
+    assert result["status"] == ("success" if payload["status"] == "success" else "error")
+    return payload
+
+
+def _article_instead_of_stats(stats: dict) -> None:
+    stats.clear()
+    stats["title"] = "An article, not stats"
+
+
+def _instance_layout(tmp_path: Path) -> InstanceLayout:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    set_agent_ref(_InstanceAgent(layout))
+    return layout
+
+
+def test_a_work_report_publishes_with_its_own_design_and_a_trusted_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _instance_layout(tmp_path)
+    monkeypatch.setenv("INTERNAL_WEBSITE_BASE_URL", "http://127.0.0.1:18500")
+    stats = _work_report_stats()
+
+    payload = _publish_report_as(monkeypatch, "alice", stats)
+
+    assert payload["status"] == "success"
+    assert payload["site_kind"] == "report"
+    assert payload["chat_enabled"] is False
+    assert payload["site_url"] == f"http://127.0.0.1:18500/docs/sites/{payload['site_id']}/"
+    assert "retry-failed-webhook-deliveries" in payload["site_id"]
+    index_path = layout.person_sites_dir("alice") / payload["site_id"] / "index.html"
+    assert Path(payload["index_path"]) == index_path
+    page = index_path.read_text(encoding="utf-8")
+    title = stats["run"]["title"]
+    assert f"<title>{title} · work report</title>" in page
+    assert f'<h1 class="title">{title}</h1>' in page
+    # The report's design, with its stylesheet passed in, not the runtime theme or chat.
+    assert '<html lang="en" class="cct-page">' in page
+    assert f"<style>{WORK_REPORT_CSS_PATH.read_text(encoding='utf-8')}</style>" in page
+    assert "<script" not in page.lower()
+    assert "/docs/assets/" not in page
+    assert "site-chat" not in page
+    assert "Decisions to check" in page
+    record = _record(layout.root, payload["site_id"])
+    assert record["site_kind"] == "report"
+    assert record["title"] == title
+    assert record["owner_person_id"] == "alice"
+    assert record["files"] == {"index.html": hashlib.sha256(index_path.read_bytes()).hexdigest()}
+
+
+def test_a_work_report_is_updated_in_place_through_top_level_update_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _instance_layout(tmp_path)
+    first = _publish_report_as(monkeypatch, "alice", _work_report_stats())
+    stats = _work_report_stats()
+    stats["narrative"]["summary"] = "The fix round closed the last blocking finding."
+    stats["update_site_id"] = first["site_id"]
+
+    updated = _publish_report_as(monkeypatch, "alice", stats)
+    refused = _publish_report_as(monkeypatch, "bob", stats)
+
+    assert updated["operation"] == "updated"
+    assert updated["site_id"] == first["site_id"]
+    page = Path(updated["index_path"]).read_text(encoding="utf-8")
+    assert "The fix round closed the last blocking finding." in page
+    record = _record(layout.root, first["site_id"])
+    assert record["update_count"] == 1
+    assert record["files"]["index.html"] == hashlib.sha256(page.encode("utf-8")).hexdigest()
+    assert refused["failure_reason"] == "site_not_found"
+
+
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        (lambda stats: stats["run"].pop("title"), "run.title is missing"),
+        (lambda stats: stats.update(schema=2), "schema 1"),
+        (lambda stats: stats["run"].update(status="merged"), "run.status is not one of"),
+        (lambda stats: stats["item_list"][0].update(lens="vibes"), "item_list[0].lens is not one of"),
+        (lambda stats: stats["run"].update(started_at="yesterday"), "run.started_at"),
+        (_article_instead_of_stats, "schema 1"),
+    ],
+)
+def test_malformed_work_report_stats_are_refused_and_nothing_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change, named: str
+) -> None:
+    layout = _instance_layout(tmp_path)
+    stats = _work_report_stats()
+    change(stats)
+
+    payload = _publish_report_as(monkeypatch, "alice", stats)
+
+    assert payload["status"] == "failed"
+    assert payload["failure_stage"] == "input_validation"
+    assert payload["failure_reason"] == "invalid_report_stats"
+    assert named in payload["message"]
+    assert payload["retryable"] is False
+    assert list(layout.published_sites_dir.glob("*.json")) == []
+    assert not layout.person_sites_dir("alice").exists() or not any(layout.person_sites_dir("alice").iterdir())
+
+
+def test_hostile_strings_in_a_work_report_are_escaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _instance_layout(tmp_path)
+    hostile = '<script>alert(1)</script><img src=x onerror="alert(2)">'
+    stats = _work_report_stats()
+    stats["run"]["title"] = "Retry </title></style>" + hostile
+    stats["run"]["pr"]["url"] = "javascript:alert(3)"
+    stats["narrative"]["summary"] = hostile
+    stats["acceptance"][0]["evidence"] = hostile
+    stats["item_list"][0]["title"] = hostile
+    stats["diff"]["files_list"][0]["path"] = hostile
+    issue = next(f for f in stats["review"]["findings"] if f["status"] == "issue_filed")
+    issue["issue_url"] = "javascript:alert(4)"
+
+    payload = _publish_report_as(monkeypatch, "alice", stats)
+    page = Path(payload["index_path"]).read_text(encoding="utf-8")
+
+    assert payload["status"] == "success"
+    assert "<script" not in page.lower()
+    assert "<img" not in page
+    assert "javascript:" not in page
+    assert page.count("</style>") == 1
+    assert page.count("</title>") == 1
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert 'onerror=&quot;alert(2)&quot;' in page
+
+
+def test_work_report_sync_check_refuses_a_stale_copy_or_a_missing_skill(tmp_path: Path) -> None:
+    canonical = tmp_path / "coder-critic-team"
+    (canonical / "scripts").mkdir(parents=True)
+    (canonical / "assets").mkdir()
+    (canonical / "SKILL.md").write_text("---\nname: coder-critic-team\n---\n", encoding="utf-8")
+    copies = sync_work_report_renderer.DESTINATION
+    (canonical / "scripts" / "render_report.py").write_bytes((copies / "render_report.py").read_bytes())
+    (canonical / "assets" / "report.css").write_bytes((copies / "report.css").read_bytes() + b"\n")
+    check = ["--check", "--canonical-root", str(canonical)]
+
+    assert sync_work_report_renderer.main(check) == 1
+    assert sync_work_report_renderer.stale_copies(canonical) == ["report.css"]
+    (canonical / "assets" / "report.css").write_bytes((copies / "report.css").read_bytes())
+    assert sync_work_report_renderer.main(check) == 0
+    (canonical / "SKILL.md").unlink()
+    assert sync_work_report_renderer.main(check) == 1
+
+
+@pytest.mark.skipif(
+    bool(sync_work_report_renderer.canonical_skill_missing(sync_work_report_renderer.DEFAULT_CANONICAL_ROOT)),
+    reason="The canonical coder-critic-team skill is not in a sibling ua-skills checkout (CI checks out only this repository).",
+)
+def test_work_report_renderer_copies_match_the_canonical_skill() -> None:
+    # Fails when ua-skills changed the renderer or stylesheet without a sync:
+    # python -m scripts.sync_work_report_renderer
+    assert sync_work_report_renderer.main(["--check"]) == 0

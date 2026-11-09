@@ -1571,7 +1571,8 @@ outbound text-to-speech are controlled separately.
 ## Website Host and Generated Sites
 
 The shared website app serves user docs, generated skill docs, generated
-article, comparison, how-to, and app sites, plus embedded generated-site chat.
+article, comparison, how-to, app, and work report sites, plus embedded
+generated-site chat.
 The default settings are:
 
 ```yaml

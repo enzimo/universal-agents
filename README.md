@@ -47,7 +47,7 @@ Features:
 - 🔐 Integrated encrypted credentials store
 - 🤖 OpenAI API, OpenAI Codex and xAI Oauth support
 - 🎙️ Voice input / output support
-- 🗺️ Custom-generated articles, comparisons, how-to sites, and interactive apps
+- 🗺️ Custom-generated articles, comparisons, how-to sites, interactive apps, and coder-critic work reports
 - 📲 Integration with Telegram, WhatsApp, Discord, Signal CLI, iMessage, and Web Chat
 - 🛡️ Fully integrated permissions boundaries for agent actions
 - ♻️ Internal self-improvement loops
@@ -71,7 +71,7 @@ The Web UI is designed to be lightweight so don't expect it to have all the bell
 
 ### Custom Website Generation
 
-In terms of usability, Markdown is downright awkward. For ease of use, Universal Agents can generate browser-ready articles, side-by-side comparisons, procedural how-to pages, and interactive apps with browser-local progress tracking. Ask for the format that fits the content—for example, a car comparison, a repair walkthrough, or a workout tracker. Generated sites are automatically saved and can be revisited at any time. Each page also has a quick chat interface for follow-up questions.
+In terms of usability, Markdown is downright awkward. For ease of use, Universal Agents can generate browser-ready articles, side-by-side comparisons, procedural how-to pages, and interactive apps with browser-local progress tracking. Ask for the format that fits the content—for example, a car comparison, a repair walkthrough, or a workout tracker. Generated sites are automatically saved and can be revisited at any time. Each page also has a quick chat interface for follow-up questions. A coder-critic-team run can publish its work report the same way, in the report's own design and without chat.
 
 ## 🧠 Chapter 3: The Intelligence Stack
 

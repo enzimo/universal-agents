@@ -1,8 +1,9 @@
 # Generated Sites
 
 Generated sites are browser pages the agent can create when information is
-easier to use visually than in a chat thread. Every generated site has embedded
-chat and uses the same saved visual theme as the rest of the website.
+easier to use visually than in a chat thread. Articles, comparisons, how-tos
+and apps have embedded chat and use the same saved visual theme as the rest of
+the website. A work report keeps its own design and has no chat.
 
 ## Site Types
 
@@ -25,6 +26,14 @@ The agent chooses the content shape before publishing:
   goal dashboards. Useful optional elements include stat cards, counters,
   progress trackers, task or habit checklists, action links, and supporting
   content sections.
+- **Work report** is only for the report of a coder-critic-team run: what a
+  coding agent and a critic agent built, how they settled each critique, and
+  what the project review found. The agent publishes the statistics the
+  skill's `cct.py stats` command wrote, unchanged, and the page shows them
+  in the report's own design: one page without scripts, with its own light and
+  dark colors, not the website theme, and no chat panel. Statistics that are
+  not in the shape `cct.py stats` writes are refused and nothing is published.
+  Any other report is an article.
 
 These elements are building blocks, not required template sections. Generated
 sites omit empty elements and should not add filler merely to populate a
@@ -102,8 +111,9 @@ content. Only a page made for you can be regenerated for you.
 
 ## Embedded Chat
 
-The embedded chat panel sends follow-up questions back through the gateway,
-as you. It works only for the person the page was made for, signed in to Web
+Every page except a work report has an embedded chat panel. It sends
+follow-up questions back through the gateway, as you. It works only for the
+person the page was made for, signed in to Web
 Chat in the same browser; anyone else who opens the page sees a sign-in link
 instead, so a shared link never lets someone talk to the agents in your name.
 When the generated page includes the original session and conversation

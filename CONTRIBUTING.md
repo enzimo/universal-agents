@@ -286,6 +286,14 @@ same way from `docker/secret_env_vars.yaml`, the list of secret environment
 variables and the processes that receive them. After changing that list, run
 `.venv/bin/python scripts/export_secret_env_docs.py` (it also has `--check`).
 
+`custom_tools/work_report/render_report.py` and `report.css` are byte-identical
+copies of the `coder-critic-team` skill's renderer and stylesheet in the
+sibling `../ua-skills` checkout. Change them there, then run
+`.venv/bin/python -m scripts.sync_work_report_renderer` and repeat it with
+`--check`. The test that compares the copies runs only when `../ua-skills` is
+checked out beside this repository; CI checks out only this one, so run it
+locally after a renderer change.
+
 Live tests that accept either `config.yaml` or `instance_config.yaml` use
 `TEAM_NATS_LIVE_CONFIG` or `UA_LIVE_CONFIG`. The loader identifies the file by
 its required instance identity fields because the two schemas have independent
