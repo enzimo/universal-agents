@@ -3246,6 +3246,9 @@ async def test_live_turn_action_delegation_aborts_before_publish_when_target_una
                 "custom_agents.strands_agent.UniversalAgent._configure_model",
                 return_value=MagicMock(),
             ),
+            # By name, the lead first waits a bounded time for a just-started worker to appear
+            # (custom_agents.team_directory); nobody starts here, so a short wait is enough.
+            patch("custom_agents.team_directory.NAMED_AGENT_START_SECONDS", 0.5),
         ):
             manager = _agent(
                 agent_id=manager_id,
