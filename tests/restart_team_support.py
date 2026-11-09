@@ -20,6 +20,7 @@ from custom_agents.agent_requests import AskBlocked, SessionlessAgent
 from custom_agents.live_controls import status_reply
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.enums import MessageMetaType
+from custom_messages.wire.frame import body_model
 from custom_transport.protocol1.team_agents import TeamAgent
 
 
@@ -113,4 +114,6 @@ class FakeTeam:
         if answer.reply is None:
             await asyncio.Event().wait()
         assert answer.reply is not None
+        # A real reply passes the contract's reply model before anyone reads it (frame verification).
+        body_model(f"{kind}.reply")[0].validate_python(answer.reply)
         return dict(answer.reply)

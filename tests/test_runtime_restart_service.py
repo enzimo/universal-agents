@@ -503,8 +503,8 @@ def test_the_person_sees_a_specialist_that_did_not_answer(agent) -> None:
     assert "Agents that did not answer when asked what they are running (1): Ada (agent_specialist). " \
         "Their work is unknown" in effect
     assert "If an agent that answered stops answering" in effect
-    assert proposal.summary.endswith("2 tasks may be interrupted or delayed; 1 agent did not answer, so its work "
-                                     "is unknown.")
+    assert proposal.summary.endswith("2 tasks may be interrupted or delayed; 1 agent did not answer or cannot be "
+                                     "asked, so its work is unknown.")
     assert "Ada (agent_specialist)" in plan["user_impact_summary"]
 
 

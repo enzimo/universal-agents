@@ -36,7 +36,7 @@ from custom_agents.runtime_restart_service import (
 )
 from custom_messages.contracts.common_v1 import utc_now
 from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
-from tests.restart_team_support import FakeTeam, worker_status
+from tests.restart_team_support import FakeTeam, status_answer, worker_status
 
 LEAD_ID = "agent_lead"
 ADA = "agent_ada"
@@ -122,7 +122,8 @@ def test_an_agent_that_does_not_answer_is_shown_as_not_answering(team: FakeTeam,
     assert snapshot.interrupted_work() == {f"{ADA}#not-answering": "Ada did not answer, so its work is unknown"}
     assert "event=runtime_restart_agent_not_answering" in caplog.text and f"target_agent_id={ADA}" in caplog.text
     review = _review(snapshot)
-    assert "Restart all; no task is known to be running, queued or waiting; 1 agent did not answer" in review
+    assert "Restart all; no task is known to be running, queued or waiting; 1 agent did not answer or cannot be " \
+        "asked" in review
     assert "Agents that did not answer when asked what they are running (1): Ada (agent_ada)." in review
     assert "interrupts none" not in review
 
@@ -277,7 +278,12 @@ def test_an_agent_a_host_runs_without_a_session_is_listed_as_not_answering(team:
     key = "agent-Researcher-1#Researcher-agent_bo#no-session"
     assert key in current.interrupted_work() and key not in current.interrupted_tasks()
     review = _review(current)
-    assert "Researcher-agent_bo on host agent-Researcher-1 (no session: its host already runs as many agents" in review
+    assert current.interrupted_work()[key] == (
+        "Researcher-agent_bo on host agent-Researcher-1 runs without a session (its host already runs as many "
+        "agents as it may), so nobody can ask what it is doing; its work is unknown")
+    assert "Agents that run without a session, so nobody can ask what they are doing (1): Researcher-agent_bo on " \
+        "host agent-Researcher-1 (its host already runs as many agents as it may)." in review
+    assert "did not answer when asked" not in review, "nobody asked it"
     assert "event=runtime_restart_agent_without_session" in caplog.text
     # It appeared after planning: its work was never approved. Planned with it, it keeps the approval.
     assert "do not answer now" in _outside_approval(approved, current)
@@ -305,6 +311,24 @@ def test_a_component_named_like_a_live_agent_does_not_hide_that_agent_stopping(t
     _ada_runs(team, SILENT)
 
     assert "Ada" in _outside_approval(approved, _capture())
+
+
+def test_no_id_a_restart_key_is_built_from_can_hold_a_hash() -> None:
+    """The '#' keys rely on the contract: a reported task id, an agent id, a host id or a component never holds '#'."""
+
+    from pydantic import TypeAdapter
+
+    from custom_messages.wire import models
+    from custom_messages.wire.frame import body_model
+
+    for id_type in (models.RecordId, models.AgentId, models.RuntimeId, models.TokenId):
+        with pytest.raises(ValidationError):
+            TypeAdapter(id_type).validate_python(f"{ADA}#not-answering")
+    reply = status_answer(worker_status("agent_bo", "Bo", current_task_id="task_bo"))
+    body_model("agent.status.reply")[0].validate_python(reply)
+    for planted in (f"{ADA}#not-answering", f"{ADA}#unknown-task", f"lead#{ADA}#no-session"):
+        with pytest.raises(ValidationError):
+            body_model("agent.status.reply")[0].validate_python({**reply, "current_task_id": planted})
 
 
 def test_a_reported_task_id_cannot_switch_off_the_recheck_for_another_agent(team: FakeTeam) -> None:

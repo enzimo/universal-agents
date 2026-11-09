@@ -187,8 +187,17 @@ class RuntimeRestartAgentState(BaseModel):
     @property
     def label(self) -> str:
         if self.without_session is not None:
-            return f"{self.agent_id} on host {self.host} (no session: {self.without_session})"
+            return f"{self.agent_id} on host {self.host}"
         return self.name or self.agent_id
+
+    @property
+    def unknown_work(self) -> str:
+        """Why its work is unknown, in words: it did not answer, or nobody can ask it."""
+
+        if self.without_session is not None:
+            return (f"{self.label} runs without a session ({self.without_session}), so nobody can ask what it is "
+                    "doing; its work is unknown")
+        return f"{self.label} did not answer, so its work is unknown"
 
     @property
     def not_answering_key(self) -> str:
@@ -231,7 +240,7 @@ class RuntimeRestartImpactSnapshot(BaseModel):
         delegated_by = {child.task_id: item.task_id for item in self.manager_tasks for child in item.subtasks}
         for agent in self.known_team_agents:
             if not agent.answered:
-                work[agent.not_answering_key] = f"{agent.label} did not answer, so its work is unknown"
+                work[agent.not_answering_key] = agent.unknown_work
                 continue
             if not agent.is_executing:
                 continue
@@ -244,7 +253,7 @@ class RuntimeRestartImpactSnapshot(BaseModel):
         return dict(sorted(work.items()))
 
     def agents_not_answering(self) -> tuple[RuntimeRestartAgentState, ...]:
-        """The other agents that did not answer the team lead, so their work is unknown."""
+        """The other agents whose work is unknown: they did not answer the team lead, or nobody can ask them."""
 
         return tuple(agent for agent in self.known_team_agents if not agent.answered)
 
@@ -391,8 +400,8 @@ def _outside_approval(approved: RuntimeRestartImpactSnapshot, current: RuntimeRe
         why.append(f"New work started that this restart would interrupt: {', '.join(started)}.")
     if stopped_answering:
         why.append(
-            f"These agents do not answer now, so the restart may interrupt work nobody approved: "
-            f"{', '.join(stopped_answering)}."
+            f"These agents do not answer now or cannot be asked, so the restart may interrupt work nobody "
+            f"approved: {', '.join(stopped_answering)}."
         )
     why.append("The approval covers only the work listed when the restart was planned.")
     return " ".join(why)
@@ -681,7 +690,7 @@ def _restart_summary(plan: RuntimeRestartPlan, processes: str) -> str:
         work = "no tasks are running, queued or waiting"
     if silent:
         work += (
-            f"; {silent} agent{'s' if silent != 1 else ''} did not answer, so "
+            f"; {silent} agent{'s' if silent != 1 else ''} did not answer or cannot be asked, so "
             f"{'their' if silent != 1 else 'its'} work is unknown"
         )
     return summary_line(f"Restart {processes}; {work}.")
@@ -712,7 +721,8 @@ def _impact_summary(plan: RuntimeRestartPlan) -> str:
     work = plan.impact_snapshot.interrupted_tasks()
     if not work:
         if plan.impact_snapshot.agents_not_answering():
-            return "No task is known to be running, queued or waiting, but some agents did not answer."
+            return ("No task is known to be running, queued or waiting, but some agents did not answer or "
+                    "cannot be asked.")
         return "No tasks are running, queued or waiting, so the restart interrupts none."
     entries = [f"{task_id} ({doing})" for task_id, doing in work.items()]
     return _one_review_line(
@@ -723,15 +733,12 @@ def _impact_summary(plan: RuntimeRestartPlan) -> str:
 
 
 def _not_answering_summary(plan: RuntimeRestartPlan) -> str:
-    """The other agents that did not answer, as one review line; empty when every agent answered."""
+    """The other agents that did not answer, as one review line; empty when every agent asked answered."""
 
-    agents = plan.impact_snapshot.agents_not_answering()
+    agents = [agent for agent in plan.impact_snapshot.agents_not_answering() if agent.without_session is None]
     if not agents:
         return ""
-    entries = [
-        f"{agent.name} ({agent.agent_id})" if agent.name and agent.without_session is None else agent.label
-        for agent in agents
-    ]
+    entries = [f"{agent.name} ({agent.agent_id})" if agent.name else agent.agent_id for agent in agents]
     return _one_review_line(
         entries,
         lambda names: (
@@ -742,11 +749,28 @@ def _not_answering_summary(plan: RuntimeRestartPlan) -> str:
     )
 
 
-def _review_lines(plan: RuntimeRestartPlan) -> tuple[str, ...]:
-    """What the restart interrupts, for the person: the tasks, then the agents that did not answer."""
+def _without_session_summary(plan: RuntimeRestartPlan) -> str:
+    """The agents hosts run without a session, as one review line; empty when there are none."""
 
-    silent = _not_answering_summary(plan)
-    return (_impact_summary(plan), silent) if silent else (_impact_summary(plan),)
+    agents = [agent for agent in plan.impact_snapshot.agents_not_answering() if agent.without_session is not None]
+    if not agents:
+        return ""
+    entries = [f"{agent.label} ({agent.without_session})" for agent in agents]
+    return _one_review_line(
+        entries,
+        lambda names: (
+            f"Agents that run without a session, so nobody can ask what they are doing ({len(entries)}): {names}. "
+            "Their work is unknown; the restart interrupts whatever they are running."
+        ),
+        "agents",
+    )
+
+
+def _review_lines(plan: RuntimeRestartPlan) -> tuple[str, ...]:
+    """What the restart interrupts, for the person: the tasks, the agents that did not answer, those nobody can ask."""
+
+    return tuple(line for line in (_impact_summary(plan), _not_answering_summary(plan), _without_session_summary(plan))
+                 if line)
 
 
 class RestartPlanFromOtherRelease(ValueError):
