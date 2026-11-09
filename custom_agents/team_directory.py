@@ -28,13 +28,19 @@ own loop, here. Nothing else writes these two maps.
   fails, at once, each such subtask that still waits in the departed agent's own mailbox
   and that nobody ever took: nothing will read that mailbox again (agent ids are new at
   every start) and the subtask is in no saved state. The subtask's route names the
-  mailbox (``header.to_routing_path`` is the agent id a by-name delegation was sent to),
-  and the requester's delegated-task record says whether anyone took it. A subtask a
-  worker took is left alone: a restarted agent takes over what it held from saved state
-  and reports it again, and one handed back goes to another worker; custody recovery and
-  the subtask watchdog handle those. An agent whose host only stopped reporting has not
-  left for good: the host may be unreachable for a while, and the watchdog handles work
-  that never comes back.
+  mailbox (``header.to_routing_path`` is the agent id a by-name delegation was sent to).
+  The requester's delegated-task record says whether a worker said it took it; since that
+  claim is sent after the worker saved the task and may be lost or late, the requester
+  also withdraws the message from the work stream (its ``publish_sequence``) and fails the
+  subtask only when the withdrawal succeeds: a worker that took it removed it from the
+  stream. A subtask a worker took is left alone: a restarted agent takes over what it held
+  from saved state and reports it again, and one handed back goes to another worker;
+  custody recovery and the subtask watchdog handle those, as they do a subtask whose record
+  cannot be read or was never published. One narrow window stays: a worker that saved the
+  task but crashed before removing it from the stream. A subtask delegated before records
+  existed has no record and is failed as before. An agent whose host only stopped
+  reporting has not left for good: the host may be unreachable for a while, and the
+  watchdog handles work that never comes back.
 - **No database writes.** The team lead no longer copies other agents' status into the
   shared ``agent_states`` table; every agent refreshes its own row there.
 """
@@ -50,8 +56,6 @@ from custom_messages.enums import MessageMetaType
 from custom_transport.protocol1.team_agents import TeamAgent
 
 _LOGGER = logging.getLogger(__name__)
-# Each agent's names held by more than one live agent now, with their holders, so a collision is logged once.
-_AMBIGUOUS_NAMES: dict[str, dict[str, tuple[str, ...]]] = {}
 # The fields an entry takes from the record; an entry whose fields are unchanged is kept as it is.
 _RECORD_FIELDS = {"self_id", "team_id", "name", "named_agent_type", "agent_role", "is_team_lead", "is_paused",
                   "is_executing", "is_busy", "accepting_work", "is_exiting"}
@@ -102,10 +106,15 @@ def sync_directory(agent: Any, view: Mapping[str, TeamAgent]) -> None:
 
 
 def _note_ambiguous_names(agent: Any, ambiguous: dict[str, tuple[str, ...]]) -> None:
-    """Log each name two live agents hold, once while it lasts, and when it names one agent again."""
+    """Log each name two live agents hold, once while it lasts, and when it names one agent again.
+
+    The agent remembers them (``UniversalAgent._ambiguous_team_names``), written only here, on its own loop.
+    """
 
     own = str(agent.id)
-    earlier = _AMBIGUOUS_NAMES.get(own, {})
+    earlier = getattr(agent, "_ambiguous_team_names", None)
+    if earlier is None:  # a stand-in agent; UniversalAgent declares it
+        earlier = agent._ambiguous_team_names = {}
     for name, ids in ambiguous.items():
         if earlier.get(name) != ids:
             agent._logger.warning("[%s] Live agents share a name, so it names none of them until only one is left. "
@@ -114,10 +123,8 @@ def _note_ambiguous_names(agent: Any, ambiguous: dict[str, tuple[str, ...]]) -> 
     for name in earlier.keys() - ambiguous.keys():
         agent._logger.info("[%s] A shared name names one agent again. event=team_directory_name_unique agent_id=%s "
                            "name=%s", own, own, name)
-    if ambiguous:
-        _AMBIGUOUS_NAMES[own] = ambiguous
-    else:
-        _AMBIGUOUS_NAMES.pop(own, None)
+    earlier.clear()
+    earlier.update(ambiguous)
 
 
 async def agent_exited(agent: Any, departed: TeamAgent, reason: str) -> None:
@@ -135,8 +142,7 @@ async def agent_exited(agent: Any, departed: TeamAgent, reason: str) -> None:
     ]
     for subtask_info in in_its_mailbox:
         task_id = subtask_info.task.task_id
-        taken = await _taken(agent, task_id, departed)
-        if taken is not False:
+        if not await _still_waiting(agent, task_id, departed):
             continue
         parent_task_id = await task_manager.operations_runtime.run(task_manager.get_parent_task_id, task_id)
         if not parent_task_id:
@@ -153,13 +159,21 @@ async def agent_exited(agent: Any, departed: TeamAgent, reason: str) -> None:
         )
 
 
-async def _taken(agent: Any, task_id: str, departed: TeamAgent) -> Optional[bool]:
-    """Whether any worker took the subtask (its delegated-task record); None when that cannot be read.
+async def _still_waiting(agent: Any, task_id: str, departed: TeamAgent) -> bool:
+    """Whether the subtask still waits in the departed agent's mailbox, untaken: then it may be failed.
 
-    A subtask with no record (delegated before records existed) counts as never taken.
+    True only when its record says nobody took it and its message could be withdrawn from the
+    work stream, or when it has no record (delegated before records existed). Anything that
+    cannot be told is left to the watchdog (module docstring).
     """
 
     from custom_agents.delegated_work_runtime import delegated_tasks
+
+    def kept(why: str, event: str, holder: Optional[str] = None) -> bool:
+        agent._logger.info("[%s] A subtask sent to the departed agent's mailbox is not failed: %s. event=%s "
+                           "agent_id=%s subtask_id=%s departed_agent_id=%s holder_agent_id=%s", agent.id, why, event,
+                           agent.id, task_id, departed.agent, holder)
+        return False
 
     try:
         record = await agent.task_manager.operations_runtime.run(delegated_tasks(agent).get, str(agent.team_id),
@@ -168,14 +182,26 @@ async def _taken(agent: Any, task_id: str, departed: TeamAgent) -> Optional[bool
         agent._logger.exception("[%s] Whether a subtask was taken could not be read; it is left to the subtask "
                                 "watchdog. event=team_agent_left_subtask_unread agent_id=%s subtask_id=%s "
                                 "departed_agent_id=%s", agent.id, agent.id, task_id, departed.agent)
-        return None
-    if record is not None and (record.holder_agent_id is not None or record.holders):
-        agent._logger.info("[%s] A subtask the departed agent's mailbox held was taken by a worker; custody recovery "
-                           "and the watchdog handle it. event=team_agent_left_subtask_kept agent_id=%s subtask_id=%s "
-                           "departed_agent_id=%s holder_agent_id=%s", agent.id, agent.id, task_id, departed.agent,
-                           record.holder_agent_id)
+        return False
+    if record is None:
         return True
-    return False
+    if record.holder_agent_id is not None or record.holders:
+        return kept("a worker took it, so custody recovery and the watchdog handle it",
+                    "team_agent_left_subtask_kept", record.holder_agent_id)
+    if not record.publish_sequence:
+        return kept("it is not published yet, so the watchdog handles it", "team_agent_left_subtask_unpublished")
+    try:
+        withdrawn = bool(await agent.team_comms.delete_work_message(record.publish_sequence))
+    except Exception:
+        agent._logger.exception("[%s] A subtask's message could not be withdrawn; it is left to the subtask watchdog. "
+                                "event=team_agent_left_subtask_withdraw_failed agent_id=%s subtask_id=%s "
+                                "departed_agent_id=%s sequence=%s", agent.id, agent.id, task_id, departed.agent,
+                                record.publish_sequence)
+        return False
+    if not withdrawn:
+        return kept("its message was no longer in the work stream, so a worker took it and its claim has not "
+                    "arrived", "team_agent_left_subtask_taken_unclaimed")
+    return True
 
 
 def live_agent_status(agent: Any, named_agent_type: Optional[str],

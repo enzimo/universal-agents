@@ -1128,6 +1128,8 @@ class UniversalAgent(BaseModel):
     _liveness_observation: LivenessObservation = PrivateAttr(default_factory=LivenessObservation)
     _scheduler_wake: Optional[asyncio.Event] = PrivateAttr(default=None)
     _agent_id_by_name: Dict[str, str] = PrivateAttr(default_factory=dict)
+    # Names two live agents share now, with their holders (custom_agents.team_directory).
+    _ambiguous_team_names: Dict[str, tuple[str, ...]] = PrivateAttr(default_factory=dict)
     _strands_agent: Optional[Agent] = PrivateAttr(default=None)
     _strands_model: Optional[Any] = PrivateAttr(default=None)
     # A person's own model for the current turn (custom_agents.person_model_runtime).

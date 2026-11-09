@@ -49,7 +49,8 @@ class _Records:
 
 
 def directory_owner(*, agent_id: str = "lead_1", is_lead: bool = True, pending: list | None = None,
-                    records: Optional[_Records] = None, lane_seconds: float = 0.0) -> SimpleNamespace:
+                    records: Optional[_Records] = None, lane_seconds: float = 0.0,
+                    withdrawn: bool = True) -> SimpleNamespace:
     subtasks = list(pending or [])
 
     async def run(function, *args):
@@ -64,6 +65,7 @@ def directory_owner(*, agent_id: str = "lead_1", is_lead: bool = True, pending: 
                                      get_pending_subtasks=lambda: subtasks,
                                      get_parent_task_id=lambda task_id: f"parent_of_{task_id}"),
         _fail_subtask_and_reconcile_parent=AsyncMock(), _delegated_task_repository=records or _Records(),
+        team_comms=SimpleNamespace(delete_work_message=AsyncMock(return_value=withdrawn)),
     )
 
 
@@ -74,8 +76,8 @@ def subtask(task_id: str, to_agent_id: str) -> SimpleNamespace:
                            meta=SimpleNamespace(to_agent_name=None))
 
 
-def taken(holder: Optional[str], holders: tuple[str, ...]) -> SimpleNamespace:
-    return SimpleNamespace(holder_agent_id=holder, holders=list(holders))
+def taken(holder: Optional[str], holders: tuple[str, ...], *, sequence: Optional[int] = 5) -> SimpleNamespace:
+    return SimpleNamespace(holder_agent_id=holder, holders=list(holders), publish_sequence=sequence)
 
 
 def test_the_directory_takes_the_whole_view_with_names_types_and_the_lead() -> None:
@@ -145,6 +147,8 @@ async def test_a_subtask_nobody_took_from_the_departed_agents_mailbox_is_failed(
     failed = sorted(call.kwargs["subtask_info"].task.task_id
                     for call in owner._fail_subtask_and_reconcile_parent.await_args_list)
     assert failed == ["sub_1", "sub_3"]
+    # Its message was withdrawn from the work stream first (sub_1 has no record to say where it is).
+    owner.team_comms.delete_work_message.assert_awaited_once_with(5)
     call = owner._fail_subtask_and_reconcile_parent.await_args_list[0]
     assert call.kwargs["parent_task_id"] == "parent_of_sub_1"
     assert "Researcher-1 left before taking it" in call.kwargs["error_message"]
@@ -164,6 +168,24 @@ async def test_a_subtask_a_worker_took_is_left_to_custody_recovery(record, caplo
 
     owner._fail_subtask_and_reconcile_parent.assert_not_awaited()
     assert "event=team_agent_left_subtask_kept" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("record", "withdrawn", "event"), [
+    # A worker took it (removing it from the stream) but its claim has not arrived (C12).
+    (taken(None, ()), False, "team_agent_left_subtask_taken_unclaimed"),
+    # Not published yet: the watchdog handles a delegation that never went out.
+    (taken(None, (), sequence=None), True, "team_agent_left_subtask_unpublished"),
+])
+async def test_a_subtask_whose_message_cannot_be_withdrawn_is_not_failed(record, withdrawn, event, caplog) -> None:
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1")], records=_Records({"sub_1": record}),
+                            withdrawn=withdrawn)
+
+    with caplog.at_level(logging.INFO):
+        await agent_exited(owner, member("worker_1", "Researcher-1"), "session_closed")
+
+    owner._fail_subtask_and_reconcile_parent.assert_not_awaited()
+    assert f"event={event}" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -341,6 +363,7 @@ def requester(tmp_path):
                              target_agent_name="Researcher-B", publish_sequence=7)
     return SimpleNamespace(id="lead_1", team_id="team_one", is_team_lead=True, task_manager=manager,
                            _delegated_task_repository=records,
+                           team_comms=SimpleNamespace(delete_work_message=AsyncMock(return_value=True)),
                            _logger=logging.getLogger("test.requester"), _fail_subtask_and_reconcile_parent=AsyncMock())
 
 
@@ -389,6 +412,20 @@ async def test_a_handback_the_requester_has_not_finished_handling_fails_nothing(
     await agent_exited(requester, WORKER_B, "exiting")
 
     requester._fail_subtask_and_reconcile_parent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_claim_that_arrives_after_the_exit_was_seen_finds_its_subtask_still_open(requester) -> None:
+    """C12: worker_b saved the subtask and removed it from the stream, but its claim was lost or late."""
+
+    requester.team_comms.delete_work_message.return_value = False  # no longer in the stream: a worker took it
+
+    await agent_exited(requester, WORKER_B, "session_closed")
+    _claim(requester, "worker_b2")  # the restarted worker reports what it holds
+
+    requester._fail_subtask_and_reconcile_parent.assert_not_awaited()
+    requester.team_comms.delete_work_message.assert_awaited_once_with(7)
+    assert requester._delegated_task_repository.get("team_one", "task_sub").status == "running"
 
 
 @pytest.mark.asyncio
