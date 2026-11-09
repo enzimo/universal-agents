@@ -1,7 +1,8 @@
 # Local CI
 
-Tests, dependency audits, source releases, and AMD64 container
-builds use `[self-hosted, Linux, X64, ua-build, ua-linux]`. ARM64 container
+AMD64 container builds use `[self-hosted, Linux, X64, ua-heavy, ua-linux]`.
+Tests and heavier dependency checks use `ua-test`; small checks and release
+coordination use `ua-light`, with the same Linux architecture labels. ARM64 container
 builds use `[self-hosted, macOS, ARM64, ua-build, ua-macos]` with a native
 ARM64 Docker daemon. A final Linux job combines both immutable platform digests
 before applying version tags and the release attestation policy. Native builds pass
@@ -28,6 +29,12 @@ previous one-hour deadline. It stops at the first failure so its traceback is
 reported before a later deadline can hide it, and reports the slowest tests
 after completion.
 
+Pytest gives each RTK subprocess an in-memory usage-statistics database through
+`RTK_DB_PATH=:memory:`. This keeps SQLite commits and unrelated usage-history
+locks out of shell execution and cancellation deadlines on a busy build disk.
+The tests still execute real RTK commands under the configured sandbox and keep
+their existing timeout assertions. This setting applies only during tests.
+
 The runtime produces Linux amd64 and arm64 container images that run under
 Docker on Windows, macOS, and Linux. Native desktop installers belong to the
 sibling Universal Agents Desktop repository. Linux CI can run inside WSL 2,
@@ -36,7 +43,7 @@ GitHub Linux container actions directly.
 
 The shared host setup uses the `Universal Agents` organization runner group
 for explicitly approved repositories, with allowlists enforced by installed hooks.
-One Windows host runs a Windows runner and two Linux runners; the Linux runners
+One Windows host runs a Windows runner and three Linux runners; the Linux runners
 use a dedicated `Ubuntu-24.04` WSL 2 distribution and its own Docker daemon. A
 Mac runs the ARM64 runner.
 Mac and Linux runner registration and group access require organization runner

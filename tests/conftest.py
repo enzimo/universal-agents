@@ -55,6 +55,19 @@ def pytest_runtest_makereport(
 
 
 @pytest.fixture(autouse=True)
+def isolate_rtk_tracking_between_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep real RTK commands independent of usage-history disk writes.
+
+    RTK records statistics after a command exits. SQLite commits on a busy
+    build disk can exceed shell cancellation and execution deadlines even for
+    ``printf``. Tests need the real commands and sandbox, but no usage history.
+    Each RTK process gets its own in-memory database instead.
+    """
+
+    monkeypatch.setenv("RTK_DB_PATH", ":memory:")
+
+
+@pytest.fixture(autouse=True)
 def isolate_agent_context_between_tests():
     """Prevent one test's runtime agent from changing later tool boundaries."""
 
