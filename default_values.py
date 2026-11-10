@@ -380,6 +380,7 @@ class WorkspaceDefaultValues:
             "safe_max_score": 20,
             "plan_ttl_seconds": 86400,
             "max_repository_bytes": 104857600,
+            "semantic_review": {"mode": "off", "max_input_bytes": 262144},
         },
         "Quarantined GitHub skill acquisition, SkillSpector gate, and immutable plan limits.",
         onboarding_overridable=False,

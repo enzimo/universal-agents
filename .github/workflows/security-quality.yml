@@ -82,6 +82,8 @@ jobs:
             custom_messages/contracts/mcp_v1.py \
             custom_messages/contracts/runtime_v1.py \
             custom_agents/skill_installation.py \
+            custom_agents/skill_semantic_review.py \
+            runtime_settings/skill_assessment.py \
             custom_agents/skill_repository.py \
             custom_agents/runtime_restart_service.py \
             custom_agents/runtime_setting_registry.py \
@@ -175,6 +177,8 @@ jobs:
             tests/test_gateway_model_keys.py \
             tests/test_shell_execution.py \
             tests/test_skill_installation.py \
+            tests/test_skill_semantic_review.py \
+            tests/test_live_skill_semantic_review.py \
             tests/test_skill_repository.py \
             tests/test_strands_team_skills.py \
             tests/test_runtime_restart_service.py \
@@ -353,6 +357,7 @@ jobs:
             tests/test_secure_tool_broker.py \
             tests/test_shell_execution.py \
             tests/test_skill_installation.py \
+            tests/test_skill_semantic_review.py \
             tests/test_skill_repository.py \
             tests/test_strands_team_skills.py \
             tests/test_runtime_restart_service.py \

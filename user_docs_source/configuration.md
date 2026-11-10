@@ -1081,6 +1081,30 @@ scanned plan waits for approval; and
 separate 500-file, 20 MiB total, and 5 MiB per-file limits in the trusted
 acquisition boundary.
 
+`semantic_review.mode` defaults to `"off"`, so local checks finish without
+extra model configuration. Set it to `"task_model"` to add semantic assessment
+using the model selected for the calling task, including a person's own model
+and its existing broker-managed authentication. Do not supply a key in these
+settings or expose one to the scanner. Configure an existing provider with
+`/auth model` or `/auth model me` when needed. This setting authorizes submitting
+the quarantined skill contents to that selected model; a local model stays local.
+
+`semantic_review.max_input_bytes` defaults to 262144 and accepts 1024-1048576.
+It bounds the complete UTF-8 request, including metadata. Selected assessment
+refuses binary content, exceeded bounds, partial coverage and provider failures
+rather than truncating or silently dropping back to local-only review. MEDIUM
+or higher semantic findings also prevent a plan. Both the result and settings
+are bound to the approved snapshot. Existing pending installation plans must
+be re-staged after this update; already installed attested skills remain valid.
+
+```yaml
+workspace:
+  skill_installation:
+    semantic_review:
+      mode: "task_model"
+      max_input_bytes: 262144
+```
+
 Team skills belong to the team. With authorization on, TeamArchitect applies
 a scanned plan with `apply_change`: a person approves each install, replacement
 or removal in the Inbox, unless an administrator granted TeamArchitect full

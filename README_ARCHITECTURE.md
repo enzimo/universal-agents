@@ -1431,6 +1431,12 @@ change control files only through typed services (settings, roster,
 provisioning, reviewed skill installation). Team skills are the one readable
 exception, because agents must read a skill's files and run its scripts; they
 are never writable, and new or changed skills go through reviewed installation.
+The required SkillSpector scan stays local and credential-free. Optional
+`workspace.skill_installation.semantic_review` adds a tool-free Strands
+assessment using the current task's already authenticated model, including
+personal-model selection. Complete file coverage and both reports bind to the
+installation plan; semantic settings changes invalidate a pending plan. This
+is part of trusted installation code, not another agent-writable installer.
 Startup refuses an instance still in the old single-`workspace/` layout and
 prints the move commands rather than moving files itself.
 

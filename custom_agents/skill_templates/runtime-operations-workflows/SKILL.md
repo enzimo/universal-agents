@@ -414,6 +414,15 @@ skill with generic file, shell, GitHub, or Python tools.
    and a `LOW`/`SAFE` score at or below the operator ceiling. The planner fails
    closed otherwise, so do not ask for installation authority after a rejected
    scan.
+    Also present the native `semantic_review` status and its report. With
+    `workspace.skill_installation.semantic_review.mode: "off"`, finish the
+    local scan and explicitly say LLM assessment did not run. Offer optional
+    configuration without requiring it to finish local checks. With
+    `mode: "task_model"`, trusted runtime code assesses the same quarantined
+    files using the calling task's selected model, an independent conversation
+    and no executable tools. Present its findings separately from SkillSpector.
+    A selected review's failure, partial coverage, or MEDIUM+ finding blocks
+    the installation proposal; do not downgrade it to a static-only pass.
 4. After presenting the report, call `apply_change(change_id, reason)`. Team
    skills are the team's: if an administrator let you manage them, the skill
    installs at once and administrators get a notice; otherwise your task
@@ -449,6 +458,24 @@ needs no separate approval. Installing a skill never grants its
 tools, shell commands, MCP operations, credentials, or future updates. Managed
 skills are re-hashed against an instance-owned attestation before activation;
 changed content is rejected and must be acquired, scanned, and approved again.
+
+Configure semantic review through the operator-owned `workspace.skill_installation`
+settings in both configuration formats. Keep `semantic_review.mode` quoted as
+`"off"` or set it to `"task_model"`; `semantic_review.max_input_bytes` bounds
+the complete UTF-8 input, including file metadata. Use the model already
+configured for the task; do not copy a key into SkillSpector's environment or
+ask for a secret in chat. Existing `/auth model` or `/auth model me` setup and
+person-owned model restrictions apply. A delegated reviewer uses its task's
+own model/authentication context; delegation never passes a raw credential.
+For separate model-service tools, check `list_my_access` and obtain
+`request_access(..., hand_on=true)` before handing a worker the required
+task-scoped tool authority. A saved credential alone grants no access.
+
+Keep all approval and publication in this native workflow. Do not install a
+standalone scanner skill or use its local copy commands to replace UA's
+protected installation service. Re-stage pending version-2 plans after the
+assessment update; version-3 plans bind static and semantic evidence plus
+the semantic settings, and reject later changes to any of them.
 
 ## Team Skill Drafts
 
