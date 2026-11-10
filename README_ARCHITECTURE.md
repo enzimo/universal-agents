@@ -1539,10 +1539,22 @@ attachments, and every refusal keeps the file tools' reason code
 as `site_spec_json`, so both give the same page. `site_spec_path` is refused
 for the other kinds before anything is read. To publish any page again in
 place, the agent names it in the `update_site_id` parameter (its id or URL).
-The spec's update keys still work for `site_spec_json`, but a report read from
-its file cannot carry them without editing the file, which the next
-`cct.py stats` run overwrites; a parameter and a spec key that name different
-pages are refused.
+The spec's update keys still work for `site_spec_json`, and a parameter and a
+spec key that name different pages are refused. A statistics file that carries
+them is refused (`update_key_in_spec_file`): nobody sees what a 170 KB file
+says, editing it would be undone by the next `cct.py stats` run, and a file in
+a shared folder must not choose which of the person's pages is replaced.
+
+The renderer draws a round's critiques and lead notes once per mention, and a
+review stage's findings once per review of that stage, so statistics that
+repeated a mention could multiply the page: a 1 MB file could ask for
+hundreds of MB of HTML. `cct.py` names each critique and intervention in one
+round and writes one review per stage, so the tool refuses statistics that
+repeat one (`invalid_report_stats`) before rendering. The renderer is a
+checked copy, so this check lives in the tool. Any page larger than the site
+host serves (`MAX_SITE_FILE_BYTES`, 16 MB) is refused (`page_too_large`)
+before anything is written, so neither a new page nor the page being updated
+is replaced by one the host would not serve.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager

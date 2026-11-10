@@ -780,7 +780,7 @@ def _path_with_a_nul_character(_layout: InstanceLayout, _monkeypatch) -> str:
         (_missing_file, "file_not_found", "No statistics file is at that path"),
         (_folder, file_access.NOT_A_REGULAR_FILE, "not its folder"),
         (_file_over_the_limit, file_access.FILE_TOO_LARGE, "Statistics files can be up to 2 MB"),
-        (_path_with_a_nul_character, "unreadable_spec_file", "cannot be read"),
+        (_path_with_a_nul_character, "unreadable_spec_file", "cannot be read as a file"),
     ],
 )
 def test_a_statistics_file_the_task_may_not_read_is_refused_and_nothing_is_written(
@@ -1035,3 +1035,131 @@ def test_update_site_id_names_the_page_for_every_kind_and_must_agree_with_the_sp
     first_page = Path(first["index_path"]).read_text(encoding="utf-8")
     assert "Two." in first_page and "Three." not in first_page
     assert "Three." not in Path(other["index_path"]).read_text(encoding="utf-8")
+
+
+def test_an_unreadable_path_is_refused_in_plain_words(people_layout: InstanceLayout) -> None:
+    as_person(people_layout, "alice")
+
+    payload = _publish_from("coder-critic/stats\x00.json")
+
+    assert payload["message"] == (
+        "The path cannot be read as a file. Pass the path of the stats.json that cct.py stats wrote."
+    )
+
+
+def _round_named_twice(stats: dict) -> None:
+    stats["rounds"][0]["critic"]["items"].append("C01")
+
+
+def _critique_in_many_rounds(stats: dict) -> None:
+    # C17 already belongs to round cp3; each extra round names it once.
+    for number in range(50):
+        stats["rounds"].append(
+            {**stats["rounds"][1], "key": f"cp{100 + number}", "critic": {"summary": "Again.", "items": ["C17"]}}
+        )
+
+
+def _intervention_in_two_rounds(stats: dict) -> None:
+    stats["rounds"][0]["interventions"] = [17]  # 17 already belongs to round cp3
+
+
+def _review_stage_twice(stats: dict) -> None:
+    from custom_tools.work_report.render_report import upgrade
+
+    upgraded = upgrade(stats)  # schema 2 lists its reviews
+    stats.clear()
+    stats.update(upgraded)
+    stats["reviews"].append(dict(stats["reviews"][0]))
+
+
+@pytest.mark.parametrize(
+    ("repeat", "said"),
+    [
+        (_round_named_twice, "The rounds name the critique C01 more than once"),
+        (_critique_in_many_rounds, "The rounds name the critique C17 more than once"),
+        (_intervention_in_two_rounds, "The rounds name the intervention 17 more than once"),
+        (_review_stage_twice, "Two reviews have the stage after_pr"),
+    ],
+)
+def test_statistics_that_mention_something_twice_are_refused_before_rendering(
+    people_layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, repeat, said: str
+) -> None:
+    from custom_tools import single_page_site_tools
+
+    def not_rendered(_stats: dict) -> str:
+        raise AssertionError("statistics with repeated mentions were rendered")
+
+    monkeypatch.setattr(single_page_site_tools, "render_work_report_page", not_rendered)
+    as_person(people_layout, "alice")
+    stats = _work_report_stats()
+    repeat(stats)
+    _write_stats(people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json", stats)
+
+    payload = _publish_from("coder-critic/run/stats.json")
+
+    assert (payload["failure_stage"], payload["failure_reason"]) == ("input_validation", "invalid_report_stats")
+    assert said in payload["message"]
+    assert _nothing_published(people_layout)
+
+
+def test_a_page_larger_than_the_website_serves_is_refused_and_the_published_page_stays(
+    people_layout: InstanceLayout,
+) -> None:
+    from user_docs.published_sites import MAX_SITE_FILE_BYTES
+
+    as_person(people_layout, "alice")
+    path = _write_stats(people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json")
+    first = _publish_from("coder-critic/run/stats.json")
+    page = Path(first["index_path"]).read_bytes()
+    record = _record(people_layout.root, first["site_id"])
+    # Each critique is named once, but '&' grows fivefold when escaped and a
+    # rejected critique is drawn in its round and among the decisions to check.
+    stats = _work_report_stats()
+    template = stats["item_list"][1]  # rejected
+    while len(json.dumps(stats)) < 1_900_000:
+        item_id = f"C{len(stats['item_list']) + 100}"
+        stats["item_list"].append({**template, "id": item_id, "detail": "&" * 10_000})
+        stats["rounds"][0]["critic"]["items"].append(item_id)
+    _write_stats(path, stats)
+    assert path.stat().st_size < 2 * 1024 * 1024
+
+    updated = _publish_from("coder-critic/run/stats.json", update_site_id=first["site_id"])
+    new = _publish_from("coder-critic/run/stats.json")
+
+    for refused in (updated, new):
+        assert (refused["failure_stage"], refused["failure_reason"]) == ("render", "page_too_large")
+        assert f"more than the {MAX_SITE_FILE_BYTES // (1024 * 1024)} MB the website serves" in refused["message"]
+    assert "the published page stays as it was" in updated["message"]
+    assert Path(first["index_path"]).read_bytes() == page
+    assert _record(people_layout.root, first["site_id"]) == record
+    assert [p.name for p in people_layout.published_sites_dir.glob("*.json")] == [f"{first['site_id']}.json"]
+
+
+@pytest.mark.parametrize("in_team_folder", [False, True])
+def test_a_statistics_file_cannot_choose_the_page_it_replaces(
+    people_layout: InstanceLayout, in_team_folder: bool
+) -> None:
+    from custom_tools.single_page_site_tools import publish_single_page_site
+
+    as_person(people_layout, "alice")
+    guide = _payload(
+        publish_single_page_site(json.dumps({"title": "Alice Guide", "steps": ["Alice only."]}), site_kind="how_to")
+    )
+    page = Path(guide["index_path"]).read_bytes()
+    stats = _work_report_stats()
+    if in_team_folder:
+        # Anyone in the team can write team/; the file names alice's page by its link.
+        stats["update_site_url"] = guide["site_url"]
+        path = _write_stats(people_layout.team_dir / "coder-critic" / "run" / "stats.json", stats)
+    else:
+        stats["update_site_id"] = guide["site_id"]
+        path = _write_stats(people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json", stats)
+
+    payload = _publish_from(path)
+
+    assert (payload["failure_stage"], payload["failure_reason"]) == ("input_validation", "update_key_in_spec_file")
+    assert guide["site_id"] in payload["message"]
+    assert "update_site_id parameter" in payload["message"]
+    assert Path(guide["index_path"]).read_bytes() == page
+    assert _record(people_layout.root, guide["site_id"])["site_kind"] == "how_to"
+    assert [p.name for p in people_layout.published_sites_dir.glob("*.json")] == [f"{guide['site_id']}.json"]
