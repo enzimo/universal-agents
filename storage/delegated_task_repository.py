@@ -325,7 +325,8 @@ class DelegatedTaskRepository:
                     "holder_agent_name": None,
                     "claimed_at_utc": None,
                     "publish_sequence": publish_sequence,
-                    "holders": list(dict.fromkeys([*current.holders, from_holder_agent_id])),
+                    "holders": (current.holders if current.holders and current.holders[-1] == from_holder_agent_id
+                                else [*current.holders, from_holder_agent_id]),
                     "updated_at_utc": _now(),
                 }
             )

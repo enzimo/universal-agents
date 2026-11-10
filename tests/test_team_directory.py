@@ -452,6 +452,20 @@ async def test_a_claim_that_arrives_after_the_exit_was_seen_finds_its_subtask_st
 
 
 @pytest.mark.asyncio
+async def test_a_handback_keeps_repeated_holders_in_order(requester) -> None:
+    """The last holder still decides which later claims count as a move between workers."""
+
+    for worker in ("worker_b", "worker_c", "worker_b"):
+        _claim(requester, worker)
+    record = requester._delegated_task_repository.mark_requeued(
+        team_id="team_one", task_id="task_sub", publish_sequence=57, from_holder_agent_id="worker_b")
+    assert record.holders == ["worker_b", "worker_c", "worker_b"]
+    await agent_exited(requester, WORKER_B, "session_closed")
+    requester.team_comms.delete_work_message.assert_not_awaited()
+    requester._fail_subtask_and_reconcile_parent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_a_crashed_workers_claimed_subtask_is_left_for_its_restart_to_take_over(requester) -> None:
     """C01: worker_b's host restarts and closes its session; the restarted worker reports the subtask it holds."""
 
