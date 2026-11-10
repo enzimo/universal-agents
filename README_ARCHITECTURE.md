@@ -1546,11 +1546,12 @@ says, editing it would be undone by the next `cct.py stats` run, and a file in
 a shared folder must not choose which of the person's pages is replaced.
 
 The renderer draws a round's critiques and lead notes once per mention, a
-review stage's findings once per review of that stage, and a round's label
-once per critique in that round and per finding addressed in it, so
-statistics that repeated a mention could multiply the page: a 1 MB file could
-ask for hundreds of MB of HTML. `cct.py` names each critique and intervention
-in one round, writes one review per stage and short round labels, so the tool
+review stage's findings once per review of that stage, a round's label once
+per critique in that round and per finding addressed in it, and a lens-grid
+cell once per round with its key, so statistics that repeated a mention could
+multiply the page: a 1 MB file could ask for hundreds of MB of HTML. `cct.py`
+gives each round its own key, names each critique and intervention in one
+round, writes one review per stage and short round labels, so the tool
 refuses statistics that repeat one, or whose critiques and findings would
 repeat more than 64 Ki characters of round labels (`invalid_report_stats`),
 before rendering. The renderer is a

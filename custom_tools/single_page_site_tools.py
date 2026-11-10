@@ -24,8 +24,9 @@ as ``cct.py stats`` wrote it; a file that names a page itself is refused,
 because nobody sees what a 170 KB file says and a file someone else can write
 must not choose which of the person's pages is replaced.
 
-Statistics are refused before rendering when they mention a critique, a lead
-intervention or a review stage more than once, or name rounds so often that
+Statistics are refused before rendering when they use a round key, or mention
+a critique, a lead intervention or a review stage, more than once, or name
+rounds so often that
 the page would repeat more than ``_REPORT_LABEL_REPEAT_MAX`` characters of
 their labels, which ``cct.py`` never does: the renderer draws each mention in
 full, so repeats would multiply the page (a 1 MB file could ask for hundreds
@@ -1676,15 +1677,20 @@ def _repeated_report_mention(stats: dict[str, Any]) -> str:
     """What already-validated statistics mention twice that cct.py mentions once, or "".
 
     The renderer draws a round's critiques and lead notes once per mention, a
-    review stage's findings once per review of that stage, and a round's label
-    once per critique in it and per finding addressed in it. cct.py lists each
-    critique in one round, each intervention in one round, at most one review
-    per stage, and short round labels, so anything more is not its output and
-    would only multiply the page.
+    review stage's findings once per review of that stage, a round's label
+    once per critique in it and per finding addressed in it, and a lens-grid
+    cell, with the ids of its critiques, once per round with that key. cct.py
+    gives each round its own key, lists each critique in one round, each
+    intervention in one round, at most one review per stage, and short round
+    labels, so anything more is not its output and would only multiply the
+    page.
     """
 
     upgraded = upgrade_report_stats(stats)  # the schema the renderer reads
     rounds = upgraded["rounds"]
+    key = _first_repeat(rnd["key"] for rnd in rounds)
+    if key is not None:
+        return f"Two rounds have the key {key}; each round has its own key"
     item = _first_repeat(i for rnd in rounds for i in (rnd.get("critic") or {}).get("items") or [])
     if item is not None:
         return f"The rounds name the critique {item} more than once; each critique belongs to one round"
@@ -1706,7 +1712,7 @@ def _repeated_report_mention(stats: dict[str, Any]) -> str:
 def _repeated_label_characters(upgraded: dict[str, Any]) -> int:
     """How many characters of round labels the page writes for the rounds critiques and findings name."""
 
-    labels = {rnd["key"]: len(rnd["label"]) for rnd in upgraded["rounds"]}  # the renderer's lookup
+    labels = {rnd["key"]: len(rnd["label"]) for rnd in upgraded["rounds"]}  # keys are unique by now
     named = [item["round"] for item in upgraded["item_list"]]
     named += [key for finding in upgraded["findings"] for key in finding.get("addressed_in") or []]
     return sum(labels.get(key, 0) for key in named)

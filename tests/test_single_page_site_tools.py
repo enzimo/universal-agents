@@ -1059,6 +1059,12 @@ def _critique_in_many_rounds(stats: dict) -> None:
         )
 
 
+def _round_key_twice(stats: dict) -> None:
+    # Each copy would draw the plan column of the lens grid, with all its critique ids, again.
+    for _ in range(300):
+        stats["rounds"].append({**stats["rounds"][0], "critic": {"summary": "Again.", "items": []}})
+
+
 def _intervention_in_two_rounds(stats: dict) -> None:
     stats["rounds"][0]["interventions"] = [17]  # 17 already belongs to round cp3
 
@@ -1096,6 +1102,7 @@ def _short_label_addressed_very_many_times(stats: dict) -> None:
         (_long_label_named_by_many_critiques, "characters of round labels, more than 65536"),
         (_long_label_addressed_many_times, "characters of round labels, more than 65536"),
         (_short_label_addressed_very_many_times, "characters of round labels, more than 65536"),
+        (_round_key_twice, "Two rounds have the key plan"),
         (_round_named_twice, "The rounds name the critique C01 more than once"),
         (_critique_in_many_rounds, "The rounds name the critique C17 more than once"),
         (_intervention_in_two_rounds, "The rounds name the intervention 17 more than once"),
