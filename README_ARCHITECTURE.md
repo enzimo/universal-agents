@@ -1527,6 +1527,23 @@ for the other kinds. The site host adds no Content-Security-Policy to
 added there later must allow inline styles (`style-src 'unsafe-inline'`) or the
 report loses its design.
 
+A real run's `stats.json` is about 170 KB, too large for a model to repeat as
+a tool argument, so an agent passes `site_kind="report"` with the file's path
+in `site_spec_path` instead of its text in `site_spec_json`; the text form
+remains for small statistics, and the tool takes exactly one of the two. The
+tool reads the file through `custom_tools.file_access`, so the task's folders,
+the person from the signed context, the access service, link handling and a
+2 MB cap (`REPORT_STATS_MAX_BYTES`) apply as for `file_read` and `notify_user`
+attachments, and every refusal keeps the file tools' reason code
+(`failure_stage` `read_spec_file`). The file's text then takes the same path
+as `site_spec_json`, so both give the same page. `site_spec_path` is refused
+for the other kinds before anything is read. To publish any page again in
+place, the agent names it in the `update_site_id` parameter (its id or URL).
+The spec's update keys still work for `site_spec_json`, but a report read from
+its file cannot carry them without editing the file, which the next
+`cct.py stats` run overwrites; a parameter and a spec key that name different
+pages are refused.
+
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
 deletes files there older than `tool_policy.scratch_retention_days` (21 by

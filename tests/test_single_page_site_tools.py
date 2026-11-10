@@ -985,7 +985,8 @@ def test_a_report_from_its_file_is_published_again_in_place_only_for_its_person(
     _write_stats(path, stats)  # cct.py stats ran again after the fix round
     written = path.read_bytes()
 
-    updated = _publish_from("coder-critic/run/stats.json", update_site_id=first["site_id"])
+    # The page's URL names it as well as its id does.
+    updated = _publish_from("coder-critic/run/stats.json", update_site_id=first["site_url"])
 
     assert updated["operation"] == "updated"
     for key in ("site_id", "site_url", "index_path"):

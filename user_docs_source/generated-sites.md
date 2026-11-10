@@ -28,12 +28,16 @@ The agent chooses the content shape before publishing:
   content sections.
 - **Work report** is only for the report of a coder-critic-team run: what a
   coding agent and a critic agent built, how they settled each critique, and
-  what the project review found. The agent publishes the statistics the
-  skill's `cct.py stats` command wrote, unchanged, and the page shows them
-  in the report's own design: one page without scripts, with its own light and
-  dark colors, not the website theme, and no chat panel. Statistics that are
-  not in the shape `cct.py stats` writes are refused and nothing is published.
-  Any other report is an article.
+  what the project review found. The agent publishes the statistics file the
+  skill's `cct.py stats` command wrote by naming the file, for example
+  `coder-critic/<run name>/stats.json` in your folder, instead of copying its
+  contents into its request; it can copy them only when they are small. The
+  file is read under the same folder rules as the agent's other file reads
+  and can be up to 2 MB. The page shows the statistics in the report's own
+  design: one page without scripts, with its own light and dark colors, not
+  the website theme, and no chat panel. Statistics that are not in the shape
+  `cct.py stats` writes are refused and nothing is published. Any other report
+  is an article.
 
 These elements are building blocks, not required template sections. Generated
 sites omit empty elements and should not add filler merely to populate a
@@ -107,7 +111,10 @@ tool did not write. Ask the agent to publish the page again to change it.
 When you ask the agent to add content to an existing generated site, it can
 regenerate that same page in place by reusing the prior `site_id` or `site_url`.
 The browser URL stays the same; refresh the page to see the latest generated
-content. Only a page made for you can be regenerated for you.
+content. Only a page made for you can be regenerated for you. A work report is
+published again the same way after `cct.py stats` has rewritten its
+statistics file: the agent names the file and the page, and leaves the file
+as it is.
 
 ## Embedded Chat
 

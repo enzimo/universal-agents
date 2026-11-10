@@ -13,6 +13,14 @@ chat. ``report`` publishes the coder-critic work report from the statistics
 ``cct.py stats`` wrote, with the report's own design and no chat; its renderer
 is a checked copy of the canonical skill's (``custom_tools.work_report``), so
 the page matches the report every other runtime shows.
+
+A real run's statistics are about 170 KB, too large for a model to repeat as a
+tool argument, so an agent names the file in ``site_spec_path`` instead. The
+tool reads it through ``custom_tools.file_access``, under the folder rules and
+access decision of every agent file read, up to ``REPORT_STATS_MAX_BYTES``,
+and then treats its text exactly as ``site_spec_json``. The file never carries
+update keys: the ``update_site_id`` parameter names the page to publish again,
+so the file stays as ``cct.py stats`` wrote it.
 """
 
 from __future__ import annotations
@@ -167,12 +175,13 @@ def _requested_update_site_id(spec: dict[str, Any]) -> str:
 def _update_target(spec: dict[str, Any], update_site_id: str) -> str | dict[str, Any]:
     """The id of the page to publish again, "" for a new page, or the failure to return.
 
-    The ``update_site_id`` parameter is the way to name it; a report read from
-    its file cannot carry the spec's update keys without editing that file.
-    The spec keys still work, and naming two different pages is refused.
+    The ``update_site_id`` parameter is the way to name it, by id or by the
+    page's URL; a report read from its file cannot carry the spec's update
+    keys without editing that file. The spec keys still work, and naming two
+    different pages is refused.
     """
 
-    from_parameter = _text(update_site_id)
+    from_parameter = _site_id_from_url(update_site_id) or _text(update_site_id)
     from_spec = _requested_update_site_id(spec)
     if from_parameter and from_spec and from_parameter != from_spec:
         return _failure(
@@ -1679,8 +1688,8 @@ def publish_single_page_site(
 
     Optional section headings can be passed with section_headings or top-level
     fields such as materials_heading. To publish an existing page again in
-    place, keeping its URL, pass the site_id it returned in the update_site_id
-    parameter, with the new spec. For a report, pass the same site_spec_path
+    place, keeping its URL, pass the site_id it returned (or its site_url) in
+    the update_site_id parameter, with the new spec. For a report, pass the same site_spec_path
     again (after `cct.py stats` has rewritten the file) with update_site_id; do
     not edit the statistics file. In a site_spec_json spec, the keys
     update_site_id, existing_site_id, regenerate_site_id, update_site_url,
