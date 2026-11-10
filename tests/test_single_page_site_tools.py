@@ -1072,9 +1072,30 @@ def _review_stage_twice(stats: dict) -> None:
     stats["reviews"].append(dict(stats["reviews"][0]))
 
 
+def _long_label_named_by_many_critiques(stats: dict) -> None:
+    stats["rounds"][0]["label"] = "Plan " * 40_000
+    template = stats["item_list"][1]  # rejected, so the decisions list names its round too
+    for number in range(100):
+        stats["item_list"].append({**template, "id": f"C{200 + number}"})  # in no round's critic.items
+
+
+def _long_label_addressed_many_times(stats: dict) -> None:
+    stats["rounds"][0]["label"] = "Plan " * 40_000
+    stats["review"]["findings"][0]["addressed_in"] = ["plan"] * 100
+
+
+def _short_label_addressed_very_many_times(stats: dict) -> None:
+    # Each entry costs the file a few bytes and makes the page write the label again.
+    stats["rounds"][0]["label"] = "Plan " * 20
+    stats["review"]["findings"][0]["addressed_in"] = ["plan"] * 1_000
+
+
 @pytest.mark.parametrize(
     ("repeat", "said"),
     [
+        (_long_label_named_by_many_critiques, "characters of round labels, more than 65536"),
+        (_long_label_addressed_many_times, "characters of round labels, more than 65536"),
+        (_short_label_addressed_very_many_times, "characters of round labels, more than 65536"),
         (_round_named_twice, "The rounds name the critique C01 more than once"),
         (_critique_in_many_rounds, "The rounds name the critique C17 more than once"),
         (_intervention_in_two_rounds, "The rounds name the intervention 17 more than once"),

@@ -1545,12 +1545,15 @@ them is refused (`update_key_in_spec_file`): nobody sees what a 170 KB file
 says, editing it would be undone by the next `cct.py stats` run, and a file in
 a shared folder must not choose which of the person's pages is replaced.
 
-The renderer draws a round's critiques and lead notes once per mention, and a
-review stage's findings once per review of that stage, so statistics that
-repeated a mention could multiply the page: a 1 MB file could ask for
-hundreds of MB of HTML. `cct.py` names each critique and intervention in one
-round and writes one review per stage, so the tool refuses statistics that
-repeat one (`invalid_report_stats`) before rendering. The renderer is a
+The renderer draws a round's critiques and lead notes once per mention, a
+review stage's findings once per review of that stage, and a round's label
+once per critique in that round and per finding addressed in it, so
+statistics that repeated a mention could multiply the page: a 1 MB file could
+ask for hundreds of MB of HTML. `cct.py` names each critique and intervention
+in one round, writes one review per stage and short round labels, so the tool
+refuses statistics that repeat one, or whose critiques and findings would
+repeat more than 64 Ki characters of round labels (`invalid_report_stats`),
+before rendering. The renderer is a
 checked copy, so this check lives in the tool. Any page larger than the site
 host serves (`MAX_SITE_FILE_BYTES`, 16 MB) is refused (`page_too_large`)
 before anything is written, so neither a new page nor the page being updated

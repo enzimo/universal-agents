@@ -25,9 +25,11 @@ because nobody sees what a 170 KB file says and a file someone else can write
 must not choose which of the person's pages is replaced.
 
 Statistics are refused before rendering when they mention a critique, a lead
-intervention or a review stage more than once, which ``cct.py`` never does:
-the renderer draws each mention in full, so repeats would multiply the page
-(a 1 MB file could ask for hundreds of MB). Any page larger than the website
+intervention or a review stage more than once, or name rounds so often that
+the page would repeat more than ``_REPORT_LABEL_REPEAT_MAX`` characters of
+their labels, which ``cct.py`` never does: the renderer draws each mention in
+full, so repeats would multiply the page (a 1 MB file could ask for hundreds
+of MB). Any page larger than the website
 serves (``MAX_SITE_FILE_BYTES``) is refused before anything is written.
 """
 
@@ -88,6 +90,11 @@ _SPEC_FILE_HINTS = {
     file_access.NOT_A_REGULAR_FILE: "Name the stats.json file itself, not its folder.",
     file_access.FILE_TOO_LARGE: f"Statistics files can be up to {_REPORT_STATS_MAX_MB} MB.",
 }
+# Characters of round labels the report page may repeat: the renderer writes a
+# round's label again for each critique in that round and for each round a
+# finding was addressed in. cct.py's labels ("Checkpoint 3", "Fix round 1")
+# keep a real run to a few thousand.
+_REPORT_LABEL_REPEAT_MAX = 64 * 1024
 _UNREADABLE_SPEC_FILE = (
     "The path cannot be read as a file. Pass the path of the stats.json that cct.py stats wrote."
 )
@@ -1668,11 +1675,12 @@ def _first_repeat(values: Iterable[Any]) -> Any:
 def _repeated_report_mention(stats: dict[str, Any]) -> str:
     """What already-validated statistics mention twice that cct.py mentions once, or "".
 
-    The renderer draws a round's critiques and lead notes once per mention, and
-    a review stage's findings once per review of that stage. cct.py lists each
-    critique in one round, each intervention in one round and at most one
-    review per stage, so a repeat is not its output and would only multiply
-    the page.
+    The renderer draws a round's critiques and lead notes once per mention, a
+    review stage's findings once per review of that stage, and a round's label
+    once per critique in it and per finding addressed in it. cct.py lists each
+    critique in one round, each intervention in one round, at most one review
+    per stage, and short round labels, so anything more is not its output and
+    would only multiply the page.
     """
 
     upgraded = upgrade_report_stats(stats)  # the schema the renderer reads
@@ -1686,7 +1694,22 @@ def _repeated_report_mention(stats: dict[str, Any]) -> str:
     stage = _first_repeat(review["stage"] for review in upgraded["reviews"])
     if stage is not None:
         return f"Two reviews have the stage {stage}; there is one review per stage"
+    label_characters = _repeated_label_characters(upgraded)
+    if label_characters > _REPORT_LABEL_REPEAT_MAX:
+        return (
+            f"The critiques and findings repeat {label_characters} characters of round labels, more than "
+            f"{_REPORT_LABEL_REPEAT_MAX}; cct.py writes short labels such as 'Checkpoint 3'"
+        )
     return ""
+
+
+def _repeated_label_characters(upgraded: dict[str, Any]) -> int:
+    """How many characters of round labels the page writes for the rounds critiques and findings name."""
+
+    labels = {rnd["key"]: len(rnd["label"]) for rnd in upgraded["rounds"]}  # the renderer's lookup
+    named = [item["round"] for item in upgraded["item_list"]]
+    named += [key for finding in upgraded["findings"] for key in finding.get("addressed_in") or []]
+    return sum(labels.get(key, 0) for key in named)
 
 
 def _report_stats_refusal(spec: dict[str, Any]) -> dict[str, Any] | None:
