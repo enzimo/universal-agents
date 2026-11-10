@@ -1053,10 +1053,11 @@ transport, and credential guard remain enforced.
 
 For content that benefits from a browser layout, ask the agent to create a
 generated site. Sites can be articles, comparisons, procedural how-tos, or
-interactive apps with browser-local progress tracking. Every type can include
-an embedded chat panel that continues the task from the browser for the person
-the page was made for, signed in to Web Chat. Pages are kept in `sites/` of that
-person's folder.
+interactive apps with browser-local progress tracking. Each of these can
+include an embedded chat panel that continues the task from the browser for the
+person the page was made for, signed in to Web Chat. A coder-critic-team run
+can also publish its work report, which keeps its own design and has no chat.
+Pages are kept in `sites/` of that person's folder.
 
 Good requests include:
 

@@ -7,6 +7,12 @@ person comes only from the task's signed context), with a trusted record in
 host serves a page only through that record and only while the digests match
 (``user_docs.published_sites``), so agents' code cannot change what the Web
 Chat origin serves.
+
+Every kind but ``report`` renders here with the runtime theme and an embedded
+chat. ``report`` publishes the coder-critic work report from the statistics
+``cct.py stats`` wrote, with the report's own design and no chat; its renderer
+is a checked copy of the canonical skill's (``custom_tools.work_report``), so
+the page matches the report every other runtime shows.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from strands import tool
 
 from access_control.safe_open import UnsafePath
 from custom_tools.runtime_context import bound_task_id, get_agent_ref
+from custom_tools.work_report import render_work_report_page, validate_stats
 from custom_tools.workspace_scope import current_workspace_scope, runtime_layout
 from runtime_settings.network import compose_public_base_url
 from default_values import INTERACTIVE_APP_DEFAULTS, NETWORK_DEFAULTS
@@ -44,8 +51,10 @@ _SLUG_PATTERN = re.compile(r"[^a-zA-Z0-9._-]+")
 # Room left in a site id for the stamp and the random part (SITE_ID_PATTERN allows 128).
 _TRACKING_SLUG_MAX = 40
 _PAGE_SLUG_MAX = 48
-SiteKind = Literal["article", "comparison", "how_to", "app"]
-_SITE_KINDS: tuple[str, ...] = ("article", "comparison", "how_to", "app")
+SiteKind = Literal["article", "comparison", "how_to", "app", "report"]
+# The coder-critic work report: the spec is the stats.json cct.py wrote.
+_REPORT_SITE_KIND = "report"
+_SITE_KINDS: tuple[str, ...] = ("article", "comparison", "how_to", "app", _REPORT_SITE_KIND)
 _SITE_KIND_PRESENTATION: dict[str, dict[str, str]] = {
     "article": {
         "default_title": "Generated Article",
@@ -66,6 +75,10 @@ _SITE_KIND_PRESENTATION: dict[str, dict[str, str]] = {
         "default_title": "Interactive App",
         "eyebrow": "Interactive app",
         "chat_copy": "Continue the conversation about this app.",
+    },
+    # Only the title: the report's own renderer draws the page, without chat.
+    _REPORT_SITE_KIND: {
+        "default_title": "Work Report",
     },
 }
 
@@ -1496,19 +1509,28 @@ def publish_single_page_site(
     site_kind: SiteKind = "article",
 ) -> dict[str, Any]:
     """
-    Publish a structured single-page website with embedded chat.
+    Publish a structured single-page website.
 
-    Choose site_kind from article, comparison, how_to, or app before composing
-    the JSON spec. article is the default for explanations, reports, reference
-    pages, collections, and other content whose sections can be read
+    Choose site_kind from article, comparison, how_to, app, or report before
+    composing the JSON spec. article is the default for explanations, reports,
+    reference pages, collections, and other content whose sections can be read
     independently. comparison is for evaluating alternatives. how_to is only
     for explicitly requested instructions/checklists or genuinely ordered user
     actions where sequence affects success. app is for interactive pages whose
     browser-local state, progress, counters, tasks, or habits are part of the
-    experience.
+    experience. report is only for the coder-critic-team work report; any other
+    report is an article.
 
-    The site_spec_json argument must be a JSON object. All kinds may use title,
-    summary, sections, and resources. Optional useful elements include:
+    article, comparison, how_to, and app pages use the runtime theme and have
+    an embedded chat. For report, site_spec_json is the stats.json that
+    `cct.py stats` wrote, passed unchanged; the page uses the work report's own
+    design (inline CSS, no scripts), takes its title from run.title, and has no
+    embedded chat and no runtime theme. Statistics not in the shape cct.py
+    writes are refused (failure_reason invalid_report_stats) and nothing is
+    written.
+
+    The site_spec_json argument must be a JSON object. All other kinds may use
+    title, summary, sections, and resources. Optional useful elements include:
     article: highlights, key_points, and callouts; comparison: options with
     pros/cons/best_for, comparison_rows with criterion and values, and a
     recommendation; how_to: safety_notes, materials or supplies, tools, plans,
@@ -1522,7 +1544,8 @@ def publish_single_page_site(
     fields such as materials_heading. To regenerate an existing page in place,
     pass update_site_id, existing_site_id, regenerate_site_id, or
     update_existing=true with site_id or site_url set to the prior returned
-    page. update_site_url, existing_site_url, and regenerate_site_url are also
+    page (for report, add these keys at the top level of the statistics).
+    update_site_url, existing_site_url, and regenerate_site_url are also
     accepted; only pages made for the same person can be updated. The tool
     writes index.html into sites/<site_id>/ of the person's folder (agents/
     for work for no person) and returns the browser URL. Editing that file
@@ -1569,12 +1592,33 @@ def publish_single_page_site(
                 "retryable": False,
             },
         )
+    if resolved_site_kind == _REPORT_SITE_KIND:
+        # Checked before anything is written. validate_stats ignores top-level
+        # keys it does not read, so the update keys can sit beside the stats.
+        try:
+            validate_stats(spec)
+        except ValueError as exc:
+            # StatsError (a ValueError) names the malformed field; validate_stats
+            # also lets datetime's own ValueError through for a run.started_at
+            # that is not an ISO 8601 time.
+            return _failure(
+                "input_validation",
+                "invalid_report_stats",
+                f"{exc}. Pass the stats.json that cct.py stats wrote, unchanged.",
+            )
 
     return _publish(spec, site_slug=site_slug, site_kind=resolved_site_kind)
 
 
 def _optional_text(value: Any) -> str | None:
     return _text(value) or None
+
+
+def _page_title(spec: dict[str, Any], site_kind: str) -> str:
+    """The page's title: ``run.title`` of a work report (already validated), else ``title``."""
+
+    raw_title = spec["run"]["title"] if site_kind == _REPORT_SITE_KIND else spec.get("title")
+    return _text(raw_title) or _SITE_KIND_PRESENTATION[site_kind]["default_title"]
 
 
 def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[str, Any]:
@@ -1588,7 +1632,7 @@ def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[st
     context = _current_task_context()
     store = _site_store(agent)
     person_id = current_workspace_scope(agent).person_id
-    title = _text(spec.get("title")) or _SITE_KIND_PRESENTATION[site_kind]["default_title"]
+    title = _page_title(spec, site_kind)
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
     previous: PublishedSiteRecordV1 | None = None
@@ -1607,7 +1651,13 @@ def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[st
             now=now,
         )
     site_url = f"{website_base_url()}/docs/sites/{site_id}/"
-    html_text = _render_html(spec, site_kind=site_kind, site_id=site_id, site_url=site_url, context=context)
+    is_work_report = site_kind == _REPORT_SITE_KIND
+    # Rendered before anything is written, so a renderer error leaves no file.
+    html_text = (
+        render_work_report_page(spec)
+        if is_work_report
+        else _render_html(spec, site_kind=site_kind, site_id=site_id, site_url=site_url, context=context)
+    )
     folder_parts = site_folder_parts(person_id, site_id)
     try:
         digests = store.write_files(folder_parts, {SITE_INDEX_FILENAME: html_text.encode("utf-8")})
@@ -1659,7 +1709,7 @@ def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[st
             "site_url": site_url,
             "site_dir": str(site_dir),
             "index_path": str(site_dir / SITE_INDEX_FILENAME),
-            "chat_enabled": True,
+            "chat_enabled": not is_work_report,
             "next_step_hint": (
                 "Return the exact site_url to the user. "
                 + (
