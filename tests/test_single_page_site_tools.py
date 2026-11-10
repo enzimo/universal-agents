@@ -8,10 +8,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_tools import workspace_scope
+from custom_tools import file_access, workspace_scope
+from custom_tools.path_policy import (
+    PERSON_WORKSPACE_DENIED,
+    PROTECTED_RUNTIME_CONTROL_DENIED,
+    WORKSPACE_PATH_DENIED,
+)
 from custom_tools.work_report import WORK_REPORT_CSS_PATH
 from scripts import sync_work_report_renderer
 from tests.task_work_support import set_agent_ref
+from tests.test_file_access import BINARY as CEDAR_BINARY
+from tests.test_file_access import _swap_after_check
+from tests.test_workspace_scope_policy import TEAM, as_person, task_agent
+from tests.test_workspace_scope_policy import layout as _people_layout
 from runtime_settings.instance_layout import InstanceLayout
 
 # A trimmed stats.json (schema 1) from the coder-critic-team sample run.
@@ -683,3 +692,259 @@ def test_work_report_renderer_copies_match_the_canonical_skill() -> None:
     # Fails when ua-skills changed the renderer or stylesheet without a sync:
     # python -m scripts.sync_work_report_renderer
     assert sync_work_report_renderer.main(["--check"]) == 0
+
+
+# Work reports published from their statistics file (site_spec_path). These
+# tests use the folder-rule fixture from the workspace scope tests: alice and bob
+# have folders, authorization is off unless a test turns it on, and the task's
+# person comes from a signed context, as in production.
+people_layout = _people_layout
+
+
+def _write_stats(path: Path, stats: dict | None = None) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(stats if stats is not None else _work_report_stats()), encoding="utf-8")
+    return path
+
+
+def _publish_from(path: str | Path, **arguments) -> dict:
+    from custom_tools.single_page_site_tools import publish_single_page_site
+
+    arguments.setdefault("site_kind", "report")
+    result = publish_single_page_site(site_spec_path=str(path), **arguments)
+    payload = _payload(result)
+    assert result["status"] == ("success" if payload["status"] == "success" else "error")
+    return payload
+
+
+def _nothing_published(layout: InstanceLayout) -> bool:
+    return not list(layout.published_sites_dir.glob("*.json")) and not list(layout.workspaces_dir.glob("**/sites/*"))
+
+
+def _other_persons_file(layout: InstanceLayout, _monkeypatch) -> Path:
+    return _write_stats(layout.person_dir("bob") / "coder-critic" / "run" / "stats.json")
+
+
+def _file_outside_the_instance(layout: InstanceLayout, _monkeypatch) -> Path:
+    return _write_stats(layout.root.parent / "elsewhere" / "stats.json")
+
+
+def _control_file(layout: InstanceLayout, _monkeypatch) -> Path:
+    return _write_stats(layout.control_dir / "stats.json")
+
+
+def _link_to_another_persons_file(layout: InstanceLayout, _monkeypatch) -> Path:
+    link = layout.person_dir("alice") / "coder-critic" / "run" / "stats.json"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(_other_persons_file(layout, _monkeypatch))
+    return link
+
+
+def _link_swapped_in_after_the_check(layout: InstanceLayout, monkeypatch) -> Path:
+    runs = layout.person_dir("alice") / "coder-critic"
+    _write_stats(runs / "stats.json")
+    _write_stats(layout.person_dir("bob") / "coder-critic" / "stats.json")
+    _swap_after_check(monkeypatch, runs, layout.person_dir("bob") / "coder-critic")
+    return runs / "stats.json"
+
+
+def _missing_file(layout: InstanceLayout, _monkeypatch) -> Path:
+    return layout.person_dir("alice") / "coder-critic" / "run" / "stats.json"
+
+
+def _folder(layout: InstanceLayout, _monkeypatch) -> Path:
+    return _write_stats(layout.person_dir("alice") / "coder-critic" / "run" / "stats.json").parent
+
+
+def _file_over_the_limit(layout: InstanceLayout, _monkeypatch) -> Path:
+    from custom_tools.single_page_site_tools import REPORT_STATS_MAX_BYTES
+
+    path = layout.person_dir("alice") / "coder-critic" / "run" / "stats.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b" " * (REPORT_STATS_MAX_BYTES + 1))
+    return path
+
+
+def _path_with_a_nul_character(_layout: InstanceLayout, _monkeypatch) -> str:
+    return "coder-critic/stats\x00.json"
+
+
+@pytest.mark.parametrize(
+    ("place", "reason", "said"),
+    [
+        (_other_persons_file, PERSON_WORKSPACE_DENIED, "cannot be read"),
+        (_file_outside_the_instance, WORKSPACE_PATH_DENIED, "outside this task's folders"),
+        (_control_file, PROTECTED_RUNTIME_CONTROL_DENIED, "cannot be read"),
+        (_link_to_another_persons_file, PERSON_WORKSPACE_DENIED, "cannot be read"),
+        (_link_swapped_in_after_the_check, file_access.LINK_NOT_FOLLOWED, "link on this path is not followed"),
+        (_missing_file, "file_not_found", "No statistics file is at that path"),
+        (_folder, file_access.NOT_A_REGULAR_FILE, "not its folder"),
+        (_file_over_the_limit, file_access.FILE_TOO_LARGE, "Statistics files can be up to 2 MB"),
+        (_path_with_a_nul_character, "unreadable_spec_file", "cannot be read"),
+    ],
+)
+def test_a_statistics_file_the_task_may_not_read_is_refused_and_nothing_is_written(
+    people_layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, place, reason: str, said: str
+) -> None:
+    as_person(people_layout, "alice")
+    path = place(people_layout, monkeypatch)
+
+    payload = _publish_from(path)
+
+    assert payload["status"] == "failed"
+    assert (payload["failure_stage"], payload["failure_reason"]) == ("read_spec_file", reason)
+    assert said in payload["message"]
+    assert payload["retryable"] is False
+    assert _nothing_published(people_layout)
+
+
+def test_a_link_to_the_persons_own_statistics_publishes_like_the_file_tools_read_it(
+    people_layout: InstanceLayout,
+) -> None:
+    as_person(people_layout, "alice")
+    stats = _write_stats(people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json")
+    (people_layout.person_dir("alice") / "latest-stats.json").symlink_to(stats)
+
+    payload = _publish_from("latest-stats.json")
+
+    assert payload["status"] == "success"
+    assert Path(payload["index_path"]).parent.parent == people_layout.person_sites_dir("alice")
+
+
+@pytest.mark.skipif(not CEDAR_BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
+def test_a_statistics_file_in_a_folder_the_access_service_blocks_is_refused(people_layout: InstanceLayout) -> None:
+    from datetime import datetime, timezone
+
+    from access_control.entities import PersonPrincipal
+    from custom_agents import folder_access
+    from custom_agents.access_runtime import runtime_access
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        GrantKind,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+
+    agent = task_agent(people_layout, "alice")
+    agent.authorization_config = {"enabled": True, "cedar_binary_path": str(CEDAR_BINARY)}
+    agent.named_agent_type = "WebResearchAgent"
+    set_agent_ref(agent)
+    folder_access.forget_kept_answers()
+    blocked = _write_stats(people_layout.team_dir / "finance" / "stats.json")
+    own = _write_stats(people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json")
+    runtime_access(agent).service.grant_by_person(
+        PersonPrincipal("owner-1", TEAM, ("owner",)),
+        GrantV1(
+            grant_id="new",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+            level=AccessLevel.FULL,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id="owner-1"),
+            reason="Keep finance away from research.",
+            created_at_utc=datetime.now(timezone.utc),
+        ),
+    )
+
+    refused = _publish_from(blocked)
+    assert (refused["failure_reason"], refused["failure_stage"]) == (file_access.ACCESS_DENIED, "read_spec_file")
+    # The access service decided: its block's own reason, not a check that could not run.
+    assert "only a person can remove the block" in refused["message"]
+    assert _nothing_published(people_layout)
+    assert _publish_from(own)["status"] == "success"
+
+
+def test_statistics_of_at_least_170_kb_publish_from_a_relative_path(people_layout: InstanceLayout) -> None:
+    as_person(people_layout, "alice")
+    stats = _work_report_stats()
+    template = stats["acceptance"][0]
+    while len(json.dumps(stats)) < 170 * 1024:
+        number = len(stats["acceptance"]) + 1
+        stats["acceptance"].append({**template, "id": f"A{number}", "text": f"Criterion {number}: " + "x" * 200})
+    path = _write_stats(people_layout.person_dir("alice") / "coder-critic" / "big-run" / "stats.json", stats)
+
+    payload = _publish_from("coder-critic/big-run/stats.json")
+
+    assert path.stat().st_size >= 170 * 1024
+    assert payload["status"] == "success"
+    page = Path(payload["index_path"]).read_text(encoding="utf-8")
+    assert f"Criterion {len(stats['acceptance'])}: " in page
+
+
+def test_the_file_form_is_in_the_tool_schema_and_description() -> None:
+    from custom_tools.single_page_site_tools import REPORT_STATS_MAX_BYTES, publish_single_page_site
+
+    schema = publish_single_page_site.tool_spec["inputSchema"]["json"]
+    description = publish_single_page_site.tool_spec["description"]
+
+    assert "site_spec_path" in schema["properties"]
+    assert not {"site_spec_json", "site_spec_path"} & set(schema.get("required", []))
+    assert REPORT_STATS_MAX_BYTES >= 1_000_000
+    assert f"may be up to {REPORT_STATS_MAX_BYTES // (1024 * 1024)} MB" in description
+    assert "pass its path in site_spec_path" in description
+    assert "works only for small statistics" in description
+
+
+@pytest.mark.parametrize(
+    ("arguments", "reason", "said"),
+    [
+        ({"site_spec_json": json.dumps({"schema": 1}), "site_spec_path": "stats.json"}, "site_spec_conflict", "not both"),
+        ({}, "site_spec_missing", "site_spec_path"),
+        ({"site_spec_json": "  "}, "site_spec_missing", "JSON object in site_spec_json"),
+    ],
+)
+def test_one_spec_source_is_required(
+    people_layout: InstanceLayout, arguments: dict, reason: str, said: str
+) -> None:
+    from custom_tools.single_page_site_tools import publish_single_page_site
+
+    as_person(people_layout, "alice")
+
+    payload = _payload(publish_single_page_site(site_kind="report", **arguments))
+
+    assert (payload["failure_stage"], payload["failure_reason"]) == ("input_validation", reason)
+    assert said in payload["message"]
+    assert _nothing_published(people_layout)
+
+
+@pytest.mark.parametrize("site_kind", ["article", "comparison", "how_to", "app"])
+def test_site_spec_path_is_refused_for_other_kinds_before_anything_is_read(
+    people_layout: InstanceLayout, site_kind: str
+) -> None:
+    as_person(people_layout, "alice")
+
+    # The file does not exist: a read would answer file_not_found.
+    payload = _publish_from("coder-critic/run/stats.json", site_kind=site_kind)
+
+    assert payload["failure_reason"] == "site_spec_path_report_only"
+    assert "Pass every other kind of page as a JSON object in site_spec_json" in payload["message"]
+    assert _nothing_published(people_layout)
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        (b"{not json", "invalid_json"),
+        (b"[1, 2]", "json_not_object"),
+        ("café".encode("latin-1"), "invalid_json"),
+        (json.dumps({"title": "An article"}).encode(), "invalid_report_stats"),
+        (json.dumps({"site_kind": "article", "title": "An article"}).encode(), "site_spec_path_report_only"),
+    ],
+)
+def test_a_file_that_is_not_statistics_is_refused_and_nothing_is_written(
+    people_layout: InstanceLayout, content: bytes, reason: str
+) -> None:
+    as_person(people_layout, "alice")
+    path = people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+
+    payload = _publish_from(path)
+
+    assert payload["failure_reason"] == reason
+    assert payload["retryable"] is False
+    assert _nothing_published(people_layout)

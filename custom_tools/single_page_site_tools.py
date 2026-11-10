@@ -30,6 +30,8 @@ from urllib.parse import urlparse
 from strands import tool
 
 from access_control.safe_open import UnsafePath
+from custom_tools import file_access
+from custom_tools.path_policy import PathPolicyError
 from custom_tools.runtime_context import bound_task_id, get_agent_ref
 from custom_tools.work_report import render_work_report_page, validate_stats
 from custom_tools.workspace_scope import current_workspace_scope, runtime_layout
@@ -55,6 +57,18 @@ SiteKind = Literal["article", "comparison", "how_to", "app", "report"]
 # The coder-critic work report: the spec is the stats.json cct.py wrote.
 _REPORT_SITE_KIND = "report"
 _SITE_KINDS: tuple[str, ...] = ("article", "comparison", "how_to", "app", _REPORT_SITE_KIND)
+# The largest stats.json read from site_spec_path. A real run's is about 170 KB,
+# too large for a model to pass as text; validating and rendering a file at the
+# cap takes about 30 ms. The tool description states it in MB.
+REPORT_STATS_MAX_BYTES = 2 * 1024 * 1024
+_REPORT_STATS_MAX_MB = REPORT_STATS_MAX_BYTES // (1024 * 1024)
+# What to do about a refused statistics file, beyond the folder rules' own reason.
+_SPEC_FILE_HINTS = {
+    file_access.NOT_A_REGULAR_FILE: "Name the stats.json file itself, not its folder.",
+    file_access.FILE_TOO_LARGE: f"Statistics files can be up to {_REPORT_STATS_MAX_MB} MB.",
+}
+_SPEC_JSON_LABEL = "site_spec_json"
+_SPEC_PATH_LABEL = "The file at site_spec_path"
 _SITE_KIND_PRESENTATION: dict[str, dict[str, str]] = {
     "article": {
         "default_title": "Generated Article",
@@ -1502,11 +1516,106 @@ def _render_html(
 """
 
 
+def _spec_file_refused(site_spec_path: str, reason: str, message: str) -> dict[str, Any]:
+    LOGGER.warning(
+        "A statistics file was not read for a page. event=generated_site_spec_file_refused "
+        "reason_code=%s path=%s",
+        reason,
+        site_spec_path,
+    )
+    return _failure("read_spec_file", reason, message)
+
+
+def _read_spec_file(site_spec_path: str) -> str | dict[str, Any]:
+    """The text of the statistics file at ``site_spec_path``, or the failure to return.
+
+    The file is read through ``custom_tools.file_access`` like every file an
+    agent names: the task's folders for the person it works for, the access
+    service with authorization on, no link followed at the open, and one
+    regular file of at most ``REPORT_STATS_MAX_BYTES``. A refusal keeps the
+    reason code the file tools report.
+    """
+
+    try:
+        return file_access.read_text(site_spec_path, max_bytes=REPORT_STATS_MAX_BYTES)[1]
+    except PathPolicyError as exc:
+        hint = _SPEC_FILE_HINTS.get(exc.reason_code, "")
+        return _spec_file_refused(
+            site_spec_path,
+            exc.reason_code,
+            f"The statistics file cannot be read: {str(exc).rstrip('.')}. {hint}".strip(),
+        )
+    except FileNotFoundError as exc:
+        return _spec_file_refused(
+            site_spec_path,
+            "file_not_found",
+            f"No statistics file is at that path ({exc}). Pass the path of the stats.json that cct.py stats wrote.",
+        )
+    except UnicodeDecodeError:
+        return _spec_file_refused(
+            site_spec_path,
+            "invalid_json",
+            "The statistics file is not UTF-8 text. Pass the path of the stats.json that cct.py stats wrote.",
+        )
+    except (OSError, ValueError) as exc:
+        # For example a NUL character in the path, or a disk error while reading.
+        return _spec_file_refused(
+            site_spec_path, "unreadable_spec_file", f"The statistics file cannot be read: {str(exc).rstrip('.')}."
+        )
+
+
+def _report_only(detail: str = "") -> dict[str, Any]:
+    return _failure(
+        "input_validation",
+        "site_spec_path_report_only",
+        f"{detail}site_spec_path is only for site_kind=\"report\", the coder-critic work report. "
+        "Pass every other kind of page as a JSON object in site_spec_json.",
+    )
+
+
+def _is_report_kind(site_kind: Any) -> bool:
+    try:
+        return _normalize_site_kind(site_kind) == _REPORT_SITE_KIND
+    except ValueError:
+        return False
+
+
+def _spec_text(site_spec_json: str, site_spec_path: str, site_kind: str) -> tuple[str, str] | dict[str, Any]:
+    """The spec's JSON text and a label naming where it came from, or the failure to return.
+
+    Exactly one of the two is used. A file is read only for a report, so the
+    other kinds never take file input.
+    """
+
+    has_json, path = bool(_text(site_spec_json)), _text(site_spec_path)
+    if has_json and path:
+        return _failure(
+            "input_validation",
+            "site_spec_conflict",
+            "Pass site_spec_json or site_spec_path, not both. For a work report, pass only site_spec_path, "
+            "the path of the stats.json that cct.py stats wrote.",
+        )
+    if not has_json and not path:
+        return _failure(
+            "input_validation",
+            "site_spec_missing",
+            "Pass the page as a JSON object in site_spec_json, or for site_kind=\"report\" the path of the "
+            "stats.json that cct.py stats wrote in site_spec_path.",
+        )
+    if not path:
+        return site_spec_json, _SPEC_JSON_LABEL
+    if not _is_report_kind(site_kind):
+        return _report_only()
+    text = _read_spec_file(path)
+    return text if isinstance(text, dict) else (text, _SPEC_PATH_LABEL)
+
+
 @tool
 def publish_single_page_site(
-    site_spec_json: str,
+    site_spec_json: str = "",
     site_slug: str = "",
     site_kind: SiteKind = "article",
+    site_spec_path: str = "",
 ) -> dict[str, Any]:
     """
     Publish a structured single-page website.
@@ -1522,14 +1631,20 @@ def publish_single_page_site(
     report is an article.
 
     article, comparison, how_to, and app pages use the runtime theme and have
-    an embedded chat. For report, site_spec_json is the stats.json that
-    `cct.py stats` wrote, passed unchanged; the page uses the work report's own
-    design (inline CSS, no scripts), takes its title from run.title, and has no
-    embedded chat and no runtime theme. Statistics not in the shape cct.py
-    writes are refused (failure_reason invalid_report_stats) and nothing is
-    written.
+    an embedded chat. report publishes the stats.json that `cct.py stats`
+    wrote: pass its path in site_spec_path and leave site_spec_json empty.
+    Relative paths start in the person's folder (for example
+    coder-critic/<run name>/stats.json); the file is read under the same folder
+    rules as your other file reads and may be up to 2 MB. Passing the
+    statistics as text in site_spec_json works only for small statistics.
+    The page uses the work report's own design (inline CSS, no scripts), takes
+    its title from run.title, and has no embedded chat and no runtime theme.
+    Statistics not in the shape cct.py writes are refused (failure_reason
+    invalid_report_stats) and nothing is written. site_spec_path is refused
+    for every other kind.
 
-    The site_spec_json argument must be a JSON object. All other kinds may use
+    Pass exactly one of site_spec_json and site_spec_path. For every kind but
+    report, site_spec_json is a JSON object. All other kinds may use
     title, summary, sections, and resources. Optional useful elements include:
     article: highlights, key_points, and callouts; comparison: options with
     pros/cons/best_for, comparison_rows with criterion and values, and a
@@ -1555,43 +1670,24 @@ def publish_single_page_site(
     returned site_url to the user; do not invent or shorten generated-site
     URLs, and do not wrap bare URLs in Markdown emphasis.
     """
+    source = _spec_text(site_spec_json, site_spec_path, site_kind)
+    if isinstance(source, dict):
+        return source
+    spec_text, source_label = source
     try:
-        spec = json.loads(site_spec_json)
+        spec = json.loads(spec_text)
     except json.JSONDecodeError as exc:
-        return _json_result(
-            "error",
-            {
-                "status": "failed",
-                "failure_stage": "input_validation",
-                "failure_reason": "invalid_json",
-                "message": str(exc),
-                "retryable": False,
-            },
-        )
+        message = str(exc) if source_label == _SPEC_JSON_LABEL else f"{source_label} is not valid JSON: {exc}"
+        return _failure("input_validation", "invalid_json", message)
     if not isinstance(spec, dict):
-        return _json_result(
-            "error",
-            {
-                "status": "failed",
-                "failure_stage": "input_validation",
-                "failure_reason": "json_not_object",
-                "message": "site_spec_json must decode to a JSON object.",
-                "retryable": False,
-            },
-        )
+        return _failure("input_validation", "json_not_object", f"{source_label} must decode to a JSON object.")
     try:
         resolved_site_kind = _normalize_site_kind(spec.get("site_kind") or site_kind)
     except ValueError as exc:
-        return _json_result(
-            "error",
-            {
-                "status": "failed",
-                "failure_stage": "input_validation",
-                "failure_reason": "invalid_site_kind",
-                "message": str(exc),
-                "retryable": False,
-            },
-        )
+        return _failure("input_validation", "invalid_site_kind", str(exc))
+    if source_label == _SPEC_PATH_LABEL and resolved_site_kind != _REPORT_SITE_KIND:
+        # The file's own site_kind names another kind.
+        return _report_only(f"The file sets site_kind to {resolved_site_kind!r}. ")
     if resolved_site_kind == _REPORT_SITE_KIND:
         # Checked before anything is written. validate_stats ignores top-level
         # keys it does not read, so the update keys can sit beside the stats.
