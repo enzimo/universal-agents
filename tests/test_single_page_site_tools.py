@@ -879,14 +879,17 @@ def test_the_file_form_is_in_the_tool_schema_and_description() -> None:
     from custom_tools.single_page_site_tools import REPORT_STATS_MAX_BYTES, publish_single_page_site
 
     schema = publish_single_page_site.tool_spec["inputSchema"]["json"]
-    description = publish_single_page_site.tool_spec["description"]
+    description = " ".join(publish_single_page_site.tool_spec["description"].split())  # one line
 
-    assert "site_spec_path" in schema["properties"]
-    assert not {"site_spec_json", "site_spec_path"} & set(schema.get("required", []))
+    assert {"site_spec_path", "update_site_id"} <= set(schema["properties"])
+    assert not {"site_spec_json", "site_spec_path", "update_site_id"} & set(schema.get("required", []))
     assert REPORT_STATS_MAX_BYTES >= 1_000_000
     assert f"may be up to {REPORT_STATS_MAX_BYTES // (1024 * 1024)} MB" in description
-    assert "pass its path in site_spec_path" in description
+    assert 'pass site_kind="report" and the file\'s path in site_spec_path' in description
     assert "works only for small statistics" in description
+    # A report is published again with the parameter, never by editing its statistics.
+    assert "update_site_id" in description and "do not edit the statistics file" in description
+    assert "top level of the statistics" not in description
 
 
 @pytest.mark.parametrize(
@@ -933,6 +936,7 @@ def test_site_spec_path_is_refused_for_other_kinds_before_anything_is_read(
         ("café".encode("latin-1"), "invalid_json"),
         (json.dumps({"title": "An article"}).encode(), "invalid_report_stats"),
         (json.dumps({"site_kind": "article", "title": "An article"}).encode(), "site_spec_path_report_only"),
+        (b"[" * 100_000 + b"]" * 100_000, "invalid_json"),
     ],
 )
 def test_a_file_that_is_not_statistics_is_refused_and_nothing_is_written(
@@ -948,3 +952,85 @@ def test_a_file_that_is_not_statistics_is_refused_and_nothing_is_written(
     assert payload["failure_reason"] == reason
     assert payload["retryable"] is False
     assert _nothing_published(people_layout)
+
+
+def test_a_report_from_its_file_is_the_same_page_as_from_its_text(people_layout: InstanceLayout) -> None:
+    from custom_tools.single_page_site_tools import publish_single_page_site
+
+    as_person(people_layout, "alice")
+    text = WORK_REPORT_STATS.read_text(encoding="utf-8")
+    path = people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+
+    from_text = _payload(publish_single_page_site(text, site_kind="report"))
+    from_file = _publish_from(path)
+
+    assert from_text["status"] == from_file["status"] == "success"
+    assert Path(from_file["index_path"]).read_bytes() == Path(from_text["index_path"]).read_bytes()
+    text_record = _record(people_layout.root, from_text["site_id"])
+    file_record = _record(people_layout.root, from_file["site_id"])
+    for key in ("title", "site_kind", "owner_person_id", "files"):
+        assert file_record[key] == text_record[key]
+
+
+def test_a_report_from_its_file_is_published_again_in_place_only_for_its_person(
+    people_layout: InstanceLayout,
+) -> None:
+    as_person(people_layout, "alice")
+    path = _write_stats(people_layout.person_dir("alice") / "coder-critic" / "run" / "stats.json")
+    first = _publish_from("coder-critic/run/stats.json")
+    stats = _work_report_stats()
+    stats["narrative"]["summary"] = "The fix round closed the last blocking finding."
+    _write_stats(path, stats)  # cct.py stats ran again after the fix round
+    written = path.read_bytes()
+
+    updated = _publish_from("coder-critic/run/stats.json", update_site_id=first["site_id"])
+
+    assert updated["operation"] == "updated"
+    for key in ("site_id", "site_url", "index_path"):
+        assert updated[key] == first[key]
+    page = Path(updated["index_path"]).read_bytes()
+    assert "The fix round closed the last blocking finding." in page.decode("utf-8")
+    record = _record(people_layout.root, first["site_id"])
+    assert record["update_count"] == 1
+    assert record["files"]["index.html"] == hashlib.sha256(page).hexdigest()
+    assert path.read_bytes() == written  # the statistics file is left as cct.py wrote it
+
+    as_person(people_layout, "bob")
+    stats["narrative"]["summary"] = "Bob was here."
+    _write_stats(people_layout.person_dir("bob") / "coder-critic" / "run" / "stats.json", stats)
+    refused = _publish_from("coder-critic/run/stats.json", update_site_id=first["site_id"])
+
+    assert refused["failure_reason"] == "site_not_found"
+    assert Path(first["index_path"]).read_bytes() == page
+    assert not people_layout.person_sites_dir("bob").exists()
+
+
+def test_update_site_id_names_the_page_for_every_kind_and_must_agree_with_the_spec(
+    people_layout: InstanceLayout,
+) -> None:
+    from custom_tools.single_page_site_tools import publish_single_page_site
+
+    as_person(people_layout, "alice")
+    first = _payload(publish_single_page_site(json.dumps({"title": "Guide", "key_points": ["One."]})))
+    other = _payload(publish_single_page_site(json.dumps({"title": "Other", "key_points": ["Other."]})))
+
+    updated = _payload(
+        publish_single_page_site(
+            json.dumps({"title": "Guide", "key_points": ["Two."]}), update_site_id=first["site_id"]
+        )
+    )
+    refused = _payload(
+        publish_single_page_site(
+            json.dumps({"title": "Guide", "update_site_id": other["site_id"], "key_points": ["Three."]}),
+            update_site_id=first["site_id"],
+        )
+    )
+
+    assert (updated["operation"], updated["site_id"]) == ("updated", first["site_id"])
+    assert (refused["failure_stage"], refused["failure_reason"]) == ("input_validation", "conflicting_update_site_id")
+    assert "Pass the page to publish again only in update_site_id" in refused["message"]
+    first_page = Path(first["index_path"]).read_text(encoding="utf-8")
+    assert "Two." in first_page and "Three." not in first_page
+    assert "Three." not in Path(other["index_path"]).read_text(encoding="utf-8")

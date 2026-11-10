@@ -164,6 +164,26 @@ def _requested_update_site_id(spec: dict[str, Any]) -> str:
     return ""
 
 
+def _update_target(spec: dict[str, Any], update_site_id: str) -> str | dict[str, Any]:
+    """The id of the page to publish again, "" for a new page, or the failure to return.
+
+    The ``update_site_id`` parameter is the way to name it; a report read from
+    its file cannot carry the spec's update keys without editing that file.
+    The spec keys still work, and naming two different pages is refused.
+    """
+
+    from_parameter = _text(update_site_id)
+    from_spec = _requested_update_site_id(spec)
+    if from_parameter and from_spec and from_parameter != from_spec:
+        return _failure(
+            "input_validation",
+            "conflicting_update_site_id",
+            f"update_site_id names {from_parameter!r} but the spec names {from_spec!r}. "
+            "Pass the page to publish again only in update_site_id.",
+        )
+    return from_parameter or from_spec
+
+
 def _site_store(agent: Any) -> PublishedSiteStore:
     """Records in ``state/published_sites``, pages below ``workspaces/``.
 
@@ -1616,6 +1636,7 @@ def publish_single_page_site(
     site_slug: str = "",
     site_kind: SiteKind = "article",
     site_spec_path: str = "",
+    update_site_id: str = "",
 ) -> dict[str, Any]:
     """
     Publish a structured single-page website.
@@ -1632,9 +1653,10 @@ def publish_single_page_site(
 
     article, comparison, how_to, and app pages use the runtime theme and have
     an embedded chat. report publishes the stats.json that `cct.py stats`
-    wrote: pass its path in site_spec_path and leave site_spec_json empty.
-    Relative paths start in the person's folder (for example
-    coder-critic/<run name>/stats.json); the file is read under the same folder
+    wrote: pass site_kind="report" and the file's path in site_spec_path, and
+    leave site_spec_json empty. Relative paths start in the person's folder
+    (agents/ for work for no person), for example
+    coder-critic/<run name>/stats.json; the file is read under the same folder
     rules as your other file reads and may be up to 2 MB. Passing the
     statistics as text in site_spec_json works only for small statistics.
     The page uses the work report's own design (inline CSS, no scripts), takes
@@ -1656,12 +1678,15 @@ def publish_single_page_site(
     not rendered.
 
     Optional section headings can be passed with section_headings or top-level
-    fields such as materials_heading. To regenerate an existing page in place,
-    pass update_site_id, existing_site_id, regenerate_site_id, or
-    update_existing=true with site_id or site_url set to the prior returned
-    page (for report, add these keys at the top level of the statistics).
-    update_site_url, existing_site_url, and regenerate_site_url are also
-    accepted; only pages made for the same person can be updated. The tool
+    fields such as materials_heading. To publish an existing page again in
+    place, keeping its URL, pass the site_id it returned in the update_site_id
+    parameter, with the new spec. For a report, pass the same site_spec_path
+    again (after `cct.py stats` has rewritten the file) with update_site_id; do
+    not edit the statistics file. In a site_spec_json spec, the keys
+    update_site_id, existing_site_id, regenerate_site_id, update_site_url,
+    existing_site_url, regenerate_site_url, or update_existing=true with
+    site_id or site_url also name the page. Only pages made for the same
+    person can be updated. The tool
     writes index.html into sites/<site_id>/ of the person's folder (agents/
     for work for no person) and returns the browser URL. Editing that file
     afterwards does not change the page; it stops the page from being served,
@@ -1679,6 +1704,9 @@ def publish_single_page_site(
     except json.JSONDecodeError as exc:
         message = str(exc) if source_label == _SPEC_JSON_LABEL else f"{source_label} is not valid JSON: {exc}"
         return _failure("input_validation", "invalid_json", message)
+    except RecursionError:
+        # Arrays or objects nested tens of thousands deep exhaust the decoder's stack.
+        return _failure("input_validation", "invalid_json", f"{source_label} is nested too deeply to read as JSON.")
     if not isinstance(spec, dict):
         return _failure("input_validation", "json_not_object", f"{source_label} must decode to a JSON object.")
     try:
@@ -1703,7 +1731,7 @@ def publish_single_page_site(
                 f"{exc}. Pass the stats.json that cct.py stats wrote, unchanged.",
             )
 
-    return _publish(spec, site_slug=site_slug, site_kind=resolved_site_kind)
+    return _publish(spec, site_slug=site_slug, site_kind=resolved_site_kind, update_site_id=update_site_id)
 
 
 def _optional_text(value: Any) -> str | None:
@@ -1717,7 +1745,7 @@ def _page_title(spec: dict[str, Any], site_kind: str) -> str:
     return _text(raw_title) or _SITE_KIND_PRESENTATION[site_kind]["default_title"]
 
 
-def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[str, Any]:
+def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str, update_site_id: str) -> dict[str, Any]:
     """Render the page, write it into the person's folder, then record its digests.
 
     The files are written first and the record last, so the host never
@@ -1732,9 +1760,11 @@ def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[st
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
     previous: PublishedSiteRecordV1 | None = None
-    update_site_id = _requested_update_site_id(spec)
-    if update_site_id:
-        found = _record_to_update(store, update_site_id, person_id)
+    target = _update_target(spec, update_site_id)
+    if isinstance(target, dict):
+        return target
+    if target:
+        found = _record_to_update(store, target, person_id)
         if not isinstance(found, PublishedSiteRecordV1):
             return found
         previous = found
