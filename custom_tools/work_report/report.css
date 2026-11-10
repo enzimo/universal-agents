@@ -96,11 +96,14 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
 .cct .status--blocked { color: var(--bad); }
 .cct .status--abandoned, .cct .status--in_progress { color: var(--ink-2); }
 
-/* Acceptance criteria */
-.cct .criteria { list-style: none; padding: 0; margin: 0; display: grid; gap: 2px; }
-.cct .criteria li { display: grid; grid-template-columns: 20px 34px minmax(0, 1fr); gap: 4px 8px; padding: 5px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
-.cct .criteria li:last-child { border-bottom: 0; }
-.cct .criteria .ev { grid-column: 3; font-size: 12.5px; color: var(--ink-2); }
+/* Acceptance criteria: one line each until opened, so a long list stays short */
+.cct .criteria { border-top: 1px solid var(--line); }
+.cct .ac { border-bottom: 1px solid var(--line); }
+.cct .ac > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 20px 34px minmax(0, 1fr); gap: 4px 8px; padding: 5px 0; align-items: baseline; }
+.cct .ac > summary::-webkit-details-marker { display: none; }
+.cct .ac > summary .tx { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.cct .ac[open] > summary .tx { white-space: normal; }
+.cct .ac .ev { margin: 0 0 7px 70px; font-size: 12.5px; color: var(--ink-2); }
 .cct .mark { font-weight: 700; font-family: var(--mono); }
 .cct .mark--met { color: var(--good); }
 .cct .mark--partial { color: var(--warn); }
@@ -108,6 +111,7 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
 .cct .mark--unverified { color: var(--ink-2); }
 
 /* Stat strip: the six numbers a reviewer asks first */
+.cct header + .stats { margin-top: 24px; }
 .cct .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-top: 1.5px solid var(--ink); border-bottom: 1px solid var(--line); }
 .cct .stat { padding: 12px 14px 14px 0; min-width: 0; }
 .cct .stat + .stat { padding-left: 14px; border-left: 1px solid var(--line); }
@@ -128,6 +132,10 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
 .cct .k-source { background: var(--ink); }
 .cct .k-tests { background: var(--ink-2); }
 .cct .k-docs, .cct .k-other { background: var(--line); }
+.cct .k-fixed { background: var(--good); }
+.cct .k-open { background: var(--bad); }
+.cct .k-follow { background: var(--ink-2); }
+.cct .k-kept { background: var(--line); }
 
 /* Legend */
 .cct .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--ink-2); margin: 10px 0 0; }
@@ -149,6 +157,7 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
 .cct .tl-phase { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); }
 .cct .tl-phase:nth-child(even) { background: color-mix(in oklab, var(--wash) 55%, transparent); }
 .cct .tl-phase b { position: absolute; top: 0; left: 5px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
+.cct .tl-phase--end b { left: auto; right: 4px; }
 .cct .tl-mark { position: absolute; top: 17px; bottom: 0; border-left: 1px dotted color-mix(in oklab, var(--ink-2) 60%, transparent); }
 .cct .tl-mark i { position: absolute; top: -2px; left: 3px; font-style: normal; font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); white-space: nowrap; }
 .cct .tl-axis { position: relative; height: 18px; margin-left: 56px; }
@@ -165,6 +174,8 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
 .cct .round .rk { font-weight: 650; font-size: 13px; }
 .cct .round .rk small { display: block; font-weight: 400; font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
 .cct .round .rt { min-width: 0; }
+.cct .round .rtt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.cct .round[open] .rtt { display: block; }
 .cct .round .rt .sub { font-size: 12px; color: var(--ink-2); }
 .cct .round .glyphs { white-space: nowrap; text-align: right; }
 .cct .round-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: 20px; padding: 2px 0 16px 24px; }
@@ -221,6 +232,8 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
 .cct .decision dt { font-size: 11.5px; font-weight: 650; padding-top: 1px; }
 .cct .decision dd { margin: 0; }
 .cct .flag { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in oklab, var(--warn) 45%, transparent); color: var(--warn); margin-left: 6px; }
+.cct .flag--note { color: var(--ink-2); border-color: var(--line); }
+.cct .says > .flag:first-child { margin-left: 0; }
 
 /* Two columns */
 .cct .cols { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 32px; }
@@ -242,14 +255,19 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
 .cct .files td.n { font-family: var(--mono); font-size: 11.5px; text-align: right; white-space: nowrap; padding-left: 10px; font-variant-numeric: tabular-nums; }
 .cct .files td.p { font-family: var(--mono); font-size: 12px; word-break: break-all; }
 
-/* Findings */
+/* Findings: severity, title and status on one line; the scenario and the check inside */
 .cct .findings { border-top: 1px solid var(--line); }
-.cct .finding { display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 2px 12px; padding: 8px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+.cct .finding { border-bottom: 1px solid var(--line); }
+.cct .finding > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 2px 12px; padding: 7px 0; align-items: baseline; }
+.cct .finding > summary::-webkit-details-marker { display: none; }
 .cct .finding .sev { font-size: 11.5px; font-weight: 650; }
-.cct .finding .sub { grid-column: 2 / 4; font-size: 12.5px; color: var(--ink-2); }
+.cct .finding .ft { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.cct .finding[open] .ft { white-space: normal; }
+.cct .finding .sub { margin: 0 0 9px 90px; font-size: 12.5px; color: var(--ink-2); display: grid; gap: 3px; }
+.cct .finding .sub b { font-weight: 600; color: var(--ink); }
 .cct .finding .st { font-size: 12px; white-space: nowrap; text-align: right; }
 .cct .st--fixed { color: var(--good); }
-.cct .st--open { color: var(--bad); }
+.cct .st--open { color: var(--bad); font-weight: 650; }
 
 .cct .steps { margin: 0; padding-left: 20px; }
 .cct .steps li { margin: 3px 0; }
@@ -269,6 +287,9 @@ html.cct-page body { margin: 0; padding: 40px 24px 56px; }
   .cct .title { font-size: 26px; }
 }
 @media (max-width: 480px) {
+  .cct .ac .ev { margin-left: 28px; }
+  .cct .finding > summary { grid-template-columns: 64px minmax(0, 1fr) auto; gap: 2px 8px; }
+  .cct .finding .sub { margin-left: 0; }
   .cct .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cct .stat:nth-child(odd) { border-left: 0; padding-left: 0; }
   .cct .stat:nth-child(4) { border-left: 1px solid var(--line); padding-left: 14px; }

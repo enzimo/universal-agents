@@ -606,7 +606,7 @@ def test_a_work_report_is_updated_in_place_through_top_level_update_keys(
     ("change", "named"),
     [
         (lambda stats: stats["run"].pop("title"), "run.title is missing"),
-        (lambda stats: stats.update(schema=2), "schema 1"),
+        (lambda stats: stats.update(schema=3), "schema 1 or 2"),
         (lambda stats: stats["run"].update(status="merged"), "run.status is not one of"),
         (lambda stats: stats["item_list"][0].update(lens="vibes"), "item_list[0].lens is not one of"),
         (lambda stats: stats["run"].update(started_at="yesterday"), "run.started_at"),
