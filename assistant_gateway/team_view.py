@@ -252,7 +252,7 @@ class GatewayTeamView:
 
     # -- following the records ------------------------------------------------------------
 
-    def _changed(self, changed: frozenset[str], exited: frozenset[str]) -> None:
+    def _changed(self, changed: frozenset[str]) -> None:
         assert self._agents is not None
         before, after = self._before, self._agents.live()
         self._before = after
