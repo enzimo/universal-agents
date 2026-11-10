@@ -23,6 +23,11 @@ from custom_transport.protocol1.team_agents import RECHECK_SECONDS, TeamAgents, 
 LEAD_HOST = "lead-host"
 
 
+def _lead_session(start):
+    return SimpleNamespace(agent="lead_1", runtime=LEAD_HOST, agent_type="TeamArchitect", agent_role="lead",
+                           covers=lambda now: now < start + timedelta(hours=1), ends_at=start + timedelta(hours=1))
+
+
 class _FixedClock:
     def __init__(self, now: datetime) -> None:
         self.now = now
@@ -294,15 +299,17 @@ async def test_a_lead_whose_host_stops_writing_is_reported_unavailable_within_35
 
     start = datetime(2026, 11, 5, 9, 0, tzinfo=timezone.utc)
     now = [start]
-    team_host = SimpleNamespace(clock=lambda: now[0])
+    team_host = SimpleNamespace(clock=lambda: now[0], identity=SimpleNamespace(installation="install_test"),
+                                live=SimpleNamespace(trust=SimpleNamespace(store=SimpleNamespace(
+                                    agent_session=lambda *args: _lead_session(start)))))
     agents = TeamAgents(team_host, "team_test")
     agents._agents["lead_1"] = _Held(1, "agent", SimpleNamespace(
+        document=SimpleNamespace(expires_at=format_timestamp(start + timedelta(hours=1))),
         signer=SimpleNamespace(runtime=LEAD_HOST),
         body=SimpleNamespace(state="idle", session="session_lead", agent_type="TeamArchitect",
                              display_name="TeamLead", accepting_work=True, since=format_timestamp(start))))
     agents._placements["lead_1"] = _Held(1, "placement", SimpleNamespace(body=SimpleNamespace(host=LEAD_HOST,
-                                                                                              host_epoch=1)))
-    agents._roles["session_lead"] = "lead"
+                                                                                              host_epoch=1, agent_type="TeamArchitect")))
 
     class _HostRecords:
         """The lead host's writes, as the gateway's watch of ``UA1_HOSTS`` takes them in."""
@@ -378,16 +385,17 @@ async def test_a_lead_whose_host_runs_another_contract_takes_no_chats() -> None:
     accepting work, so commands about the tasks it holds still reach it."""
 
     start = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
-    store = SimpleNamespace(contract_sha256="1" * 64)
-    agents = TeamAgents(SimpleNamespace(clock=lambda: start, live=SimpleNamespace(trust=SimpleNamespace(store=store))),
+    store = SimpleNamespace(contract_sha256="1" * 64, agent_session=lambda *args: _lead_session(start))
+    agents = TeamAgents(SimpleNamespace(clock=lambda: start, identity=SimpleNamespace(installation="install_test"),
+                                       live=SimpleNamespace(trust=SimpleNamespace(store=store))),
                         "team_test")
     agents._agents["lead_1"] = _Held(1, "agent", SimpleNamespace(
+        document=SimpleNamespace(expires_at=format_timestamp(start + timedelta(hours=1))),
         signer=SimpleNamespace(runtime=LEAD_HOST),
         body=SimpleNamespace(state="idle", session="session_lead", agent_type="TeamArchitect",
                              display_name="TeamLead", accepting_work=True, since=format_timestamp(start))))
     agents._placements["lead_1"] = _Held(1, "placement", SimpleNamespace(body=SimpleNamespace(host=LEAD_HOST,
-                                                                                              host_epoch=1)))
-    agents._roles["session_lead"] = "lead"
+                                                                                              host_epoch=1, agent_type="TeamArchitect")))
 
     def host_record(theirs):
         return _Held(1, "host", SimpleNamespace(

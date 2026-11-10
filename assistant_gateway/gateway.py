@@ -6,7 +6,10 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+
+if TYPE_CHECKING:
+    from assistant_gateway.team_view import GatewayTeamView
 
 from access_control.identity import ISSUER_GATEWAY, ContextSigner
 from assistant_gateway.access_commands import GatewayAccessCommands
@@ -231,7 +234,6 @@ from assistant_gateway.runtime_ports import (
 from assistant_gateway.store import (
     GatewayStateStore,
 )
-from assistant_gateway.team_view import GatewayTeamView
 from assistant_gateway.team_presence import (
     GatewayTeamPresence,
     configured_agent_classes,
@@ -595,6 +597,8 @@ def _observe_team(
     message_host = getattr(runtime, "message_host", None)
     if message_host is None:
         return None
+
+    from assistant_gateway.team_view import GatewayTeamView
 
     async def apply_lead(status: AgentStatus) -> None:
         await manager_client.apply_manager_status(status, source="agent_records")

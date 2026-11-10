@@ -364,7 +364,7 @@ async def test_the_gateway_service_starts_its_host_on_its_connection_and_closes_
 
     runtime = NatsGatewayManagerRuntime.from_gateway_config(_config(tmp_path, prepared=True), adapter=_Adapter(),
                                                             message_host=_Host())
-    await runtime.connect(on_response=handler, on_operational=handler, on_presence=handler)
+    await runtime.connect(on_response=handler, on_operational=handler)
     assert events[-1] == ("host started", "the gateway's connection")
     with pytest.raises(RuntimeError, match="failed to stop"):
         await runtime.close()
