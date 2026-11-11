@@ -70,8 +70,7 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
         gateway = GatewayMessageHost(layout, TEAM)
-        view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: statuses.append(status),
-                               details_seconds=0.3)
+        view = GatewayTeamView(TEAM, on_change=statuses.append)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         await _until(view.ready.is_set)
@@ -94,13 +93,18 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         assert view.live()["lead_1"].is_lead and view.live()["lead_1"].agent_type == "TeamArchitect"
         await _until(lambda: latest("worker_1") is not None)
         assert (latest("worker_1").name, latest("worker_1").is_team_lead) == ("Researcher-1", False)
-        # What only the agent can say (its skills) arrives once the gateway asks it.
-        await _until(lambda: latest("worker_1").available_skills == ["grill-me"], timeout=10)
+        # What only the agent can say (its skills) arrives once a page asks for it (the Team tab opens).
+        assert not any(status.available_skills for status in view.statuses())
+        view.want_details()
+        await _until(lambda: any(status.self_id == "worker_1" and status.available_skills == ["grill-me"]
+                                 for status in view.statuses()), timeout=10)
         assert view.live_ids() == {"lead_1", "worker_1"}
 
-        # A worker becoming busy is shown as it happens.
+        # A worker becoming busy is shown as it happens, with no ask, and keeps its skills.
         worker_host.report("worker_1", "busy", True)
         await _until(lambda: latest("worker_1").is_executing, timeout=5)
+        assert next(status for status in view.statuses() if status.self_id == "worker_1").available_skills == [
+            "grill-me"]
 
         # The lead leaves: it is gone from the view, and the Team page shows it leaving.
         await lead_host.stop()
@@ -130,7 +134,7 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
         gateway = GatewayMessageHost(layout, TEAM)
-        view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: None, details_seconds=30)
+        view = GatewayTeamView(TEAM)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         await _until(view.ready.is_set)
@@ -205,8 +209,7 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
         gateway = GatewayMessageHost(layout, TEAM)
         shown: list[AgentStatus] = []
-        view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: shown.append(status),
-                               details_seconds=30)
+        view = GatewayTeamView(TEAM, on_change=shown.append)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         await _until(view.ready.is_set)

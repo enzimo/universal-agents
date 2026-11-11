@@ -13,11 +13,17 @@ what the gateway already acts on:
   reporting (a crash) is unavailable at most 35 seconds after the host's last liveness
   write: the record's 30 seconds plus the reader's 5-second check, about the 30 seconds
   after which the presence heartbeat counted the lead gone.
-- **The team's members.** Each live agent's state goes to the Team page and the Status
-  page's records (``GatewayTeamPresence``) as it changes. What the records do not carry
-  (skills, Status page findings, whether a busy agent could start more) is asked with
-  ``agent.status`` from each live agent every 20 seconds, the old heartbeat's period, and
-  merged in.
+- **The team's members.** The Team page lists the members the records count live, built
+  from the records each time it is read (``statuses``), so a member's change shows at once
+  and a member stays listed whether or not it answers anything. A member that left is shown
+  as exiting for a minute; one that only the reader's own stop took away has not left.
+- **Details only when a page needs them** (decision 69). What the records do not carry
+  (skills, an agent's own Status page findings, whether a busy agent could start more) is
+  asked with ``agent.status`` when the Team tab is opened or refreshed (``want_details``)
+  and when the Status page is checked (``refresh_details``), at most once in
+  ``DETAILS_FRESH_SECONDS``; nothing asks on a timer. Agents on another contract are not
+  asked. The answers are kept while their member is shown; an answered capacity counts
+  only until the member's record changes.
 - **Held guidance** is woken when the lead's record changes, as the lead's heartbeat did.
 - **Agents without a session.** Every running agent holds a session (plan 13B.5); one whose
   session the team services refused has no record and no address, so it cannot report
@@ -62,9 +68,14 @@ from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
 from custom_transport.protocol1.team_agents import READER_STOPPED, HostComponent, TeamAgent, TeamAgents
 
-# The old heartbeat's period: how often the gateway asks each live agent for its details.
-DETAILS_POLL_SECONDS = 20.0
+# How long one agent may take to answer ``agent.status``.
 DETAILS_TIMEOUT_SECONDS = 5.0
+# Details asked this recently are not asked again when a page wants them (``GatewayTeamView.want_details``).
+DETAILS_FRESH_SECONDS = 10.0
+# How many agents one round of details asks at the same time.
+DETAILS_IN_FLIGHT = 16
+# How long a member that left is still shown on the Team page, as exiting.
+EXITING_SHOWN_SECONDS = 60.0
 # How long a view task that failed, or ended before the gateway stopped, waits before it starts again: the
 # first wait, doubling up to the second (``_supervised``). A task that ran this long starts from the first again.
 RESTART_SECONDS = (5.0, 300.0)
@@ -228,47 +239,68 @@ class JoinRefusal:
     text: str
 
 
-StatusObserver = Callable[[AgentStatus, Optional[datetime], str], None]
+ChangeObserver = Callable[[AgentStatus], None]
 
 
-def record_status(item: TeamAgent, team_id: str, *, details: Optional[Mapping[str, Any]] = None,
-                  exiting: bool = False) -> AgentStatus:
-    """A member as the Team page and the manager client read it, from its record and its last answered details."""
+@dataclass(frozen=True)
+class MemberDetails:
+    """What one ``agent.status`` answer added to a member's records: its skills, its own Status page findings, and
+    whether it could start more work, with the record it was asked under (``record_status`` keeps the capacity only
+    while that record is still the member's)."""
 
-    found = dict(details or {})
-    findings = []
-    for finding in found.get("findings", []):
-        try:
-            findings.append(StatusFindingV1.model_validate(finding))
-        except ValueError:
-            _LOGGER.warning("An agent's Status page finding could not be read. event=gateway_agent_finding_invalid "
-                            "agent=%s", item.agent)
+    record: TeamAgent
+    skills: tuple[str, ...] = ()
+    findings: tuple[StatusFindingV1, ...] = ()
+    has_capacity: Optional[bool] = None
+
+
+def member_name(item: TeamAgent) -> str:
+    """The member's display name, or ``Agent_<id>`` when its record has none or only spaces (review F18)."""
+
+    return (item.display_name or "").strip() or f"Agent_{item.agent}"
+
+
+def record_status(item: TeamAgent, team_id: str, *, details: Optional[MemberDetails] = None, exiting: bool = False,
+                  seen_at: Optional[datetime] = None) -> AgentStatus:
+    """A member as the Team page reads it: its record, and what its last answer added. The answered capacity counts
+    only while the record is the one it was asked under: a member that went idle since is not still Busy (F8)."""
+
+    capacity = details.has_capacity if details is not None and details.record == item else None
     return AgentStatus(
-        self_id=item.agent, team_id=team_id, name=item.display_name or f"Agent_{item.agent}",
+        self_id=item.agent, team_id=team_id, name=member_name(item),
         named_agent_type=item.agent_type, agent_role="team_lead" if item.is_lead else "worker",
         is_team_lead=item.is_lead, is_paused=item.state == "paused", is_executing=item.state == "busy",
         is_busy=item.state == "busy", accepting_work=item.takes_work and not exiting,
-        has_execution_capacity=found.get("has_capacity"), is_exiting=exiting,
-        available_skills=list(found.get("skills", [])), status_findings=findings,
-        last_seen_at=datetime.now(timezone.utc).isoformat(), status_type=MessageMetaType.RESPONSE,
+        has_execution_capacity=capacity, is_exiting=exiting,
+        available_skills=list(details.skills) if details is not None else [],
+        status_findings=list(details.findings) if details is not None else [],
+        last_seen_at=(seen_at or datetime.now(timezone.utc)).isoformat(), status_type=MessageMetaType.RESPONSE,
     )
 
 
 class GatewayTeamView:
     """The gateway's view of its team (module docstring)."""
 
-    def __init__(self, team_id: str, *, on_status: StatusObserver, logger: Optional[logging.Logger] = None,
-                 details_seconds: float = DETAILS_POLL_SECONDS,
-                 restart_seconds: tuple[float, float] = RESTART_SECONDS) -> None:
+    def __init__(self, team_id: str, *, on_change: ChangeObserver = lambda status: None,
+                 logger: Optional[logging.Logger] = None, details_fresh_seconds: float = DETAILS_FRESH_SECONDS,
+                 restart_seconds: tuple[float, float] = RESTART_SECONDS,
+                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
         self.team_id = team_id
-        self._on_status = on_status
+        self._on_change = on_change
         self._logger = logger or _LOGGER
-        self._details_seconds = details_seconds
+        self._details_fresh_seconds = details_fresh_seconds
         self._restart_seconds = restart_seconds
+        self._clock = clock
         self._agents: Optional[TeamAgents] = None
         self._host: Any = None
-        self._details: dict[str, dict[str, Any]] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Read from the page handlers' threads too, so each is replaced as a whole, never changed in place.
+        self._details: Mapping[str, MemberDetails] = {}
+        self._departed: Mapping[str, tuple[AgentStatus, datetime]] = {}
         self._before: Mapping[str, TeamAgent] = {}
+        self._details_wanted = asyncio.Event()
+        self._round: Optional[asyncio.Task[None]] = None
+        self._round_started: Optional[float] = None
         self.ready = asyncio.Event()
         # Set on every member change, when the records are read or stop being read, and on a refused join; only
         # the lead follower clears it (``TeamLeadFollower``).
@@ -283,15 +315,16 @@ class GatewayTeamView:
     async def run(self, host: Any, stop: asyncio.Event) -> None:
         """Read the team through the gateway's joined host until ``stop``; returns as soon as ``stop`` is set.
 
-        The reader and the details each run supervised (``_supervised``).
+        The reader and the details worker each run supervised (``_supervised``).
         """
 
         self._host = host
+        self._loop = asyncio.get_running_loop()
         self._agents = TeamAgents(host, self.team_id, logger=self._logger)
         self._agents.listen(self._changed)
         parts: dict[str, Callable[[], Awaitable[None]]] = {
             "gateway_team_agents": lambda: self._read(stop),
-            "gateway_team_details": lambda: self._ask_details(stop),
+            "gateway_team_details": lambda: self._answer_details_wanted(stop),
         }
         tasks = [asyncio.create_task(_supervised(name, start, stop, self._logger, self._restart_seconds), name=name)
                  for name, start in parts.items()]
@@ -355,6 +388,44 @@ class GatewayTeamView:
         return host_findings(self._agents.host_components(), self._agents.other_contract_hosts(),
                              self._host.live.trust.store.contract_sha256)
 
+    # -- the Team page (any thread) -------------------------------------------------------
+
+    def statuses(self) -> list[AgentStatus]:
+        """Every member the records count live, as of now, and those that left within ``EXITING_SHOWN_SECONDS``,
+        shown as exiting (module docstring). Built from the records at each read, so a change shows at once and a
+        member stays listed whether or not it answers (review F7)."""
+
+        now = self._clock()
+        live = dict(self._agents.live()) if self._agents is not None else {}
+        details = self._details
+        shown = [record_status(item, self.team_id, details=details.get(agent_id), seen_at=now)
+                 for agent_id, item in live.items()]
+        shown.extend(status for agent_id, (status, left) in self._departed.items()
+                     if agent_id not in live and (now - left).total_seconds() <= EXITING_SHOWN_SECONDS)
+        return shown
+
+    def want_details(self) -> None:
+        """A page needs the members' skills (the Team tab opened or refreshed): ask them, unless they were asked
+        within ``details_fresh_seconds``. Returns at once; safe from any thread (decision 69, review F6)."""
+
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._details_wanted.set)
+
+    async def refresh_details(self) -> None:
+        """Ask every live member whose process runs this gateway's contract for its details, unless a round
+        started within ``details_fresh_seconds``. One round at a time: callers share the one in flight, and a
+        caller that gives up does not stop it."""
+
+        if self._agents is None or not self.ready.is_set():
+            return
+        if self._round is None or self._round.done():
+            loop = asyncio.get_running_loop()
+            if self._round_started is not None and loop.time() - self._round_started < self._details_fresh_seconds:
+                return
+            self._round_started = loop.time()
+            self._round = asyncio.create_task(self._ask_round(), name="gateway_team_details_round")
+        await asyncio.shield(self._round)
+
     # -- following the records ------------------------------------------------------------
 
     def _changed(self, changed: frozenset[str]) -> None:
@@ -365,9 +436,11 @@ class GatewayTeamView:
             self.ready.clear()
         before, after = self._before, self._agents.live()
         self._before = after
+        departed = dict(self._departed)
         for agent_id in sorted(changed):
             now, earlier = after.get(agent_id), before.get(agent_id)
             if now is not None:
+                departed.pop(agent_id, None)
                 status = record_status(now, self.team_id, details=self._details.get(agent_id))
             elif earlier is not None:
                 reason = self._agents.departure_reason(agent_id)
@@ -376,33 +449,60 @@ class GatewayTeamView:
                     continue
                 self._logger.info("A team member left the team's records. event=gateway_team_member_left agent=%s "
                                   "lead=%s reason=%s", agent_id, earlier.is_lead, reason)
-                self._details.pop(agent_id, None)
-                status = record_status(earlier, self.team_id, exiting=True)
+                status = record_status(earlier, self.team_id, exiting=True, seen_at=self._clock())
+                departed[agent_id] = (status, self._clock())
             else:
                 continue
-            self._on_status(status, None, SOURCE)
+            self._on_change(status)
+        self._forget(after, departed)
         self.changed.set()
 
-    async def _ask_details(self, stop: asyncio.Event) -> None:
-        """Each live agent's skills, findings and capacity, every ``details_seconds`` (module docstring)."""
+    def _forget(self, live: Mapping[str, TeamAgent], departed: dict[str, tuple[AgentStatus, datetime]]) -> None:
+        """Keep departed members only while they are shown, and details only for members still shown: worker
+        pools give every run a new id, so nothing else would ever remove them (critique C04)."""
+
+        now = self._clock()
+        self._departed = {agent_id: item for agent_id, item in departed.items()
+                          if (now - item[1]).total_seconds() <= EXITING_SHOWN_SECONDS}
+        self._details = {agent_id: item for agent_id, item in self._details.items()
+                         if agent_id in live or agent_id in self._departed}
+
+    async def _answer_details_wanted(self, stop: asyncio.Event) -> None:
+        """Ask for details whenever a page wants them (``want_details``), until ``stop``."""
 
         while not stop.is_set():
-            if not self.ready.is_set():
-                await _either(self.ready, stop)
-                continue
-            assert self._agents is not None
-            live = sorted(self._agents.live())
-            answers = await asyncio.gather(*(self._ask(agent_id) for agent_id in live))
-            for agent_id, answer in zip(live, answers):
-                current = self._agents.agent(agent_id)
-                if answer is None or current is None:
-                    continue
-                self._details[agent_id] = answer
-                self._on_status(record_status(current, self.team_id, details=answer), None, SOURCE)
+            await _either(self._details_wanted, stop)
+            self._details_wanted.clear()
+            if not stop.is_set():
+                await self.refresh_details()
+
+    async def _ask_round(self) -> None:
+        assert self._agents is not None
+        asked = {agent_id: item for agent_id, item in self._agents.live().items() if item.other_contract is None}
+        limit = asyncio.Semaphore(DETAILS_IN_FLIGHT)
+
+        async def ask(agent_id: str) -> Optional[dict[str, Any]]:
+            async with limit:
+                return await self._ask(agent_id)
+
+        answers = await asyncio.gather(*(ask(agent_id) for agent_id in asked))
+        details = dict(self._details)
+        for (agent_id, record), answer in zip(asked.items(), answers):
+            if answer is not None and self._agents.agent(agent_id) is not None:
+                details[agent_id] = self._read_details(record, answer)
+        self._details = details
+
+    def _read_details(self, record: TeamAgent, answer: Mapping[str, Any]) -> MemberDetails:
+        findings = []
+        for finding in answer.get("findings", []):
             try:
-                await asyncio.wait_for(stop.wait(), timeout=self._details_seconds)
-            except asyncio.TimeoutError:
-                pass
+                findings.append(StatusFindingV1.model_validate(finding))
+            except ValueError:
+                self._logger.warning("An agent's Status page finding could not be read. "
+                                     "event=gateway_agent_finding_invalid agent=%s", record.agent)
+        capacity = answer.get("has_capacity")
+        return MemberDetails(record=record, skills=tuple(str(skill) for skill in answer.get("skills", [])),
+                             findings=tuple(findings), has_capacity=capacity if isinstance(capacity, bool) else None)
 
     async def _ask(self, agent_id: str) -> Optional[dict[str, Any]]:
         """One agent's ``agent.status`` answer, or None. Any failure stays with this agent (review F1): a reply that

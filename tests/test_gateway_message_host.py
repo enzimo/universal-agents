@@ -194,7 +194,7 @@ async def test_closing_a_joined_host_whose_team_records_were_never_read_returns(
     reader.catches_up = False
     monkeypatch.setattr(team_view, "TeamAgents", reader)
     gateway = _gateway(tmp_path)
-    gateway.observe_team(GatewayTeamView("team_one", on_status=lambda *args: None))
+    gateway.observe_team(GatewayTeamView("team_one"))
     gateway.start(nc="connection")
     await gateway.ready(timeout=1)
     await asyncio.sleep(0.05)
@@ -271,7 +271,7 @@ async def test_a_refusal_that_cannot_change_tells_the_team_view_until_the_host_s
 
     stand_in.joins = [JoinRefused("protocol_mismatch", "refused for this test")]
     gateway = _gateway(tmp_path)
-    view = GatewayTeamView("team_one", on_status=lambda *args: None)
+    view = GatewayTeamView("team_one")
     gateway.observe_team(view)
     gateway.start(nc="connection")
     with pytest.raises(GatewayHostUnavailable):

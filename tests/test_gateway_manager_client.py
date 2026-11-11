@@ -307,7 +307,7 @@ class _Waiting:
 def _following(client: GatewayManagerClient, agents: TeamAgents) -> TeamLeadFollower:
     """The gateway's lead follower over a team view whose reader is ``agents``, already read."""
 
-    view = GatewayTeamView("team_test", on_status=lambda status, reported_at, source: None)
+    view = GatewayTeamView("team_test")
     view._agents = agents
     agents.listen(view._changed)
     agents.ready.set()
@@ -333,7 +333,7 @@ async def test_the_gateway_reads_its_team_with_a_five_second_check(monkeypatch) 
 
     monkeypatch.setattr(team_view, "TeamAgents", _Built)
     stop = asyncio.Event()
-    running = asyncio.create_task(GatewayTeamView("team_test", on_status=lambda *args: None).run(object(), stop))
+    running = asyncio.create_task(GatewayTeamView("team_test").run(object(), stop))
     await asyncio.sleep(0.01)
     stop.set()
     await asyncio.wait_for(running, timeout=2)

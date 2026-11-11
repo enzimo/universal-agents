@@ -145,8 +145,7 @@ class Running:
         self.reader, self.host = reader, host
         self.statuses: list[AgentStatus] = []
         options.setdefault("restart_seconds", (0.01, 0.05))
-        self.view = GatewayTeamView(TEAM, on_status=lambda status, at, source: self.statuses.append(status),
-                                    **options)
+        self.view = GatewayTeamView(TEAM, on_change=self.statuses.append, **options)
         self.stop = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
 
@@ -181,11 +180,14 @@ async def test_one_agents_failed_answer_is_logged_and_the_others_count(monkeypat
                  "worker_quiet": ServiceUnavailable("agent.status", "ctl.agent.worker_quiet", "no_answer_in_time"),
                  "worker_ok": {"outcome": "ok", "skills": ["grill-me"]}})
     with caplog.at_level(logging.INFO, logger="assistant_gateway.team_view"):
-        async with Running(monkeypatch, reader, host, details_seconds=0.02) as running:
+        async with Running(monkeypatch, reader, host, details_fresh_seconds=0) as running:
+            await until(running.view.ready.is_set)
             reader.publish(member("worker_bad"), member("worker_ok"), member("worker_quiet"))
-            await until(lambda: host.asked.count("worker_bad") >= 2 and host.asked.count("worker_ok") >= 2)
-            shown = [status for status in running.statuses if status.self_id == "worker_ok"]
-            assert shown[-1].available_skills == ["grill-me"]
+            await running.view.refresh_details()
+            await running.view.refresh_details()  # later asks go on
+            assert host.asked.count("worker_bad") == 2 and host.asked.count("worker_ok") == 2
+            shown = {status.self_id: status for status in running.view.statuses()}
+            assert shown["worker_ok"].available_skills == ["grill-me"] and shown["worker_bad"].available_skills == []
     assert "event=gateway_agent_status_failed agent=worker_bad error_type=FrameRefused" in caplog.text
     assert "event=gateway_agent_status_unanswered agent=worker_quiet" in caplog.text
 
@@ -210,7 +212,7 @@ async def test_a_part_of_the_view_that_ends_early_is_logged_and_started_again(mo
         calls.append("details")
 
     async with Running(monkeypatch, reader, Host()) as running:
-        running.view._ask_details = ends_at_once
+        running.view._answer_details_wanted = ends_at_once
         await until(lambda: len(calls) >= 2)
     assert "event=gateway_team_view_task_ended task=gateway_team_details" in caplog.text
 
@@ -221,7 +223,7 @@ async def test_a_departure_is_logged_with_its_reason(monkeypatch, caplog) -> Non
 
     reader = Reader()
     with caplog.at_level(logging.INFO, logger="assistant_gateway.team_view"):
-        async with Running(monkeypatch, reader, Host(), details_seconds=30) as running:
+        async with Running(monkeypatch, reader, Host()) as running:
             await until(lambda: running.view.ready.is_set())
             reader.publish(member("lead_1", lead=True), member("worker_1"))
             reader.publish(member("lead_1", lead=True), reasons={"worker_1": "host_unavailable"})
@@ -234,7 +236,7 @@ async def test_a_reader_that_stops_and_starts_again_is_no_departure(monkeypatch)
     """Nobody left when only the reader stopped: no member is shown leaving (the lead's route: the follower tests)."""
 
     reader = Reader()
-    async with Running(monkeypatch, reader, Host(), details_seconds=30) as running:
+    async with Running(monkeypatch, reader, Host()) as running:
         await until(lambda: running.view.ready.is_set())
         reader.publish(member("lead_1", lead=True), member("worker_1"))
         reader.found = (member("lead_1", lead=True), member("worker_1"))
@@ -242,6 +244,193 @@ async def test_a_reader_that_stops_and_starts_again_is_no_departure(monkeypatch)
         await until(lambda: reader.runs == 2 and running.view.ready.is_set())
         assert [status.self_id for status in running.statuses] == ["lead_1", "worker_1"] * 2
         assert not any(status.is_exiting for status in running.statuses)
+
+
+# -- the Team page and details on demand -----------------------------------------------------------------
+
+
+def _presence(view: GatewayTeamView):
+    from assistant_gateway.team_presence import GatewayTeamPresence
+
+    return GatewayTeamPresence(members=view.statuses, want_details=view.want_details, list_agent_classes=list)
+
+
+def _shown(view: GatewayTeamView) -> dict[str, AgentStatus]:
+    return {status.self_id: status for status in view.statuses()}
+
+
+@pytest.mark.asyncio
+async def test_nothing_asks_the_agents_until_a_page_needs_their_details(monkeypatch) -> None:
+    """Decision 69 (review F6): agent.status is asked when the Team tab is opened or refreshed, once in the fresh
+    window, and never by the two-second live update, the activity mesh or Tasks."""
+
+    reader = Reader()
+    host = Host({"worker_1": {"outcome": "ok", "skills": ["grill-me"]}})
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("lead_1", lead=True), member("worker_1"))
+        presence = _presence(running.view)
+        await asyncio.sleep(0.2)
+        for _ in range(5):
+            presence.list_web_chat_team_members(presence_only=True)
+        await asyncio.sleep(0.1)
+        assert host.asked == []
+
+        presence.list_web_chat_team_members()  # the Team tab opens
+        await until(lambda: sorted(host.asked) == ["lead_1", "worker_1"])
+        await until(lambda: _shown(running.view)["worker_1"].available_skills == ["grill-me"])
+        presence.list_web_chat_team_members()  # Refresh, within the fresh window
+        await asyncio.sleep(0.1)
+        assert sorted(host.asked) == ["lead_1", "worker_1"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_handlers_thread_can_ask_for_details(monkeypatch) -> None:
+    reader = Reader()
+    host = Host()
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_1"))
+        await asyncio.to_thread(running.view.want_details)
+        await until(lambda: host.asked == ["worker_1"])
+
+
+@pytest.mark.asyncio
+async def test_a_record_change_shows_at_once_and_keeps_the_answered_skills_and_findings(monkeypatch) -> None:
+    """Review F21 (mutations M26, M15, M7): a busy record shows without any ask, and what the last answer said
+    (skills, the agent's own findings) stays with the member across record changes."""
+
+    finding = {"finding_id": "mcp_unreachable:docs", "severity": "problem", "title": "An MCP server does not answer"}
+    reader = Reader()
+    host = Host({"worker_1": {"outcome": "ok", "skills": ["grill-me"], "findings": [finding]}})
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_1"))
+        await running.view.refresh_details()
+        reader.publish(member("worker_1", state="busy"))
+        shown = _shown(running.view)["worker_1"]
+        assert shown.is_executing and host.asked == ["worker_1"]
+        assert shown.available_skills == ["grill-me"]
+        assert [item.finding_id for item in shown.status_findings] == ["mcp_unreachable:docs"]
+
+
+@pytest.mark.asyncio
+async def test_an_answered_capacity_counts_only_while_the_record_is_unchanged(monkeypatch) -> None:
+    """Review F8 (and M8): asked while busy, the agent said it could start nothing more; once its record says idle
+    it is Available at once. While the record is the one it was asked under, the answer counts."""
+
+    from assistant_gateway.team_presence import _status_label
+
+    reader = Reader()
+    host = Host({"worker_1": {"outcome": "ok", "has_capacity": False}})
+    async with Running(monkeypatch, reader, host, details_fresh_seconds=0) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_1", state="busy"))
+        await running.view.refresh_details()
+        reader.publish(member("worker_1"))
+        assert _status_label(_shown(running.view)["worker_1"])["key"] == "available"
+
+        await running.view.refresh_details()  # asked while idle, it says it has no room (its lane is held)
+        assert _status_label(_shown(running.view)["worker_1"])["key"] == "busy"
+
+
+@pytest.mark.asyncio
+async def test_a_member_that_left_is_shown_exiting_for_a_minute_then_forgotten(monkeypatch) -> None:
+    """Review F21 (M22) and critique C04: a leaving member is shown, then dropped with its details."""
+
+    now = [datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)]
+    reader = Reader()
+    host = Host({"worker_1": {"outcome": "ok", "skills": ["grill-me"]}})
+    async with Running(monkeypatch, reader, host, clock=lambda: now[0]) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("lead_1", lead=True), member("worker_1"))
+        await running.view.refresh_details()
+        reader.publish(member("lead_1", lead=True), reasons={"worker_1": "exiting"})
+        assert _shown(running.view)["worker_1"].is_exiting
+        now[0] += timedelta(seconds=61)
+        assert "worker_1" not in _shown(running.view)
+        reader.publish(member("lead_1", lead=True, state="busy"))
+        assert "worker_1" not in running.view._details and "worker_1" not in running.view._departed
+
+
+@pytest.mark.asyncio
+async def test_a_member_that_does_not_answer_stays_listed(monkeypatch) -> None:
+    """Review F7: the records count the lead live, so it is listed whether or not it answers agent.status."""
+
+    from assistant_gateway.team_presence import _status_label
+
+    now = [datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)]
+    reader = Reader()
+    host = Host({"lead_1": ServiceUnavailable("agent.status", "ctl.agent.lead_1", "no_answer_in_time")})
+    async with Running(monkeypatch, reader, host, clock=lambda: now[0], details_fresh_seconds=0) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("lead_1", lead=True))
+        for _ in range(3):
+            await running.view.refresh_details()
+            now[0] += timedelta(minutes=1)
+        shown = _shown(running.view)["lead_1"]
+        assert _status_label(shown)["key"] == "available" and shown.is_team_lead
+        assert shown.last_seen_at == now[0].isoformat()
+
+
+@pytest.mark.asyncio
+async def test_agents_on_another_contract_are_not_asked_and_take_no_new_work(monkeypatch) -> None:
+    """Review F22: they cannot answer in this contract, and the Team page says they are not accepting work."""
+
+    reader = Reader()
+    host = Host()
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_1", other_contract="2" * 64), member("worker_2"))
+        await running.view.refresh_details()
+        assert host.asked == ["worker_2"]
+        members = {item.agent_id: item for item in _presence(running.view).list_web_chat_team_members(
+            presence_only=True).members}
+        assert (members["worker_1"].status.key, members["worker_1"].status.label) == ("not_accepting",
+                                                                                       "Not accepting work")
+        assert members["worker_2"].status.key == "available"
+
+
+@pytest.mark.asyncio
+async def test_a_blank_display_name_shows_as_the_agents_id(monkeypatch) -> None:
+    """Review F18: a name of spaces no longer makes the whole team list invalid."""
+
+    reader = Reader()
+    async with Running(monkeypatch, reader, Host()) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_1", name="   "), member("worker_2"))
+        members = _presence(running.view).list_web_chat_team_members(presence_only=True).members
+        assert sorted(item.name for item in members) == ["Agent_worker_1", "worker_2"]
+
+
+@pytest.mark.asyncio
+async def test_a_reader_that_starts_again_shows_nobody_leaving(monkeypatch) -> None:
+    """Critique C05(b): the reader's own stop is no departure, so nobody is shown as exiting."""
+
+    reader = Reader()
+    async with Running(monkeypatch, reader, Host()) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("lead_1", lead=True), member("worker_1"))
+        reader.crash.set()
+        await until(lambda: reader.runs == 2 and running.view.ready.is_set())
+        assert not any(status.is_exiting for status in running.view.statuses())
+        reader.found = (member("lead_1", lead=True), member("worker_1"))
+        reader.crash.set()
+        await until(lambda: reader.runs == 3 and running.view.ready.is_set())
+        assert sorted(_shown(running.view)) == ["lead_1", "worker_1"]
+        assert not any(status.is_exiting for status in running.view.statuses())
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_finding_in_an_answer_is_logged_and_left_out(monkeypatch, caplog) -> None:
+    reader = Reader()
+    host = Host({"worker_1": {"outcome": "ok", "findings": [{"finding_id": "x"}]}})
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_1"))
+        await running.view.refresh_details()
+        assert _shown(running.view)["worker_1"].status_findings == []
+    assert "event=gateway_agent_finding_invalid agent=worker_1" in caplog.text
 
 
 # -- the lead follower (TeamLeadFollower) ---------------------------------------------------------------
@@ -261,7 +450,7 @@ class Following:
     """A running view, the real manager client holding the route, and the follower between them."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, reader: Reader, *, saved: Optional[str] = None) -> None:
-        self.running = Running(monkeypatch, reader, Host(), details_seconds=30)
+        self.running = Running(monkeypatch, reader, Host())
         self.reader, self.view = reader, self.running.view
         self.writes: list[Optional[str]] = []
         self.available: list = []
