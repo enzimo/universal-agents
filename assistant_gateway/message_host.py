@@ -105,9 +105,16 @@ class GatewayMessageHost:
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _task: Optional[asyncio.Task[None]] = None
+    # Who is live and who leads, read once joined (assistant_gateway.team_view).
+    team_view: Optional[Any] = None
     _joined: bool = False
     # Why it cannot join while this process runs (module docstring).
     _refusal: Optional[str] = None
+
+    def observe_team(self, view: Any) -> None:
+        """Read the team's agent records into ``view`` once joined (``GatewayTeamView.run``)."""
+
+        self.team_view = view
 
     @property
     def runtime(self) -> str:
@@ -124,6 +131,8 @@ class GatewayMessageHost:
             return
         self._ready, self._stop = asyncio.Event(), asyncio.Event()
         self._joined, self._refusal = False, None
+        if self.team_view is not None:
+            self.team_view.joining()  # a refusal from an earlier start no longer holds
         self.host = MessageHost(self.layout, gateway_profile(self.team), nc, logger=self.logger,
                                 contract_sha256=self.contract_sha256)
         self._task = asyncio.create_task(self._run(), name="gateway_message_host")
@@ -156,13 +165,19 @@ class GatewayMessageHost:
         except Exception:
             self.logger.exception("The gateway's first host record could not be written; the upkeep writes it again. "
                                   "event=gateway_host_first_record_failed")
-        await self.host.keep_up(self._stop)
+        if self.team_view is None:
+            await self.host.keep_up(self._stop)
+            return
+        await asyncio.gather(self.host.keep_up(self._stop), self.team_view.run(self.host, self._stop))
 
     def _refuse(self, refused: JoinRefused) -> None:
         self._refusal = _FINAL_REFUSALS.get(
             refused.outcome, f"The installation refused this gateway's join ({refused.outcome}): {refused.message}")
         self.logger.error("The installation refused the gateway's join; it does not ask again until it starts again. "
                           "event=gateway_host_join_refused outcome=%s message=%s", refused.outcome, refused.message)
+        if self.team_view is not None:
+            # Nobody can see the team now: chats stop going to a lead nobody sees (team_view.TeamLeadFollower).
+            self.team_view.refuse(refused.outcome, self._refusal)
         self._ready.set()
 
     def _join_failed(self, failures: int, error: BaseException) -> None:

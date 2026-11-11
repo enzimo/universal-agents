@@ -18,7 +18,11 @@ to stop desktop alerts for this user in this browser.
 
 Reopening Settings returns to the tab you last used until you sign out or reload
 the page. **Team** lists running agents and all defined agent classes with their
-descriptions, including specialists that are not currently running.
+descriptions, including specialists that are not currently running. Each running agent
+shows whether it is Available, Busy, Paused, Not accepting work (for example while it
+starts, or when its process runs another release) or Exiting (for a minute after it
+stops). The skills column is filled when you open the tab or press **Refresh**: the
+gateway asks the agents for them then, not on a timer.
 
 **Access**, next to **Inbox**, is the access map: what each agent type can use
 and where that access came from, what each person has given, and every tool's
@@ -955,8 +959,9 @@ a typed team refresh notice. Each idle skills-enabled specialist verifies the
 immutable installation receipt, reloads its own cache, and republishes its live
 skill list. A busy specialist defers the reload until its active turn finishes.
 A presence-heartbeat fingerprint check repairs that deferred refresh or a
-missed live notice. The Team roster may lag until refreshed presence arrives,
-but a successful install does not require a manager or system restart. If the
+missed live notice. The Team page shows each agent's skills as of the last time
+someone opened the Team tab or pressed Refresh, but a successful install does not
+require a manager or system restart. If the
 exact semantic name remains unavailable after the next idle presence heartbeat,
 report it as a runtime defect rather than approving a restart workaround.
 Installing the skill does not activate it and does not approve its tools, shell
@@ -1228,8 +1233,11 @@ disappears once it is fixed:
 
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
-  is not answering, the secure tool broker does not answer, TeamLead
-  stopped reporting, or a disk the instance uses is nearly full (95% by
+  is not answering, the secure tool broker does not answer, the team's records
+  show no running TeamLead, the gateway cannot see the team (the installation
+  refused its join, or it has not read the team's records), an agent cannot run its work because the team gave it
+  no session (the finding says why, for example the worker limit is reached,
+  and what to do), or a disk the instance uses is nearly full (95% by
   default).
 - **Warning**: something works, but not as configured, for example a
   variable in `team.env` or the container environment that overrides a saved

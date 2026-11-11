@@ -186,7 +186,6 @@ class NatsGatewayManagerRuntime:
         *,
         on_response: GatewayManagerEnvelopeHandler,
         on_operational: GatewayManagerEnvelopeHandler,
-        on_presence: GatewayManagerEnvelopeHandler,
     ) -> None:
         if self._connected:
             return
@@ -208,17 +207,6 @@ class NatsGatewayManagerRuntime:
                 handler=self._delivery_handler(on_operational),
                 logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
                 delivery=SubscriptionDelivery.CORE,
-            )
-            await self._adapter.subscribe_subject(
-                name=f"{self.settings.instance_name}:presence",
-                subject=f"{self._mapper.prefix}.presence.*",
-                handler=self._delivery_handler(on_presence),
-                durable_name=self._mapper.durable_name(
-                    f"gateway_presence_{response_route}"
-                ),
-                logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                consumer_role="gateway_presence",
-                deliver_last_per_subject=True,
             )
         except Exception:
             await self._adapter.close()
@@ -292,18 +280,6 @@ class NatsGatewayManagerRuntime:
                     or envelope.msg_header.message_id
                 ),
             ),
-        )
-
-    async def manager_has_live_consumer(
-        self,
-        manager_id: str,
-    ) -> bool | None:
-        # The manager's direct mailbox is a pull consumer: missing means the
-        # manager is gone, an open request means it is listening, otherwise
-        # unknown (it may be handling a message) and presence decides.
-        return await self._adapter.consumer_is_listening(
-            stream_name=self._mapper.work_stream_name(),
-            durable_name=self._mapper.durable_name(f"agent_{manager_id}"),
         )
 
     async def put_object(

@@ -40,8 +40,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
 @pytest.mark.asyncio
 async def test_gateway_reviews_notes_and_restores_archives_over_nats(
-    tmp_path, broker: str,  # noqa: F811 - the shared live NATS fixture
+    tmp_path, broker: str, monkeypatch,  # noqa: F811 - the shared live NATS fixture
 ) -> None:
+    from assistant_gateway import team_view
+
+    # No team lead runs here: the gateway's start need not wait the usual 15 seconds for one.
+    monkeypatch.setattr(team_view, "LEAD_START_SECONDS", 1.0)
     manager_db, gateway_db = tmp_path / "manager.db", tmp_path / "gateway.db"
     config = GatewayInstanceConfig.create(
         instance_name="live_knowledge", instance_root=str(tmp_path / "instance"),

@@ -102,7 +102,6 @@ class GatewayManagerRuntime(GatewayManagerTransport, Protocol):
         *,
         on_response: GatewayManagerEnvelopeHandler,
         on_operational: GatewayManagerEnvelopeHandler,
-        on_presence: GatewayManagerEnvelopeHandler,
     ) -> None:
         """Connect and install the gateway's inbound envelope handlers."""
 
@@ -114,12 +113,6 @@ class GatewayManagerRuntime(GatewayManagerTransport, Protocol):
 
     async def jetstream_usage(self) -> Any:
         """The messaging account's stored messages and limits, or None when it keeps none (Status page)."""
-
-    async def manager_has_live_consumer(
-        self,
-        manager_id: str,
-    ) -> bool | None:
-        """Return whether the manager route has an active consumer when known."""
 
     async def put_object(
         self,

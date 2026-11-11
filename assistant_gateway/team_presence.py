@@ -1,11 +1,13 @@
-"""Live team presence for Settings → Team and the Tasks view.
+"""The live team for Settings → Team, the Tasks view and the activity mesh.
 
-Agents report their status on the manager's presence and response routes; the
-gateway keeps the latest report per agent of its own team in memory (nothing
-is stored) and shows a redacted view: name, type, whether it leads the team,
-a status label, the skills it can activate, and when it was last seen. Older
-reports never replace newer ones, and agents that stop reporting drop out
-after twice the stale time.
+The members come from the gateway's team view (``assistant_gateway.team_view``), which
+builds them from the team's signed agent records each time they are read: a member is
+listed while the records count it live, and for a minute after it left, as exiting.
+Nothing is stored. The pages get a redacted view: name, type, whether it leads the team, a
+status label, the skills it can activate, and when it was last seen (now, for a live
+member). Skills come from the agents' own answers, which the view asks for only when the
+Team tab is opened or refreshed (``list_web_chat_team_members`` without
+``presence_only``); the two-second live update, the mesh and Tasks never ask.
 
 The Team view also lists the agent classes defined for the team (from the
 agent catalog, without prompts), so people can see who could be started.
@@ -14,25 +16,16 @@ agent catalog, without prompts), so people can see who could be started.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
-from assistant_gateway.application.ports import GatewayClock
+from pydantic import ValidationError
+
 from assistant_gateway.application.website_application import (
     WebAgentClassV1,
     WebTeamMemberListV1,
     WebTeamMemberV1,
 )
 from custom_messages.contracts.control_v1 import AgentStatus
-from custom_messages.enums import MessageMetaType
-
-
-@dataclass(frozen=True)
-class _PresenceObservation:
-    status: AgentStatus
-    reported_at: datetime
-    source: str
 
 
 def configured_agent_classes(config: Any) -> list[dict[str, str]]:
@@ -51,15 +44,21 @@ def configured_agent_classes(config: Any) -> list[dict[str, str]]:
     ]
 
 
-def _status_label(status: AgentStatus, *, age_seconds: float, stale_after: float) -> dict[str, str]:
+def _status_label(status: AgentStatus) -> dict[str, str]:
+    """The label and its dot colour (ui/DESIGN.md: green Available, amber Busy, red Exiting, gray otherwise).
+
+    A member that takes no new work (its process runs another message contract, it is still
+    starting, or it winds down) is "Not accepting work" unless it is busy with work it holds.
+    """
+
     if status.is_exiting:
         return {"key": "exiting", "label": "Exiting", "tone": "danger"}
-    if age_seconds > stale_after:
-        return {"key": "stale", "label": "Stale", "tone": "neutral"}
     if status.is_paused:
         return {"key": "paused", "label": "Paused", "tone": "neutral"}
     if status.is_executing or status.has_execution_capacity is False:
         return {"key": "busy", "label": "Busy", "tone": "warning"}
+    if status.accepting_work is False:
+        return {"key": "not_accepting", "label": "Not accepting work", "tone": "neutral"}
     return {"key": "available", "label": "Available", "tone": "success"}
 
 
@@ -67,62 +66,33 @@ class GatewayTeamPresence:
     def __init__(
         self,
         *,
-        team_id: str,
-        clock: GatewayClock,
-        stale_after_seconds: float,
+        members: Callable[[], Sequence[AgentStatus]],
+        want_details: Callable[[], None],
         list_agent_classes: Callable[[], list[dict[str, str]]],
         logger: logging.Logger | None = None,
     ) -> None:
-        self._team_id = team_id
-        self._clock = clock
-        self._stale_after = float(stale_after_seconds)
+        # The team view's members (``GatewayTeamView.statuses``), none for a gateway without one.
+        self._statuses = members
+        self._want_details = want_details
         self._list_agent_classes = list_agent_classes
         self._logger = logger or logging.getLogger(__name__)
-        self._presence: dict[str, _PresenceObservation] = {}
-
-    def record_agent_presence(self, status: AgentStatus, reported_at: datetime | None, source: str) -> None:
-        """Record a same-team status report without keeping diagnostic payloads for the browser."""
-
-        if status.status_type != MessageMetaType.RESPONSE or status.team_id != self._team_id or not status.self_id:
-            return
-        timestamp = reported_at or self._clock.now_utc()
-        existing = self._presence.get(status.self_id)
-        if existing is not None and timestamp < existing.reported_at:
-            self._logger.debug(
-                "Gateway ignored older team presence. agent_id=%s source=%s timestamp=%s",
-                status.self_id,
-                source,
-                timestamp.isoformat(),
-            )
-            return
-        self._presence[status.self_id] = _PresenceObservation(
-            status=status.model_copy(deep=True), reported_at=timestamp, source=source
-        )
 
     def _members(self) -> list[dict[str, Any]]:
-        now = self._clock.now_utc()
-        retention_seconds = max(self._stale_after * 2.0, 60.0)
-        members: list[dict[str, Any]] = []
-        for agent_id, observation in list(self._presence.items()):
-            age_seconds = max(0.0, (now - observation.reported_at).total_seconds())
-            if age_seconds > retention_seconds:
-                self._presence.pop(agent_id, None)
-                continue
-            status = observation.status
-            members.append(
-                {
-                    "agent_id": agent_id,
-                    "name": str(status.name or agent_id),
-                    "named_agent_type": str(status.named_agent_type or "Unknown"),
-                    "is_team_lead": bool(status.is_team_lead),
-                    "status": _status_label(status, age_seconds=age_seconds, stale_after=self._stale_after),
-                    "available_skills": sorted(
-                        {str(name).strip() for name in status.available_skills or [] if str(name).strip()},
-                        key=str.casefold,
-                    ),
-                    "last_seen_at": observation.reported_at.isoformat(),
-                }
-            )
+        members = [
+            {
+                "agent_id": status.self_id,
+                "name": str(status.name or status.self_id),
+                "named_agent_type": str(status.named_agent_type or "Unknown"),
+                "is_team_lead": bool(status.is_team_lead),
+                "status": _status_label(status),
+                "available_skills": sorted(
+                    {str(name).strip() for name in status.available_skills or [] if str(name).strip()},
+                    key=str.casefold,
+                ),
+                "last_seen_at": status.last_seen_at,
+            }
+            for status in self._statuses()
+        ]
         members.sort(
             key=lambda item: (
                 not item["is_team_lead"],
@@ -133,25 +103,32 @@ class GatewayTeamPresence:
         )
         return members
 
-    def current_statuses(self) -> list[AgentStatus]:
-        """The latest heartbeat of every agent that reported within the stale limit (Status page)."""
-
-        now = self._clock.now_utc()
-        return [
-            observation.status
-            for observation in list(self._presence.values())
-            if (now - observation.reported_at).total_seconds() <= self._stale_after
-            and not observation.status.is_exiting
-        ]
-
     def list_web_chat_team_members(self, *, presence_only: bool = False) -> WebTeamMemberListV1:
-        """Live members, plus the defined agent classes unless only presence is needed."""
+        """Live members, plus the defined agent classes unless only presence is needed.
 
+        A full read (the Team tab opened or refreshed) asks the members for their skills; the
+        answers show with the next live update. One member that does not fit the page's
+        model is logged and left out, so it cannot break the list everyone's pages read.
+        """
+
+        if not presence_only:
+            self._want_details()
+        members = []
+        for item in self._members():
+            try:
+                members.append(WebTeamMemberV1.model_validate(item))
+            except ValidationError as error:
+                self._logger.warning(
+                    "A team member could not be shown and was left out. event=gateway_team_member_invalid "
+                    "agent_id=%s error=%s",
+                    item["agent_id"],
+                    error.errors(include_url=False, include_input=False),
+                )
         return WebTeamMemberListV1(
             definitions=tuple(
                 WebAgentClassV1.model_validate(item) for item in ([] if presence_only else self._list_agent_classes())
             ),
-            members=tuple(WebTeamMemberV1.model_validate(item) for item in self._members()),
+            members=tuple(members),
         )
 
 

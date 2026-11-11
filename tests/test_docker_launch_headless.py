@@ -2029,7 +2029,7 @@ async def ignore(_envelope):
 async def gateway(config):
     wait_for("manager.checked", 10)
     runtime = NatsGatewayManagerRuntime.from_gateway_config(config)
-    await runtime.connect(on_response=ignore, on_operational=ignore, on_presence=ignore)
+    await runtime.connect(on_response=ignore, on_operational=ignore)
     (folder / "gateway.connected").touch()
     await asyncio.sleep(60)
 

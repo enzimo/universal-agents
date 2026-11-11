@@ -42,8 +42,10 @@ class _Records:
         self.values = {record: {} for record in ("agent", "placement", "host", "agent_session")}
         self.queues = {record: asyncio.Queue() for record in self.values}
         self.trust_failure = None
+        self.opened = {record: 0 for record in self.values}
 
     async def watch(self, record, keys, *, caught_up):
+        self.opened[record] += 1
         for key, raw in list(self.values[record].items()):
             yield key, raw
         caught_up.set()
@@ -408,6 +410,44 @@ async def test_an_exit_while_the_record_watch_reopens_is_recognised():
 
         await _until(lambda: reader.left_for_good("lead"))
         assert reader.agent("lead") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record", ["agent", "placement", "host"])
+async def test_a_reopened_watch_is_no_departure(record, caplog):
+    """A watch that fails and reopens keeps the records it held until the new watch has caught up, so the
+    lead never leaves the view: the gateway would otherwise mark a healthy lead unavailable (review F15)."""
+
+    async with _reading() as (reader, records, host):
+        changes = []
+        reader.listen(changes.append)
+        await records.queues[record].put(ConnectionError("watch connection lost"))
+        await records.queues[record].join()
+        await _until(lambda: records.opened[record] == 2)
+        await asyncio.sleep(0.1)  # several 0.02 s checks after the new watch caught up
+
+        assert reader.agent("lead") is not None and reader.departure_reason("lead") is None
+        assert not any("lead" in changed for changed in changes)
+        assert "event=team_agents_watch_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_take_over_is_logged_and_the_bucket_still_counts_as_read(caplog):
+    """Nothing awaits the take-over task, so its own failure is logged there, and readiness never waits on it."""
+
+    host = SimpleNamespace(identity=SimpleNamespace(installation=INSTALL), clock=lambda: NOW)
+    reader = TeamAgents(host, TEAM)
+
+    def fails(*args):
+        raise RuntimeError("removal failed")
+
+    reader._remove = fails
+    attempt_caught_up, caught_up = asyncio.Event(), asyncio.Event()
+    attempt_caught_up.set()
+    await reader._take_over("agent", {"lead": object()}, {"lead"}, set(), attempt_caught_up, caught_up)
+
+    assert caught_up.is_set()
+    assert "event=team_agents_take_over_failed team=team_example record=agent" in caplog.text
 
 
 @pytest.mark.asyncio

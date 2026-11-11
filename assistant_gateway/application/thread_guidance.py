@@ -17,9 +17,9 @@ settles the held copy:
   its next safe point (``custom_agents.task_steering_runtime``);
 - the lead does not hold the request's task yet (it waits behind other work),
   or no answer came in time, or no lead is reachable: the copy stays held and
-  is sent again when the lead reports its state (it does when a turn starts
-  or ends and on every presence heartbeat), when a lead becomes available,
-  and at least every ``retry_seconds``;
+  is sent again when the lead's record in the team's records changes (its
+  host writes it when a turn starts or ends; ``assistant_gateway.team_view``),
+  when a lead becomes available, and at least every ``retry_seconds``;
 - the request ended first, or the lead refused it: the person is told, and
   the message is not used. Guidance never becomes a new request: the person
   starts new work themselves (New Chat, ``/new``, or a message after the
@@ -35,7 +35,6 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 
 from assistant_gateway.application.gateway_application import GatewayDeliveryEvent
@@ -501,15 +500,10 @@ class GatewayThreadGuidance:
 
         self._wake.set()
 
-    def lead_reported(
-        self,
-        status: AgentStatus,
-        reported_at: datetime | None,
-        source: str,
-    ) -> None:
-        """Presence observer: the lead's report may mean it now holds a waiting request."""
+    def lead_reported(self, status: AgentStatus) -> None:
+        """A member's record changed (``assistant_gateway.team_view``): when it is the lead's, it may now hold a
+        waiting request."""
 
-        del reported_at, source
         if status.self_id and status.self_id == self._manager.manager_id:
             self._wake.set()
 

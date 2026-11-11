@@ -2,12 +2,14 @@
 
 Covered: the launcher lists operator variables that override saved settings
 and model keys (names only); the gateway turns them, the broker's model key
-status, agents' heartbeat findings and its own configuration into findings,
+status, the team view's findings (from the team's records) and the agents' own
+findings, and its own configuration into findings,
 problems first; a broker that does not answer is a problem, not silence; a
 configured endpoint with no key from anywhere is a problem, one with an
 environment key is not; a fixed rejection disappears; administrators get one
 notice per set of problems; agents report MCP servers that do not load and
-degraded memory search; only administrators read the page.
+degraded memory search; agents without a session, from their hosts' records, are
+a problem until their session opens; only administrators read the page.
 """
 
 from __future__ import annotations
@@ -63,18 +65,23 @@ class _Notices:
         return True
 
 
-def _page(config, *, keys: dict | Exception | None = None, agents=None, notices=None) -> StatusPage:
+def _page(config, *, keys: dict | Exception | None = None, agent_findings=(), team_findings=(),
+          notices=None) -> StatusPage:
     async def model_key_status() -> dict:
         if isinstance(keys, Exception):
             raise keys
         return keys if keys is not None else {"endpoints": []}
 
+    async def agents() -> list[StatusFindingV1]:
+        return list(agent_findings)
+
     return StatusPage(
         config=config,
         model_key_status=model_key_status,
-        agent_statuses=lambda: [_lead()] if agents is None else agents,
         send_notice_once=notices or _Notices(),
         now=lambda: NOW,
+        team_findings=lambda: list(team_findings),
+        agent_findings=agents,
     )
 
 
@@ -136,18 +143,106 @@ async def test_a_broker_that_does_not_answer_is_a_problem_and_listed_as_unavaila
 
 
 @pytest.mark.asyncio
-async def test_agent_findings_are_shown_once_and_a_silent_team_lead_is_a_problem(tmp_path) -> None:
+async def test_agent_findings_are_shown_once(tmp_path) -> None:
     finding = StatusFindingV1(
         finding_id="mcp_server_not_loaded:mcp:weather", severity=StatusSeverity.PROBLEM, title="weather down", source="TeamArchitect"
     )
-    worker = _lead([finding]).model_copy(update={"self_id": "worker-1", "is_team_lead": False})
     keys = {"endpoints": [{"address": "https://bifrost.example.com", "state": "stored"}]}
 
-    reported = await _page(_config(tmp_path), keys=keys, agents=[_lead([finding]), worker]).report()
-    silent = await _page(_config(tmp_path), keys=keys, agents=[]).report()
+    reported = await _page(_config(tmp_path), keys=keys, agent_findings=[finding, finding]).report()
 
     assert _ids(reported) == ["mcp_server_not_loaded:mcp:weather"]
-    assert _ids(silent) == ["team_lead_not_reporting"]
+
+
+@pytest.mark.asyncio
+async def test_an_agents_finding_cannot_hide_or_stand_in_for_the_gateways_own(tmp_path) -> None:
+    """Review F17: a worker answers with a finding that reuses the gateway's id and says it comes from the gateway;
+    the gateway's own finding is the one shown."""
+
+    from assistant_gateway.team_view import host_findings
+
+    ours = host_findings([], {"lead": "2" * 64}, "1" * 64)
+    fake = StatusFindingV1(finding_id="host_other_contract:lead", severity=StatusSeverity.NOTE,
+                           title="All processes run one contract", source="Gateway")
+    keys = {"endpoints": [{"address": "https://bifrost.example.com", "state": "stored"}]}
+
+    report = await _page(_config(tmp_path), keys=keys, team_findings=ours, agent_findings=[fake]).report()
+
+    [shown] = report.findings
+    assert shown.severity is StatusSeverity.PROBLEM and shown.title == ours[0].title
+    assert shown.source == "The team lead's process"
+
+
+def test_agents_without_a_session_are_a_problem_saying_who_why_and_what_to_do() -> None:
+    """Plan 13B.5: an agent whose session was refused has no address, so its host's record lists it."""
+
+    from assistant_gateway.team_view import host_findings
+    from custom_transport.protocol1.team_agents import HostComponent
+
+    limit = host_findings([HostComponent("lead", "Researcher-agent_id_0123456789ab", "unhealthy",
+                                         "session_limit_reached")])
+    assert len(limit) == 1 and limit[0].severity is StatusSeverity.PROBLEM
+    assert limit[0].finding_id == "agent_without_session:lead:session_limit_reached"
+    assert limit[0].title == "Agent Researcher-agent_id_0123456789ab cannot run its work"
+    assert limit[0].summary.startswith("Researcher-agent_id_0123456789ab in the team lead's process got no session")
+    assert "worker limit" in limit[0].summary and "TeamLead" in limit[0].summary
+    assert "max_total_workers_per_team" in limit[0].action and "team-wide restart" in limit[0].action
+
+    # One finding per process and reason, however many agents it names.
+    many = host_findings([HostComponent("lead", f"Analyst-agent_{n}", "unhealthy", "session_type_not_granted")
+                          for n in range(12)] + [
+        HostComponent("agent-Writer", "Writer agent-x", "unhealthy", "agent_type_not_certifiable"),
+        HostComponent("lead", "more-agents", "unhealthy", "sessions_refused"),
+        HostComponent("lead", "Coder-agent_9", "unhealthy", "session_runtime_error"),
+    ])
+    by_id = {finding.finding_id: finding for finding in many}
+    assert set(by_id) == {"agent_without_session:lead:session_type_not_granted",
+                          "agent_without_session:agent-Writer:agent_type_not_certifiable",
+                          "agent_without_session:lead:sessions_refused",
+                          "agent_without_session:lead:session_runtime_error"}
+    granted = by_id["agent_without_session:lead:session_type_not_granted"]
+    assert granted.title == "12 agents in the team lead's process cannot run their work"
+    assert "and 2 more" in granted.summary and "installation authority" in granted.summary
+    assert "process agent-Writer" in by_id["agent_without_session:agent-Writer:agent_type_not_certifiable"].summary
+    assert "event=agent_host_session_refused" in by_id["agent_without_session:lead:sessions_refused"].action
+    assert "asked for again" in by_id["agent_without_session:lead:session_runtime_error"].action
+
+
+def test_a_host_on_another_contract_is_a_problem_naming_both_digests_and_what_to_do() -> None:
+    """Contract README "Versions": its agents take no new work; installing one release everywhere ends it."""
+
+    from assistant_gateway.team_view import host_findings
+
+    ours, theirs = "1" * 64, "2" * 64
+    found = host_findings([], {"lead": theirs, "agent-Researcher": theirs}, ours)
+    assert [finding.finding_id for finding in found] == ["host_other_contract:agent-Researcher",
+                                                         "host_other_contract:lead"]
+    assert all(finding.severity is StatusSeverity.PROBLEM for finding in found)
+    lead = found[1]
+    assert lead.title == "The team lead's process runs another release's message contract"
+    assert "takes no new work" in lead.summary and "chats are answered as unavailable" in lead.summary
+    assert "same release" in lead.action and "restart the whole team" in lead.action
+    assert theirs in lead.details and ours in lead.details
+    assert found[0].source == "Process agent-Researcher"
+
+
+@pytest.mark.asyncio
+async def test_the_status_page_shows_what_the_hosts_records_list(tmp_path) -> None:
+    from assistant_gateway.team_view import host_findings
+    from custom_transport.protocol1.team_agents import HostComponent
+
+    listed = [HostComponent("lead", "Researcher-agent_1", "unhealthy", "session_limit_reached")]
+    keys = {"endpoints": [{"address": "https://bifrost.example.com", "state": "stored"}]}
+    page = StatusPage(config=_config(tmp_path), model_key_status=lambda: _keys(keys), send_notice_once=_Notices(),
+                      now=lambda: NOW, team_findings=lambda: host_findings(listed))
+
+    assert _ids(await page.report()) == ["agent_without_session:lead:session_limit_reached"]
+    listed.clear()  # its session opened
+    assert _ids(await page.report()) == []
+
+
+async def _keys(keys: dict) -> dict:
+    return keys
 
 
 @pytest.mark.asyncio

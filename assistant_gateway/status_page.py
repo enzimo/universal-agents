@@ -15,8 +15,15 @@ Sources, each producing ``StatusFindingV1`` items:
 - the broker's model key status (rejections; configured endpoints with no
   key from anywhere), plus the configured endpoints
   (``assistant_gateway.model_key_endpoints``);
-- the agents' own findings in their status heartbeat
-  (``custom_agents.status_findings``), and whether TeamLead is reporting;
+- the team, as the gateway's team view reads it from the team's signed records
+  (``assistant_gateway.team_view.GatewayTeamView.team_findings``): whether TeamLead is
+  running, agents that cannot run their work because the team services gave them no
+  session, processes that run another message contract, and whether the gateway can see
+  the team at all (its join refused, or the records not read). A gateway without a team
+  view (command-line runs) does not judge the team;
+- the agents' own findings (``custom_agents.status_findings``), which the view asks them
+  for when the page is checked (``GatewayTeamView.agent_findings``). They come last, so an
+  agent's finding never hides or stands in for the gateway's own with the same id;
 - people's model settings in the access store (``access_control.person_settings``):
   active people whose work may not use the team's model keys and who have no
   model of their own yet (a warning: their requests do not run), and the
@@ -69,7 +76,6 @@ from custom_messages.contracts.access_v2 import (
     PersonStanding,
     TeamPersonV1,
 )
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.model_keys_v1 import (
     ConnectionPurposeV1,
     KeySource,
@@ -117,6 +123,10 @@ async def _no_message_storage() -> None:
     return None
 
 
+async def _no_agent_findings() -> Sequence[StatusFindingV1]:
+    return ()
+
+
 class StatusPage:
     """Builds the Status report from every source; reads only, never repairs."""
 
@@ -125,7 +135,6 @@ class StatusPage:
         *,
         config: GatewayInstanceConfig,
         model_key_status: Callable[[], Awaitable[dict[str, Any]]],
-        agent_statuses: Callable[[], Sequence[AgentStatus]],
         send_notice_once: Callable[[AccessNoticeV1], bool],
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         open_access_store: Callable[[], Any] | None = None,
@@ -133,12 +142,13 @@ class StatusPage:
         storage: StorageCapacity | None = None,
         jetstream_usage: Callable[[], Awaitable[Any]] = _no_message_storage,
         person_storage_totals: Callable[[], StatusFindingV1 | None] = lambda: None,
+        team_findings: Callable[[], Sequence[StatusFindingV1]] = lambda: (),
+        agent_findings: Callable[[], Awaitable[Sequence[StatusFindingV1]]] = _no_agent_findings,
     ) -> None:
         self._config = config
         # People and their model settings; the gateway's own manager storage unless a test gives one.
         self._open_access_store = open_access_store or (lambda: AccessRepository(config.manager_storage_settings))
         self._model_key_status = model_key_status
-        self._agent_statuses = agent_statuses
         self._send_notice_once = send_notice_once
         self._now = now
         # The gateway's own receive loops that stopped (custom_transport.nats_pull).
@@ -149,6 +159,10 @@ class StatusPage:
         self._jetstream_usage = jetstream_usage
         # Out-of-date totals behind people's storage notices (storage_usage.StorageUsageNotices.stale_finding).
         self._person_storage_totals = person_storage_totals
+        # The gateway's own judgement of the team from its records, and the agents' own findings
+        # (team_view.GatewayTeamView.team_findings and agent_findings); none without a team view.
+        self._team_findings = team_findings
+        self._agent_findings = agent_findings
 
     async def report(self) -> StatusReportV1:
         # File and database reads run in worker threads: the gateway's loop
@@ -158,12 +172,14 @@ class StatusPage:
         overrides = await asyncio.to_thread(self._environment_overrides)
         findings.extend(_override_findings(overrides))
         findings.extend(await self._model_key_findings(overrides, unavailable))
-        findings.extend(self._agent_findings())
+        findings.extend(self._team_findings())
         findings.extend(self._receiver_findings())
         findings.extend(await asyncio.to_thread(self._person_findings, unavailable))
         findings.extend(self._configuration_findings())
         findings.extend(await self._storage_findings(unavailable))
         findings.extend(await asyncio.to_thread(self._person_storage_findings, unavailable))
+        # Last: ``_unique`` keeps the first finding per id, so an agent cannot hide the gateway's own (review F17).
+        findings.extend(await self._agent_findings())
         return StatusReportV1(
             checked_at=self._now(), findings=tuple(_ordered(_unique(findings))), unavailable_sources=tuple(unavailable)
         )
@@ -283,25 +299,6 @@ class StatusPage:
             if (finding := _missing_key(use, by_address.get(use.address), environment, chat_api_base)) is not None
         ]
         findings.extend(_rejection(endpoint) for endpoint in status.endpoints if _rejected_now(endpoint))
-        return findings
-
-    def _agent_findings(self) -> list[StatusFindingV1]:
-        statuses = list(self._agent_statuses())
-        findings = [finding for status in statuses for finding in status.status_findings]
-        if not any(status.is_team_lead for status in statuses):
-            findings.append(
-                StatusFindingV1(
-                    finding_id="team_lead_not_reporting",
-                    severity=StatusSeverity.PROBLEM,
-                    title="TeamLead is not reporting",
-                    summary=(
-                        "No status from TeamLead arrived recently, so messages may not be answered and agents' own "
-                        "problems are missing from this page."
-                    ),
-                    action="Check that the manager process is running (its log, or restart the container).",
-                    source=GATEWAY_SOURCE,
-                )
-            )
         return findings
 
     def _person_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
