@@ -15,6 +15,11 @@ settles the held copy:
 
 - accepted: the lead saved it with the request's task, which applies it at
   its next safe point (``custom_agents.task_steering_runtime``);
+- pending: the lead saved it but could not yet pass it on to every worker
+  holding one of the request's delegated tasks; the copy stays held and is
+  sent again like an unanswered one, and the lead passes it on again. The
+  lead accepts it after a few attempts (``GUIDANCE_PASS_ON_ATTEMPTS``), so
+  later messages of the thread are not held back for long;
 - the lead does not hold the request's task yet (it waits behind other work),
   or no answer came in time, or no lead is reachable: the copy stays held and
   is sent again when the lead reports its state (it does when a turn starts

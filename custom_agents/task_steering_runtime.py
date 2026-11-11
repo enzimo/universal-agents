@@ -193,6 +193,7 @@ def _discard_task_steering_memory(
         task_id, None
     )
     getattr(agent, "_consumed_task_steering_ids", {}).pop(task_id, None)
+    getattr(agent, "_guidance_pass_on_failures", {}).pop(task_id, None)
     if session is not None:
         # Its agent still holds the interrupt; no later turn may reuse it.
         session.strands.replace_before_next_turn = True
@@ -423,12 +424,96 @@ async def _record_guidance_history(
     return entry is not None
 
 
+# How many times the lead answers "pending" for guidance it saved but could not pass on to
+# every worker holding a delegated subtask. The gateway keeps a thread's later messages behind
+# a held one and sends the held one again every 15 seconds (assistant_gateway.application.
+# thread_guidance), so a forward that keeps failing must not hold them back for the rest of the
+# request: after this many attempts (about a minute) the lead answers accepted, names the
+# subtasks it could not reach and logs event=task_steering_forward_abandoned. Its own task
+# applies the guidance either way.
+GUIDANCE_PASS_ON_ATTEMPTS = 4
+
+
+@dataclass(frozen=True)
+class GuidanceForwarding:
+    """What passing guidance on to the delegated subtasks did."""
+
+    forwarded: int = 0
+    # (subtask id, holder id) of each subtask it did not reach; the holder is None when the
+    # stores that name it could not be read.
+    failed: tuple[tuple[str, Optional[str]], ...] = ()
+
+
+def _forwarded_guidance_envelope(
+    agent: Any, steering: TaskSteering, subtask: Any, subtask_meta: Any, holder_id: str, msg_meta: MessageMeta,
+) -> MessageEnvelope:
+    """The copy of the guidance for one delegated subtask, addressed to the worker holding it.
+
+    Its id is ``<guidance key>:<subtask id>``, the same on every attempt: NATS drops a repeat
+    within its duplicate window and the worker ignores a key it already saved, so passing the
+    guidance on again is safe.
+    """
+
+    forwarded = TaskSteering(
+        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+        target_task_id=subtask.task_id,
+        target_correlation_id=getattr(subtask_meta, "msg_correlation_id", None) or steering.target_correlation_id,
+        conversation_id=steering.conversation_id or getattr(msg_meta, "conversation_id", None),
+        target_named_agent_type=getattr(subtask_meta, "to_named_agent_type", None),
+        guidance_text=steering.guidance_text,
+        attachments=[attachment.model_copy(deep=True) for attachment in list(steering.attachments or [])],
+        replied_message=(
+            steering.replied_message.model_copy(deep=True) if steering.replied_message is not None else None
+        ),
+        status=TaskSteeringStatus.PENDING,
+        expires_at=steering.expires_at,
+        idempotency_key=f"{steering.idempotency_key or steering.steering_id}:{subtask.task_id}",
+    )
+    return MessageEnvelope(
+        msg_content=forwarded,
+        msg_header=MessageHeader(
+            from_agent_id=agent.id,
+            to_routing_path=holder_id,
+            response_routing_key=None,
+            agent_signature="",
+            idempotency_key=forwarded.idempotency_key or forwarded.steering_id,
+        ),
+        msg_meta=MessageMeta(
+            from_agent_name=agent.name,
+            to_agent_name=getattr(subtask_meta, "to_agent_name", None),
+            to_named_agent_type=forwarded.target_named_agent_type,
+            msg_correlation_id=new_id("corr_id"),
+            conversation_id=forwarded.conversation_id,
+            requester_type=RequesterType.AGENT_REQUESTER,
+            is_response_requested=False,
+            request_timezone=getattr(msg_meta, "request_timezone", None),
+        ),
+    )
+
+
+async def _pending_delegated_subtasks(agent: Any, task_id: str) -> list[tuple[Any, Any]]:
+    """The task's unfinished subtasks that went to a worker type or an agent by name."""
+
+    get_pending_subtasks = getattr(agent.task_manager, "get_pending_subtasks", None)
+    if not callable(get_pending_subtasks):
+        return []
+    pending = []
+    for subtask_info in await agent.task_manager.operations_runtime.run(get_pending_subtasks, task_id) or []:
+        subtask = getattr(subtask_info, "task", None)
+        subtask_meta = getattr(subtask_info, "meta", None)
+        if subtask is None or not getattr(subtask, "task_id", None):
+            continue
+        if getattr(subtask_meta, "to_named_agent_type", None) or getattr(subtask_meta, "to_agent_name", None):
+            pending.append((subtask, subtask_meta))
+    return pending
+
+
 async def _forward_proactive_guidance_to_pending_subtasks(
     agent: Any,
     task_id: str,
     steering: TaskSteering,
     msg_meta: MessageMeta,
-) -> int:
+) -> GuidanceForwarding:
     """Pass the lead's guidance on to the workers holding the task's delegated subtasks.
 
     Each goes to the holder's own control mailbox (``agent.<id>.control``), durably, which the
@@ -436,97 +521,59 @@ async def _forward_proactive_guidance_to_pending_subtasks(
     it becomes ``task.steer``). The holder comes from team-wide task custody, then the
     parent's delegated-task records (``delegated_work_runtime.current_holders``), and for a
     subtask asked of an agent by name, last from the team's directory. A subtask no worker
-    has taken yet gets none: nothing would read it until then. Until message contract step
-    7d this went to every agent on the operational subject, and the holder picked it out.
+    has taken yet gets none: nothing would read it until then. A holder whose copy could not
+    be sent, or a subtask whose holder could not be read, is reported back as failed with a
+    warning; the others still get theirs. Until message contract step 7d this went to every
+    agent on the operational subject, and the holder picked it out.
     """
 
-    get_pending_subtasks = getattr(agent.task_manager, "get_pending_subtasks", None)
-    if not callable(get_pending_subtasks):
-        return 0
-
-    pending = []
-    for subtask_info in (
-        await agent.task_manager.operations_runtime.run(get_pending_subtasks, task_id)
-        or []
-    ):
-        subtask = getattr(subtask_info, "task", None)
-        subtask_meta = getattr(subtask_info, "meta", None)
-        if subtask is None or not getattr(subtask, "task_id", None):
-            continue
-        if not getattr(subtask_meta, "to_named_agent_type", None) and not getattr(subtask_meta, "to_agent_name", None):
-            continue
-        pending.append((subtask, subtask_meta))
+    pending = await _pending_delegated_subtasks(agent, task_id)
     if not pending:
-        return 0
+        return GuidanceForwarding()
 
     from custom_agents.delegated_work_runtime import current_holders
 
+    unreadable = False
     try:
         # The task lane copies its arguments; the agent goes in through partial.
         holders = await agent.task_manager.operations_runtime.run(
             partial(current_holders, agent), task_id, [subtask.task_id for subtask, _meta in pending]
         )
-    except Exception:
-        agent._logger.exception("Could not read who holds the delegated subtasks; guidance reaches subtasks asked "
-                                "by name only. event=delegated_task_records_unreadable agent_id=%s task_id=%s",
-                                agent.id, task_id)
-        holders = {}
+    except Exception as exc:
+        unreadable, holders = True, {}
+        agent._logger.warning(
+            "[%s] Could not read which workers hold the delegated subtasks; guidance goes only to subtasks asked "
+            "of an agent by name now, and to the rest when it is sent again. event=delegated_task_holders_unreadable "
+            "task_id=%s subtask_ids=%s error_type=%s",
+            agent.id, task_id, [subtask.task_id for subtask, _meta in pending], type(exc).__name__,
+        )
     forwarded_count = 0
+    failed: list[tuple[str, Optional[str]]] = []
     for subtask, subtask_meta in pending:
-        target_named_agent_type = getattr(subtask_meta, "to_named_agent_type", None)
         target_agent_name = getattr(subtask_meta, "to_agent_name", None)
         holder_id = holders.get(subtask.task_id) or (
             agent._agent_id_by_name.get(target_agent_name) if target_agent_name else None
         )
         if not holder_id:
-            agent._logger.info("[%s] No worker holds a delegated subtask yet; guidance is not passed on to it. "
-                               "event=task_steering_forward_no_holder task_id=%s subtask_id=%s",
-                               agent.id, task_id, subtask.task_id)
+            if unreadable:
+                failed.append((subtask.task_id, None))
+            else:
+                agent._logger.info("[%s] No worker holds a delegated subtask yet; guidance is not passed on to it. "
+                                   "event=task_steering_forward_no_holder task_id=%s subtask_id=%s",
+                                   agent.id, task_id, subtask.task_id)
             continue
-
-        forwarded = TaskSteering(
-            steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
-            target_task_id=subtask.task_id,
-            target_correlation_id=getattr(subtask_meta, "msg_correlation_id", None)
-            or steering.target_correlation_id,
-            conversation_id=steering.conversation_id
-            or getattr(msg_meta, "conversation_id", None),
-            target_named_agent_type=target_named_agent_type,
-            guidance_text=steering.guidance_text,
-            attachments=[
-                attachment.model_copy(deep=True)
-                for attachment in list(steering.attachments or [])
-            ],
-            replied_message=(
-                steering.replied_message.model_copy(deep=True)
-                if steering.replied_message is not None
-                else None
-            ),
-            status=TaskSteeringStatus.PENDING,
-            expires_at=steering.expires_at,
-            idempotency_key=f"{steering.idempotency_key or steering.steering_id}:{subtask.task_id}",
-        )
-        envelope = MessageEnvelope(
-            msg_content=forwarded,
-            msg_header=MessageHeader(
-                from_agent_id=agent.id,
-                to_routing_path=holder_id,
-                response_routing_key=None,
-                agent_signature="",
-                idempotency_key=forwarded.idempotency_key or forwarded.steering_id,
-            ),
-            msg_meta=MessageMeta(
-                from_agent_name=agent.name,
-                to_agent_name=target_agent_name,
-                to_named_agent_type=target_named_agent_type,
-                msg_correlation_id=new_id("corr_id"),
-                conversation_id=forwarded.conversation_id,
-                requester_type=RequesterType.AGENT_REQUESTER,
-                is_response_requested=False,
-                request_timezone=getattr(msg_meta, "request_timezone", None),
-            ),
-        )
-        await agent.team_comms.send_message(message=envelope, routing_key=holder_id)
+        envelope = _forwarded_guidance_envelope(agent, steering, subtask, subtask_meta, holder_id, msg_meta)
+        try:
+            await agent.team_comms.send_message(message=envelope, routing_key=holder_id)
+        except Exception as exc:
+            failed.append((subtask.task_id, holder_id))
+            agent._logger.warning(
+                "[%s] Could not pass guidance on to the worker holding a delegated subtask; it is tried again when "
+                "the guidance is sent again. event=task_steering_forward_failed task_id=%s subtask_id=%s "
+                "holder_id=%s error_type=%s",
+                agent.id, task_id, subtask.task_id, holder_id, type(exc).__name__,
+            )
+            continue
         forwarded_count += 1
 
     if forwarded_count:
@@ -542,7 +589,77 @@ async def _forward_proactive_guidance_to_pending_subtasks(
                 "forwarded_count": forwarded_count,
             },
         )
-    return forwarded_count
+    return GuidanceForwarding(forwarded=forwarded_count, failed=tuple(failed))
+
+
+def _pass_on_failures(agent: Any, task_id: str) -> dict[str, int]:
+    """Failed pass-on attempts per guidance key for one task (dropped with its steering state)."""
+
+    if not hasattr(agent, "_guidance_pass_on_failures"):
+        agent._guidance_pass_on_failures = {}
+    return agent._guidance_pass_on_failures.setdefault(task_id, {})
+
+
+async def _pass_on_guidance_and_answer(
+    agent: Any,
+    task_id: str,
+    steering: TaskSteering,
+    msg_header: MessageHeader,
+    msg_meta: MessageMeta,
+    *,
+    repeated: bool,
+) -> None:
+    """Pass saved guidance on to the subtasks' holders and answer the sender.
+
+    ``repeated``: the guidance was already saved (the gateway sent it again because it did not
+    get an accepted answer); it is passed on again, so a copy that failed before reaches its
+    worker now. Answers ``pending`` when a copy did not go out, so the gateway keeps the
+    guidance and sends it again, up to ``GUIDANCE_PASS_ON_ATTEMPTS`` times.
+    """
+
+    result = await _forward_proactive_guidance_to_pending_subtasks(agent, task_id, steering, msg_meta)
+    key = steering.idempotency_key or steering.steering_id
+    failures = _pass_on_failures(agent, task_id)
+    status = TaskSteeringStatus.ACCEPTED
+    if not result.failed:
+        failures.pop(key, None)
+        if result.forwarded:
+            reason = (
+                f"Duplicate steering event; passed on again to {result.forwarded} active delegated subtask(s)."
+                if repeated
+                else f"Proactive steering accepted and forwarded to {result.forwarded} active delegated subtask(s)."
+            )
+        else:
+            reason = (
+                "Duplicate steering event ignored."
+                if repeated
+                else "Proactive steering accepted and will apply at the next safe checkpoint."
+            )
+    else:
+        attempts = failures.get(key, 0) + 1
+        subtask_ids = [subtask_id for subtask_id, _holder in result.failed]
+        if attempts < GUIDANCE_PASS_ON_ATTEMPTS:
+            failures[key] = attempts
+            status = TaskSteeringStatus.PENDING
+            reason = (
+                f"The guidance was saved for the task, but it could not be passed on to {len(subtask_ids)} "
+                "delegated subtask(s) yet; it is passed on when the guidance is sent again."
+            )
+        else:
+            failures.pop(key, None)
+            agent._logger.warning(
+                "[%s] Gave up passing guidance on to delegated subtasks; the task applies it itself. "
+                "event=task_steering_forward_abandoned task_id=%s steering_key=%s attempts=%s subtask_ids=%s "
+                "holder_ids=%s",
+                agent.id, task_id, key, attempts, subtask_ids, [holder for _subtask, holder in result.failed],
+            )
+            reason = (
+                f"Proactive steering accepted, but after {attempts} attempts it could not be passed on to delegated "
+                f"subtask(s) {', '.join(subtask_ids)}; the task applies it at its next safe checkpoint."
+            )
+    if not failures:
+        agent._guidance_pass_on_failures.pop(task_id, None)
+    await _send_steering_status_response(agent, steering, msg_header, msg_meta, status=status, reason=reason)
 
 
 WORKER_INTERRUPT_REFUSED = (
@@ -674,6 +791,12 @@ async def handle_task_steering_message(
     dedupe_key = steering.idempotency_key or steering.steering_id
     _saved_guidance, saved_keys = _saved_proactive_guidance(task_info)
     if dedupe_key in seen or dedupe_key in saved_keys:
+        if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE and (steering.guidance_text or "").strip():
+            # Guidance this agent saved earlier (in memory, or in the task's history after a
+            # restart): the gateway sends it again until it is accepted, so pass it on again; a
+            # copy that failed the first time reaches its worker now.
+            await _pass_on_guidance_and_answer(agent, task_id, steering, msg_header, msg_meta, repeated=True)
+            return
         await _send_steering_status_response(
             agent,
             steering,
@@ -706,25 +829,7 @@ async def handle_task_steering_message(
             return
         seen.add(dedupe_key)
         agent._pending_proactive_task_steering.setdefault(task_id, []).append(steering)
-        forwarded_count = await _forward_proactive_guidance_to_pending_subtasks(
-            agent,
-            task_id,
-            steering,
-            msg_meta,
-        )
-        reason = (
-            f"Proactive steering accepted and forwarded to {forwarded_count} active delegated subtask(s)."
-            if forwarded_count
-            else "Proactive steering accepted and will apply at the next safe checkpoint."
-        )
-        await _send_steering_status_response(
-            agent,
-            steering,
-            msg_header,
-            msg_meta,
-            status=TaskSteeringStatus.ACCEPTED,
-            reason=reason,
-        )
+        await _pass_on_guidance_and_answer(agent, task_id, steering, msg_header, msg_meta, repeated=False)
         return
 
     if steering.steering_type == TaskSteeringType.INTERRUPT_RESPONSE:

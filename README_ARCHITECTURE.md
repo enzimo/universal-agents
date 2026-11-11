@@ -5011,8 +5011,18 @@ comes from team-wide task custody first, then the parent's delegated-task record
 by team and parent, then, for a subtask asked of an agent by name, the team's directory
 (`delegated_work_runtime.current_holders`): custody names the worker before its claim reaches
 the lead and after a takeover whose claim is not recorded yet, and records looked up by parent
-are found after the lead restarted with a new id. The skill hint is no longer
-a message type.
+are found after the lead restarted with a new id. Each copy's id is
+`<guidance key>:<subtask id>`, so passing guidance on again is safe: NATS drops a repeat within
+its duplicate window and the worker ignores a key it saved. A copy that could not be sent,
+or a subtask whose holder could not be read, is logged with its ids
+(`event=task_steering_forward_failed`, `event=delegated_task_holders_unreadable`) without
+stopping the others, and the lead answers `pending` instead of `accepted`; the gateway keeps
+the guidance and sends it again, and the lead, finding the key already saved, passes it on
+again rather than answering "duplicate". Because the gateway keeps a thread's later messages
+behind a held one, the lead gives up after `GUIDANCE_PASS_ON_ATTEMPTS` (4, about a minute),
+answers `accepted` naming the subtasks it could not reach and logs
+`event=task_steering_forward_abandoned`; its own task applies the guidance either way. The
+skill hint is no longer a message type.
 
 Agents now find each other only through the records, which only an agent holding a session
 has, so a run with several agents needs the launcher (`docker/launch_headless.py`, which
