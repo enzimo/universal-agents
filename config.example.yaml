@@ -5,7 +5,7 @@
 # Do not store secrets in this file. API keys, passwords, and DSNs should live
 # in environment variables or Docker-style *_FILE secret variables.
 
-schema_version: 10                              # Generic config.yaml schema version. This is not the same version as gateway instance_config.yaml.
+schema_version: 11                              # Generic config.yaml schema version. This is not the same version as gateway instance_config.yaml.
 
 # Where an onboarded instance's secrets come from. Onboarding copies this into
 # instance_config.yaml (launch.secrets_source); later onboarding runs and

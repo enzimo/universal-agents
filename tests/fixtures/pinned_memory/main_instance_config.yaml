@@ -29,6 +29,7 @@ transport:                            # NATS/JetStream messaging settings. NATS 
   max_deliver: 5                            # Maximum redelivery attempts before termination.
   duplicate_window_seconds: 600.0           # JetStream duplicate message-id window.
   work_max_age_seconds: 604800.0            # Durable work/reply retention age.
+  presence_max_age_seconds: 600.0           # Replayable presence retention age.
   process_consumer_inactive_threshold_seconds: 300.0 # Expiry delay for unbound process-scoped JetStream consumers.
 gateway:                              # Gateway routing, Web Chat, request waiting, and gateway-local state settings.
   team_id: team_old                         # Team id used for routing and subject-prefix defaults.

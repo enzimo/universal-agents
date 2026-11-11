@@ -20,8 +20,8 @@ from config_loader import (
 
 
 def test_public_config_schema_versions_are_current() -> None:
-    assert CONFIG_SCHEMA_VERSION == 10
-    assert INSTANCE_CONFIG_SCHEMA_VERSION == 12
+    assert CONFIG_SCHEMA_VERSION == 11
+    assert INSTANCE_CONFIG_SCHEMA_VERSION == 13
 
 
 @pytest.mark.parametrize(
@@ -426,4 +426,72 @@ def test_current_schemas_refuse_a_removed_mcp_folder_by_name(tmp_path: Path, pat
     with pytest.raises(ValueError, match=rf"{re.escape(name)} has been removed"):
         GatewayInstanceConfig.model_validate(
             _instance_payload(tmp_path / "instance", INSTANCE_CONFIG_SCHEMA_VERSION, mcp)
+        )
+
+
+# -- the presence stream's setting (message contract step 7d) ------------------------------
+
+PINNED_0_9_CONFIG = Path(__file__).parent / "fixtures" / "pinned_memory" / "main_instance_config.yaml"
+
+
+def test_upgrading_the_pinned_old_instance_config_removes_the_presence_setting() -> None:
+    """The fixture is an earlier version's file, kept byte for byte; it holds the setting."""
+
+    raw = yaml.safe_load(PINNED_0_9_CONFIG.read_text(encoding="utf-8"))
+    assert raw["transport"]["presence_max_age_seconds"] == 600.0
+
+    migrated, steps = _migrate_instance_config_dict(raw, source_path=PINNED_0_9_CONFIG)
+
+    assert migrated["schema_version"] == INSTANCE_CONFIG_SCHEMA_VERSION
+    assert "presence_max_age_seconds" not in migrated["transport"]
+    assert "12 -> 13: the presence stream was removed; transport.presence_max_age_seconds removed" in steps
+    assert raw["transport"]["presence_max_age_seconds"] == 600.0, "the caller's mapping is not changed"
+
+
+def test_upgrading_a_0_9_instance_config_file_removes_the_setting_and_keeps_a_backup(tmp_path: Path) -> None:
+    from tests.pinned_memory_support import zero_nine_instance
+
+    path = zero_nine_instance(tmp_path, "alpha", "team_a")
+
+    result = migrate_instance_config_file(path)
+
+    assert (result.original_version, result.migrated_version) == (12, 13)
+    assert any(step.startswith("12 -> 13: the presence stream was removed;") for step in result.applied_steps)
+    assert "presence_max_age_seconds" not in yaml.safe_load(path.read_text(encoding="utf-8"))["transport"]
+    assert yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["transport"]["presence_max_age_seconds"] == 600.0
+    assert GatewayInstanceConfig.load(path).transport.work_max_age_seconds == 604800.0
+
+
+def test_upgrading_a_config_yaml_removes_the_setting_and_keeps_a_backup(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump({"schema_version": 10, "transport": {"presence_max_age_seconds": 600.0, "max_deliver": 5}}),
+        encoding="utf-8",
+    )
+
+    result = migrate_config_file(path)
+
+    assert (result.original_version, result.migrated_version) == (10, 11)
+    assert "10 -> 11: the presence stream was removed; transport.presence_max_age_seconds removed" in result.applied_steps
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["transport"] == {"max_deliver": 5}
+    assert yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["transport"]["presence_max_age_seconds"] == 600.0
+
+
+def test_the_upgrade_step_without_the_setting_only_advances_the_version(tmp_path: Path) -> None:
+    migrated, steps = _migrate_config_dict({"schema_version": 10}, source_path=tmp_path / "config.yaml")
+
+    assert migrated == {"schema_version": 11}
+    assert "10 -> 11: the presence stream was removed" in steps
+
+
+def test_current_files_naming_the_presence_setting_are_refused(tmp_path: Path) -> None:
+    """The upgrade step removes it, so a current file holding it was edited by hand."""
+
+    transport = {"transport": {"presence_max_age_seconds": 600.0}}
+    with pytest.raises(ValueError, match=r"transport\.presence_max_age_seconds has been removed"):
+        _migrate_config_dict({"schema_version": CONFIG_SCHEMA_VERSION, **transport}, source_path=tmp_path / "config.yaml")
+    with pytest.raises(ValueError, match=r"transport\.presence_max_age_seconds has been removed"):
+        GatewayInstanceConfig.model_validate(
+            {"schema_version": INSTANCE_CONFIG_SCHEMA_VERSION, "instance_name": "test",
+             "instance_root": str(tmp_path), **transport}
         )

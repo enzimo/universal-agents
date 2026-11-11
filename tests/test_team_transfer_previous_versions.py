@@ -55,9 +55,9 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
             allowed.update({4, 5})
-        # Settings versions 6 and 7 are exercised by real export/import
-        # cases in test_team_transfer_settings, including keep-forever output retention;
-        # version 8 (the releases before message contract step 7d) by its retired-setting case there.
+        # Settings versions 6, 7 and 8 are exercised by real export/import
+        # cases in test_team_transfer_settings, including keep-forever output retention
+        # and, for 8 (the releases before message contract step 7d), the retired presence setting.
         if name == "settings":
             allowed.update((6, 7, 8))
         assert version in allowed, f"the conversion step from {name} version {version} has no supported export case"

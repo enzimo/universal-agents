@@ -90,7 +90,11 @@ from runtime_settings.storage import (
     StateStorageSettings,
 )
 from runtime_settings.telemetry import ActivityCollectorSettings, OTelSettings
-from runtime_settings.transport import TransportSettings
+from runtime_settings.transport import (
+    TransportSettings,
+    drop_retired_presence_setting,
+    refuse_retired_presence_setting,
+)
 from runtime_settings.voice import VoiceSettings
 from runtime_settings.workspace import WorkspaceSettings
 from secure_tools.chat_commands import ACCOUNTS_MODEL_SUBJECT, ACCOUNTS_PRIVATE, ACCOUNTS_SHARE, accounts_command
@@ -102,7 +106,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INSTANCE_ROOT = Path.home() / GATEWAY_DEFAULTS.instance_root_name.value
 
 
-INSTANCE_CONFIG_SCHEMA_VERSION = 12
+INSTANCE_CONFIG_SCHEMA_VERSION = 13
 
 
 DIRECTLY_COMPATIBLE_INSTANCE_CONFIG_VERSIONS = {INSTANCE_CONFIG_SCHEMA_VERSION}
@@ -1513,7 +1517,35 @@ def _migrate_instance_config_dict(
         )
         version = 12
 
+    if version == 12:
+        # The presence stream was removed (message contract step 7d), and with it
+        # the setting for how long it kept messages; every 0.9 file holds it.
+        removed = drop_retired_presence_setting(migrated)
+        migrated["schema_version"] = 13
+        applied_steps.append(
+            "12 -> 13: the presence stream was removed"
+            + ("; transport.presence_max_age_seconds removed" if removed else "")
+        )
+        version = 13
+
     return migrated, tuple(applied_steps)
+
+
+def read_upgraded_instance_config(path: str | Path) -> Dict[str, Any]:
+    """The saved file's settings as this version reads them, without validation.
+
+    The file is parsed and passed through the upgrade steps in memory, as
+    ``GatewayInstanceConfig.load`` does before it validates, with no deployment
+    details applied. For readers that compare the saved choices with this
+    version's defaults (the team export, ``team_transfer.settings``): a file the
+    launcher has not rewritten since the code was upgraded must not carry
+    settings this version no longer has.
+    """
+
+    config_path = Path(path).expanduser().resolve()
+    data = _parse_instance_config_yaml(config_path.read_bytes(), config_path)
+    migrated, _steps = _migrate_instance_config_dict(data, source_path=config_path)
+    return migrated
 
 
 def migrate_instance_config_file(
@@ -1983,6 +2015,13 @@ class GatewayInstanceConfig(BaseModel):
         # The old permission system's settings (authorization.permission_delegation,
         # emergency_deny, human_interactions, ...); named one by one.
         refuse_removed_access_settings(value)
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_retired_presence_setting(cls, value: Any) -> Any:
+        # transport.presence_max_age_seconds; the 12 -> 13 upgrade step removes it from older files.
+        refuse_retired_presence_setting(value)
         return value
 
     @model_validator(mode="before")

@@ -4987,9 +4987,16 @@ the row is the heartbeat the liveness rules read, and the check picks up a misse
 the publish options for them and the JetStream push listener that only presence used are
 removed, so nothing on JetStream is pushed. The topology owner deletes an existing
 `<PREFIX>_PRESENCE` stream at start (`event=nats_retired_stream_deleted`), which also removes
-the gateway's old durable consumer on it. `transport.presence_max_age_seconds` is retired:
-an older configuration still loads, with a warning, and the team transfer's settings
-section (version 9) drops it from older exports. The operational subject now carries only
+the gateway's old durable consumer on it. `transport.presence_max_age_seconds` is retired
+through versioned upgrade steps, so the running code reads only the current format: the
+instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
+(`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
+old file), a current file that still names it is refused by name like other removed
+settings, and the team transfer's settings section (version 9) drops it from older exports
+(`RETIRED_PRESENCE_SETTING`, the one name for the path). The settings export reads the file
+through the upgrade steps (`read_upgraded_instance_config`), so an export taken after the
+code upgrade but before the launcher rewrote the file carries only what this version reads.
+The operational subject now carries only
 the gateway's task progress, parent-task probe and thread guidance, with their replies
 (plan decision 68); a lead's guidance for a delegated task goes to the worker holding it
 through its control mailbox (`agent.<id>.control`, durable, read while it works; plan
