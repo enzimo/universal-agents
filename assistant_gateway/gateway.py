@@ -584,6 +584,30 @@ def _team_view(config: GatewayInstanceConfig, runtime: object, guidance: Gateway
     return view
 
 
+def _team_view_and_presence(
+    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance
+) -> tuple[GatewayTeamView | None, GatewayTeamPresence]:
+    """The team view (``_team_view``) and the Team page's projection of it; without a view the page lists no
+    members. Composed here so the host stays a composition root."""
+
+    view = _team_view(config, runtime, guidance)
+    presence = GatewayTeamPresence(
+        members=view.statuses if view is not None else tuple,
+        want_details=view.want_details if view is not None else lambda: None,
+        list_agent_classes=lambda: configured_agent_classes(config),
+        logger=logger,
+    )
+    return view, presence
+
+
+def _team_lead_tasks(follower: TeamLeadFollower | None, stop_event: asyncio.Event) -> list[asyncio.Task[None]]:
+    """The lead follower's background check (``TeamLeadFollower.run``), when the gateway has a team view."""
+
+    if follower is None:
+        return []
+    return [asyncio.create_task(follower.run(stop_event), name="gateway_team_lead")]
+
+
 def _bind_manager_client(gateway: "UserGateway", view: GatewayTeamView | None) -> TeamLeadFollower | None:
     """The manager client's inbound handlers, and the team lead follower that keeps its route in step with the
     team's records (``assistant_gateway.team_view.TeamLeadFollower``), when there is a team view."""
@@ -1037,13 +1061,9 @@ class UserGateway:
             logger=logger,
         )
         signed_in = SignedInPerson(sessions=self.session_repository, request_context=self._request_context_service)
-        # Who is live and who leads, from the team's records (None without a message host).
-        self._team_view = _team_view(config, resolved_manager_runtime, self._thread_guidance)
-        self.team_presence = GatewayTeamPresence(
-            members=self._team_view.statuses if self._team_view is not None else tuple,
-            want_details=self._team_view.want_details if self._team_view is not None else lambda: None,
-            list_agent_classes=lambda: configured_agent_classes(config),
-            logger=logger,
+        # Who is live and who leads, from the team's records (None without a message host), and the Team page.
+        self._team_view, self.team_presence = _team_view_and_presence(
+            config, resolved_manager_runtime, self._thread_guidance
         )
         # Approving an MCP server stores grants through the Inbox's access
         # service (created below; looked up when a person approves).
@@ -1473,12 +1493,9 @@ class UserGateway:
             asyncio.create_task(
                 self._thread_guidance.run(self._stop_event),
                 name="gateway_held_guidance_loop",
-            )
+            ),
+            *_team_lead_tasks(self._team_lead, self._stop_event),
         ]
-        if self._team_lead is not None:
-            self._background_tasks.append(
-                asyncio.create_task(self._team_lead.run(self._stop_event), name="gateway_team_lead")
-            )
 
         if start_services:
             await self._maintenance_schedules.ensure_all()
