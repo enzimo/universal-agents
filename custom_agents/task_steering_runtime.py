@@ -601,6 +601,33 @@ def _pass_on_failures(agent: Any, task_id: str) -> dict[str, int]:
     return agent._guidance_pass_on_failures.setdefault(task_id, {})
 
 
+def _pass_on_answer(result: GuidanceForwarding, *, repeated: bool, attempts: int) -> tuple[TaskSteeringStatus, str]:
+    """The answer to the guidance's sender after passing it on (``attempts`` is 0 when nothing failed)."""
+
+    if not result.failed:
+        if result.forwarded:
+            if repeated:
+                return TaskSteeringStatus.ACCEPTED, (
+                    f"Duplicate steering event; passed on again to {result.forwarded} active delegated subtask(s)."
+                )
+            return TaskSteeringStatus.ACCEPTED, (
+                f"Proactive steering accepted and forwarded to {result.forwarded} active delegated subtask(s)."
+            )
+        if repeated:
+            return TaskSteeringStatus.ACCEPTED, "Duplicate steering event ignored."
+        return TaskSteeringStatus.ACCEPTED, "Proactive steering accepted and will apply at the next safe checkpoint."
+    if attempts < GUIDANCE_PASS_ON_ATTEMPTS:
+        return TaskSteeringStatus.PENDING, (
+            f"The guidance was saved for the task, but it could not be passed on to {len(result.failed)} "
+            "delegated subtask(s) yet; it is passed on when the guidance is sent again."
+        )
+    unreached = ", ".join(subtask for subtask, _holder in result.failed)
+    return TaskSteeringStatus.ACCEPTED, (
+        f"Proactive steering accepted, but after {attempts} attempts it could not be passed on to delegated "
+        f"subtask(s) {unreached}; the task applies it at its next safe checkpoint."
+    )
+
+
 async def _pass_on_guidance_and_answer(
     agent: Any,
     task_id: str,
@@ -621,45 +648,22 @@ async def _pass_on_guidance_and_answer(
     result = await _forward_proactive_guidance_to_pending_subtasks(agent, task_id, steering, msg_meta)
     key = steering.idempotency_key or steering.steering_id
     failures = _pass_on_failures(agent, task_id)
-    status = TaskSteeringStatus.ACCEPTED
-    if not result.failed:
-        failures.pop(key, None)
-        if result.forwarded:
-            reason = (
-                f"Duplicate steering event; passed on again to {result.forwarded} active delegated subtask(s)."
-                if repeated
-                else f"Proactive steering accepted and forwarded to {result.forwarded} active delegated subtask(s)."
-            )
-        else:
-            reason = (
-                "Duplicate steering event ignored."
-                if repeated
-                else "Proactive steering accepted and will apply at the next safe checkpoint."
-            )
-    else:
-        attempts = failures.get(key, 0) + 1
-        subtask_ids = [subtask_id for subtask_id, _holder in result.failed]
-        if attempts < GUIDANCE_PASS_ON_ATTEMPTS:
-            failures[key] = attempts
-            status = TaskSteeringStatus.PENDING
-            reason = (
-                f"The guidance was saved for the task, but it could not be passed on to {len(subtask_ids)} "
-                "delegated subtask(s) yet; it is passed on when the guidance is sent again."
-            )
-        else:
-            failures.pop(key, None)
-            agent._logger.warning(
-                "[%s] Gave up passing guidance on to delegated subtasks; the task applies it itself. "
-                "event=task_steering_forward_abandoned task_id=%s steering_key=%s attempts=%s subtask_ids=%s "
-                "holder_ids=%s",
-                agent.id, task_id, key, attempts, subtask_ids, [holder for _subtask, holder in result.failed],
-            )
-            reason = (
-                f"Proactive steering accepted, but after {attempts} attempts it could not be passed on to delegated "
-                f"subtask(s) {', '.join(subtask_ids)}; the task applies it at its next safe checkpoint."
-            )
+    # Counted only while copies fail; a send that reaches every holder drops the count.
+    earlier = failures.pop(key, 0)
+    attempts = earlier + 1 if result.failed else 0
+    if 0 < attempts < GUIDANCE_PASS_ON_ATTEMPTS:
+        failures[key] = attempts
+    elif attempts:
+        agent._logger.warning(
+            "[%s] Gave up passing guidance on to delegated subtasks; the task applies it itself. "
+            "event=task_steering_forward_abandoned task_id=%s steering_key=%s attempts=%s subtask_ids=%s "
+            "holder_ids=%s",
+            agent.id, task_id, key, attempts, [subtask for subtask, _holder in result.failed],
+            [holder for _subtask, holder in result.failed],
+        )
     if not failures:
         agent._guidance_pass_on_failures.pop(task_id, None)
+    status, reason = _pass_on_answer(result, repeated=repeated, attempts=attempts)
     await _send_steering_status_response(agent, steering, msg_header, msg_meta, status=status, reason=reason)
 
 

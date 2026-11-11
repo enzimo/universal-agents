@@ -273,6 +273,7 @@ async def test_a_forward_that_failed_reaches_the_worker_when_the_gateway_sends_t
     assert accepted.status == TaskSteeringStatus.ACCEPTED
     assert accepted.status_reason == "Duplicate steering event; passed on again to 1 active delegated subtask(s)."
     assert len(lead._pending_proactive_task_steering[PARENT]) == 1, "saved once, not again"
+    assert lead._guidance_pass_on_failures == {}, "the failed attempt is no longer counted"
 
 
 @pytest.mark.asyncio
