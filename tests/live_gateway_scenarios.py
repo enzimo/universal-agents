@@ -4,17 +4,14 @@
 import argparse
 import asyncio
 import contextlib
-import errno
 import json
 import logging
 import shutil
-import socket
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
-from typing import Any
 import uuid
 import yaml
 from aiohttp import ClientSession, ClientTimeout, CookieJar
@@ -41,6 +38,7 @@ from runtime_settings.interactive_apps import InteractiveAppPluginConfiguration
 from tests.application_test_doubles import (
     application_from as GatewayApplicationFacade,
 )
+from tests.live_website_support import gateway_with_website
 from assistant_gateway.gateway import GatewayDeliveryEvent, UserGateway
 from assistant_gateway.inbound_attachments import store_inbound_attachment_bytes
 from assistant_gateway.interactive_apps.base import BaseInteractiveApp
@@ -160,39 +158,6 @@ def _repo_python_executable() -> str:
     if repo_python.exists():
         return str(repo_python)
     return sys.executable
-
-
-def _available_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
-
-
-async def _start_website_app(
-    config: GatewayInstanceConfig, application: Any
-) -> tuple[InteractiveAppManager, int]:
-    """Start the built-in Website app on a free port; return it with that port.
-
-    The port is picked free and closed before the app binds it, so another program can
-    take it in between. The app binds in this process, so it then fails to start with
-    "address already in use" instead of answering for another server; pick another port
-    and start again.
-    """
-
-    website_settings = config.interactive_apps.internal_website
-    for _attempt in range(3):
-        bind_port = _available_loopback_port()
-        website_settings.bind_port = bind_port
-        website_settings.public_port = bind_port
-        app_manager = InteractiveAppManager(config, application, include_apps=["website"])
-        try:
-            await app_manager.start()
-        except OSError as error:
-            if error.errno != errno.EADDRINUSE:
-                raise
-            continue
-        return app_manager, bind_port
-    raise AssertionError("Every port picked for the Website app was taken before it could listen.")
 
 
 def _scenario_manager_db_path(test_number: int) -> str:
@@ -2875,12 +2840,29 @@ async def run_test_54(
     _apply_state_storage(config, result_dir, 54)
     bootstrap_instance(config)
 
-    app_manager = None
     try:
-        async with UserGateway(config, output_sink=None) as gateway:
-            await _wait_for_manager_route(gateway, manager)
-            app_manager, bind_port = await _start_website_app(config, gateway.application)
+        async with gateway_with_website(
+            config, ready=lambda gateway: _wait_for_manager_route(gateway, manager)
+        ) as (gateway, app_manager, bind_port):
             gateway.bind_event_sink(app_manager.handle_gateway_event)
+
+            base_url = f"http://127.0.0.1:{bind_port}"
+            # The gateway copied the Website address into these links when it was built; they
+            # must name the port the app serves on (the Web Chat link's settings are private
+            # to the gateway's identity service).
+            stored_links = {
+                "web_chat_url": gateway._identity_service._settings.web_chat_url,
+                "access_review_url": gateway.access_inbox.review_url(),
+            }
+            expected_links = {
+                "web_chat_url": f"{base_url}/webchat",
+                "access_review_url": f"{base_url}/webchat?view=inbox",
+            }
+            if stored_links != expected_links:
+                raise AssertionError(
+                    f"The gateway's Website links name another port: {stored_links!r}, "
+                    f"expected {expected_links!r}"
+                )
 
             website = app_manager.apps["website"]
             running_health = app_manager.plugin_health_for_channel("website")
@@ -2897,7 +2879,6 @@ async def run_test_54(
                     "Registry-created Website adapter retained a concrete gateway attribute."
                 )
 
-            base_url = f"http://127.0.0.1:{bind_port}"
             async with ClientSession(
                 cookie_jar=CookieJar(unsafe=True),
                 timeout=ClientTimeout(total=45),
@@ -2988,9 +2969,6 @@ async def run_test_54(
             )
     finally:
         os.environ.pop(auth_env_var, None)
-        if app_manager is not None and app_manager.has_running_apps:
-            with contextlib.suppress(Exception):
-                await app_manager.stop()
         cleanup: list[dict] = []
         with contextlib.suppress(Exception):
             returncode = await manager.stop()
