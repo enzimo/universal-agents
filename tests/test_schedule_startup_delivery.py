@@ -245,7 +245,8 @@ async def test_startup_checks_work_delegated_by_name_only_after_restoring_it(tmp
     monkeypatch.setattr(agent_instantiation_service, "update_runtime_launch", Mock())
     monkeypatch.setattr(agent_team_runtime, "register_local_worker", Mock())
     with pytest.raises(SubscriptionProbeComplete):
-        await agent._connect_nats()
+        # Bounded: without the check, startup goes on to wait for the agent's exit.
+        await asyncio.wait_for(agent._connect_nats(), 10)
     agent._cleanup_nats_runtime_on_exit.assert_awaited_once()
     await agent._presence_task
 
