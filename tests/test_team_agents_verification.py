@@ -421,6 +421,25 @@ async def test_a_reopened_watch_is_no_departure(record, caplog):
 
 
 @pytest.mark.asyncio
+async def test_a_failed_take_over_is_logged_and_the_bucket_still_counts_as_read(caplog):
+    """Nothing awaits the take-over task, so its own failure is logged there, and readiness never waits on it."""
+
+    host = SimpleNamespace(identity=SimpleNamespace(installation=INSTALL), clock=lambda: NOW)
+    reader = TeamAgents(host, TEAM)
+
+    def fails(*args):
+        raise RuntimeError("removal failed")
+
+    reader._remove = fails
+    attempt_caught_up, caught_up = asyncio.Event(), asyncio.Event()
+    attempt_caught_up.set()
+    await reader._take_over("agent", {"lead": object()}, {"lead"}, set(), attempt_caught_up, caught_up)
+
+    assert caught_up.is_set()
+    assert "event=team_agents_take_over_failed team=team_example record=agent" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_an_exiting_record_after_the_agent_went_quiet_is_heard_once():
     async with _reading() as (reader, records, host):
         changes = []

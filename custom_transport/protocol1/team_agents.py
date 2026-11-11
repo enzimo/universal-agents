@@ -97,6 +97,8 @@ _GONE_STATES = frozenset({"exiting", "stopped"})
 # exiting, or its session was closed.
 EXITING, SESSION_CLOSED = "exiting", "session_closed"
 LEFT_FOR_GOOD = frozenset({EXITING, SESSION_CLOSED})
+# The departure reason of every agent in the view when this reader stops: nobody left, the reader stopped looking.
+READER_STOPPED = "reader_stopped"
 # How long a departed agent's last view entry is kept for evidence that it left for good.
 DEPARTED_KEEP_SECONDS = 600.0
 # Refusals that can pass later; the record is verified again at each check (module docstring).
@@ -308,7 +310,7 @@ class TeamAgents:
             await asyncio.gather(*watches, ready, return_exceptions=True)
             self.running = False
             self.ready.clear()
-            self._departures.update({agent: "reader_stopped" for agent in self._view})
+            self._departures.update({agent: READER_STOPPED for agent in self._view})
             self._publish({})
 
     async def _follow(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event,
@@ -345,14 +347,20 @@ class TeamAgents:
                          attempt_caught_up: asyncio.Event, caught_up: asyncio.Event) -> None:
         """Once a watch has caught up, forget the held records it did not deliver: they were deleted while
         no watch was open (a reopened watch, or a reader run started again after an earlier one ended).
-        Then the bucket counts as read for the run's readiness."""
+        Then the bucket counts as read for the run's readiness, also when the removal failed: nothing
+        awaits this task, so a failure is logged here rather than left in it."""
 
         await attempt_caught_up.wait()
-        for name in sorted(before - seen):
-            self._remove(record, name if record == "host" else f"{self.team}.{name}", name, held)
-        caught_up.set()
-        if self.ready.is_set():
-            self._rebuild()
+        try:
+            for name in sorted(before - seen):
+                self._remove(record, name if record == "host" else f"{self.team}.{name}", name, held)
+            if self.ready.is_set():
+                self._rebuild()
+        except Exception:
+            self._logger.exception("Records a reopened watch no longer has could not be removed. "
+                                   "event=team_agents_take_over_failed team=%s record=%s", self.team, record)
+        finally:
+            caught_up.set()
 
     async def _watch(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event,
                      seen: set[str]) -> None:
