@@ -142,8 +142,8 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
         async def no_keys() -> dict:
             return {"endpoints": []}
 
-        page = StatusPage(config=_config(tmp_path), model_key_status=no_keys, agent_statuses=lambda: [],
-                          send_notice_once=_Notices(), host_findings=view.host_findings)
+        page = StatusPage(config=_config(tmp_path), model_key_status=no_keys, send_notice_once=_Notices(),
+                          team_findings=view.team_findings)
 
         async def without_session() -> list:
             return [finding for finding in (await page.report()).findings
@@ -217,8 +217,8 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
         async def no_keys() -> dict:
             return {"endpoints": []}
 
-        page = StatusPage(config=_config(tmp_path), model_key_status=no_keys, agent_statuses=lambda: [],
-                          send_notice_once=_Notices(), host_findings=view.host_findings)
+        page = StatusPage(config=_config(tmp_path), model_key_status=no_keys, send_notice_once=_Notices(),
+                          team_findings=view.team_findings)
 
         async def keeps(agent, reason):
             return None

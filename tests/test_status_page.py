@@ -2,7 +2,8 @@
 
 Covered: the launcher lists operator variables that override saved settings
 and model keys (names only); the gateway turns them, the broker's model key
-status, agents' heartbeat findings and its own configuration into findings,
+status, the team view's findings (from the team's records) and the agents' own
+findings, and its own configuration into findings,
 problems first; a broker that does not answer is a problem, not silence; a
 configured endpoint with no key from anywhere is a problem, one with an
 environment key is not; a fixed rejection disappears; administrators get one
@@ -64,18 +65,23 @@ class _Notices:
         return True
 
 
-def _page(config, *, keys: dict | Exception | None = None, agents=None, notices=None) -> StatusPage:
+def _page(config, *, keys: dict | Exception | None = None, agent_findings=(), team_findings=(),
+          notices=None) -> StatusPage:
     async def model_key_status() -> dict:
         if isinstance(keys, Exception):
             raise keys
         return keys if keys is not None else {"endpoints": []}
 
+    async def agents() -> list[StatusFindingV1]:
+        return list(agent_findings)
+
     return StatusPage(
         config=config,
         model_key_status=model_key_status,
-        agent_statuses=lambda: [_lead()] if agents is None else agents,
         send_notice_once=notices or _Notices(),
         now=lambda: NOW,
+        team_findings=lambda: list(team_findings),
+        agent_findings=agents,
     )
 
 
@@ -137,18 +143,34 @@ async def test_a_broker_that_does_not_answer_is_a_problem_and_listed_as_unavaila
 
 
 @pytest.mark.asyncio
-async def test_agent_findings_are_shown_once_and_a_silent_team_lead_is_a_problem(tmp_path) -> None:
+async def test_agent_findings_are_shown_once(tmp_path) -> None:
     finding = StatusFindingV1(
         finding_id="mcp_server_not_loaded:mcp:weather", severity=StatusSeverity.PROBLEM, title="weather down", source="TeamArchitect"
     )
-    worker = _lead([finding]).model_copy(update={"self_id": "worker-1", "is_team_lead": False})
     keys = {"endpoints": [{"address": "https://bifrost.example.com", "state": "stored"}]}
 
-    reported = await _page(_config(tmp_path), keys=keys, agents=[_lead([finding]), worker]).report()
-    silent = await _page(_config(tmp_path), keys=keys, agents=[]).report()
+    reported = await _page(_config(tmp_path), keys=keys, agent_findings=[finding, finding]).report()
 
     assert _ids(reported) == ["mcp_server_not_loaded:mcp:weather"]
-    assert _ids(silent) == ["team_lead_not_reporting"]
+
+
+@pytest.mark.asyncio
+async def test_an_agents_finding_cannot_hide_or_stand_in_for_the_gateways_own(tmp_path) -> None:
+    """Review F17: a worker answers with a finding that reuses the gateway's id and says it comes from the gateway;
+    the gateway's own finding is the one shown."""
+
+    from assistant_gateway.team_view import host_findings
+
+    ours = host_findings([], {"lead": "2" * 64}, "1" * 64)
+    fake = StatusFindingV1(finding_id="host_other_contract:lead", severity=StatusSeverity.NOTE,
+                           title="All processes run one contract", source="Gateway")
+    keys = {"endpoints": [{"address": "https://bifrost.example.com", "state": "stored"}]}
+
+    report = await _page(_config(tmp_path), keys=keys, team_findings=ours, agent_findings=[fake]).report()
+
+    [shown] = report.findings
+    assert shown.severity is StatusSeverity.PROBLEM and shown.title == ours[0].title
+    assert shown.source == "The team lead's process"
 
 
 def test_agents_without_a_session_are_a_problem_saying_who_why_and_what_to_do() -> None:
@@ -211,8 +233,8 @@ async def test_the_status_page_shows_what_the_hosts_records_list(tmp_path) -> No
 
     listed = [HostComponent("lead", "Researcher-agent_1", "unhealthy", "session_limit_reached")]
     keys = {"endpoints": [{"address": "https://bifrost.example.com", "state": "stored"}]}
-    page = StatusPage(config=_config(tmp_path), model_key_status=lambda: _keys(keys), agent_statuses=lambda: [_lead()],
-                      send_notice_once=_Notices(), now=lambda: NOW, host_findings=lambda: host_findings(listed))
+    page = StatusPage(config=_config(tmp_path), model_key_status=lambda: _keys(keys), send_notice_once=_Notices(),
+                      now=lambda: NOW, team_findings=lambda: host_findings(listed))
 
     assert _ids(await page.report()) == ["agent_without_session:lead:session_limit_reached"]
     listed.clear()  # its session opened

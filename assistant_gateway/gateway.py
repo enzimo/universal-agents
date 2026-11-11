@@ -610,8 +610,8 @@ async def _follow_team_lead_at_start(follower: TeamLeadFollower | None, manager_
 
     if follower is None:
         logger.warning("The gateway cannot see the team's agents without its message host; it keeps its saved route "
-                       "to the team lead as it is. event=gateway_team_view_unavailable manager_id=%s",
-                       manager_client.manager_id)
+                       "to the team lead as it is, and its Status page does not judge the team. "
+                       "event=gateway_team_view_unavailable manager_id=%s", manager_client.manager_id)
         return
     await follower.start()
 
@@ -1404,13 +1404,17 @@ class UserGateway:
             status=StatusPage(
                 config=config,
                 model_key_status=lambda: self._secure_broker.get_model_key_status(),
-                agent_statuses=self.team_presence.current_statuses,
                 send_notice_once=self.access_inbox.send_notice_once,
                 stopped_receivers=resolved_manager_runtime.stopped_receivers,
                 storage=self.stored_data.capacity,
                 person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
-                host_findings=self._team_view.host_findings if self._team_view is not None else lambda: (),
+                # Without a team view (command-line runs) the gateway does not judge the team (review F11).
+                **(
+                    {"team_findings": self._team_view.team_findings, "agent_findings": self._team_view.agent_findings}
+                    if self._team_view is not None
+                    else {}
+                ),
             ),
             # People's Knowledge page; the team services answer it (team_services.knowledge).
             knowledge=GatewayKnowledgePages(

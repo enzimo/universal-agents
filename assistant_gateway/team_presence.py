@@ -103,11 +103,6 @@ class GatewayTeamPresence:
         )
         return members
 
-    def current_statuses(self) -> list[AgentStatus]:
-        """Every member the records count live (the Status page)."""
-
-        return [status for status in self._statuses() if not status.is_exiting]
-
     def list_web_chat_team_members(self, *, presence_only: bool = False) -> WebTeamMemberListV1:
         """Live members, plus the defined agent classes unless only presence is needed.
 

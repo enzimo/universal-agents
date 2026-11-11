@@ -44,9 +44,7 @@ from assistant_gateway.storage_capacity import (
     disk_spaces,
 )
 from custom_messages.contracts.access_v2 import AccessNoticeKind
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.status_v1 import StatusSeverity
-from custom_messages.enums import MessageMetaType
 from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
 from storage.config import resolve_storage_settings
@@ -294,13 +292,6 @@ def _config(tmp_path: Path) -> GatewayInstanceConfig:
     return config
 
 
-def _lead() -> AgentStatus:
-    return AgentStatus(
-        self_id="lead-1", team_id="team_storage", named_agent_type="TeamArchitect", name="Nova", is_paused=False,
-        agent_role="lead", is_team_lead=True, status_type=MessageMetaType.RESPONSE, status_findings=[],
-    )
-
-
 def _page(
     config, capacity: StorageCapacity, notices: _Notices, clock: _Clock, *, messages=None, person_totals=lambda: None
 ) -> StatusPage:
@@ -313,7 +304,7 @@ def _page(
         return messages
 
     return StatusPage(
-        config=config, model_key_status=keys, agent_statuses=lambda: [_lead()], send_notice_once=notices,
+        config=config, model_key_status=keys, send_notice_once=notices,
         now=clock, storage=capacity, jetstream_usage=jetstream, person_storage_totals=person_totals,
     )
 

@@ -49,6 +49,7 @@ class Reader:
         self._listeners: list[Callable[[frozenset[str]], None]] = []
         self._view: dict[str, TeamAgent] = {}
         self._departures: dict[str, str] = {}
+        self.components: list = []
 
     def __call__(self, host: Any, team: str, **_: Any) -> "Reader":
         return self
@@ -70,7 +71,7 @@ class Reader:
         return self._departures.get(agent_id)
 
     def host_components(self) -> list:
-        return []
+        return list(self.components)
 
     def other_contract_hosts(self) -> dict:
         return {}
@@ -126,6 +127,8 @@ class Host:
         agent_id = audience["id"]
         self.asked.append(agent_id)
         answer = self.answers.get(agent_id, {"outcome": "ok"})
+        if answer == "hang":
+            await asyncio.Event().wait()
         if isinstance(answer, BaseException):
             raise answer
         return SimpleNamespace(raw={"body": answer})
@@ -431,6 +434,102 @@ async def test_an_unreadable_finding_in_an_answer_is_logged_and_left_out(monkeyp
         await running.view.refresh_details()
         assert _shown(running.view)["worker_1"].status_findings == []
     assert "event=gateway_agent_finding_invalid agent=worker_1" in caplog.text
+
+
+# -- the Status page's sources ---------------------------------------------------------------------------
+
+
+def _finding_ids(findings) -> list[str]:
+    return [finding.finding_id for finding in findings]
+
+
+@pytest.mark.asyncio
+async def test_whether_the_lead_runs_comes_from_the_records(monkeypatch) -> None:
+    """Review F7 and critique C05(a): any live lead record counts, also two of them; answers play no part."""
+
+    reader = Reader()
+    host = Host({"lead_1": ServiceUnavailable("agent.status", "ctl.agent.lead_1", "no_answer_in_time")})
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        assert _finding_ids(running.view.team_findings()) == ["team_lead_not_reporting"]
+        reader.publish(member("lead_1", lead=True))
+        await running.view.agent_findings()  # it does not answer
+        assert running.view.team_findings() == []
+        reader.publish(member("lead_1", lead=True), member("lead_2", lead=True, minute=5))
+        assert running.view.team_findings() == []
+        reader.publish(member("lead_1", lead=True, other_contract="2" * 64))
+        assert running.view.team_findings() == []  # its host's own finding says what to do
+
+
+@pytest.mark.asyncio
+async def test_the_status_page_says_when_the_gateway_cannot_see_the_team(monkeypatch) -> None:
+    """Review F4: a refused join is a problem saying why and what to do; records not read for longer than the start
+    limit are one too, so silence never looks like health. Before the limit, nothing is said yet."""
+
+    now = [datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)]
+    reader = Reader()
+    reader.catches_up = False
+    async with Running(monkeypatch, reader, Host(), clock=lambda: now[0]) as running:
+        assert running.view.team_findings() == []
+        now[0] += timedelta(seconds=16)
+        [unread] = running.view.team_findings()
+        assert unread.finding_id == "team_view_not_read" and "event=gateway_host_join_failed" in unread.action
+
+        running.view.refuse("protocol_mismatch", "Install the installation's release here and start it again.")
+        [refused] = running.view.team_findings()
+        assert (refused.finding_id, refused.title) == ("team_view_refused", "The gateway cannot see the team")
+        assert "chats are answered as unavailable" in refused.summary
+        assert refused.action == "Install the installation's release here and start it again."
+        assert "protocol_mismatch" in refused.details
+
+
+@pytest.mark.asyncio
+async def test_an_agents_findings_name_the_agent_its_record_names(monkeypatch) -> None:
+    """Review F17: the source of an agent's finding comes from its record, never from its answer."""
+
+    finding = {"finding_id": "mcp_unreachable:docs", "severity": "problem", "title": "An MCP server does not answer",
+               "source": "Gateway"}
+    reader = Reader()
+    host = Host({"worker_1": {"outcome": "ok", "findings": [finding]}})
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_1", name="Researcher-1"))
+        [shown] = await running.view.agent_findings()
+        assert (shown.finding_id, shown.source) == ("mcp_unreachable:docs", "Researcher-1")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_does_not_answer_does_not_hold_the_status_page(monkeypatch) -> None:
+    """Critique C04: the page waits at most about one ask, with the answers that came; the round goes on."""
+
+    monkeypatch.setattr(team_view, "FINDINGS_WAIT_SECONDS", 0.2)
+    finding = {"finding_id": "memory_search_degraded", "severity": "warning", "title": "Memory search is slow"}
+    reader = Reader()
+    host = Host({"worker_hang": "hang", "worker_ok": {"outcome": "ok", "findings": [finding]}})
+    async with Running(monkeypatch, reader, host) as running:
+        await until(running.view.ready.is_set)
+        reader.publish(member("worker_hang"), member("worker_ok"))
+        started = asyncio.get_running_loop().time()
+        found = await running.view.agent_findings()
+        assert asyncio.get_running_loop().time() - started < 1.0
+        assert _finding_ids(found) == ["memory_search_degraded"]
+
+
+@pytest.mark.asyncio
+async def test_a_page_that_wants_details_before_the_records_are_read_gets_them(monkeypatch) -> None:
+    """Critique C09: a want that comes while the gateway is still starting waits for the records."""
+
+    reader = Reader()
+    reader.catches_up = False
+    host = Host()
+    running = Running(monkeypatch, reader, host)
+    running.view.want_details()  # before the view even runs
+    async with running:
+        running.view.want_details()
+        await asyncio.sleep(0.05)
+        reader.publish(member("worker_1"))
+        reader.ready.set()
+        await until(lambda: host.asked == ["worker_1"])
 
 
 # -- the lead follower (TeamLeadFollower) ---------------------------------------------------------------
@@ -848,3 +947,71 @@ async def test_a_change_to_the_leads_record_wakes_held_guidance(tmp_path, monkey
         assert wake.times == before + 1
     finally:
         await gateway.close()
+
+
+def _report_ids(report) -> list[str]:
+    return [finding.finding_id for finding in report.findings]
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_without_a_team_view_does_not_judge_the_team_lead(tmp_path, caplog) -> None:
+    """Review F11: a command-line gateway has no message host, so no records; it cannot tell whether the lead runs
+    and must not tell administrators it does not."""
+
+    from assistant_gateway.gateway import UserGateway
+    from assistant_gateway.store import GatewayStateStore
+    from tests.test_gateway_phase1 import _build_test_config, _FakeGatewayManagerRuntime
+
+    gateway = UserGateway(_build_test_config(tmp_path), output_sink=None,
+                          state_store=GatewayStateStore(str(tmp_path / "state.db")),
+                          manager_runtime=_FakeGatewayManagerRuntime())
+    sent: list = []
+    gateway.application.status._send_notice_once = lambda notice: sent.append(notice) or True
+    with caplog.at_level(logging.WARNING, logger="assistant_gateway.gateway"):
+        await gateway.connect(start_services=False)
+    try:
+        assert "team_lead_not_reporting" not in _report_ids(await gateway.application.status.report())
+        await gateway.application.status.notify_new_problems()
+        assert not any("TeamLead" in notice.summary for notice in sent)
+        assert caplog.text.count("event=gateway_team_view_unavailable") == 1
+        assert "does not judge the team" in caplog.text
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_the_gateways_status_page_reads_the_team_from_its_records(tmp_path, monkeypatch) -> None:
+    """Review F9 (mutation M10): the gateway's own Status page gets the team view's findings: a running lead is no
+    problem (F5), and what the hosts' records list is shown."""
+
+    from custom_transport.protocol1.team_agents import HostComponent
+
+    reader = Reader()
+    reader.publish(member("lead_1", lead=True))
+    reader.components = [HostComponent("lead", "Researcher-agent_2", "unhealthy", "session_limit_reached")]
+    gateway, _ = _gateway(tmp_path, monkeypatch, reader, saved="lead_1")
+    await gateway.connect(start_services=False)
+    try:
+        found = _report_ids(await gateway.application.status.report())
+        assert "agent_without_session:lead:session_limit_reached" in found
+        assert "team_lead_not_reporting" not in found
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_join_is_on_the_gateways_status_page(tmp_path, monkeypatch) -> None:
+    """Review F4: the Status page says the gateway cannot see the team, why, and what to do."""
+
+    reader = Reader()
+    gateway, _ = _gateway(tmp_path, monkeypatch, reader,
+                          refusal=("denied", "The installation does not take this gateway as it runs."))
+    await gateway.connect(start_services=False)
+    try:
+        report = await gateway.application.status.report()
+        [refused] = [finding for finding in report.findings if finding.finding_id == "team_view_refused"]
+        assert refused.action == "The installation does not take this gateway as it runs."
+        assert "team_lead_not_reporting" not in _report_ids(report)
+    finally:
+        await gateway.close()
+
