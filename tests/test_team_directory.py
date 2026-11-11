@@ -63,7 +63,9 @@ def directory_owner(*, agent_id: str = "lead_1", is_lead: bool = True, pending: 
         _logger=logging.getLogger("test.team_directory"),
         task_manager=SimpleNamespace(operations_runtime=SimpleNamespace(run=run),
                                      get_pending_subtasks=lambda: subtasks,
-                                     get_parent_task_id=lambda task_id: f"parent_of_{task_id}"),
+                                     get_parent_task_id=lambda task_id: f"parent_of_{task_id}",
+                                     resolve_root_task_id=lambda task_id: "request_1",
+                                     get_task_info=lambda task_id: None, is_terminal_state=lambda state: False),
         _fail_subtask_and_reconcile_parent=AsyncMock(), _delegated_task_repository=records or _Records(),
         team_comms=SimpleNamespace(delete_work_message=AsyncMock(return_value=withdrawn)),
     )
@@ -167,6 +169,33 @@ async def test_one_subtask_that_cannot_be_failed_does_not_keep_the_others_waitin
     assert [call.kwargs["subtask_info"].task.task_id
             for call in owner._fail_subtask_and_reconcile_parent.await_args_list] == ["sub_1", "sub_2"]
     assert "event=team_agent_left_subtask_fail_error" in caplog.text and "subtask_id=sub_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_requests_waiting_on_a_departed_worker_are_failed_side_by_side() -> None:
+    """C08: a parent's turn runs inside the failure step; another request does not wait for it, the same one does."""
+
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1"), subtask("sub_2", "worker_1"),
+                                     subtask("sub_3", "worker_1")])
+    owner.task_manager.resolve_root_task_id = {"sub_1": "request_a", "sub_2": "request_a", "sub_3": "request_b"}.get
+    turn_of_a, started = asyncio.Event(), []
+
+    async def fail(**kwargs) -> None:
+        started.append(kwargs["subtask_info"].task.task_id)
+        if started[-1] == "sub_1":
+            await turn_of_a.wait()  # request_a's parent turn is still running
+
+    owner._fail_subtask_and_reconcile_parent = AsyncMock(side_effect=fail)
+    exiting = asyncio.create_task(agent_exited(owner, member("worker_1", "Researcher-1"), "exiting"))
+    for _ in range(100):
+        if "sub_3" in started:
+            break
+        await asyncio.sleep(0.01)
+
+    assert started == ["sub_1", "sub_3"]  # request_b went ahead; sub_2 waits behind its own request's turn
+    turn_of_a.set()
+    await asyncio.wait_for(exiting, 2)
+    assert started == ["sub_1", "sub_3", "sub_2"]
 
 
 @pytest.mark.asyncio
@@ -470,6 +499,38 @@ async def test_a_departure_fails_only_the_untaken_subtask_and_resumes_the_parent
     assert not manager.is_terminal_state(manager.get_task_info("task_parent").state)
     requester._resume_parent_task_if_ready.assert_awaited_once_with("task_parent")
     requester._send_task_error_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("parent_waits", "event", "resumes"), [
+    (True, "team_agent_left_parent_resume_retry", 2),
+    (False, "team_agent_left_parent_not_resumed", 1),
+])
+async def test_a_parent_the_failure_step_could_not_resume_is_resumed_once_more_while_it_waits(
+        requester, caplog, parent_waits, event, resumes) -> None:
+    """C07: the subtask is already failed, so the watchdog no longer sees it; nothing else would resume the parent."""
+
+    from functools import partial
+
+    from custom_agents import subtask_watchdog_runtime
+    from custom_messages.enums import ProgressState
+
+    manager = requester.task_manager
+    state = ProgressState.WAITING if parent_waits else ProgressState.IN_PROGRESS
+    assert manager.update_main_task_state("task_parent", state, datetime.now(timezone.utc).isoformat())
+    requester.name = "TeamLead"
+    requester._runtime_coordinator = lambda: SimpleNamespace(defer_subtask_failure_if_blocked=lambda **_: False)
+    requester._resume_parent_task_if_ready = AsyncMock(side_effect=[OSError("database is locked"), None])
+    requester._fail_subtask_and_reconcile_parent = partial(
+        subtask_watchdog_runtime._fail_subtask_and_reconcile_parent, requester)
+
+    with caplog.at_level(logging.INFO):
+        await agent_exited(requester, WORKER_B, "exiting")
+
+    assert manager.get_task_info("task_sub").state == ProgressState.FAILED and not manager.get_pending_subtasks()
+    assert requester._resume_parent_task_if_ready.await_count == resumes
+    assert f"event={event}" in caplog.text and "parent_task_id=task_parent" in caplog.text
+    assert "event=team_agent_left_subtask_fail_error" not in caplog.text  # it is not left to the watchdog
 
 
 @pytest.mark.asyncio

@@ -79,7 +79,8 @@ def stand_in(agent_id: str, name: str, agent_type: str, *, is_lead: bool, pendin
     operations = SimpleNamespace(run=AsyncMock(side_effect=lambda function, *args: function(*args)))
     agent.task_manager = SimpleNamespace(
         current_task_id="", operations_runtime=operations, get_task_info=lambda task_id: agent.tasks.get(task_id),
-        get_pending_subtasks=lambda: subtasks, get_parent_task_id=lambda task_id: "root")
+        get_pending_subtasks=lambda: subtasks, get_parent_task_id=lambda task_id: "root",
+        resolve_root_task_id=lambda task_id: "root")
     return agent
 
 

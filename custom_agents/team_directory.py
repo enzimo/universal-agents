@@ -179,13 +179,36 @@ async def _fail_untaken(agent: Any, departed_id: str, label: str, reason: str, s
 
     Only the subtask fails, as when the subtask watchdog times one out, a worker hands one back
     or a delegated task keeps losing its workers: the parent task and its other subtasks go on,
-    and the parent's turn resumes to decide again. One subtask's error does not stop the others;
-    that subtask is left to the watchdog.
+    and the parent's turn resumes to decide again. That turn runs inside the failure step, so
+    the subtasks of different requests (root tasks) are failed side by side: a restart can leave
+    several people's requests waiting on one departed worker, and none should wait for another
+    request's turn. One request's subtasks go one after another, so a request never runs two
+    turns at once, and only its last failed subtask resumes its parent.
     """
+
+    task_manager = agent.task_manager
+    by_request: dict[str, list[Any]] = {}
+    for subtask_info in subtasks:
+        task_id = subtask_info.task.task_id
+        try:
+            request = await task_manager.operations_runtime.run(task_manager.resolve_root_task_id, task_id)
+        except Exception as error:
+            agent._logger.error("[%s] A subtask left in the mailbox of an agent that left for good could not be "
+                                "failed (its request could not be read); it is left to the subtask watchdog. "
+                                "event=team_agent_left_subtask_fail_error agent_id=%s subtask_id=%s "
+                                "departed_agent_id=%s", agent.id, agent.id, task_id, departed_id, exc_info=error)
+            continue
+        by_request.setdefault(request or task_id, []).append(subtask_info)
+    await asyncio.gather(*(_fail_in_order(agent, departed_id, label, reason, group) for group in by_request.values()))
+
+
+async def _fail_in_order(agent: Any, departed_id: str, label: str, reason: str, subtasks: list[Any]) -> None:
+    """One request's subtasks, one after another (``_fail_untaken``); one subtask's error does not stop the others."""
 
     task_manager = agent.task_manager
     for subtask_info in subtasks:
         task_id = subtask_info.task.task_id
+        parent_task_id: Optional[str] = None
         try:
             if not await _still_waiting(agent, task_id, departed_id):
                 continue
@@ -207,11 +230,57 @@ async def _fail_untaken(agent: Any, departed_id: str, label: str, reason: str, s
                     "another named worker, do it another way, or tell the person."
                 ),
             )
+        except Exception as error:
+            await _failure_step_failed(agent, task_id, parent_task_id, departed_id, error)
+
+
+async def _failure_step_failed(agent: Any, task_id: str, parent_task_id: Optional[str], departed_id: str,
+                               error: Exception) -> None:
+    """Say what an error in the failure step left behind, and resume a parent it left waiting.
+
+    The failure step marks the subtask failed first and resumes the parent last. An error before
+    the subtask was failed leaves it waiting, and the subtask watchdog handles it. After that the
+    watchdog no longer sees it, so the parent is resumed once more here, but only while it still
+    waits for its subtasks (``WAITING``): a parent whose turn already began is not run again.
+    """
+
+    from custom_messages.enums import ProgressState
+
+    task_manager = agent.task_manager
+    run = task_manager.operations_runtime.run
+    subtask_failed, parent_state = False, None
+    if parent_task_id:
+        try:
+            subtask = await run(task_manager.get_task_info, task_id)
+            subtask_failed = subtask is not None and bool(await run(task_manager.is_terminal_state, subtask.state))
+            parent = await run(task_manager.get_task_info, parent_task_id)
+            parent_state = parent.state if parent is not None else None
         except Exception:
-            agent._logger.exception("[%s] A subtask left in the mailbox of an agent that left for good could not be "
-                                    "failed; it is left to the subtask watchdog. "
-                                    "event=team_agent_left_subtask_fail_error agent_id=%s subtask_id=%s "
-                                    "departed_agent_id=%s", agent.id, agent.id, task_id, departed_id)
+            agent._logger.exception("[%s] After an error in the failure step, the subtask's state could not be read. "
+                                    "event=team_agent_left_subtask_state_unread agent_id=%s subtask_id=%s",
+                                    agent.id, agent.id, task_id)
+    ids = (agent.id, task_id, parent_task_id, departed_id)
+    if not subtask_failed:
+        agent._logger.error("[%s] A subtask left in the mailbox of an agent that left for good could not be failed; it "
+                            "is left to the subtask watchdog. event=team_agent_left_subtask_fail_error agent_id=%s "
+                            "subtask_id=%s parent_task_id=%s departed_agent_id=%s", agent.id, *ids, exc_info=error)
+        return
+    if parent_state != ProgressState.WAITING:
+        agent._logger.error("[%s] A subtask was failed after its agent left for good, but its parent task could not be "
+                            "resumed, and the parent no longer waits (state=%s), so it is not run again. "
+                            "event=team_agent_left_parent_not_resumed agent_id=%s subtask_id=%s parent_task_id=%s "
+                            "departed_agent_id=%s", agent.id, getattr(parent_state, "value", parent_state), *ids,
+                            exc_info=error)
+        return
+    agent._logger.error("[%s] A subtask was failed after its agent left for good, but its parent task could not be "
+                        "resumed; it is resumed once more. event=team_agent_left_parent_resume_retry agent_id=%s "
+                        "subtask_id=%s parent_task_id=%s departed_agent_id=%s", agent.id, *ids, exc_info=error)
+    try:
+        await agent._resume_parent_task_if_ready(parent_task_id)
+    except Exception:
+        agent._logger.exception("[%s] The parent task still could not be resumed; it waits until a person or the team "
+                                "lead acts on it. event=team_agent_left_parent_resume_failed agent_id=%s subtask_id=%s "
+                                "parent_task_id=%s departed_agent_id=%s", agent.id, *ids)
 
 
 async def _still_waiting(agent: Any, task_id: str, departed_id: str) -> bool:
