@@ -51,6 +51,12 @@ How it reads:
   this host's clock (``not_yet_valid``). Placements and an idle agent's record are written
   rarely, so dropping them would hide a live agent until it next changed. Stopping the
   reader clears its view and readiness. A listener can read ``departure_reason``.
+- **A reopened watch** is no departure. The records already held stay, and are still
+  judged by their own expiry at each check, until the new watch has delivered the
+  bucket's current values; only then are the held records it did not deliver removed, as
+  deletions (they were deleted while no watch was open). Clearing the bucket at once, as
+  this reader did before, emptied the view for a few seconds, so the gateway marked a
+  healthy team lead unavailable and available again, and agents saw their peers leave.
 
 The hosts' records also say which of their parts are not healthy (``components``), such as
 an agent whose session the team services refused, which has no record of its own and so
@@ -307,30 +313,53 @@ class TeamAgents:
 
     async def _follow(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event,
                       stop: asyncio.Event) -> None:
-        """Reopen failed watches; a failed host watch must not stop liveness expiry checks."""
+        """Watch one bucket, reopening a failed watch (module docstring, "A reopened watch").
+
+        A failed host watch must not stop the liveness expiry checks, and a reopened watch
+        is no departure: the records already held stay until the new watch has caught up.
+        """
 
         while not stop.is_set():
+            # This watch's own catch-up, and the names it delivers until then (``_take_over``).
+            attempt_caught_up, seen = asyncio.Event(), set()
+            taking_over = asyncio.create_task(self._take_over(record, held, set(held), seen, attempt_caught_up,
+                                                              caught_up))
             try:
-                await self._watch(record, keys, held, caught_up)
+                await self._watch(record, keys, held, attempt_caught_up, seen)
                 if not stop.is_set():
                     raise RuntimeError("the record watch ended before the reader stopped")
             except Exception:
                 self._logger.warning("A team record watch stopped; reopening it. event=team_agents_watch_failed "
                                      "team=%s record=%s", self.team, record, exc_info=True)
-                held.clear()  # the replacement watch supplies a complete current snapshot
                 for slot in list(self._pending):
                     if slot[0] == record:
                         self._pending.pop(slot, None)
-                self._rebuild()
+            finally:
+                taking_over.cancel()
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._recheck_seconds)
             except asyncio.TimeoutError:
                 pass
 
-    async def _watch(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event) -> None:
+    async def _take_over(self, record: str, held: dict[str, _Held], before: set[str], seen: set[str],
+                         attempt_caught_up: asyncio.Event, caught_up: asyncio.Event) -> None:
+        """Once a watch has caught up, forget the held records it did not deliver: they were deleted while
+        no watch was open (a reopened watch, or a reader run started again after an earlier one ended).
+        Then the bucket counts as read for the run's readiness."""
+
+        await attempt_caught_up.wait()
+        for name in sorted(before - seen):
+            self._remove(record, name if record == "host" else f"{self.team}.{name}", name, held)
+        caught_up.set()
+        if self.ready.is_set():
+            self._rebuild()
+
+    async def _watch(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event,
+                     seen: set[str]) -> None:
         records = self._host.records
         async for key, raw in records.watch(record, keys, caught_up=caught_up):
             name = key.removeprefix(f"{self.team}.") if record != "host" else key
+            seen.add(name)
             if raw is None:
                 self._remove(record, key, name, held)
             else:
