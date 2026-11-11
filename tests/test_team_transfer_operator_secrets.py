@@ -182,6 +182,26 @@ def _cli_export(
 
 # What the export did with the NATS login, in the notice test below.
 LEFT_OUT, CARRIED, NONE_CARRIED = "left out", "carried", "none carried"
+# How the export's NATS line ends whenever it carries a login: the switch does not travel.
+KEEP_THE_SERVER = (
+    "For the new instance to use that server, set {names}TEAM_LOCAL_NATS_ENABLED=false in its team.env "
+    "(or its environment, if it takes secrets from there) before importing; otherwise the image starts its "
+    "own NATS server."
+)
+ADDRESS_IN_THE_SETTINGS = (
+    "The server's address travels in instance_config.yaml, but TEAM_LOCAL_NATS_ENABLED does not."
+)
+
+
+def _neither(names: str, where: str = "team.env") -> str:
+    """The middle of the line when the instance's environment names the server, with its tail."""
+
+    verb = "does" if " and " not in names else "do"
+    value = "value" if " and " not in names else "values"
+    return (
+        f"TEAM_LOCAL_NATS_ENABLED does not travel, and neither {verb} the {names} in this instance's {where}. "
+        + KEEP_THE_SERVER.format(names=f"{names} to the same {value} and ")
+    )
 
 
 @pytest.mark.parametrize(
@@ -230,14 +250,15 @@ def test_the_export_says_when_the_commands_nats_variables_would_have_decided_oth
     assert f"command_names={','.join(name for name in NATS_DECISION_ENV_NAMES if name in shell)}" in warnings[0]
     if outcome == CARRIED:
         assert notice.startswith("NATS_USER and NATS_PASSWORD were carried: ")
-        assert "would mean a local server" in notice and "the import says how" in notice
+        # One line about one login: the command's variable, then what the new instance needs.
+        assert notice.endswith("would mean a local server; it was not used. " + _neither("NATS_URL"))
         assert "instance_nats=external carried_names=NATS_USER,NATS_PASSWORD" in warnings[0]
         assert set(NATS_CREDENTIAL_ENV_NAMES) <= set(_carried(out))
     elif outcome == NONE_CARRIED:
         # No login travels, so there is none for the new instance to keep or the import to refuse.
         assert notice.startswith("No NATS_USER or NATS_PASSWORD was carried: ")
         assert notice.endswith("This command's own NATS_URL would mean a local server; it was not used.")
-        assert "keeps the login" not in notice
+        assert "TEAM_LOCAL_NATS_ENABLED" not in notice
         assert "instance_nats=external carried_names=none" in warnings[0]
         assert not set(NATS_CREDENTIAL_ENV_NAMES) & set(_carried(out))
     else:
@@ -252,24 +273,48 @@ def test_the_export_says_when_the_commands_nats_variables_would_have_decided_oth
     _assert_no_values(printed.out + printed.err + caplog.text, team_env, shell)
 
 
+CARRIED_FROM_TEAM_ENV = (
+    "NATS_USER and NATS_PASSWORD were carried: this instance's own settings (instance_config.yaml and team.env) "
+    "say it uses an external NATS server. "
+)
+
+
 @pytest.mark.parametrize(
-    ("team_env", "shell", "saved_nats_url", "secrets_source"),
+    ("team_env", "shell", "saved_nats_url", "secrets_source", "line"),
     [
-        pytest.param(f"NATS_URL={EXTERNAL_NATS}\n", {}, None, None, id="clean-shell"),
-        pytest.param("", {"NATS_URL": "nats://localhost:4222"}, None, None, id="both-local"),
-        pytest.param("", {"NATS_URL": SHELL_EXTERNAL_NATS}, EXTERNAL_NATS, None, id="both-external"),
+        pytest.param(
+            f"NATS_URL={EXTERNAL_NATS}\n", {}, None, None, CARRIED_FROM_TEAM_ENV + _neither("NATS_URL"),
+            id="clean-shell",
+        ),
+        pytest.param("", {"NATS_URL": "nats://localhost:4222"}, None, None, None, id="both-local"),
+        pytest.param(
+            "", {"NATS_URL": SHELL_EXTERNAL_NATS}, EXTERNAL_NATS, None,
+            CARRIED_FROM_TEAM_ENV + ADDRESS_IN_THE_SETTINGS + " " + KEEP_THE_SERVER.format(names=""),
+            id="both-external",
+        ),
         pytest.param(
             f"NATS_SERVERS={EXTERNAL_NATS}\n", {"NATS_URL": LOCAL_NATS}, None, None,
+            CARRIED_FROM_TEAM_ENV + _neither("NATS_SERVERS"),
             id="team-env-servers-outrank-the-shells-url",
         ),
         pytest.param(
             "NATS_CREDENTIALS_FILE=/run/secrets/nats.creds\n", {"NATS_URL": LOCAL_NATS}, None, None,
+            CARRIED_FROM_TEAM_ENV + _neither("NATS_CREDENTIALS_FILE"),
             id="team-env-credentials-file-outranks-the-shells-url",
         ),
-        pytest.param("", {"NATS_URL": SHELL_EXTERNAL_NATS}, None, "environment", id="secrets-from-the-environment"),
+        pytest.param("", {"NATS_URL": SHELL_EXTERNAL_NATS}, None, "environment", None, id="secrets-from-the-environment"),
+        pytest.param(
+            "",
+            {"NATS_SERVERS": SHELL_EXTERNAL_NATS, "NATS_URL": SHELL_EXTERNAL_NATS, "NATS_USER": "env-nats-user"},
+            None,
+            "environment",
+            "NATS_USER was carried: this instance's own settings (instance_config.yaml and its environment) say it "
+            "uses an external NATS server. " + _neither("NATS_SERVERS and NATS_URL", "environment"),
+            id="secrets-from-the-environment-with-a-login",
+        ),
     ],
 )
-def test_the_export_says_nothing_about_nats_when_the_command_would_decide_the_same(
+def test_the_export_says_nothing_about_the_commands_nats_variables_when_they_would_decide_the_same(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -278,18 +323,22 @@ def test_the_export_says_nothing_about_nats_when_the_command_would_decide_the_sa
     shell: dict[str, str],
     saved_nats_url: str | None,
     secrets_source: str | None,
+    line: str | None,
 ) -> None:
     # The launcher lays the container's environment over team.env name by name,
     # and the rule reads NATS_CREDENTIALS_FILE, then NATS_SERVERS, then
     # NATS_URL; a command value that would not change the decision is not news.
     # With secrets from the environment, the command's environment is the instance's.
+    # A carried login still gets its line: the local-server switch does not travel (F8).
     caplog.set_level(logging.INFO)
-    _cli_export(
+    out = _cli_export(
         tmp_path, monkeypatch, team_env=team_env, shell=shell, saved_nats_url=saved_nats_url, secrets_source=secrets_source
     )
 
     printed = capsys.readouterr()
-    assert "NATS" not in printed.out
+    notices = [text for text in printed.out.splitlines() if "NATS" in text]
+    assert notices == ([line] if line else [])
+    assert bool(line) == bool(set(NATS_CREDENTIAL_ENV_NAMES) & set(_carried(out))), "a line exactly when a login travels"
     assert not any(event in caplog.text for event in NOTICE_EVENTS)
     _assert_no_values(printed.out + printed.err + caplog.text, team_env, shell)
 
@@ -380,21 +429,26 @@ def _new_team_env(target: Path) -> dict[str, str]:
 
 
 @pytest.mark.parametrize(
-    ("old_team_env", "shell", "saved_nats_url", "new_team_env", "kept"),
+    ("old_team_env", "shell", "saved_nats_url", "new_team_env", "kept", "export_says"),
     [
-        pytest.param("", {"NATS_URL": LOCAL_NATS}, EXTERNAL_NATS, "", True, id="server-in-the-saved-settings-local-shell"),
+        pytest.param(
+            "", {"NATS_URL": LOCAL_NATS}, EXTERNAL_NATS, "", True,
+            ADDRESS_IN_THE_SETTINGS + " " + KEEP_THE_SERVER.format(names=""),
+            id="server-in-the-saved-settings-local-shell",
+        ),
         pytest.param(
             "", {"NATS_URL": SHELL_EXTERNAL_NATS, "NATS_SERVERS": SHELL_EXTERNAL_NATS}, None, "", False,
+            "NATS_USER and NATS_PASSWORD were left out: ",
             id="local-instance-external-shell",
         ),
         pytest.param(
             f"NATS_URL={EXTERNAL_NATS}\n", {"NATS_URL": LOCAL_NATS}, None,
-            f"NATS_URL={EXTERNAL_NATS}\nTEAM_LOCAL_NATS_ENABLED=false\n", True,
+            f"NATS_URL={EXTERNAL_NATS}\nTEAM_LOCAL_NATS_ENABLED=false\n", True, _neither("NATS_URL"),
             id="server-in-the-old-team-env-named-again-by-url",
         ),
         pytest.param(
             f"NATS_SERVERS={EXTERNAL_NATS}\n", {}, None,
-            f"NATS_SERVERS={EXTERNAL_NATS}\nTEAM_LOCAL_NATS_ENABLED=false\n", True,
+            f"NATS_SERVERS={EXTERNAL_NATS}\nTEAM_LOCAL_NATS_ENABLED=false\n", True, _neither("NATS_SERVERS"),
             id="server-in-the-old-team-env-named-again-by-servers",
         ),
     ],
@@ -409,11 +463,15 @@ def test_an_external_servers_login_reaches_the_new_team_env_when_the_new_instanc
     saved_nats_url: str | None,
     new_team_env: str,
     kept: bool,
+    export_says: str,
 ) -> None:
     # The shell stays set during the import too: with env_file secrets the
     # import decides from the new team.env, not from the command's environment.
     caplog.set_level(logging.INFO)
     out = _cli_export(tmp_path, monkeypatch, team_env=old_team_env, shell=shell, saved_nats_url=saved_nats_url)
+    exported = capsys.readouterr().out
+    # The import accepts a carried login without a word about the switch (F8), so the export says it.
+    assert len([line for line in exported.splitlines() if export_says in line]) == 1, exported
     target = _new_root(tmp_path, new_team_env)
     review = _prepare_review(tmp_path, out, target)
     capsys.readouterr()
@@ -432,7 +490,8 @@ def test_an_external_servers_login_reaches_the_new_team_env_when_the_new_instanc
     for line in new_team_env.splitlines():
         name, value = line.split("=", 1)
         assert new[name] == value, "what the operator wrote is kept"
-    _assert_no_values(printed.out + printed.err + caplog.text, old_team_env, shell)
+    assert "TEAM_LOCAL_NATS_ENABLED" in new_team_env or "TEAM_LOCAL_NATS_ENABLED" not in new, "the switch does not travel"
+    _assert_no_values(exported + printed.out + printed.err + caplog.text, old_team_env, shell)
 
 
 def test_an_external_server_named_only_in_the_old_team_env_is_refused_with_the_steps_until_unselected(
@@ -532,6 +591,9 @@ def test_an_environment_mode_instance_lists_its_external_servers_login_for_the_n
     out = _cli_export(tmp_path, monkeypatch, team_env="", shell=environment, secrets_source="environment")
     carried = _carried(out)
     assert (carried["NATS_USER"], carried["NATS_PASSWORD"]) == ("env-nats-user", "env-nats-password")
+    exported = capsys.readouterr().out
+    assert _neither("NATS_URL", "environment") in exported
+    assert "env-nats-user" not in exported and "env-nats-password" not in exported and "external.example" not in exported
     target = _new_root(tmp_path, "")
     review = _prepare_review(tmp_path, out, target)
     capsys.readouterr()

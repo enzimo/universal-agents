@@ -133,17 +133,56 @@ def _saved_config(source: ExportSource) -> Any:
     return GatewayInstanceConfig.load_saved(source.layout.instance_config_path)
 
 
-# Where the notices below say the decision came from.
-_INSTANCE_SETTINGS = "this instance's own settings (instance_config.yaml and team.env)"
+def _instance_settings(environment_mode: bool) -> str:
+    """Where the notices below say the decision came from."""
+
+    where = "its environment" if environment_mode else "team.env"
+    return f"this instance's own settings (instance_config.yaml and {where})"
 
 
-def _command_nats_notice(
+def _nats_notice(
     source: ExportSource,
     config: Any,
     environment: Mapping[str, str],
     values: Mapping[str, str],
 ) -> list[str]:
-    """One line for the operator when this command's NATS variables would have decided otherwise.
+    """At most one line for the operator about the NATS login, names only.
+
+    It is given when this command's NATS variables would have decided
+    otherwise (``_command_nats_sentence``) or when the export carries a NATS
+    login, which the new instance uses only with the right switch
+    (``_keep_server_sentence``). It starts with what happened to the login and
+    why, so one login gets one line. Never a value, because an address may
+    hold a user and password.
+    """
+
+    from assistant_gateway.instance_secrets import should_generate_internal_nats_credentials
+
+    environment_mode = bool(source.config.launch.secrets_from_environment)
+    # The same rule on the same inputs _operator_values used, so it adds no new way to fail.
+    instance_generates = should_generate_internal_nats_credentials(config, environment)
+    told = [
+        sentence
+        for sentence in (
+            _command_nats_sentence(source, config, environment, instance_generates, values),
+            _keep_server_sentence(environment, environment_mode, values),
+        )
+        if sentence
+    ]
+    if not told:
+        return []
+    login = _nats_login_outcome(instance_generates, values, environment_mode)
+    return [" ".join([f"{login}.", *told])]
+
+
+def _command_nats_sentence(
+    source: ExportSource,
+    config: Any,
+    environment: Mapping[str, str],
+    instance_generates: bool,
+    values: Mapping[str, str],
+) -> str:
+    """What this command's own NATS variables would have decided, when that differs; otherwise "".
 
     Only with ``env_file`` secrets, where the export reads the instance's
     ``team.env`` and not this command's environment. The launcher lays the
@@ -153,14 +192,12 @@ def _command_nats_notice(
     with a stray NATS_URL, would otherwise decide without saying so. The
     command's side is the instance's environment with the command's values for
     ``NATS_DECISION_ENV_NAMES`` laid over it the same way (an empty value
-    replaces too, as in the launcher). The line names only the variables whose
-    value differs from the instance's; never a value, because an address may
-    hold a user and password.
+    replaces too, as in the launcher). The sentence names only the variables
+    whose value differs from the instance's.
 
-    ``values`` are what the export carries; the line says whether NATS_USER and
-    NATS_PASSWORD are among them. A command value the rule cannot read (for
-    example a malformed address) is reported and not used; it does not stop
-    the export, because the instance never used it.
+    A command value the rule cannot read (for example a malformed address) is
+    reported and not used; it does not stop the export, because the instance
+    never used it.
     """
 
     from assistant_gateway.instance_secrets import (
@@ -169,17 +206,15 @@ def _command_nats_notice(
     )
 
     if source.config.launch.secrets_from_environment:
-        return []
+        return ""
     command = {
         name: os.environ[name]
         for name in NATS_DECISION_ENV_NAMES
         if name in os.environ and os.environ[name] != environment.get(name, "")
     }
     if not command:
-        return []
+        return ""
     names = _join_names(list(command))
-    instance_generates = should_generate_internal_nats_credentials(config, environment)
-    login = _nats_login_outcome(instance_generates, values)
     unused = "it was" if len(command) == 1 else "they were"
     try:
         command_generates = should_generate_internal_nats_credentials(
@@ -189,29 +224,67 @@ def _command_nats_notice(
         _log_nats_notice(
             "team_transfer_nats_environment_unreadable", source, command, instance_generates, values
         )
-        return [f"{login}. This command's own {names} could not be read; {unused} not used."]
+        return f"This command's own {names} could not be read; {unused} not used."
     if command_generates == instance_generates:
-        return []
+        return ""
     _log_nats_notice(
         "team_transfer_nats_environment_differs", source, command, instance_generates, values
     )
     if not instance_generates:
-        # Only a carried login can be kept; with none carried there is nothing to refuse either.
-        keeps = (
-            " The new instance keeps the login only if it names the same server; the import says how."
-            if _carried_nats_names(values)
-            else ""
-        )
-        return [f"{login}. This command's own {names} would mean a local server; {unused} not used.{keeps}"]
+        return f"This command's own {names} would mean a local server; {unused} not used."
     one = len(command) == 1
-    return [
-        f"{login}. This command's own {names} would mean an external server; {unused} not used. "
+    return (
+        f"This command's own {names} would mean an external server; {unused} not used. "
         f"If this instance really runs with {'that value' if one else 'those values'} (for example from "
         f"its Docker container's environment), add {'it' if one else 'them'} to the instance's team.env "
         "and export again, or set the server's address, NATS_USER, NATS_PASSWORD and "
         "TEAM_LOCAL_NATS_ENABLED=false on the new instance yourself. If "
         f"{'it is' if one else 'they are'} left over from another setup, nothing was lost."
-    ]
+    )
+
+
+def _keep_server_sentence(
+    environment: Mapping[str, str], environment_mode: bool, values: Mapping[str, str]
+) -> str:
+    """What the new instance needs to use the external server whose login travels; "" when none does.
+
+    The login travels, but the image's local-server switch,
+    TEAM_LOCAL_NATS_ENABLED, does not, nor do the NATS variables the
+    instance's environment sets (``NATS_DECISION_ENV_NAMES``): only the address
+    in ``instance_config.yaml`` travels, with the settings section. The switch
+    is on unless set to false (``docker.nats_service.local_nats_enabled_from_env``),
+    and then the image starts its own NATS server with the carried login, so
+    the new instance would stop using the external server without a word. The
+    import cannot say this when it accepts the login (it reports reasons only
+    for records it refuses or lists), so the export does, on every export that
+    carries the login. It is not logged: it is the same instruction each time,
+    not a sign that something went wrong.
+    """
+
+    from assistant_gateway.instance_secrets import NATS_DECISION_ENV_NAMES
+
+    if not _carried_nats_names(values):
+        return ""
+    named = [name for name in NATS_DECISION_ENV_NAMES if environment.get(name)]
+    # Where the import's plan reads the address (``_new_instance_environment``);
+    # the launcher reads the switch there too.
+    place = (
+        "in its team.env (or its environment, if it takes secrets from there) before importing; "
+        "otherwise the image starts its own NATS server."
+    )
+    if not named:
+        return (
+            "The server's address travels in instance_config.yaml, but TEAM_LOCAL_NATS_ENABLED does not. "
+            f"For the new instance to use that server, set TEAM_LOCAL_NATS_ENABLED=false {place}"
+        )
+    names = _join_names(named)
+    one = len(named) == 1
+    where = "environment" if environment_mode else "team.env"
+    return (
+        f"TEAM_LOCAL_NATS_ENABLED does not travel, and neither {'does' if one else 'do'} the {names} "
+        f"in this instance's {where}. For the new instance to use that server, set {names} to the same "
+        f"{'value' if one else 'values'} and TEAM_LOCAL_NATS_ENABLED=false {place}"
+    )
 
 
 def _log_nats_notice(
@@ -236,25 +309,25 @@ def _log_nats_notice(
     )
 
 
-def _nats_login_outcome(instance_generates: bool, values: Mapping[str, str]) -> str:
+def _nats_login_outcome(
+    instance_generates: bool, values: Mapping[str, str], environment_mode: bool
+) -> str:
     """Whether the NATS login travels, and why, in one sentence without its full stop."""
 
+    settings = _instance_settings(environment_mode)
     if instance_generates:
         return (
-            f"NATS_USER and NATS_PASSWORD were left out: {_INSTANCE_SETTINGS} say it uses a local "
+            f"NATS_USER and NATS_PASSWORD were left out: {settings} say it uses a local "
             "NATS server, and the new instance makes its own login for that"
         )
     carried = _carried_nats_names(values)
     if not carried:
         return (
-            f"No NATS_USER or NATS_PASSWORD was carried: {_INSTANCE_SETTINGS} say it uses an external "
+            f"No NATS_USER or NATS_PASSWORD was carried: {settings} say it uses an external "
             "NATS server, but they hold no such login"
         )
     verb = "was" if len(carried) == 1 else "were"
-    return (
-        f"{_join_names(carried)} {verb} carried: {_INSTANCE_SETTINGS} say it uses an "
-        "external NATS server"
-    )
+    return f"{_join_names(carried)} {verb} carried: {settings} say it uses an external NATS server"
 
 
 def _carried_nats_names(values: Mapping[str, str]) -> list[str]:
@@ -352,7 +425,7 @@ class OperatorSecretsSection:
             ciphertext=encrypt_section(
                 self.name, self.schema_version, records, files.keys
             ),
-            notices=_command_nats_notice(source, config, environment, values),
+            notices=_nats_notice(source, config, environment, values),
         )
 
     def plan(
