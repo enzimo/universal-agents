@@ -51,6 +51,7 @@ from runtime_settings.model_request_options import (
 from runtime_settings.environment import _apply_env_overrides
 from runtime_settings.governance import refuse_removed_access_settings
 from runtime_settings.worker_pools import move_worker_capacity_settings
+from runtime_settings.transport import drop_retired_presence_setting, refuse_retired_presence_setting
 from runtime_settings.values import (
     DEFAULT_AUTHORIZATION_CONFIG,
     _mapping_or_empty,
@@ -71,7 +72,7 @@ from runtime_settings.projection import (
 logger = logging.getLogger(__name__)
 
 
-CONFIG_SCHEMA_VERSION = 10
+CONFIG_SCHEMA_VERSION = 11
 
 
 DIRECTLY_COMPATIBLE_CONFIG_VERSIONS = {CONFIG_SCHEMA_VERSION}
@@ -384,7 +385,19 @@ def _migrate_config_dict(
         )
         version = 10
 
+    if version == 10:
+        # The presence stream was removed (message contract step 7d), and with it
+        # the setting for how long it kept messages (config.example.yaml had it).
+        removed = drop_retired_presence_setting(migrated)
+        migrated["schema_version"] = 11
+        applied_steps.append(
+            "10 -> 11: the presence stream was removed"
+            + ("; transport.presence_max_age_seconds removed" if removed else "")
+        )
+        version = 11
+
     refuse_removed_access_settings(migrated)
+    refuse_retired_presence_setting(migrated)
     agent_cfg = _mapping_or_empty(migrated.get("agent"))
     removed_agent_workspace_keys = {
         "skills_dir",

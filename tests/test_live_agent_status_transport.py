@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from tests.memory_support import SYSTEM_MEMORY_WRITER
+from tests.team_services_support import InProcessTeamServices
 import asyncio
 import contextlib
-import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -13,21 +13,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from live_nats_client import LiveNatsClient, resolve_live_transport_settings
+from live_nats_client import LiveNatsClient, delete_team_streams, resolve_live_transport_settings
 
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from custom_agents.manager_control_runtime import (
-    handle_manager_memory_command,
-    handle_manager_schedule_command,
     handle_task_progress_status,
 )
 from custom_agents.schedule_store import ScheduleStore
+from custom_transport.protocol1.delivery_refs import ensure_delivery_ref_key
 from custom_agents.scheduled_runtime import prepare_memory_review_schedule
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_operation_runtime import TaskOperationRuntime
-from custom_messages.contracts.control_v1 import AgentStatus, ManagerMemoryCommand
+from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
@@ -35,7 +34,6 @@ from custom_messages.contracts.routing_v1 import (
     MessageMeta,
 )
 from custom_messages.contracts.schedule_v1 import (
-    ManagerScheduleCommand,
     ScheduledMessage,
 )
 from custom_messages.contracts.task_v1 import Task, TaskProgressStatus
@@ -43,22 +41,19 @@ from custom_messages.enums import (
     ControlType,
     MessageMetaType,
     ProgressState,
-    RequesterType,
     RoutingType,
+    ScheduleManagementClass,
 )
 from custom_messages.system_schedules import (
     COREMEM_AUDIT_SCHEDULE_NAME_PREFIX,
 )
-from custom_tools.providers.agent_management import query_agent_state
-from tests.task_work_support import set_agent_ref
-from custom_transport.base import SubscriptionDelivery, TransportPublishOptions
+from custom_transport.base import SubscriptionDelivery
 from custom_transport.subjects import NatsSubjectMapper
-from id_generation import new_id, new_id_suffix
+from id_generation import new_id
 from runtime_settings.projection import _project_transport
 from runtime_settings.transport import TransportSettings
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import context_signer
-from tests.live_nats_support import flush_adapter_fully
 
 pytestmark = [
     pytest.mark.integration,
@@ -79,165 +74,6 @@ async def _wait_for_agent_connected(agent, *, timeout: float = 10.0) -> None:
             return
         await asyncio.sleep(0.05)
     raise AssertionError("Agent did not finish NATS operational setup in time.")
-
-
-@pytest.mark.asyncio
-async def test_live_agent_status_presence_replays_but_operational_status_does_not(
-    tmp_path, live_transport,
-):
-    from custom_agents.strands_agent import UniversalAgent
-
-    team_id = new_id("live_status")
-    mapper = NatsSubjectMapper(team_id=team_id, subject_prefix=live_transport.subject_prefix)
-    agent_task = None
-
-    async with LiveNatsClient(team_id, transport=live_transport) as client:
-        try:
-            with patch("custom_agents.strands_agent.Agent") as mock_agent_class:
-                mock_agent_class.return_value = MagicMock()
-                with patch(
-                    "custom_agents.strands_agent.UniversalAgent._configure_model",
-                    return_value=MagicMock(),
-                ):
-                    agent = UniversalAgent(
-                        **_project_transport(transport_cfg=live_transport.model_dump()),
-                        role="Live Status Manager",
-                        tools=[],
-                        team_id=team_id,
-                        named_agent_type="TeamArchitect",
-                        is_team_lead=True,
-                        skills_enabled=False,
-                        task_manager=TaskManager(
-                            db_path=str(tmp_path / "agent_status_transport.db")
-                        ),
-                    )
-                    assert agent.task_manager._db_path == str(tmp_path / "agent_status_transport.db")
-                    agent_task = asyncio.create_task(agent.connect())
-                    await _wait_for_agent_connected(agent)
-
-                    presence_queue = asyncio.Queue()
-
-                    async def presence_handler(delivery) -> None:
-                        await presence_queue.put(delivery.envelope)
-                        await delivery.ack()
-
-                    await client.adapter.subscribe_subject(
-                        name="presence-replay-probe",
-                        subject=f"{mapper.prefix}.presence.*",
-                        handler=presence_handler,
-                        durable_name=mapper.durable_name(new_id("presence_probe")),
-                        logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                        deliver_last_per_subject=True,
-                    )
-
-                    startup_envelope = await asyncio.wait_for(
-                        presence_queue.get(), timeout=8
-                    )
-                    assert isinstance(startup_envelope.msg_content, AgentStatus)
-                    assert startup_envelope.msg_content.self_id == agent.id
-                    assert startup_envelope.msg_content.is_exiting is False
-                    assert (
-                        startup_envelope.msg_content.named_agent_type == "TeamArchitect"
-                    )
-
-                    operational_monitor = asyncio.Queue()
-
-                    async def operational_handler(delivery) -> None:
-                        await operational_monitor.put(delivery.envelope)
-                        await delivery.ack()
-
-                    await client.adapter.subscribe_subject(
-                        name="operational-monitor",
-                        subject=mapper.operational_subject(),
-                        handler=operational_handler,
-                        delivery=SubscriptionDelivery.CORE,
-                        logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                    )
-                    response_route = "live_status_probe"
-
-                    request = MessageEnvelope(
-                        msg_content=AgentStatus(
-                            self_id="live_status_probe",
-                            team_id=team_id,
-                            named_agent_type="live_probe",
-                            is_paused=False,
-                            is_executing=False,
-                            has_execution_capacity=True,
-                            is_busy=False,
-                            name="live_status_probe",
-                            agent_role="live_test",
-                            status_type=MessageMetaType.REQUEST,
-                            info_type=ControlType.STATUS_REQUEST_BASIC,
-                        ),
-                        msg_header=MessageHeader(
-                            from_agent_id="live_status_probe",
-                            to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-                            response_routing_key=response_route,
-                            agent_signature="",
-                        ),
-                        msg_meta=MessageMeta(
-                            from_agent_name="live_status_probe",
-                            msg_correlation_id=new_id("corr_id"),
-                            requester_type=RequesterType.AGENT_REQUESTER,
-                            is_response_requested=True,
-                        ),
-                    )
-                    await client.publish(
-                        RoutingType.ALL_AGENTS_ROUTE,
-                        request,
-                        operational=True,
-                        durable=False,
-                    )
-
-                    observed_operational = await asyncio.wait_for(
-                        operational_monitor.get(), timeout=5
-                    )
-                    assert isinstance(observed_operational.msg_content, AgentStatus)
-                    assert (
-                        observed_operational.msg_content.status_type
-                        == MessageMetaType.REQUEST
-                    )
-
-                    response = await asyncio.wait_for(
-                        operational_monitor.get(), timeout=8
-                    )
-                    assert isinstance(response.msg_content, AgentStatus)
-                    assert response.msg_content.status_type == MessageMetaType.RESPONSE
-                    assert response.msg_content.self_id == agent.id
-                    assert response.msg_header.to_routing_path == response_route
-
-                    late_operational_monitor = asyncio.Queue()
-
-                    async def late_operational_handler(delivery) -> None:
-                        await late_operational_monitor.put(delivery.envelope)
-                        await delivery.ack()
-
-                    await client.adapter.subscribe_subject(
-                        name="late-operational-monitor",
-                        subject=mapper.operational_subject(),
-                        handler=late_operational_handler,
-                        delivery=SubscriptionDelivery.CORE,
-                        logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                    )
-                    with pytest.raises(asyncio.TimeoutError):
-                        await asyncio.wait_for(
-                            late_operational_monitor.get(), timeout=0.5
-                        )
-
-                    agent.set_exit_flag()
-                    exit_envelope = await asyncio.wait_for(
-                        presence_queue.get(), timeout=8
-                    )
-                    assert isinstance(exit_envelope.msg_content, AgentStatus)
-                    assert exit_envelope.msg_content.self_id == agent.id
-                    assert exit_envelope.msg_content.is_exiting is True
-                    await asyncio.wait_for(agent_task, timeout=10)
-                    agent_task = None
-        finally:
-            if agent_task is not None:
-                agent.set_exit_flag()
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(agent_task, timeout=10)
 
 
 @pytest.mark.asyncio
@@ -335,179 +171,20 @@ async def test_local_memory_schedule_does_not_publish_to_remote_memreview_queue(
 
 
 @pytest.mark.asyncio
-async def test_live_gateway_discovery_uses_operational_subject_not_presence(tmp_path, live_transport):
-    team_id = new_id("live_gateway")
-
-    async with LiveNatsClient(team_id, transport=live_transport) as responder_client:
-        mapper = responder_client.mapper
-        requests = asyncio.Queue()
-
-        async def responder_handler(delivery) -> None:
-            await requests.put(delivery.envelope)
-            await delivery.ack()
-
-        await responder_client.adapter.subscribe_subject(
-            name="gateway-discovery-responder",
-            subject=mapper.operational_subject(),
-            handler=responder_handler,
-            delivery=SubscriptionDelivery.CORE,
-            logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-        )
-        # The gateway's discovery request comes from its own connection.
-        await flush_adapter_fully(responder_client.adapter)
-
-        async def responder() -> None:
-            while True:
-                request = await asyncio.wait_for(requests.get(), timeout=8)
-                assert isinstance(request.msg_content, AgentStatus)
-                assert request.msg_content.status_type == MessageMetaType.REQUEST
-                response = MessageEnvelope(
-                    msg_content=AgentStatus(
-                        self_id="manager_live_from_operational",
-                        team_id=team_id,
-                        named_agent_type="TeamArchitect",
-                        is_paused=False,
-                        is_executing=False,
-                        has_execution_capacity=True,
-                        is_busy=False,
-                        name="manager-live",
-                        agent_role="manager",
-                        status_type=MessageMetaType.RESPONSE,
-                        info_type=ControlType.STATUS_REQUEST_BASIC,
-                    ),
-                    msg_header=MessageHeader(
-                        from_agent_id="manager_live_from_operational",
-                        to_routing_path=request.msg_header.response_routing_key,
-                        agent_signature="",
-                    ),
-                    msg_meta=MessageMeta(
-                        msg_correlation_id=request.msg_meta.msg_correlation_id
-                    ),
-                )
-                await responder_client.publish(
-                    request.msg_header.response_routing_key, response, durable=True
-                )
-
-        gateway_config = GatewayInstanceConfig.create(
-            instance_name="live_gateway",
-            instance_root=str(tmp_path / "gateway"),
-            team_id=team_id,
-            timezone="America/Chicago",
-            named_agent_type="TeamArchitect",
-        )
-        gateway_config.transport = live_transport.model_copy(deep=True)
-        gateway = UserGateway(
-            gateway_config,
-            output_sink=None,
-            state_store=GatewayStateStore(str(tmp_path / "gateway_state.db")),
-        )
-
-        responder_task = asyncio.create_task(responder())
-        try:
-            await gateway.connect(start_services=False)
-            # This test targets the extracted manager-client transport directly;
-            # manager discovery is intentionally not a UserGateway forwarding API.
-            manager_id = await gateway._manager_client.discover_manager_id(
-                timeout_seconds=5.0
-            )
-            assert manager_id == "manager_live_from_operational"
-        finally:
-            responder_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await responder_task
-            await gateway.close()
-
-
-@pytest.mark.asyncio
-async def test_live_query_agent_state_live_sends_targeted_operational_status_request(live_transport):
-    team_id = new_id("live_tool")
-
-    async with LiveNatsClient(team_id, transport=live_transport) as client:
-        monitor = asyncio.Queue()
-
-        async def monitor_handler(delivery) -> None:
-            await monitor.put(delivery.envelope)
-            await delivery.ack()
-
-        await client.adapter.subscribe_subject(
-            name="query-agent-state-monitor",
-            subject=client.mapper.operational_subject(),
-            handler=monitor_handler,
-            delivery=SubscriptionDelivery.CORE,
-            logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-        )
-        response_route = f"{team_id}_gateway_tool_{new_id_suffix()}_response"
-
-        async def send_operational_message(envelope: MessageEnvelope) -> None:
-            await client.adapter.publish(
-                envelope=envelope,
-                routing_key=str(
-                    envelope.msg_header.to_routing_path
-                    or RoutingType.ALL_AGENTS_ROUTE.value
-                ),
-                options=TransportPublishOptions(operational=True, durable=False),
-            )
-
-        fake_agent = SimpleNamespace(
-            id="live_tool_caller",
-            team_id=team_id,
-            named_agent_type="TeamArchitect",
-            paused=False,
-            is_executing=False,
-            name="live-tool-caller",
-            role="tool-caller",
-            _agent_state_store=None,
-            _agent_id_by_name={"target-manager": "target-manager-id"},
-            _operational_queue_name=response_route,
-            task_manager=SimpleNamespace(
-                operations_runtime=TaskOperationRuntime(),
-                current_task_id=None,
-                get_task_info=lambda task_id: None,
-            ),
-            _has_execution_capacity=lambda: True,
-            _send_operational_message=send_operational_message,
-            # A running agent's loop and owned-work fields: the tool's send runs there.
-            _runtime_loop=asyncio.get_running_loop(),
-            _should_exit=asyncio.Event(),
-            _owned_tasks=set(),
-            _logger=logging.getLogger("test_live_query_agent_state"),
-        )
-
-        set_agent_ref(fake_agent)
-        try:
-            # Strands runs sync tools in a worker thread; the send finishes
-            # on the agent loop before the tool returns.
-            result = json.loads(
-                await asyncio.to_thread(query_agent_state, live="true", target_agent="target-manager")
-            )
-            assert result["live_refresh_requested"] is True
-            assert result["live_refresh_targets"] == ["target-manager"]
-
-            envelope = await asyncio.wait_for(monitor.get(), timeout=5)
-            assert isinstance(envelope.msg_content, AgentStatus)
-            assert envelope.msg_content.status_type == MessageMetaType.REQUEST
-            assert envelope.msg_header.to_routing_path == RoutingType.ALL_AGENTS_ROUTE
-            assert envelope.msg_header.response_routing_key == response_route
-            assert envelope.msg_meta.to_agent_name == "target-manager"
-            assert envelope.msg_header.from_agent_id == "live_tool_caller"
-        finally:
-            set_agent_ref(None)
-
-
-@pytest.mark.asyncio
 async def test_live_gateway_manager_controls_use_nats_and_separate_storage(tmp_path, live_transport, monkeypatch):
     from tests.broker_access_support import forget_task_context_keys, use_gateway_key
 
     # The manager acts only for the person the gateway signed onto each command.
     use_gateway_key(monkeypatch)
+    team_id = new_id("live_decoupled")
     try:
-        await _gateway_manager_controls_over_nats(tmp_path, live_transport)
+        await _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id)
     finally:
         forget_task_context_keys()
+        await delete_team_streams(team_id, transport=live_transport)
 
 
-async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
-    team_id = new_id("live_decoupled")
+async def _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id: str) -> None:
     manager_id = new_id("manager")
     gateway_db = tmp_path / "gateway.db"
     manager_db = tmp_path / "manager.db"
@@ -523,14 +200,28 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
         named_agent_type="TeamArchitect",
     )
     config.transport = live_transport.model_copy(deep=True)
+    # Memory and schedule commands go to the team services (tests/test_live_team_memory.py covers
+    # them over NATS); here they run in process on the manager's database, which the gateway never
+    # opens. A chat's schedule list names the chat with the launcher's delivery reference key.
+    ensure_delivery_ref_key(config.layout)
     gateway = UserGateway(
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(gateway_db)),
+        team_services=InProcessTeamServices(config),
     )
     session = gateway.application.resolve_session(
         session_key=config.user.default_session_key
     )
+    ScheduleStore(storage_settings=config.manager_storage_settings).add(ScheduledMessage(
+        schedule_id="sched_live_decoupled",
+        management_class=ScheduleManagementClass.USER,
+        claim_team_id=team_id,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check the vehicle listings."),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(
+            canonical_user_id=config.user.canonical_user_id, session_key=session.session_key)),
+        interval_ms=3_600_000,
+    ))
     root_task = Task(
         task_id="task_live_decoupled",
         task_type=MessageMetaType.REQUEST,
@@ -644,25 +335,6 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
                 )
             await delivery.ack()
 
-        async def manager_command_handler(delivery) -> None:
-            envelope = delivery.envelope
-            content = envelope.msg_content
-            if isinstance(content, ManagerMemoryCommand):
-                await handle_manager_memory_command(
-                    manager,
-                    command=content,
-                    msg_header=envelope.msg_header,
-                    msg_meta=envelope.msg_meta,
-                )
-            elif isinstance(content, ManagerScheduleCommand):
-                await handle_manager_schedule_command(
-                    manager,
-                    command=content,
-                    msg_header=envelope.msg_header,
-                    msg_meta=envelope.msg_meta,
-                )
-            await delivery.ack()
-
         async def manager_work_handler(delivery) -> None:
             if not isinstance(delivery.envelope.msg_content, Task):
                 await delivery.ack()
@@ -685,15 +357,6 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
             routing_key=manager_id,
             handler=manager_work_handler,
             durable_name=manager_client.mapper.durable_name(f"manager_{manager_id}"),
-        )
-        await manager_client.adapter.subscribe_subject(
-            name="live-decoupled-manager-control",
-            subject=manager_client.mapper.agent_control_subject(manager_id),
-            handler=manager_command_handler,
-            durable_name=manager_client.mapper.durable_name(
-                f"manager_{manager_id}_control"
-            ),
-            logical_route=manager_id,
         )
 
         try:
@@ -753,12 +416,10 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport) -> None:
             assert "NATS keeps gateway and manager storage independent." in str(
                 listed.text or ""
             )
-            assert (
-                await gateway.application.list_scheduled_jobs(
-                    session_key=session.session_key
-                )
-                == []
-            )
+            listed_jobs = await gateway.application.list_scheduled_jobs(session_key=session.session_key)
+            assert [(job.scheduled_job_id, job.task_summary) for job in listed_jobs] == [
+                ("sched_live_decoupled", "Check the vehicle listings.")
+            ]
         finally:
             release_work.set()
             await gateway.close()

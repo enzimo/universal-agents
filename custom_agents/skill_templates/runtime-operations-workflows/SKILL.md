@@ -153,6 +153,29 @@ a person asks about such a notice, look at the task's history and current state
 (`list_task_queue`), explain it in plain words, and if they want it stopped,
 give them `/stop task <task_id>`; do not resend or recreate the request.
 
+When an agent leaves the team for good (it stopped, or its process restarted
+after a crash), a subtask you sent to it by name that it never took fails at once
+("... left before taking it"), also when you were restarted meanwhile; only that
+subtask fails, and your task resumes so you can decide again, for example
+delegate it to the type or to another named worker. A subtask it had already
+taken is not failed: its restarted run takes it over, or it was handed back and
+another worker takes it. An agent that only stopped answering is not given up
+on; the subtask watchdog checks it again and times the subtask out if it never
+comes back. A by-name delegation waits a few seconds for a worker you just
+started; one that is listed but does not answer, is exiting or takes no work is
+refused at once, so pick another worker instead of retrying it. A refusal that
+says "This agent cannot send requests" is about you, not the worker: retry
+shortly when it says so, otherwise delegate by type or tell the person.
+
+`send_control_instruction` pauses, resumes or stops another agent, never
+yourself (to restart the manager, plan a restart). Agents obey it only from the
+team lead, so another agent that calls it is told "not allowed". Read its answer:
+"nothing was changed there" means the change did not happen; "whether it will
+... is unknown" means the agent may still act on it, so check with
+`query_agent_state(live="true")` before asking again. That tool asks every
+target at once, waits about ten seconds in all, and gives each target's own answer
+or why it has none.
+
 After a host suspension or a long gap in the task monitor's checks, allow the
 runtime's one-minute heartbeat refresh window. Use `event=liveness_monitor_paused`
 to identify that wait in runtime logs. Startup agents and TeamLead are judged by
@@ -438,12 +461,14 @@ skill with generic file, shell, GitHub, or Python tools.
    notification must both complete; report its warning if either fails. Activate
    the exact installed skill by semantic name in the same task when it is
    needed. TeamArchitect refreshes immediately. Idle skills-enabled specialists
-   verify the immutable receipt from the typed team notice, reload their caches,
-   and republish presence. Busy specialists wait until their active turn
-   finishes. Their next idle presence heartbeat repairs that deferred refresh
-   or a missed live notice. No manager, gateway, or all-runtime restart is
-   required. If the skill remains absent after the next idle heartbeat, report
-   a runtime defect instead of requesting a restart.
+   verify the immutable receipt from the typed team notice and reload their
+   caches. Busy specialists wait until their active turn finishes. Each agent's
+   own catalog check, every 20 seconds while it is not working, repairs that
+   deferred refresh or a missed notice. The Team page shows each agent's skills
+   as of the last time someone opened the Team tab or pressed Refresh. No
+   manager, gateway, or all-runtime restart is required. If
+   the skill remains absent after the next idle check, report a runtime defect
+   instead of requesting a restart.
 
 Installation copies only the scanned, digest-bound tree into instance-owned
 managed storage at
@@ -503,11 +528,11 @@ or file tools.
    removal path. Skills in `control/skills`
    (operator-added and external) are operator-owned and must be rejected by
    this workflow. Uninstallation reloads
-   TeamArchitect, sends the same receipt-verified team refresh notice, and
-   republishes each idle agent's remaining semantic skill names. A busy agent
-   waits until its active turn finishes. The next idle heartbeat repairs that
-   deferred refresh or a missed notice; do not request a runtime restart to
-   repair the Team roster.
+   TeamArchitect and sends the same receipt-verified team refresh notice; each
+   idle agent reloads its remaining skills. A busy agent waits until its active
+   turn finishes. Its own catalog check, every 20 seconds while it is not
+   working, repairs that deferred refresh or a missed notice; do not request a
+   runtime restart to repair the Team roster.
 
 ## Installed Permission Proposals And Invocation
 
@@ -676,27 +701,38 @@ refuses it); only the person turns it on.
 A runtime restart can interrupt active work. Never infer restart authority from
 a settings change, skill installation, ordinary chat agreement, or a model
 boolean. Never request a restart merely to make a newly installed skill appear;
-managed skill installation refreshes TeamArchitect immediately, notifies idle
-specialists, and repairs busy or missed refreshes on the next idle presence
-heartbeat.
+managed skill installation refreshes TeamArchitect immediately, tells every
+agent with the `skills.changed` event, and an agent that missed it catches up
+when it is next asked for its status or at its next own catalog check.
 
 1. Call `plan_runtime_restart(reason=..., scope=...)` with exact scope
    `manager`, `gateway`, or `all`. Review the returned affected processes,
-   current/queued/waiting task counts and ids/states, team-visible active work,
+   current/queued/waiting task counts and ids/states, other agents' work (for
+   `all`, each agent's answer about what it runs; `answered: false` means it did
+   not answer and its work is unknown, never that it is idle),
    unavailable gateway-session visibility, state digest, and expiry.
 2. Present that state and impact to the person, then call
    `apply_change(change_id, reason)`. With authorization on, a person approves
    the exact restart in the Inbox and your task waits; with it off, get their
    agreement and pass `confirmed=true`. The person approves interrupting the
    tasks the plan lists: every task you hold (running, queued or waiting) and,
-   for `all`, the work other agents are running. A worker's work on a task
-   you delegated counts as that task. Plan-step and recovery tasks also count
+   for `all`, the work other agents are running, plus whatever the agents that
+   did not answer are running (`<agent id>#not-answering`; tell the person
+   which agents did not answer) and the agents a host runs without a session,
+   which nobody can ask (`<host>#<component>#no-session`, with the reason in
+   `without_session`). A worker's work on a task you delegated
+   counts as that task. Plan-step and recovery tasks also count
    as their original request, so ordinary progress needs no new approval.
 3. Applying captures the runtime state again. The approval still holds when
    listed tasks finished, changed state, or moved on to another part of the
    same task. When a new task arrived that the restart would interrupt (a
-   message, a scheduled run, a worker's own task), the restart is refused and
-   names the new task; stage a fresh plan and ask again. Plans last one hour.
+   message, a scheduled run, a worker's own task), or an agent that answered
+   no longer answers, the restart is refused and names them;
+   stage a fresh plan and ask again. When you cannot ask the other agents yet
+   (your process has not joined, your session is not open, or the team's agents
+   are not read yet), an `all` restart is refused with that reason; try again in
+   a minute. A plan staged before an upgrade is refused with a plain message;
+   stage it again. Plans last one hour.
 4. Use `get_runtime_restart_status(change_id)` to check dispatch. `requested`
    means the supervisor has not accepted it yet; `dispatched` includes the
    supervisor's receipt. For a plan not yet applied, `still_applies` and

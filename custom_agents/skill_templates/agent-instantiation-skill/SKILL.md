@@ -55,12 +55,15 @@ Stage a fresh plan after a denied approval, an expired plan (plans last 24
 hours), or an ended task.
 
 Parameter guidance:
-- `agent_type`: Use an exact named agent type. The list below is as of this agent's start; `get_available_agent_types()` lists every type now, including specialists created since. Prefer the narrowest specialist that can complete the task.
+- `agent_type`: Use an exact named agent type. The list below is as of this agent's start; `get_available_agent_types()` lists every type now, including specialists created since. Prefer the narrowest specialist that can complete the task. Never `TeamArchitect`: the team has one lead, and such a start is refused (`manager_launch_forbidden`).
 - `team_id`: Use the team that should own the new child agent. In normal operation, keep this set to the current team: `{{current_team_id}}`.
 - `mcp_profile_names`: Pass `None` or `[]`; non-empty agent-supplied values fail closed. A new instance uses an installed MCP server when it holds access to the server's tool (`mcp:<name>`) for the person it works for (with authorization off: when the server's record names its type).
 - `idle_ttl_seconds`: Optional per-child idle TTL. When omitted, `TEAM_AGENTS.yaml` ephemeral policy is used.
 
 Runtime behavior:
+- A process draining for another message contract starts no agents and accepts
+  no new delegations. Finish locally or tell the person the work needs the
+  restarted team; repeating a launch or changing pool limits cannot clear it.
 - Create exactly one child agent per tool call. Repeat the tool call to create multiple children.
 - Forward `agent_type` into `AgentCreationRequest.named_agent_type`.
 - Always set `agent_quantity=1` for this tool path.

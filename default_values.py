@@ -126,11 +126,6 @@ class TransportDefaultValues:
         "Maximum age for durable work/reply messages in JetStream.",
         onboarding_overridable=False,
     )
-    presence_max_age_seconds: DefaultValue[Optional[float]] = default_value(
-        600.0,
-        "Maximum age for replayable presence messages in JetStream.",
-        onboarding_overridable=False,
-    )
     process_consumer_inactive_threshold_seconds: DefaultValue[float] = default_value(
         300.0,
         "Seconds an unbound process-scoped JetStream consumer remains before NATS deletes it.",
@@ -455,21 +450,6 @@ class AgentDefaultValues:
     user_name_postfix: DefaultValue[str] = default_value(
         "user",
         "Name suffix used for user-facing queue identity.",
-        onboarding_overridable=False,
-    )
-    broadcast_history_length: DefaultValue[int] = default_value(
-        30,
-        "Number of recent presence broadcasts retained in memory.",
-        onboarding_overridable=False,
-    )
-    max_broadcast_age_ms: DefaultValue[int] = default_value(
-        100,
-        "Maximum accepted age in milliseconds for received presence broadcasts.",
-        onboarding_overridable=False,
-    )
-    delete_fanout_on_exit: DefaultValue[bool] = default_value(
-        False,
-        "Whether a team lead deletes the fanout exchange on exit.",
         onboarding_overridable=False,
     )
     paused: DefaultValue[bool] = default_value(

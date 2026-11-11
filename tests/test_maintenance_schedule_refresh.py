@@ -65,7 +65,7 @@ from custom_agents.schedule_management import (
 from custom_agents.scheduled_runtime import handle_scheduled_message
 from custom_agents.task_context_runtime import sign_system_escalation
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.routing_v1 import ManagerEscalationContext, MessageHeader
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType, SystemScheduleKind
@@ -211,6 +211,7 @@ def _record_people(world) -> None:
     now = datetime.now(timezone.utc)
     people = [
         TeamPersonV1(
+            person_ref=new_person_ref(),
             team_id=TEAM,
             person_id=person_id,
             standing=PersonStanding.ACTIVE,

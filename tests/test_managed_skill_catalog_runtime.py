@@ -13,24 +13,23 @@ from strands.sandbox.not_a_sandbox_local_environment import (
 )
 
 from assistant_gateway.config import GatewayInstanceConfig
-from custom_agents.deferred_message_runtime import requires_execution_slot
+from custom_agents import agent_requests
+from custom_agents.live_controls import skills_changed
 from custom_agents.skill_catalog_runtime import (
-    handle_managed_skill_catalog_notification,
+    apply_managed_skill_catalog_change,
     publish_managed_skill_catalog_notification,
     refresh_agent_skill_catalog,
     repair_agent_skill_catalog,
 )
 from custom_agents.skill_installation import resolve_skill_installation_paths
 from custom_agents.skill_repository import build_skill_tree_manifest
-from custom_agents.strands_agent import UniversalAgent
 from custom_agents.sdk.strands.skills import (
     build_skills_plugin,
     list_agent_skill_names,
     refresh_skills_plugin,
 )
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
+from custom_messages.wire.frame import body_model
 
 
 TEAM_ID = "team_skill_catalog"
@@ -88,7 +87,6 @@ async def _specialist_runtime(
     )
     sdk_agent = _LocalSkillAgent()
     await plugin.init_agent(sdk_agent)  # type: ignore[arg-type]
-    published_presence: list[tuple[str, ...]] = []
     refreshed_state: list[bool] = []
 
     runtime = SimpleNamespace(
@@ -112,7 +110,6 @@ async def _specialist_runtime(
         _refresh_self_agent_state=AsyncMock(
             side_effect=lambda: refreshed_state.append(True)
         ),
-        _published_presence=published_presence,
         _refreshed_state=refreshed_state,
     )
 
@@ -125,23 +122,22 @@ async def _specialist_runtime(
             previous_fingerprint=runtime._skills_fingerprint,
         )
 
-    async def publish_presence(*, is_exiting: bool) -> None:
-        assert is_exiting is False
-        published_presence.append(tuple(list_agent_skill_names(plugin, sdk_agent)))
-
     runtime._refresh_skills_plugins = refresh
-    runtime._publish_presence_status = publish_presence
     refresh(force=False)
     await plugin.init_agent(sdk_agent)  # type: ignore[arg-type]
     return runtime, plugin
 
 
-def _manager_runtime() -> tuple[SimpleNamespace, list[MessageEnvelope]]:
-    published: list[MessageEnvelope] = []
+def _manager_runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[SimpleNamespace, list[tuple[str, dict]]]:
+    """The team lead, with its team events captured (custom_agents.agent_requests.announce)."""
 
-    async def send_operational(message: MessageEnvelope) -> None:
-        published.append(message)
+    published: list[tuple[str, dict]] = []
 
+    async def announce(agent, kind, body):
+        body_model(kind)[0].validate_python(body)
+        published.append((kind, dict(body)))
+
+    monkeypatch.setattr(agent_requests, "announce", announce)
     return (
         SimpleNamespace(
             id="agent_team_architect",
@@ -149,10 +145,15 @@ def _manager_runtime() -> tuple[SimpleNamespace, list[MessageEnvelope]]:
             named_agent_type="TeamArchitect",
             team_id=TEAM_ID,
             is_team_lead=True,
-            _send_operational_message=send_operational,
         ),
         published,
     )
+
+
+def _event(body: dict, *, role: str = "lead", agent: str = "agent_team_architect") -> SimpleNamespace:
+    """What the ``skills.changed`` handler reads from a verified event: its body and the sender's session."""
+
+    return SimpleNamespace(raw={"body": body}, session=SimpleNamespace(agent_role=role, team=TEAM_ID, agent=agent))
 
 
 def _write_receipt(
@@ -200,8 +201,8 @@ def _write_attestation(runtime: SimpleNamespace, skill_name: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_install_notification_refreshes_idle_specialist_and_presence(
-    tmp_path: Path,
+async def test_install_notification_refreshes_an_idle_specialist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, config_path = _instance(tmp_path)
     specialist, plugin = await _specialist_runtime(config, config_path)
@@ -217,7 +218,7 @@ async def test_install_notification_refreshes_idle_specialist_and_presence(
         skill_name="grill-me",
         installed_tree_sha256=tree_digest,
     )
-    manager, published = _manager_runtime()
+    manager, published = _manager_runtime(monkeypatch)
     await publish_managed_skill_catalog_notification(
         manager,
         {
@@ -227,44 +228,31 @@ async def test_install_notification_refreshes_idle_specialist_and_presence(
         },
         operation="install",
     )
-    envelope = MessageEnvelope.model_validate_json(published[0].model_dump_json())
 
-    assert UniversalAgent._is_operational_content(envelope.msg_content)
-    assert not requires_execution_slot(envelope)
-    assert UniversalAgent._operational_target_matches(
-        specialist,
-        msg_content=envelope.msg_content,
-        msg_header=envelope.msg_header,
-        msg_meta=envelope.msg_meta,
-    )
-    assert await handle_managed_skill_catalog_notification(
-        specialist,
-        notification=envelope.msg_content,
-        msg_header=envelope.msg_header,
-        msg_meta=envelope.msg_meta,
-    )
+    # One team event, in the contract's form, that every agent process hands to its agents.
+    [(kind, body)] = published
+    assert kind == "skills.changed"
+    assert body == {"operation": "install", "change_id": INSTALL_CHANGE_ID, "skill_name": "grill-me",
+                    "installed_tree_sha256": tree_digest}
+    await skills_changed(specialist, _event(body))
     assert list_agent_skill_names(plugin, specialist._strands_agent) == [
         "base",
         "grill-me",
     ]
-    assert specialist._published_presence == [("base", "grill-me")]
 
-    assert await handle_managed_skill_catalog_notification(
-        specialist,
-        notification=envelope.msg_content,
-        msg_header=envelope.msg_header,
-        msg_meta=envelope.msg_meta,
-    )
-    assert specialist._published_presence == [("base", "grill-me")]
+    # The same change again changes nothing.
+    await skills_changed(specialist, _event(body))
 
 
 @pytest.mark.asyncio
-async def test_notification_rejects_sender_mismatch_and_missing_receipt(
+async def test_notification_rejects_a_sender_that_is_not_the_lead_and_a_missing_receipt(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     config, config_path = _instance(tmp_path)
-    specialist, _plugin = await _specialist_runtime(config, config_path)
+    specialist, plugin = await _specialist_runtime(config, config_path)
+    body = {"operation": "install", "change_id": INSTALL_CHANGE_ID, "skill_name": "grill-me",
+            "installed_tree_sha256": TREE_DIGEST}
     notification = ManagedSkillCatalogChangedV1(
         team_id=TEAM_ID,
         source_agent_id="agent_team_architect",
@@ -274,20 +262,12 @@ async def test_notification_rejects_sender_mismatch_and_missing_receipt(
         installed_tree_sha256=TREE_DIGEST,
     )
     with caplog.at_level(logging.WARNING):
-        assert not await handle_managed_skill_catalog_notification(
-            specialist,
-            notification=notification,
-            msg_header=MessageHeader(from_agent_id="forged_agent"),
-            msg_meta=MessageMeta(from_agent_name="forged"),
-        )
-        assert not await handle_managed_skill_catalog_notification(
-            specialist,
-            notification=notification,
-            msg_header=MessageHeader(from_agent_id="agent_team_architect"),
-            msg_meta=MessageMeta(from_agent_name="TeamArchitect-0001"),
-        )
-    assert "event=managed_skill_catalog_sender_rejected" in caplog.text
+        # Another agent of the lead's process may not send it.
+        await skills_changed(specialist, _event(body, role="worker", agent="worker_1"))
+        assert not await apply_managed_skill_catalog_change(specialist, notification)
+    assert "event=skills_changed_sender_rejected" in caplog.text
     assert "event=managed_skill_catalog_notification_failed" in caplog.text
+    assert list_agent_skill_names(plugin, specialist._strands_agent) == ["base"]
 
 
 @pytest.mark.asyncio
@@ -321,12 +301,7 @@ async def test_install_notification_rejects_tampered_managed_tree(
     )
 
     with caplog.at_level(logging.WARNING):
-        assert not await handle_managed_skill_catalog_notification(
-            specialist,
-            notification=notification,
-            msg_header=MessageHeader(from_agent_id="agent_team_architect"),
-            msg_meta=MessageMeta(from_agent_name="TeamArchitect-0001"),
-        )
+        assert not await apply_managed_skill_catalog_change(specialist, notification)
         assert not await repair_agent_skill_catalog(
             specialist,
             reason="presence_heartbeat",
@@ -383,17 +358,15 @@ async def test_skill_reload_does_not_yield_to_event_loop(tmp_path: Path, monkeyp
         skill_name="grill-me",
         installed_tree_sha256=digest,
     )
-    manager, published = _manager_runtime()
+    manager, published = _manager_runtime(monkeypatch)
     await publish_managed_skill_catalog_notification(
         manager,
         {"change_id": INSTALL_CHANGE_ID, "skill_name": "grill-me", "installed_tree_sha256": digest},
         operation="install",
     )
-    notice = published[0]
+    [(_kind, body)] = published
     try:
-        assert await handle_managed_skill_catalog_notification(
-            specialist, notification=notice.msg_content, msg_header=notice.msg_header, msg_meta=notice.msg_meta
-        )
+        await skills_changed(specialist, _event(body))
         _write_skill(managed_root, "second-skill")
         _write_attestation(specialist, "second-skill")
         assert await repair_agent_skill_catalog(specialist, reason="presence_heartbeat")
@@ -436,6 +409,6 @@ async def test_a_new_lane_agent_leaves_running_turns_their_skills_and_changes_re
 
     # A skill added meanwhile reaches the lane's running agent, not only the main one.
     _write_skill(config.layout.skills_dir, "added")
-    await refresh_agent_skill_catalog(runtime, force=False, publish_presence=False, reason="test")
+    await refresh_agent_skill_catalog(runtime, force=False, reason="test")
     assert list_agent_skill_names(plugin, lane_agent) == ["added", "base"]
     assert list_agent_skill_names(plugin, runtime._strands_agent) == ["added", "base"]

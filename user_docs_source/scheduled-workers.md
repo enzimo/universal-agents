@@ -739,6 +739,17 @@ system timers. Their timing and targets are protected:
 
 ## Operator controls and diagnosis
 
+Schedule lists and pause, resume, disable and remove commands are answered by the
+team services. They show only schedules you own in the current team. If the service
+or its storage cannot answer, the command explains the failure instead of showing an
+empty list. Refresh a stale list before trying a refused change again.
+
+`/pause schedule <id> <until_iso>` accepts an ISO date and time. A time without an
+offset uses your time zone; include an offset for a time skipped or repeated by a
+daylight saving change. For example, `2030-01-01T09:30:00+01:00` is unambiguous.
+If an older schedule contains an invalid pause time, its card explains the problem
+and remains available to resume or remove.
+
 Both `config.yaml` and `instance_config.yaml` use `agent.schedule_workers` for
 lead-managed eligibility and timing defaults, plus the operator-owned
 `default_startup_policy_enabled` switch (true by default), kill switch, explicit
@@ -765,9 +776,9 @@ under their own rules.
 
 Schedules continue to use the shared database claim path. The startup service
 counts only workers registered in the local process; a remote NATS listener cannot
-suppress a needed local start. NATS carries worker
-presence, notices that an access request was decided, and the chat messages about
-stuck schedules. The scheduler does
+suppress a needed local start. NATS carries each worker's signed record of
+whether it is live and busy, notices that an access request was decided, and the
+chat messages about stuck schedules. The scheduler does
 not publish a second copy of the scheduled payload to a worker queue.
 
 A worker renews its launch lease on every scheduler pass. If it cannot renew for

@@ -90,7 +90,11 @@ from runtime_settings.storage import (
     StateStorageSettings,
 )
 from runtime_settings.telemetry import ActivityCollectorSettings, OTelSettings
-from runtime_settings.transport import TransportSettings
+from runtime_settings.transport import (
+    TransportSettings,
+    drop_retired_presence_setting,
+    refuse_retired_presence_setting,
+)
 from runtime_settings.voice import VoiceSettings
 from runtime_settings.workspace import WorkspaceSettings
 from secure_tools.chat_commands import ACCOUNTS_MODEL_SUBJECT, ACCOUNTS_PRIVATE, ACCOUNTS_SHARE, accounts_command
@@ -102,7 +106,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INSTANCE_ROOT = Path.home() / GATEWAY_DEFAULTS.instance_root_name.value
 
 
-INSTANCE_CONFIG_SCHEMA_VERSION = 12
+INSTANCE_CONFIG_SCHEMA_VERSION = 13
 
 
 DIRECTLY_COMPATIBLE_INSTANCE_CONFIG_VERSIONS = {INSTANCE_CONFIG_SCHEMA_VERSION}
@@ -379,7 +383,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "transport.nats_url": "Single-server URL.",
     "transport.storage_dir": "Transport-owned local storage directory. Relative paths resolve under instance_root.",
     "transport.nats_servers": "NATS server URLs.",
-    "transport.jetstream_enabled": "Use JetStream for durable work/reply/presence messages.",
+    "transport.jetstream_enabled": "Use JetStream for durable work and reply messages.",
     "transport.subject_prefix": "Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.",
     "transport.storage": 'JetStream storage: "file" or "memory".',
     "transport.replicas": "JetStream stream replica count.",
@@ -387,7 +391,6 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "transport.max_deliver": "Maximum redelivery attempts before termination.",
     "transport.duplicate_window_seconds": "JetStream duplicate message-id window.",
     "transport.work_max_age_seconds": "Durable work/reply retention age.",
-    "transport.presence_max_age_seconds": "Replayable presence retention age.",
     "transport.process_consumer_inactive_threshold_seconds": "Expiry delay for unbound process-scoped JetStream consumers.",
     "mcp": "Installed MCP connection, transport, authorization, and managed-host settings.",
     "mcp.enabled": "Run the brokered MCP control/data plane before the first dynamic proposal exists.",
@@ -403,7 +406,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "gateway": "Gateway routing, Web Chat, request waiting, and gateway-local state settings.",
     "gateway.team_id": "Team id used for routing and subject-prefix defaults.",
     "gateway.named_agent_type": "Manager agent type the gateway targets.",
-    "gateway.manager_agent_id": "Optional direct manager agent id. Blank uses live manager presence discovery.",
+    "gateway.manager_agent_id": "Team lead agent id to use until the team's signed agent records name the live lead. Blank waits for the records.",
     "gateway.request_timeout_seconds": "Seconds to wait for one terminal manager reply before timing out locally.",
     "gateway.response_queue_name": "Gateway response queue name for manager replies.",
     "gateway.startup_agents": "Specialist agent processes supervised at headless startup.",
@@ -545,7 +548,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "agent.knowledge.limits.edit_war_freeze_minutes": "How long a frozen page refuses agent edits; agents add notes instead.",
     "agent.knowledge.limits.max_title_chars": "Longest page title.",
     "agent.knowledge.limits.max_summary_chars": "Longest page summary or change description.",
-    "agent.knowledge.limits.max_body_chars": "Longest page text; longer pages should be split into linked pages.",
+    "agent.knowledge.limits.max_body_chars": "Longest page text; longer pages should be split into linked pages. Web Chat shows and saves at most 32768 characters until long text travels as a file.",
     "agent.knowledge.limits.max_note_chars": "Longest note.",
     "agent.knowledge.limits.max_tags": "Most tags on one page.",
     "agent.knowledge.sensitive_content": "Content the knowledge base never stores, beyond the built-in rules (credentials and identity numbers).",
@@ -1514,7 +1517,35 @@ def _migrate_instance_config_dict(
         )
         version = 12
 
+    if version == 12:
+        # The presence stream was removed (message contract step 7d), and with it
+        # the setting for how long it kept messages; every 0.9 file holds it.
+        removed = drop_retired_presence_setting(migrated)
+        migrated["schema_version"] = 13
+        applied_steps.append(
+            "12 -> 13: the presence stream was removed"
+            + ("; transport.presence_max_age_seconds removed" if removed else "")
+        )
+        version = 13
+
     return migrated, tuple(applied_steps)
+
+
+def read_upgraded_instance_config(path: str | Path) -> Dict[str, Any]:
+    """The saved file's settings as this version reads them, without validation.
+
+    The file is parsed and passed through the upgrade steps in memory, as
+    ``GatewayInstanceConfig.load`` does before it validates, with no deployment
+    details applied. For readers that compare the saved choices with this
+    version's defaults (the team export, ``team_transfer.settings``): a file the
+    launcher has not rewritten since the code was upgraded must not carry
+    settings this version no longer has.
+    """
+
+    config_path = Path(path).expanduser().resolve()
+    data = _parse_instance_config_yaml(config_path.read_bytes(), config_path)
+    migrated, _steps = _migrate_instance_config_dict(data, source_path=config_path)
+    return migrated
 
 
 def migrate_instance_config_file(
@@ -1576,6 +1607,11 @@ class StartupAgentSettings(BaseModel):
             raise ValueError(
                 "gateway.startup_agents.named_agent_type must be non-empty."
             )
+        from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN
+
+        if not AGENT_TYPE_PATTERN.fullmatch(normalized):
+            raise ValueError("A startup agent type must use 1 to 24 letters, digits, '-' or '_', "
+                             "starting with a letter or digit, so its message host can name it.")
         return normalized
 
     @field_validator("count", mode="before")
@@ -1979,6 +2015,13 @@ class GatewayInstanceConfig(BaseModel):
         # The old permission system's settings (authorization.permission_delegation,
         # emergency_deny, human_interactions, ...); named one by one.
         refuse_removed_access_settings(value)
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_retired_presence_setting(cls, value: Any) -> Any:
+        # transport.presence_max_age_seconds; the 12 -> 13 upgrade step removes it from older files.
+        refuse_retired_presence_setting(value)
         return value
 
     @model_validator(mode="before")

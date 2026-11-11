@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "sessions.close.reply",
+  "message_id": "01928f3a-7b2c-7d0f-8000-000000000d0f",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "host",
+    "id": "worker-host-1",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7d0c-8000-000000000d0c",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "runtime_error",
+    "message": "The session's end could not be recorded."
+  },
+  "causation_id": "01928f3a-7b2c-7d0c-8000-000000000d0c",
+  "idempotency_key": "sessions.close.reply:1VqDBcHhIUseY27nkzO3N_lWHAHH5IQmKf8QHooklvI",
+  "body_digest": "xgYfYhPSXs6yKiawf0m04tnr0UYm5mMwNhduaR5dQyo",
+  "signature": "G9Hx0o9-dlJQGtz1rS9R-MYhJn8eTVk8tYHqx02Dyq1ysqQtp3U9ft-tXLq-EdLIWKUbrHLOEqmKjDzq-lzDCg"
+}

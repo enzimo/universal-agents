@@ -1,6 +1,7 @@
 """Agent management support for the trusted Strands tool surface."""
 
 import json
+from typing import Any
 import logging
 from typing import TYPE_CHECKING, Optional
 
@@ -9,10 +10,8 @@ from strands import tool
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.schedule_worker_v1 import AgentCreationResultV1
 from custom_agents.team_templates import load_team_templates, summarize_team_templates
-from custom_messages.contracts.control_v1 import AGENT_STATUS_RUNTIME_ONLY_FIELDS, AgentCreationRequest, AgentStatus
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
+from custom_messages.contracts.control_v1 import AGENT_STATUS_RUNTIME_ONLY_FIELDS, AgentCreationRequest
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, MessageMetaType, RoutingType
 from custom_tools.agent_team_port import current_agent_type_map
 from custom_tools.provider_contract import ToolProvider
 from custom_tools.runtime_context import (
@@ -25,8 +24,10 @@ if TYPE_CHECKING:
 
 
 from custom_tools.providers._runtime import (
+    CONTROL_WAIT_MARGIN_SECONDS,
     _run_agent_coroutine,
     _send_control_instruction_payload,
+    control_reply_seconds,
 )
 from custom_tools.providers.diagnostics import (
     build_runtime_pressure_snapshot,
@@ -65,14 +66,29 @@ def _instantiate_agent_request(
     return agent.handle_agent_creation_request(request, header, meta)
 
 
+def _refused_for_another_contract(result: AgentCreationResultV1) -> Optional[str]:
+    """The model's answer when the process runs another message contract and starts no agents; else None."""
+
+    from custom_agents.agent_instantiation_service import LAUNCH_REFUSED_OTHER_CONTRACT, NO_NEW_WORK_MESSAGE
+
+    if result.results and all(item.reason == LAUNCH_REFUSED_OTHER_CONTRACT for item in result.results):
+        return json.dumps({"error": NO_NEW_WORK_MESSAGE, "reason_code": LAUNCH_REFUSED_OTHER_CONTRACT})
+    return None
+
+
 @tool
 def get_known_agents() -> str:
     """
-    Get a map of all known agents and their current status.
+    Get the team's live agents as this agent knows them.
 
-    Returns information about other agents that this agent has received
-    status updates from. Useful for understanding what agents are available
-    for task delegation.
+    The list comes from the team's signed agent records: every other agent
+    whose host keeps reporting, with its type, name, whether it is the team
+    lead, paused or busy, and whether it takes new work. An agent that left,
+    or whose host stopped reporting, is not listed. Each entry's last_seen_at
+    is when this agent last took that entry as it now stands (its record last
+    changed), not a time the other agent wrote. What an agent is doing now
+    (its task, queue, skills or findings) is not here: ask it with
+    query_agent_state(live="true").
 
     Returns:
         JSON string containing a map of agent IDs to their AgentStatus objects.
@@ -84,6 +100,34 @@ def get_known_agents() -> str:
     return agent.known_agents.model_dump_json(
         exclude={"agent_map": {"__all__": set(AGENT_STATUS_RUNTIME_ONLY_FIELDS)}}
     )
+
+
+# How long query_agent_state(live=true) waits for the agents' answers, all asked at once.
+LIVE_STATUS_SECONDS = 10.0
+
+
+async def _live_statuses(agent: Any, targets: dict[str, str], level: str) -> dict[str, dict[str, Any]]:
+    """Each target's own status answer (``agent.status``), asked at once under one deadline, or why it has none.
+
+    ``targets`` maps what the caller asked for (a name or an id) to the agent id. One target's
+    failure, whatever it is, is reported for that target only (``agent_requests.ask_each``).
+    """
+
+    from custom_agents.agent_requests import ask_each, cannot_ask
+
+    blocked = cannot_ask(agent, need_view=False)
+    if blocked is not None:
+        return {asked: {"outcome": "unavailable", "message": blocked.reason} for asked in targets}
+    answers = await ask_each(agent, "agent.status", {"level": level}, set(targets.values()), timeout=LIVE_STATUS_SECONDS)
+    found: dict[str, dict[str, Any]] = {}
+    for asked, target_id in targets.items():
+        answer = answers[target_id]
+        if isinstance(answer, Exception):
+            logger.info("An agent's live status could not be read. event=agent_live_status_unavailable agent_id=%s "
+                        "target_agent_id=%s error_type=%s error=%s", agent.id, target_id, type(answer).__name__, answer)
+            answer = {"outcome": "unavailable", "message": f"{type(answer).__name__}: {answer}"}
+        found[asked] = answer
+    return found
 
 
 @tool
@@ -114,14 +158,15 @@ def query_agent_state(
         team_id: Filter by team ID (exact match).
 
     Args:
-        live: When "true", "1", or "yes", also send live AgentStatus request messages
-            before returning. This does not wait for replies; it triggers refresh and
-            returns the current persisted snapshot.
-        target_agent: Optional explicit agent ID/name to refresh when `live=true`.
-        info_level: Live refresh detail level when `live=true` - "basic" or "full".
+        live: When "true", "1", or "yes", also ask each matching agent (or `target_agent`) for its
+            status now, all at once, waiting at most 10 seconds in all, and include each answer under
+            "live_status"; an agent that could not be asked or did not answer gets
+            {"outcome": "unavailable", "message": <why>}.
+        target_agent: Optional explicit agent ID/name to ask when `live=true`.
+        info_level: Detail of the live answer when `live=true` - "basic" or "full" (full adds diagnostics).
 
     Returns:
-        JSON object containing matching AgentStatus rows and optional live-refresh metadata.
+        JSON object containing matching AgentStatus rows and, with `live`, each agent's own answer.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -150,80 +195,19 @@ def query_agent_state(
 
     try:
         live_requested = live.lower() in ("true", "1", "yes")
-        live_targets: list[str] = []
+        live_answers: dict[str, Any] = {}
         if live_requested:
-            current_task_id = bound_task_id()
-            current_task_info = (
-                agent.task_manager.operations_runtime.run_sync(
-                    agent.task_manager.get_task_info, current_task_id
-                )
-                if current_task_id
-                else None
-            )
-            conversation_id = getattr(
-                getattr(current_task_info, "meta", None), "conversation_id", None
-            )
-            request_timezone = getattr(
-                getattr(current_task_info, "meta", None), "request_timezone", None
-            )
-            info_type = (
-                ControlType.STATUS_REQUEST_FULL
-                if info_level == "full"
-                else ControlType.STATUS_REQUEST_BASIC
-            )
-            status_request = AgentStatus(
-                self_id=agent.id,
-                team_id=agent.team_id,
-                named_agent_type=agent.named_agent_type,
-                is_paused=bool(getattr(agent, "paused", False)),
-                is_executing=bool(getattr(agent, "is_executing", False)),
-                has_execution_capacity=bool(
-                    getattr(agent, "_has_execution_capacity", lambda: False)()
-                ),
-                is_busy=bool(getattr(agent, "is_executing", False)),
-                name=agent.name,
-                agent_role=agent.role,
-                status_type=MessageMetaType.REQUEST,
-                info_type=info_type,
-            )
-
             if target_agent:
                 live_targets = [target_agent]
+            elif agent_state_store is None:
+                return json.dumps({"error": "AgentStateStore not initialized on this agent."})
             else:
-                if agent_state_store is None:
-                    return json.dumps(
-                        {"error": "AgentStateStore not initialized on this agent."}
-                    )
-                matched_statuses = agent_state_store.query(filters)
-                live_targets = [
-                    status.self_id
-                    for status in matched_statuses
-                    if status.self_id
-                ]
-
-            for raw_target in live_targets:
-                routing_key = agent._agent_id_by_name.get(raw_target, raw_target)
-                target_is_known_name = raw_target in agent._agent_id_by_name
-                envelope = MessageEnvelope(
-                    msg_content=status_request,
-                    msg_header=MessageHeader(
-                        from_agent_id=agent.id,
-                        to_routing_path=RoutingType.ALL_AGENTS_ROUTE
-                        if target_is_known_name
-                        else routing_key,
-                        response_routing_key=getattr(
-                            agent, "_operational_queue_name", None
-                        )
-                        or agent.id,
-                    ),
-                    msg_meta=MessageMeta(
-                        from_agent_name=agent.name,
-                        to_agent_name=raw_target if target_is_known_name else None,
-                        conversation_id=conversation_id,
-                        request_timezone=request_timezone,
-                    ),
-                )
-                _run_agent_coroutine(agent, agent._send_operational_message(envelope))
+                live_targets = [status.self_id for status in agent_state_store.query(filters) if status.self_id]
+            level = "full" if info_level == "full" else "basic"
+            targets = {raw: agent._agent_id_by_name.get(raw, raw) for raw in live_targets}
+            # All at once, within LIVE_STATUS_SECONDS, however many there are (A21).
+            live_answers = _run_agent_coroutine(agent, _live_statuses(agent, targets, level),
+                                                timeout=LIVE_STATUS_SECONDS + CONTROL_WAIT_MARGIN_SECONDS)
 
         if agent_state_store is None:
             if live_requested and target_agent:
@@ -237,9 +221,8 @@ def query_agent_state(
         return json.dumps(
             {
                 "returned": len(results),
-                "live_refresh_requested": live_requested,
-                "live_refresh_targets": live_targets,
                 "agents": [r.model_dump(exclude=set(AGENT_STATUS_RUNTIME_ONLY_FIELDS)) for r in results],
+                **({"live_status": live_answers} if live_requested else {}),
             },
             default=str,
         )
@@ -290,8 +273,9 @@ def instantiate_agent(
     Create a new agent of the specified type.
 
     Instantiates a new specialist agent that will connect to the NATS
-    message bus and be available for task delegation. The new agent
-    will broadcast its status when it becomes operational.
+    message bus and be available for task delegation. Once it has started
+    and takes work, its record lists it for the team (get_known_agents),
+    usually within seconds; a delegation to it by name waits for that.
 
     Args:
         agent_type: The named agent type to instantiate (e.g., "CodeWritingAgent",
@@ -334,15 +318,16 @@ def instantiate_agent(
         )
 
     try:
-        return _instantiate_agent_request(
+        result = _instantiate_agent_request(
             agent,
             agent_type,
             team_id,
             mcp_profile_names,
             idle_ttl_seconds,
-        ).model_dump_json()
+        )
     except Exception as e:
         return f"Error instantiating agent: {e}"
+    return _refused_for_another_contract(result) or result.model_dump_json()
 
 
 @tool
@@ -461,6 +446,9 @@ def instantiate_team_template(
                 result = _instantiate_agent_request(
                     agent, member_agent_type, target_team_id, mcp_profile_names
                 )
+                refused = _refused_for_another_contract(result)
+                if refused is not None:
+                    return refused  # nothing else would start either
                 if not result.accepted:
                     errors.append(f"{member_agent_type}: {result}")
                     continue
@@ -511,7 +499,7 @@ def send_control_instruction(target_agent: str, instruction: str) -> str:
         instruction: The control instruction - one of: "pause", "resume", "exit"
 
     Returns:
-        Confirmation that the instruction was sent, or error message.
+        What the agent answered (for example "paused" or "already paused"), or why it could not be reached.
     """
     valid_instructions = ["pause", "resume", "exit"]
     if instruction.lower() not in valid_instructions:
@@ -521,17 +509,21 @@ def send_control_instruction(target_agent: str, instruction: str) -> str:
     if agent is None:
         return "Error: Agent reference not set"
 
+    normalized_instruction = instruction.lower()
     try:
-        normalized_instruction = instruction.lower()
-        _run_agent_coroutine(
+        # Waits longer than the request may take, so the request's own deadline answers first.
+        return _run_agent_coroutine(
             agent,
             _send_control_instruction_payload(
                 agent, target_agent, normalized_instruction
             ),
+            timeout=control_reply_seconds() + CONTROL_WAIT_MARGIN_SECONDS,
         )
-
-        return f"Control instruction '{normalized_instruction}' sent to {target_agent}"
-
+    except TimeoutError as e:
+        return (
+            f"{target_agent} did not answer in time ({e}), so whether it will "
+            f"{normalized_instruction} is unknown. Check its state with query_agent_state(live=true)."
+        )
     except Exception as e:
         return f"Error sending control instruction: {e}"
 

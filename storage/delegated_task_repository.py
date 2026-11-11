@@ -77,6 +77,9 @@ class ClaimOutcome(BaseModel):
     record: Optional[DelegatedTaskRecordV1]
     # The claim came from a different worker than the last one that held it.
     moved: bool = False
+    # It moved because that worker handed it over without any fault (its process runs another
+    # message contract), so the move does not count as a lost worker (``interruptions``).
+    handed_over: bool = False
     # The record was already finished, failed or cancelled.
     already_closed: bool = False
 
@@ -248,8 +251,13 @@ class DelegatedTaskRepository:
         worker_agent_id: str,
         worker_agent_name: Optional[str],
         claimed_at: datetime,
+        handed_over_by: frozenset[str] = frozenset(),
     ) -> ClaimOutcome:
-        """Record which worker holds a task; a different worker counts as a move."""
+        """Record which worker holds a task; a different worker counts as a move.
+
+        A move from a worker in ``handed_over_by``, which handed the task back without
+        any fault, is recorded but not counted as a lost worker.
+        """
 
         with self._connect() as conn:
             conn.begin_write()
@@ -262,6 +270,7 @@ class DelegatedTaskRepository:
                 return ClaimOutcome(record=current, already_closed=True)
             last_holder = current.holders[-1] if current.holders else None
             moved = last_holder is not None and last_holder != worker_agent_id
+            handed_over = moved and last_holder in handed_over_by
             holders = list(current.holders)
             if last_holder != worker_agent_id:
                 holders.append(worker_agent_id)
@@ -272,13 +281,13 @@ class DelegatedTaskRepository:
                     "holder_agent_name": worker_agent_name,
                     "claimed_at_utc": claimed_at,
                     "holders": holders,
-                    "interruptions": current.interruptions + (1 if moved else 0),
+                    "interruptions": current.interruptions + (1 if moved and not handed_over else 0),
                     "updated_at_utc": _now(),
                 }
             )
             self._write(conn, record)
             conn.commit()
-            return ClaimOutcome(record=record, moved=moved)
+            return ClaimOutcome(record=record, moved=moved, handed_over=handed_over)
 
     def mark_requeued(
         self,
@@ -294,6 +303,9 @@ class DelegatedTaskRepository:
         is gone or closed, or another worker already claimed the re-sent task
         (a fast claim, or a retried handback whose task was already re-sent).
         A claim recorded since must never be turned back into "queued".
+        The handback itself proves who held the task even when its claim was
+        lost. Keep that history so an exit cannot withdraw the re-sent message
+        as if it still waited, untaken, in the first worker's mailbox.
         """
 
         with self._connect() as conn:
@@ -313,6 +325,8 @@ class DelegatedTaskRepository:
                     "holder_agent_name": None,
                     "claimed_at_utc": None,
                     "publish_sequence": publish_sequence,
+                    "holders": (current.holders if current.holders and current.holders[-1] == from_holder_agent_id
+                                else [*current.holders, from_holder_agent_id]),
                     "updated_at_utc": _now(),
                 }
             )

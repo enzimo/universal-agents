@@ -2,8 +2,12 @@
 
 This module deliberately depends only on the Python standard library.  Agent
 SDK integration, workspace policy, credential policy, and OpenShell routing
-belong in the caller.  Keeping the process boundary small and typed makes it
-straightforward to replace with a Rust implementation later.
+belong in the caller.  Because the module imports nothing from the project or
+from third-party packages, the names in ``__all__`` are the whole process
+boundary: nothing behind them ties a caller to the rest of the project or to
+another package.  The boundary can therefore be tested without an agent or its
+policies, and another supervisor that provides the same names with the same
+behavior can take this module's place.
 """
 
 from __future__ import annotations
@@ -91,19 +95,6 @@ class AnyCancel:
 
     def is_set(self) -> bool:
         return any(item.is_set() for item in self._signals)
-
-
-class ProcessRunner(Protocol):
-    """Structural contract for a replaceable process supervisor."""
-
-    def __call__(
-        self,
-        request: ProcessRequest,
-        *,
-        cancel_event: CancelSignal | None = None,
-        on_chunk: Callable[[ProcessStreamChunk], None] | None = None,
-        on_spawn: Callable[[int], None] | None = None,
-    ) -> ProcessResult: ...
 
 
 def validate_environment_keys(env: Mapping[str, str]) -> None:
@@ -382,7 +373,6 @@ __all__ = [
     "CancelSignal",
     "ProcessRequest",
     "ProcessResult",
-    "ProcessRunner",
     "ProcessStreamChunk",
     "RtkCommandPlan",
     "plan_rtk_command",

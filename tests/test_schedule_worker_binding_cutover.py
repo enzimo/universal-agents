@@ -3,7 +3,8 @@
 Binding schema version 1 kept the removed permission system's policy and
 request ids and the authority mode ``authorized``. The repository refuses such
 rows with a message naming ``assistant_cli access approve-existing``; startup
-refuses while any remain; the command rewrites them in place (real SQLite).
+refuses while any remain; the command rewrites them in place (real SQLite, and PostgreSQL with
+``LIVE_TEST_POSTGRES_DSN``).
 """
 
 from __future__ import annotations
@@ -128,3 +129,53 @@ def test_startup_refuses_while_old_binding_rows_remain(tmp_path: Path) -> None:
         validate_runtime_layout(config)
 
     assert "sched_old" in str(refused.value) and APPROVE_EXISTING in str(refused.value)
+
+
+@pytest.mark.live
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_approve_existing_rewrites_old_binding_rows_on_postgres() -> None:
+    """The rewrite reads each row by position: PostgreSQL rows are mappings, and unpacking gives column names."""
+
+    import os
+    from uuid import uuid4
+
+    from psycopg.conninfo import make_conninfo
+
+    from storage.config import resolve_storage_settings
+    from storage.postgres_connection import connect_postgres
+
+    dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("LIVE_TEST_POSTGRES_DSN is required for the PostgreSQL rewrite test")
+    schema = "binding_cutover_" + uuid4().hex
+    with connect_postgres(dsn) as conn:
+        conn.execute(f"CREATE SCHEMA {schema}")
+        conn.commit()
+    scoped = make_conninfo(dsn, options=f"-csearch_path={schema}")
+    try:
+        settings = resolve_storage_settings({"backend": "postgres", "postgres": {"dsn": scoped}})
+        repository = ScheduleWorkerRepository(settings)  # creates the tables
+        with connect_postgres(scoped) as conn:
+            for schedule_id, previous in (("sched_old", None), ("sched_pending", _old_payload("sched_pending"))):
+                conn.execute(
+                    "INSERT INTO schedule_worker_bindings(schedule_id,team_id,owner_id,revision,payload_json,"
+                    "previous_binding_json) VALUES (%s,%s,%s,%s,%s,%s)",
+                    (schedule_id, TEAM, "user_dana", 3, _old_payload(schedule_id), previous),
+                )
+            conn.commit()
+
+        assert repository.rewrite_old_bindings() == ("sched_old", "sched_pending")
+
+        assert old_schedule_worker_bindings(settings) == ()
+        rewritten = repository.get_binding("sched_old", team_id=TEAM)
+        assert rewritten is not None and rewritten.schema_version == 2 and rewritten.authority_mode == "held_access"
+        with connect_postgres(scoped) as conn:
+            stored_previous = conn.execute(
+                "SELECT previous_binding_json FROM schedule_worker_bindings WHERE schedule_id='sched_pending'"
+            ).fetchone()[0]
+        assert "observed_policy_ids" not in json.loads(stored_previous)
+    finally:
+        with connect_postgres(dsn) as conn:
+            conn.execute(f"DROP SCHEMA {schema} CASCADE")
+            conn.commit()

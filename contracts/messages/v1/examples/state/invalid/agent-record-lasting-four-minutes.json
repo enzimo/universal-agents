@@ -1,0 +1,14 @@
+{
+  "description": "An agent record cannot outlive its bucket's three minute lifetime.",
+  "refusal": "invalid_body",
+  "at": "/expires_at",
+  "base": "agent/lead-busy.json",
+  "changes": [
+    {
+      "set": "/expires_at",
+      "to": "2026-10-22T04:34:00.000Z"
+    }
+  ],
+  "context": {},
+  "document_text": "{\"record\": \"agent\", \"protocol\": \"1.0-pre\", \"key\": \"team_example.lead\", \"writer\": {\"type\": \"host\", \"installation\": \"install_example\", \"runtime\": \"lead-host-1\", \"membership_epoch\": 3, \"key_id\": \"test-lead-key-1\"}, \"sequence\": 12, \"issued_at\": \"2026-10-22T04:30:00.000Z\", \"expires_at\": \"2026-10-22T04:34:00.000Z\", \"body\": {\"team\": \"team_example\", \"agent\": \"lead\", \"agent_type\": \"team_lead\", \"display_name\": \"Team lead\", \"session\": \"s-lead-1\", \"state\": \"busy\", \"accepting_work\": true, \"since\": \"2026-10-22T04:29:00.000Z\"}, \"algorithm\": \"ed25519\", \"body_digest\": \"IQJqKPFGQB77Uww1ycfU4NoiE_ccFRQjJ20BDNuoyS0\", \"signature\": \"i3jSAlEKiiVN2yFluG5E3xm6lyPEQ_zL7osCLN9e0b8ZwScClQ9t2LqMbZDW0CF7maXKJEgDSs_hQRb41sVhBw\"}"
+}

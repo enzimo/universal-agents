@@ -311,7 +311,7 @@ async def test_a_paused_or_claimed_schedule_is_not_stuck(tmp_path):
 
 
 def test_the_schedules_card_projection_matches_the_notice(tmp_path):
-    from custom_agents.manager_control_runtime import _schedule_worker_assignment
+    from custom_agents.person_schedule_controls import schedule_worker_assignment as _schedule_worker_assignment
 
     lead = make_lead(tmp_path)
     add_schedule(lead)

@@ -14,11 +14,11 @@
   "audience": {
     "installation": "install_example",
     "team": "team_example",
-    "target": "edge",
-    "id": "web",
-    "runtime": "gateway-1"
+    "target": "agent",
+    "id": "lead",
+    "runtime": "lead-host-1"
   },
-  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7000-8000-00000000a018",
+  "subject": "_INBOX.lead-host-1.01928f3a-7b2c-7000-8000-00000000a018",
   "issued_at": "2026-10-22T04:30:00.000Z",
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
@@ -35,5 +35,5 @@
   },
   "causation_id": "01928f3a-7b2c-7000-8000-00000000a018",
   "body_digest": "gWxg3ocpmvnMN4L52DLUufWfE82-Mssu3E6T_vcec-Q",
-  "signature": "JJbHMG84EgFKPI50E_lVT9akOlWqUnk7l36pKRxenjZzzbh8NULJUdJHAlWvvU62jOQSB2uWfsU3wRA0iOGLBA"
+  "signature": "zXFF-zAGUejPmlrZd-aTnz_694BYO0CtUEp7r7wJx9Ucia_7lpQsceUOIU1xXneWSOptp5Izub_i0QkLkS95AA"
 }

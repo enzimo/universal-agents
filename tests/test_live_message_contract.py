@@ -22,6 +22,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Iterable
@@ -31,6 +32,8 @@ import pytest
 from nats.js.api import AckPolicy, ConsumerConfig, RetentionPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 
+from custom_messages.wire import frame as wire_frame
+from custom_messages.wire.buckets import bucket_stream
 from custom_messages.wire.kinds import KINDS
 from custom_messages.wire.permissions import HostPlacement, host_permissions
 from custom_messages.wire.refusals import FrameRefused
@@ -51,14 +54,21 @@ HOSTS = {
     # The same host after researcher-3 moved to it: a new credential naming both agents.
     "worker_moved": {"role": "worker_host", "runtime": "worker-host-1", "agents": ["researcher-2", "researcher-3"],
                      "pools": ["researcher"], "edges": []},
-    "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": []},
+    # The topology owner's {team} is every team of the installation (README, "Who sets up the streams").
+    "authority": {"role": "installation_authority", "runtime": "authority-1", "agents": [], "pools": [], "edges": [],
+                  "teams": ["team_example", "team_other"]},
     "services": {"role": "team_services", "runtime": "team-services-1", "agents": [], "pools": [], "edges": []},
     "scheduler": {"role": "scheduler", "runtime": "scheduler-1", "agents": [], "pools": [], "edges": []},
     "gateway": {"role": "gateway", "runtime": "gateway-1", "agents": [], "pools": [], "edges": ["web"]},
     "edge": {"role": "edge_adapter", "runtime": "edge-adapter-1", "agents": [], "pools": [], "edges": ["a2a_partner"]},
     # A host that has not joined yet: the bootstrap bundle's pre-join permissions only.
     "joining": {"role": "joining_host", "runtime": "new-host-1", "agents": [], "pools": [], "edges": []},
+    # A worker host of another team of the same installation.
+    "other_worker": {"role": "worker_host", "runtime": "worker-host-9", "agents": ["writer-1"], "pools": [], "edges": [],
+                     "team": "team_other"},
 }
+# The installation these hosts belong to, and the installation an agreement names (the edge adapter keeps its records).
+INSTALLATION, PEER = "install_example", "install_peer"
 # What a new host's bootstrap bundle carries besides the authority keys (README, "Installation traffic").
 BOOTSTRAP_RECORDS = {"certificates/authority-1.json", "revocations/install_example.json"}
 
@@ -67,9 +77,11 @@ def permissions(user: str) -> dict:
     """The host's generated permissions filled as membership code fills them (README, "Filling the templates")."""
 
     host = HOSTS[user]
+    team = host.get("team", TEAM)
     document = json.loads((CONTRACT / "generated/permissions" / f"{host['role']}.json").read_text())
-    placement = HostPlacement(host["runtime"], (TEAM,), agents={TEAM: tuple(host["agents"])},
-                              pools={TEAM: tuple(host["pools"])}, edges={TEAM: tuple(host["edges"])})
+    placement = HostPlacement(host["runtime"], tuple(host.get("teams", [team])), agents={team: tuple(host["agents"])},
+                              pools={team: tuple(host["pools"])}, edges={team: tuple(host["edges"])},
+                              installation=INSTALLATION, peers=(PEER,))
     return host_permissions(document, placement)
 
 
@@ -101,6 +113,7 @@ def stream_config(name: str, team: str = TEAM) -> StreamConfig:
         duplicate_window=spec.get("duplicate_window_seconds"),
         max_consumers=spec.get("max_consumers"),
         max_msg_size=spec.get("max_message_bytes"),
+        max_msgs_per_subject=spec.get("max_msgs_per_subject", -1),
     )
 
 
@@ -525,20 +538,226 @@ async def test_installation_requests_reach_the_authority_and_dead_letters_keep_r
             assert await asyncio.wait_for(received.get(), timeout=2) == operation.encode()
 
         js = admin.nc.jetstream()
-        await js.add_stream(config=stream_config("UA1_DLQ"))
+        dead_letters = f"UA1_DLQ_{TEAM}"
+        await js.add_stream(config=stream_config("UA1_DLQ_{team}"))
         raw = b"{a refused message stays byte-for-byte identical\x00"
         raw_subject = "ua.v1.team_example.worker-host-1.dlq.raw." + "c" * 64
-        await worker.nc.jetstream().publish(raw_subject, raw)
+        # Another copy first, so the copy's sequence in this stream is not 1; the publish is retried
+        # after a lost acknowledgement, and the stream still keeps one copy under the subject.
+        await worker.nc.jetstream().publish("ua.v1.team_example.worker-host-1.dlq.raw." + "d" * 64, b"another copy")
+        for _attempt in range(2):
+            await worker.nc.jetstream().publish(raw_subject, raw)
         notice = fixtures.example_frame("dlq.notice", "bad-signature")
         await worker.nc.jetstream().publish(notice["subject"], json.dumps(notice).encode(), headers=headers(notice))
-        assert (await js.get_last_msg("UA1_DLQ", raw_subject)).data == raw
-        stored = await js.get_last_msg("UA1_DLQ", notice["subject"])
+        assert (await js.get_last_msg(dead_letters, raw_subject)).data == raw
+        assert (await js.stream_info(dead_letters)).state.messages == 3  # the other copy, one copy of raw, the notice
+        stored = await js.get_last_msg(dead_letters, notice["subject"])
         fixtures.verify(stored.data, notice)  # a stored frame is verified without its headers
         other = raw_subject.replace("worker-host-1", "another-host")
         await worker.publish_refused(other, raw)
         with pytest.raises(nats.js.errors.NotFoundError):
-            await js.get_last_msg("UA1_DLQ", other)
-        assert worker.errors.empty() and authority.errors.empty()
+            await js.get_last_msg(dead_letters, other)
+        # Only the team services read their team's notices and raw copies, and delete a copy.
+        services = await connect(stack, isolated_broker, "services")
+        dlq = TRANSPORT["consumers"]["dead_letters"]
+        await js.add_consumer(dead_letters, config=ConsumerConfig(
+            durable_name=dlq["name"].format(team=TEAM), filter_subject=dlq["filter"].format(team=TEAM),
+            ack_policy=AckPolicy.EXPLICIT))
+        pulled = await services.nc.jetstream().pull_subscribe_bind(dlq["name"].format(team=TEAM), stream=dead_letters)
+        [message] = await pulled.fetch(1, timeout=2)
+        assert message.subject == notice["subject"]
+        await message.ack()
+        # The team services find the copy by its subject and delete it by the sequence that read returns.
+        found = await services.nc.jetstream().get_last_msg(dead_letters, raw_subject)
+        assert found.data == raw and found.seq != notice["body"]["original"]["stream_sequence"]
+        await services.nc.jetstream().delete_msg(dead_letters, found.seq)
+        with pytest.raises(nats.js.errors.NotFoundError):
+            await js.get_last_msg(dead_letters, raw_subject)
+        await worker.publish_refused(f"$JS.API.STREAM.MSG.GET.{dead_letters}")
+        assert worker.errors.empty() and authority.errors.empty() and services.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_receiver_answers_only_the_requesters_inbox(isolated_broker) -> None:
+    """README, "Answering only the requester's inbox": a reply subject the requester chose is no write path.
+
+    allow_responses lets the team services publish one answer to any reply subject, so a
+    worker that names a JetStream API subject as its reply subject gets the stream deleted
+    by a receiver that answers blindly. A receiver that answers through
+    ``answer_subject`` leaves it alone and still answers a request from the worker's inbox.
+    """
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        services = await connect(stack, isolated_broker, "services")
+        worker = await connect(stack, isolated_broker, "worker")
+        js = admin.nc.jetstream()
+        refusal = {"UA-Refused": "invalid_body", "UA-Refused-At": "/body"}
+        address = f"ua.v1.{TEAM}.worker-host-1.svc.team"
+
+        async def blindly(message):
+            await services.nc.publish(message.reply, b"", headers=refusal)
+
+        # Without the rule, the answer to a request deletes a stream the worker may not touch.
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        blind = await services.nc.subscribe(f"ua.v1.{TEAM}.*.svc.team", cb=blindly)
+        await flush_fully(services.nc)
+        await worker.nc.publish(address, b"{}", reply="$JS.API.STREAM.DELETE.UA1_WORK")
+        await worker.nc.flush()
+        async def stream_names() -> list[str]:
+            return [info.config.name for info in await js.streams_info()]
+
+        deadline = time.monotonic() + 2
+        while "UA1_WORK" in await stream_names() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        assert "UA1_WORK" not in await stream_names()
+        await blind.unsubscribe()
+
+        dropped: list[tuple[str, str]] = []
+
+        async def answer(message):
+            subject = wire_frame.answer_subject(message.subject, message.reply)
+            if subject is None:
+                dropped.append((message.subject, message.reply))
+                return
+            await services.nc.publish(subject, b"", headers=refusal)
+
+        await js.add_stream(config=stream_config("UA1_WORK"))
+        await subscribe_ready(services, f"ua.v1.{TEAM}.*.svc.team", answer)
+        for reply in ("$JS.API.STREAM.DELETE.UA1_WORK", f"$KV.UA1_LOCKS.team_services.{TEAM}", "_INBOX.lead-host-1.x"):
+            await worker.nc.publish(address, b"{}", reply=reply)
+        await worker.nc.flush()
+        answered = await worker.nc.request(address, b"{}", timeout=2)
+        assert answered.headers == refusal and answered.data == b""
+        assert [subject for subject, _reply in dropped] == [address] * 3
+        assert (await js.stream_info("UA1_WORK")).config.name == "UA1_WORK"
+        assert services.errors.empty() and worker.errors.empty()
+
+
+async def create_buckets(owner: Client, teams: Iterable[str] = (TEAM, "team_other")) -> None:
+    """What the topology owner does: every bucket as a stream with transport.yaml's settings, a bucket per team for each team."""
+
+    js = owner.nc.jetstream()
+    for bucket in TRANSPORT["key_value"]:
+        for team in (teams if "{team}" in bucket else (None,)):
+            settings = bucket_stream(TRANSPORT, bucket, team)
+            info = await js.add_stream(config=StreamConfig(**{**settings, "storage": STORAGE[settings["storage"]]}))
+            assert (info.config.allow_rollup_hdrs, info.config.deny_purge, info.config.allow_direct) == (False, True, True)
+
+
+@pytest.mark.asyncio
+async def test_hosts_write_only_their_own_records_and_read_every_bucket(isolated_broker) -> None:
+    """README, "Key-value grants": the topology owner creates the buckets, each writer reaches only its own keys."""
+
+    async with AsyncExitStack() as stack:
+        authority = await connect(stack, isolated_broker, "authority")
+        lead = await connect(stack, isolated_broker, "lead")
+        worker = await connect(stack, isolated_broker, "worker")
+        services = await connect(stack, isolated_broker, "services")
+        await create_buckets(authority)
+        hosts = await worker.nc.jetstream().key_value("UA1_HOSTS")
+        watch = await hosts.watch("worker-host-1")
+        await hosts.put("worker-host-1", b"liveness")
+        async def first_value():
+            async for entry in watch:
+                if entry is not None and entry.value:
+                    return entry.value
+        assert await asyncio.wait_for(first_value(), timeout=2) == b"liveness"
+        await watch.stop()
+        agents = await worker.nc.jetstream().key_value("UA1_AGENTS")
+        await agents.put(f"{TEAM}.researcher-2", b"idle")
+        # Another host's liveness, an agent it does not run, a placement and the lock are refused.
+        for subject in ("$KV.UA1_HOSTS.lead-host-1", f"$KV.UA1_AGENTS.{TEAM}.lead", f"$KV.UA1_PLACEMENT.{TEAM}.researcher-2",
+                        f"$KV.UA1_LOCKS.team_services.{TEAM}", f"$KV.UA1_CERTS.session.{INSTALLATION}.{TEAM}.s-1"):
+            await worker.publish_refused(subject)
+        placement = await services.nc.jetstream().key_value("UA1_PLACEMENT")
+        revision = await placement.create(f"{TEAM}.researcher-2", b"placed")
+        await placement.update(f"{TEAM}.researcher-2", b"moved", last=revision)
+        locks = await services.nc.jetstream().key_value("UA1_LOCKS")
+        await locks.create(f"team_services.{TEAM}", b"team-services-1")
+        with pytest.raises(nats.js.errors.KeyWrongLastSequenceError):
+            await locks.create(f"team_services.{TEAM}", b"team-services-2")
+        await services.publish_refused("$KV.UA1_PLACEMENT.another_team.researcher-2")
+        assert (await (await worker.nc.jetstream().key_value("UA1_PLACEMENT")).get(f"{TEAM}.researcher-2")).value == b"moved"
+
+        # README, "Every bucket's stream settings": a writer of one key cannot erase the others.
+        await (await lead.nc.jetstream().key_value("UA1_HOSTS")).put("lead-host-1", b"lead liveness")
+        with pytest.raises(nats.js.errors.APIError, match="rollup"):
+            await worker.nc.jetstream().publish("$KV.UA1_HOSTS.worker-host-1", b"x", headers={"Nats-Rollup": "all"})
+        with pytest.raises(nats.js.errors.APIError, match="rollup"):
+            await hosts.purge("worker-host-1")
+        with pytest.raises(nats.js.errors.APIError, match="rollup"):
+            await services.nc.jetstream().publish(f"$KV.UA1_LOCKS.team_services.{TEAM}", b"x", headers={"Nats-Rollup": "all"})
+        assert (await hosts.get("lead-host-1")).value == b"lead liveness"
+        assert (await locks.get(f"team_services.{TEAM}")).value == b"team-services-1"
+        # A delete marker removes the writer's own record only.
+        await hosts.delete("worker-host-1")
+        with pytest.raises(nats.js.errors.KeyNotFoundError):
+            await hosts.get("worker-host-1")
+        assert (await hosts.get("lead-host-1")).value == b"lead liveness"
+        assert authority.errors.empty() and worker.errors.empty() and services.errors.empty()
+
+
+@pytest.mark.asyncio
+async def test_bucket_readers_watch_through_unnamed_consumers_and_read_only_their_teams_words(isolated_broker) -> None:
+    """README, "Key-value grants" and "One bucket per team for people's words"."""
+
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        authority = await connect(stack, isolated_broker, "authority")
+        lead = await connect(stack, isolated_broker, "lead")
+        worker = await connect(stack, isolated_broker, "worker")
+        other = await connect(stack, isolated_broker, "other_worker")
+        services = await connect(stack, isolated_broker, "services")
+        edge = await connect(stack, isolated_broker, "edge")
+        await create_buckets(authority)
+        lead_hosts = await lead.nc.jetstream().key_value("UA1_HOSTS")
+        watch = await lead_hosts.watch("worker-host-1")
+        stack.push_async_callback(watch.stop)
+        # A reader may not name a consumer: no durable consumer, and no way to change the lead's watch.
+        for subject in ("$JS.API.CONSUMER.CREATE.KV_UA1_HOSTS.stay", "$JS.API.CONSUMER.CREATE.KV_UA1_HOSTS.stay.$KV.UA1_HOSTS.x",
+                        "$JS.API.CONSUMER.DURABLE.CREATE.KV_UA1_HOSTS.stay", "$JS.API.CONSUMER.DELETE.KV_UA1_HOSTS.stay",
+                        "$JS.API.STREAM.MSG.GET.KV_UA1_HOSTS"):
+            await worker.publish_refused(subject)
+        durable = {"stream_name": "KV_UA1_HOSTS", "config": {"durable_name": "stay", "ack_policy": "none"}}
+        answer = json.loads((await worker.nc.request("$JS.API.CONSUMER.CREATE.KV_UA1_HOSTS", json.dumps(durable).encode(),
+                                                     timeout=2)).data)
+        assert "error" in answer, answer
+        await (await worker.nc.jetstream().key_value("UA1_HOSTS")).put("worker-host-1", b"liveness")
+        entry = await watch.updates(timeout=2)
+        while entry is None or not entry.value:
+            entry = await watch.updates(timeout=2)
+        assert entry.value == b"liveness"
+
+        # Each team's team view and block list are its own bucket; another team's host has no grant on them.
+        view = await services.nc.jetstream().key_value(f"UA1_TEAM_VIEW_{TEAM}")
+        await view.put(f"{TEAM}.objective.o1", b"a person's own words")
+        await (await services.nc.jetstream().key_value(f"UA1_BLOCK_LIST_{TEAM}")).put(TEAM, b"blocks")
+        assert (await (await worker.nc.jetstream().key_value(f"UA1_TEAM_VIEW_{TEAM}")).get(f"{TEAM}.objective.o1")).value \
+            == b"a person's own words"
+        for bucket in (f"UA1_TEAM_VIEW_{TEAM}", f"UA1_BLOCK_LIST_{TEAM}"):
+            for subject in (f"$JS.API.DIRECT.GET.KV_{bucket}", f"$JS.API.DIRECT.GET.KV_{bucket}.$KV.{bucket}.{TEAM}",
+                            f"$JS.API.CONSUMER.CREATE.KV_{bucket}", f"$JS.API.STREAM.INFO.KV_{bucket}"):
+                await other.publish_refused(subject)
+        # It reads its own team's bucket.
+        with pytest.raises(nats.js.errors.KeyNotFoundError):
+            await (await other.nc.jetstream().key_value("UA1_TEAM_VIEW_team_other")).get("team_other.objective.o9")
+
+        # The edge adapter keeps peers' copies only; the team services sign sessions of their own installation only.
+        for subject in (f"$KV.UA1_CERTS.revocations.{INSTALLATION}", f"$KV.UA1_CERTS.host.{INSTALLATION}.lead-host-1.1",
+                        f"$KV.UA1_CERTS.session.{INSTALLATION}.{TEAM}.s-1"):
+            await edge.publish_refused(subject)
+        await edge.nc.jetstream().publish(f"$KV.UA1_CERTS.revocations.{PEER}", b"a peer's revocations")
+        await services.publish_refused(f"$KV.UA1_CERTS.session.{PEER}.{TEAM}.s-1")
+
+        # The topology owner finds and deletes a consumer a host left behind.
+        js = authority.nc.jetstream()
+        names = [info.name for info in await js.consumers_info("KV_UA1_HOSTS")]
+        assert names
+        for name in names:
+            assert await js.delete_consumer("KV_UA1_HOSTS", name)
+        assert admin.errors.empty() and authority.errors.empty() and edge.errors.empty() and services.errors.empty()
+        assert worker.errors.empty() and other.errors.empty() and lead.errors.empty()
 
 
 @pytest.mark.asyncio

@@ -11,12 +11,16 @@
     "up": "the receiver is the task's requester"
   },
   "fixed_rules": [
+    "a task's requester may ask the task's holder about that task (requester_kinds) whatever the requester's role, because every agent watches the subtasks it delegated",
     "access requests and decisions go to the team services, never to a model",
     "the output of work a person gave a worker directly (a run of the person's own schedule, or system work with a configured route) goes to the person",
     "notifications for delegated work come from the lead",
     "a receiver refuses a message whose edge its topology does not allow, and the sender gets delivery.refused",
     "a message from an agent that does not hold the task it names is refused",
     "only the lead receives work, answers and other messages from outside agents"
+  ],
+  "requester_kinds": [
+    "task.probe"
   ],
   "topologies": {
     "all_peers": {

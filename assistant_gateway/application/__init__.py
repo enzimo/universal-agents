@@ -145,7 +145,8 @@ from assistant_gateway.application.session_command_service import (
 )
 from assistant_gateway.application.schedule_management import (
     GatewayScheduleApplication,
-    GatewayScheduleCommandRequest,
+    GatewayScheduleListing,
+    GatewayScheduleView,
     GatewayScheduleCreateRequest,
     GatewayScheduleSettings,
 )
@@ -250,7 +251,8 @@ __all__ = [
     "GatewayProactiveTargetProvider",
     "GatewayScheduledJob",
     "GatewayScheduleApplication",
-    "GatewayScheduleCommandRequest",
+    "GatewayScheduleListing",
+    "GatewayScheduleView",
     "GatewayScheduleCreateRequest",
     "GatewayScheduleSettings",
     "GatewayRequestService",

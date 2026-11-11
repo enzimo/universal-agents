@@ -8,6 +8,7 @@ from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
+from custom_agents.task_manager import TaskManager
 
 
 def _task(task_id: str) -> Task:
@@ -42,6 +43,8 @@ async def test_agent_logs_deferred_message_backlog_threshold_and_recovery(
     ) as mock_model:
         mock_model.return_value = MagicMock()
         agent = UniversalAgent(
+            instance_root=str(tmp_path / "instance"),
+            task_manager=TaskManager(db_path=str(tmp_path / "tasks.db")),
             role="Test Agent",
             tools=[],
             team_id="test_team",

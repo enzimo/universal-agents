@@ -1,10 +1,12 @@
-"""Who may change schedules the runtime manages from the gateway (access plan 4c-4).
+"""Who may change schedules the runtime manages (access plan 4c-4).
 
-The gateway checks, before it publishes a schedule command, whether the
-signed-in person may make ``system_schedule`` changes (``PersonChangeCheck``:
-the people who could approve one in the Inbox, so administrators with
-authorization on; any active member with it off). The manager applies that
-answer only to schedules the runtime manages (tests/test_manager_control_runtime.py).
+One rule, ``PersonChangeCheck``: the people who could approve a
+``system_schedule`` change in the Inbox, so administrators with authorization
+on; any active member with it off. The gateway uses it to offer controls; the
+team services decide each change with it, with the person's current roles from
+the people copy (``team_services.schedules.SystemScheduleCheck``, applied only to
+schedules the runtime manages: tests/test_team_schedules.py). Commands carry no
+authority of their own.
 """
 
 from __future__ import annotations
@@ -23,8 +25,14 @@ from assistant_gateway.application.schedule_management import (
 from assistant_gateway.application.request_context import GatewayCommandPerson, GatewayRequestRoute
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.domain.sessions import SessionRecord
-from custom_messages.contracts.schedule_v1 import SYSTEM_SCHEDULE_CHANGE_KIND, ManagerScheduleCommand
+from access_control.people_directory import PeopleDirectory
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.schedule_v1 import SYSTEM_SCHEDULE_CHANGE_KIND
+from custom_messages.wire.frame import body_model
+from team_services.people import CommandPerson
+from team_services.schedules import SystemScheduleCheck
 from tests.change_approval_support import CEDAR_BINARY, needs_cedar
+from tests.people_directory_support import access_store_at
 
 TEAM = "team_gateway_sched"
 PERSON = "user_carol"
@@ -38,13 +46,19 @@ class _Memberships:
         return self.roles if person_id == PERSON and team_id == TEAM else None
 
 
-class _ManagerCommands:
-    def __init__(self) -> None:
-        self.commands: list[ManagerScheduleCommand] = []
+class _TeamCommands:
+    """The gateway's team commands port, recording each command's kind and body."""
 
-    async def request(self, request: Any) -> ManagerScheduleCommand:
-        self.commands.append(request.command)
-        return request.command.model_copy(update={"success": True})
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, dict[str, Any]]] = []
+
+    async def request(self, kind: str, body: dict[str, Any], *, person_id: str) -> dict[str, Any]:
+        assert person_id == PERSON
+        body_model(kind)[0].validate_python({"request_id": "cmd-1", **body})
+        self.commands.append((kind, body))
+        if kind == "schedules.list":
+            return {"outcome": "ok", "schedules": [], "total": 0}
+        return {"outcome": "ok", "state": "removed", "schedule_id": body["schedule_id"]}
 
 
 def _config(tmp_path: Path, *, authorization_enabled: bool) -> GatewayInstanceConfig:
@@ -61,7 +75,7 @@ def _config(tmp_path: Path, *, authorization_enabled: bool) -> GatewayInstanceCo
     return config
 
 
-def _application(check: PersonChangeCheck | None, roles: tuple[str, ...]) -> tuple[GatewayScheduleApplication, _ManagerCommands]:
+def _application(check: PersonChangeCheck | None, roles: tuple[str, ...]) -> tuple[GatewayScheduleApplication, _TeamCommands]:
     session = SessionRecord(
         session_key="session_carol",
         session_alias=None,
@@ -77,7 +91,7 @@ def _application(check: PersonChangeCheck | None, roles: tuple[str, ...]) -> tup
         updated_at="2026-09-25T00:00:00+00:00",
         owner_canonical_user_id=PERSON,
     )
-    commands = _ManagerCommands()
+    commands = _TeamCommands()
     application = GatewayScheduleApplication(
         settings=GatewayScheduleSettings(
             instance_name="gateway-schedules",
@@ -98,7 +112,7 @@ def _application(check: PersonChangeCheck | None, roles: tuple[str, ...]) -> tup
         ),
         delivery=SimpleNamespace(remove_scheduled_target=lambda schedule_id: None),
         manager=SimpleNamespace(manager_id="manager"),
-        manager_commands=commands,  # type: ignore[arg-type]
+        team_commands=commands,  # type: ignore[arg-type]
         id_generator=SimpleNamespace(),  # type: ignore[arg-type]
         person_changes=check,
     )
@@ -117,17 +131,19 @@ async def test_only_an_administrator_may_change_system_schedules_with_authorizat
         application, commands = _application(check, roles)
         assert application.may_change_system_schedules(GatewayRequestRoute()) is allowed
 
-        await application.pause("hb_sched_team", paused_until="2026-09-26T00:00:00+00:00")
-        await application.list()
+        await application.pause("hb_sched_team", paused_until="2026-09-26T00:00:00+00:00",
+                                expected_record_digest="a" * 64)
+        await application.list(owner_wide=True)
     finally:
         check.close()
 
-    pause, listing = commands.commands
-    assert pause.action == "pause" and listing.action == "list"
-    # Commands carry no authority: the manager decides with the signed person
-    # (test_the_manager_decides_system_schedule_changes_from_the_signed_roles).
-    assert "may_change_system_schedules" not in ManagerScheduleCommand.model_fields
-    assert "principal" not in ManagerScheduleCommand.model_fields
+    # Commands carry no authority (their bodies are checked against the contract above):
+    # the team services decide with the token's person
+    # (test_the_team_services_decide_system_schedule_changes_from_current_roles).
+    (pause, pause_body), (listing, _) = commands.commands
+    assert (pause, listing) == ("schedules.pause", "schedules.list")
+    assert pause_body == {"schedule_id": "hb_sched_team", "seen_version": "a" * 64,
+                          "paused_until": "2026-09-26T00:00:00.000Z"}
 
 
 @pytest.mark.asyncio
@@ -135,48 +151,37 @@ async def test_any_member_may_change_system_schedules_with_authorization_off(tmp
     check = PersonChangeCheck(_config(tmp_path, authorization_enabled=False), _Memberships(("member",)))
     application, commands = _application(check, ("member",))
 
-    await application.remove("hb_sched_team")
+    await application.remove("hb_sched_team", expected_record_digest="a" * 64)
 
-    assert commands.commands[0].action == "remove"
+    assert commands.commands[0][0] == "schedules.remove"
 
 
-def _manager(tmp_path: Path, *, authorization_enabled: bool) -> SimpleNamespace:
+def _team_services_check(tmp_path: Path, roles: tuple[str, ...], *, authorization_enabled: bool) -> SystemScheduleCheck:
+    from datetime import datetime, timezone
+
     config = _config(tmp_path, authorization_enabled=authorization_enabled)
-    return SimpleNamespace(
-        id="manager",
-        team_id=TEAM,
-        instance_root=str(config.instance_root_path),
-        authorization_config={
-            "enabled": authorization_enabled,
-            "cedar_binary_path": str(CEDAR_BINARY),
-        },
-        task_manager=SimpleNamespace(storage_settings=config.manager_storage_settings),
-    )
+    access = access_store_at(tmp_path)
+    access.record_person(TeamPersonV1(team_id=TEAM, person_id=PERSON, person_ref="p-CarolCarolCarolCarolCa",
+                                      standing=PersonStanding.ACTIVE, roles=roles,
+                                      changed_at_utc=datetime.now(timezone.utc)))
+    return SystemScheduleCheck(config, PeopleDirectory(access, TEAM))
 
 
 @needs_cedar
 @pytest.mark.parametrize(("roles", "allowed"), [(("member",), False), (("admin",), True)])
-def test_the_manager_decides_system_schedule_changes_from_the_signed_roles(
+def test_the_team_services_decide_system_schedule_changes_from_current_roles(
     tmp_path: Path, roles: tuple[str, ...], allowed: bool
 ) -> None:
-    from custom_agents.access_runtime import _runtime_access
-    from custom_agents.manager_control_runtime import CommandPerson, _may_change_system_schedules
-
-    _runtime_access.cache_clear()
+    check = _team_services_check(tmp_path, roles, authorization_enabled=True)
     try:
-        person = CommandPerson(canonical_user_id=PERSON, team_id=TEAM, roles=roles)
-        assert _may_change_system_schedules(_manager(tmp_path, authorization_enabled=True), person) is allowed
+        # The command's roles do not count: the people copy's current roles do.
+        assert check(CommandPerson(person_id=PERSON, team_id=TEAM, roles=("owner",))) is allowed
     finally:
-        _runtime_access.cache_clear()
+        check.close()
 
 
-def test_with_authorization_off_any_signed_member_may_change_system_schedules(tmp_path: Path) -> None:
-    from custom_agents.access_runtime import _runtime_access
-    from custom_agents.manager_control_runtime import CommandPerson, _may_change_system_schedules
+def test_with_authorization_off_any_active_member_may_change_system_schedules(tmp_path: Path) -> None:
+    check = _team_services_check(tmp_path, ("member",), authorization_enabled=False)
 
-    _runtime_access.cache_clear()
-    try:
-        person = CommandPerson(canonical_user_id=PERSON, team_id=TEAM, roles=("member",))
-        assert _may_change_system_schedules(_manager(tmp_path, authorization_enabled=False), person) is True
-    finally:
-        _runtime_access.cache_clear()
+    assert check(CommandPerson(person_id=PERSON, team_id=TEAM, roles=("member",))) is True
+    assert check(CommandPerson(person_id="user_unknown", team_id=TEAM, roles=("member",))) is False

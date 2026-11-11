@@ -446,18 +446,21 @@ class _ConnectionPeopleStore:
     conn: Any
     bind: str
 
+    # The old instance may predate people's references (0.9), so records are read as an earlier
+    # version wrote them (TeamPersonV1.from_earlier_record); the export reads only standing.
+
     def team_person(self, team_id: str, person_id: str) -> TeamPersonV1 | None:
         row = self.conn.execute(
             f"SELECT payload_json FROM {PEOPLE_TABLE} WHERE team_id={self.bind} AND person_id={self.bind}",
             (team_id, person_id),
         ).fetchone()
-        return TeamPersonV1.model_validate_json(row[0]) if row else None
+        return TeamPersonV1.from_earlier_record(row[0]) if row else None
 
     def team_people(self, team_id: str) -> list[TeamPersonV1]:
         rows = self.conn.execute(
             f"SELECT payload_json FROM {PEOPLE_TABLE} WHERE team_id={self.bind} ORDER BY person_id", (team_id,)
         ).fetchall()
-        return [TeamPersonV1.model_validate_json(row[0]) for row in rows]
+        return [TeamPersonV1.from_earlier_record(row[0]) for row in rows]
 
     def people_synced_at(self, team_id: str) -> datetime | None:
         row = self.conn.execute(

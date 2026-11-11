@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -40,6 +41,25 @@ from storage.agent_launch_repository import (
 # number and start time (runtime_hosting.process_run), so the team lead can
 # later prove whether the process is gone.
 PROCESS_HOST_ID = current_process_identity().text()
+
+
+# Why every start of a TeamArchitect is refused (``AgentInstantiationService.validate_type``).
+MANAGER_LAUNCH_FORBIDDEN = "manager_launch_forbidden"
+_LOGGER = logging.getLogger(__name__)
+# Why ``launch`` refused a start: the process runs another message contract than its installation
+# (``custom_agents.contract_drain``), so it takes no new work and starts no agents.
+LAUNCH_REFUSED_OTHER_CONTRACT = "process_runs_another_message_contract"
+# What the model is told when it asks such a process to start an agent.
+NO_NEW_WORK_MESSAGE = (
+    "This process runs another message contract than its installation, so it takes no new work and starts no "
+    "agents. It finishes or hands back what it holds; ask again once the installation's release runs here."
+)
+
+
+def _drains(agent: Any) -> bool:
+    """``contract_drain.is_contract_draining``, read here directly: that module's wind-down reads this one."""
+
+    return getattr(agent, "_contract_drain", None) is not None
 
 
 def current_worker_limits(agent: Any) -> ScheduleWorkersConfig:
@@ -92,6 +112,16 @@ class AgentInstantiationService:
     def validate_type(
         self, agent_type: str, *, automatic: bool
     ) -> tuple[dict[str, Any], ScheduleWorkersConfig]:
+        if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
+            # The team lead is the only TeamArchitect, whoever asks for another (manual, pool,
+            # schedule or delegation): on the lead's host the team services sign a TeamArchitect's
+            # session with the lead role (team_services.sessions), so a second one could pause or
+            # stop the real lead through its signed controls (custom_agents.live_controls).
+            _LOGGER.warning(
+                "A start of another TeamArchitect was refused: the team lead is the only one. "
+                "event=manager_launch_refused agent_id=%s automatic=%s", getattr(self.agent, "id", None), automatic,
+            )
+            raise PermissionError(MANAGER_LAUNCH_FORBIDDEN)
         limits = current_worker_limits(self.agent)
         if agent_type in limits.denied_agent_types:
             raise PermissionError("agent_type_disallowed")
@@ -102,19 +132,15 @@ class AgentInstantiationService:
                 and not default_type_allowed(self.agent, agent_type, definition)
             ):
                 raise PermissionError("agent_type_ineligible_for_automatic_launch")
-            if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-                raise PermissionError("automatic_manager_launch_forbidden")
         return definition, limits
 
     def validate_pool_start(self, agent_type: str) -> None:
-        """A worker pool start: pools on, and never TeamArchitect (denies are checked in validate_type)."""
+        """A worker pool start: pools on (denies and the TeamArchitect refusal are checked in validate_type, first)."""
 
         from custom_agents.worker_pool_settings import current_worker_pool_settings
 
         if not current_worker_pool_settings(self.agent).enabled:
             raise PermissionError("worker_pools_disabled")
-        if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-            raise PermissionError("automatic_manager_launch_forbidden")
 
     def capacity(self, agent_type: str, limits: ScheduleWorkersConfig) -> LaunchCapacity:
         """The limits a start is checked against, read now (custom_agents.worker_pool_limits)."""
@@ -143,6 +169,8 @@ class AgentInstantiationService:
         occurrence_id: str | None = None,
         join_pending: bool | None = None,
     ) -> AgentLaunchResultV1:
+        if _drains(self.agent):
+            return self._refused_while_draining(agent_type, source, request_id)
         try:
             if mcp_profile_names:
                 # An agent cannot add MCP servers to a new agent; MCP
@@ -193,7 +221,7 @@ class AgentInstantiationService:
                 idle_ttl_seconds=ttl,
                 lease_expires_at_utc=now + timedelta(seconds=limits.lease_seconds),
             )
-            # NATS presence can describe remote workers. Only this process's
+            # The team's agent records list remote workers too. Only this process's
             # registered workers consume capacity for the local launch policy.
             external = tuple(
                 (status.self_id, status.named_agent_type)
@@ -261,6 +289,16 @@ class AgentInstantiationService:
                 )
         except (ValueError, PermissionError, LaunchConflict) as exc:
             return AgentLaunchResultV1(status="denied", reason=str(exc))
+
+    def _refused_while_draining(self, agent_type: str, source: str, request_id: str) -> AgentLaunchResultV1:
+        """No agent starts in a process that runs another message contract (``custom_agents.contract_drain``)."""
+
+        self.agent._logger.warning(
+            "An agent start was refused: this process runs another message contract than its installation and "
+            "takes no new work. event=agent_launch_refused_other_contract agent_type=%s source=%s request_id=%s",
+            agent_type, source, request_id,
+        )
+        return AgentLaunchResultV1(status="denied", reason=LAUNCH_REFUSED_OTHER_CONTRACT)
 
     def validate_schedule_start(
         self, binding: ScheduleWorkerBindingV1 | None, occurrence_id: str | None
@@ -339,6 +377,11 @@ class AgentInstantiationService:
                     AgentLaunchResultV1(status="denied", reason="same_team_required"),
                 ),
             )
+        if _drains(self.agent):
+            # One refusal and one log line for the whole request (custom_agents.contract_drain).
+            refused = self._refused_while_draining(request.named_agent_type, source, request.request_id)
+            return AgentCreationResultV1(request_id=request.request_id,
+                                         results=(refused,) * max(request.agent_quantity, 1))
         owner_id = verified_person_id(self.agent) or ""  # the signed context's person
         ttl = request.idle_ttl_seconds
         if ttl is None:
