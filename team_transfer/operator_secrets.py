@@ -67,6 +67,7 @@ def _generated_names(
 ) -> frozenset[str]:
     from internal_credentials import INTERNAL_ENV_KEYS
     from assistant_gateway.instance_secrets import (
+        NATS_CREDENTIAL_ENV_NAMES,
         should_generate_internal_nats_credentials,
     )
 
@@ -74,8 +75,20 @@ def _generated_names(
     if config is not None and not should_generate_internal_nats_credentials(
         config, environment or {}
     ):
-        names.difference_update({"NATS_USER", "NATS_PASSWORD"})
+        names.difference_update(NATS_CREDENTIAL_ENV_NAMES)
     return frozenset(names)
+
+
+def _process_environment() -> dict[str, str]:
+    """This command's process environment, without empty values.
+
+    It is the instance's environment only when the instance takes its secrets
+    from the environment and the command runs where the instance runs (for
+    example inside its container); otherwise it may hold the operator's own
+    variables, which the instance never used.
+    """
+
+    return {key: value for key, value in os.environ.items() if value}
 
 
 def _environment(source: ExportSource) -> dict[str, str]:
@@ -90,27 +103,32 @@ def _environment(source: ExportSource) -> dict[str, str]:
     from internal_credentials import parse_env_file
 
     if source.config.launch.secrets_from_environment:
-        return {key: value for key, value in os.environ.items() if value}
+        return _process_environment()
     env_path = Path(source.config.launch.env_file_path or source.layout.team_env_path)
     return parse_env_file(env_path) if env_path.is_file() else {}
 
 
-def _instance_config(source: ExportSource, environment: Mapping[str, str]) -> Any:
-    """The instance's settings: the saved file with ``environment`` (``_environment``) applied.
+def _saved_config(source: ExportSource) -> Any:
+    """The instance's saved settings (``instance_config.yaml``), with no environment applied.
 
-    Which NATS credentials are generated is decided from these, as onboarding
-    and the import decide it. ``source.config`` has this command's own
-    environment applied instead, and an operator's shell may name a NATS
-    server the instance does not use: an external server's user and password
-    would be left behind as generated, or a local server's generated ones
-    carried.
+    Whether the instance generated its NATS user and password is decided from
+    these settings plus the instance's environment (``_environment``):
+    ``should_generate_internal_nats_credentials`` reads that environment's
+    NATS_CREDENTIALS_FILE, NATS_SERVERS and NATS_URL ahead of the saved
+    addresses. Onboarding and the import decide the same way.
+
+    ``source.config`` is not used: it has this command's own environment
+    applied, and an operator's shell may name a NATS server the instance does
+    not use. Applying the instance's environment to the saved settings
+    (``load_for_process``) is not needed either: it changes no decision, and
+    it fails on values the decision never reads, such as a malformed
+    NATS_ACK_WAIT_SECONDS or a NATS_PASSWORD_FILE that exists only inside the
+    instance's container.
     """
 
     from assistant_gateway.config import GatewayInstanceConfig
 
-    return GatewayInstanceConfig.load_for_process(
-        source.layout.instance_config_path, env=environment
-    )
+    return GatewayInstanceConfig.load_saved(source.layout.instance_config_path)
 
 
 def _operator_values(
@@ -176,7 +194,7 @@ class OperatorSecretsSection:
                 ),
             )
             for name, value in sorted(
-                _operator_values(environment, _instance_config(source, environment)).items()
+                _operator_values(environment, _saved_config(source)).items()
             )
         ]
         for path in _auth_files(source.layout):

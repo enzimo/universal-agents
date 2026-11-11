@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from assistant_gateway.instance_secrets import NATS_CREDENTIAL_ENV_NAMES, NATS_DECISION_ENV_NAMES
 from internal_credentials import parse_env_file
 from team_transfer.container import TransferReader
 from team_transfer.crypto import new_key_derivation
 from team_transfer.operator_secrets import OperatorSecretsSection
-from team_transfer.sections import RecordOutcome
+from team_transfer.sections import RecordOutcome, read_section_records
 from team_transfer.service import export_source, export_team, import_team
 from team_transfer.settings import SettingsSection
 from tests.pinned_memory_support import new_instance
@@ -23,6 +24,28 @@ BOT_TOKEN = "123456:telegram-bot-token-value"
 MODEL_KEY = "sk-operator-model-key-value"
 OLD_SIGNING_KEY = "gateway-old:old-signing-seed"
 CODEX_AUTH = '{"tokens": {"refresh_token": "codex-refresh-value"}}'
+
+
+@pytest.fixture(autouse=True)
+def _no_nats_variables_from_the_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shell running the tests may set any of these; a test that needs one sets it.
+    for name in (*NATS_DECISION_ENV_NAMES, *NATS_CREDENTIAL_ENV_NAMES):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _export(config_path: Path, out: Path) -> None:
+    export_team(
+        export_source(config_path), out, PASSPHRASE, owner_person_id="usr_owner", sections=SECTIONS,
+        key_derivation=new_key_derivation(**FAST_KEYS),
+    )
+
+
+def _carried(out: Path) -> dict[str, str]:
+    """The operator secrets an export file carries, by name."""
+
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        records = read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version)
+    return {record["name"]: record["value"] for record in records}
 
 
 def _old_instance(tmp_path: Path) -> Path:
@@ -140,3 +163,29 @@ def test_with_secrets_from_the_environment_the_commands_environment_is_the_insta
 
         carried = {r["name"]: r["value"] for r in read_section_records(reader, "operator_secrets", OperatorSecretsSection.schema_version)}
     assert carried["NATS_USER"] == "nats-user-value" and carried["NATS_PASSWORD"] == "nats-password-value"
+
+
+@pytest.mark.parametrize(
+    "unread_line",
+    [
+        pytest.param("NATS_ACK_WAIT_SECONDS=thirty", id="malformed-ack-wait"),
+        pytest.param("NATS_PASSWORD_FILE=/run/secrets/only-inside-the-container", id="password-file-elsewhere"),
+        pytest.param("USER_DOCS_BASE_URL=https://docs.example.invalid", id="removed-variable"),
+    ],
+)
+def test_a_local_instance_exports_team_env_values_the_nats_decision_never_reads(
+    tmp_path: Path, unread_line: str
+) -> None:
+    # The decision reads only the NATS addresses and the credentials file from
+    # team.env. Applying all of team.env to the saved settings made the export
+    # fail on lines like these, which the instance's export accepted before.
+    path, config = new_instance(tmp_path, "alpha", "team_a")
+    config.layout.team_env_path.write_text(
+        f"TELEGRAM_BOT_TOKEN={BOT_TOKEN}\nNATS_USER=nats-user-value\n{unread_line}\n"
+    )
+    out = tmp_path / "team.uatransfer"
+    _export(path, out)
+
+    carried = _carried(out)
+    assert carried["TELEGRAM_BOT_TOKEN"] == BOT_TOKEN
+    assert not set(carried) & set(NATS_CREDENTIAL_ENV_NAMES), "a local server's login is generated anew"
