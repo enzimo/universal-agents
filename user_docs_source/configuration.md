@@ -875,7 +875,8 @@ JetStream-backed delivery where configured. Verify:
   `nats-server` through a private configuration file, not its command line.
   Delete the file only while every runtime process is stopped.
 - The configured JetStream stream exists or the runtime is allowed to create
-  and reconcile it.
+  and reconcile it. Since 0.10 the NATS login needs more than that; see
+  [Message host trust](docker.md#message-host-trust) in the Docker guide.
 - Bundle mode runs the bundled NATS service unless explicitly configured for
   an external NATS deployment.
 
