@@ -20,12 +20,14 @@ What travels (owner's decision 2026-10-05: credentials move with the team):
   travels; a local server's is made anew. The server's address travels only
   when ``instance_config.yaml`` names it (with the settings section).
   ``NATS_URL``, ``NATS_SERVERS`` or ``NATS_CREDENTIALS_FILE`` from ``team.env``
-  or the environment do not travel, nor does the image's local-server switch
-  ``TEAM_LOCAL_NATS_ENABLED`` (a proposed follow-up: one shared decision of
-  local or external NATS that travels). So the export prints what the new
-  instance needs whenever it carries the login (``_keep_server_sentence``),
-  and the import refuses the login, with the steps, while the new instance's
-  settings name a local server (``_generated_reason``);
+  or the environment do not travel, nor does the file ``NATS_CREDENTIALS_FILE``
+  names or the image's local-server switch ``TEAM_LOCAL_NATS_ENABLED`` (a
+  proposed follow-up: one shared decision of local or external NATS that
+  travels). So the export prints what the new instance needs whenever the
+  instance's settings name an external server, whether or not a login travels
+  (``_keep_server_sentence``; a credentials file or a server without a login
+  carries none), and the import refuses the login, with the steps, while the
+  new instance's settings name a local server (``_generated_reason``);
 - the model-provider sign-in files ``auth/openai_codex_auth.json`` and
   ``auth/xai_oauth_auth.json``. Their refresh tokens rotate, so the old
   instance must stop right after the export (the export says so).
@@ -167,11 +169,11 @@ def _nats_notice(
     """At most one line for the operator about the NATS login, names only.
 
     It is given when this command's NATS variables would have decided
-    otherwise (``_command_nats_sentence``) or when the export carries a NATS
-    login, which the new instance uses only with the right switch
-    (``_keep_server_sentence``). It starts with what happened to the login and
-    why, so one login gets one line. Never a value, because an address may
-    hold a user and password.
+    otherwise (``_command_nats_sentence``) or whenever the instance's settings
+    name an external server, which the new instance keeps using only with the
+    right switch (``_keep_server_sentence``). It starts with what happened to
+    the login and why, so one login gets one line. Never a value, because an
+    address may hold a user and password.
     """
 
     from assistant_gateway.instance_secrets import should_generate_internal_nats_credentials
@@ -183,13 +185,13 @@ def _nats_notice(
         sentence
         for sentence in (
             _command_nats_sentence(source, config, environment, instance_generates, values),
-            _keep_server_sentence(environment, environment_mode, values),
+            _keep_server_sentence(environment, environment_mode, instance_generates),
         )
         if sentence
     ]
     if not told:
         return []
-    login = _nats_login_outcome(instance_generates, values, environment_mode)
+    login = _nats_login_outcome(instance_generates, values, environment, environment_mode)
     return [" ".join([f"{login}.", *told])]
 
 
@@ -262,26 +264,33 @@ def _command_nats_sentence(
 
 
 def _keep_server_sentence(
-    environment: Mapping[str, str], environment_mode: bool, values: Mapping[str, str]
+    environment: Mapping[str, str], environment_mode: bool, instance_generates: bool
 ) -> str:
-    """What the new instance needs to use the external server whose login travels; "" when none does.
+    """What the new instance needs to keep using the external server; "" for a local one.
 
-    The login travels, but the image's local-server switch,
-    TEAM_LOCAL_NATS_ENABLED, does not, nor do the NATS variables the
-    instance's environment sets (``NATS_DECISION_ENV_NAMES``): only the address
-    in ``instance_config.yaml`` travels, with the settings section. The switch
-    is on unless set to false (``docker.nats_service.local_nats_enabled_from_env``),
-    and then the image starts its own NATS server with the carried login, so
-    the new instance would stop using the external server without a word. The
-    import cannot say this when it accepts the login (it reports reasons only
-    for records it refuses or lists), so the export does, on every export that
-    carries the login. It is not logged: it is the same instruction each time,
-    not a sign that something went wrong.
+    The image's local-server switch, TEAM_LOCAL_NATS_ENABLED, does not travel,
+    nor do the NATS variables the instance's environment sets
+    (``NATS_DECISION_ENV_NAMES``) or the file NATS_CREDENTIALS_FILE names: only
+    the address in ``instance_config.yaml`` travels, with the settings section.
+    The switch is on unless set to false
+    (``docker.nats_service.local_nats_enabled_from_env``), and then the image
+    starts its own NATS server, so the new instance would stop using the
+    external server without a word. That holds whether or not a login travels:
+    a credentials file, or a server without a login, carries none, and then
+    the import has no NATS record to refuse. The import cannot say this when it
+    accepts the login either (it reports reasons only for records it refuses or
+    lists), so the export does, on every export whose instance uses an external
+    server. The sentence names no login, so a line with none carried promises
+    none. It is not logged: it is the same instruction each time, not a sign
+    that something went wrong.
     """
 
-    from assistant_gateway.instance_secrets import NATS_DECISION_ENV_NAMES
+    from assistant_gateway.instance_secrets import (
+        ENV_NATS_CREDENTIALS_FILE,
+        NATS_DECISION_ENV_NAMES,
+    )
 
-    if not _carried_nats_names(values):
+    if instance_generates:
         return ""
     named = [name for name in NATS_DECISION_ENV_NAMES if environment.get(name)]
     # Where the import's plan reads the address (``_new_instance_environment``);
@@ -298,10 +307,17 @@ def _keep_server_sentence(
     names = _join_names(named)
     one = len(named) == 1
     where = "environment" if environment_mode else "team.env"
+    # Setting the same NATS_CREDENTIALS_FILE is not enough: the file it names stays on the old host.
+    credentials_file = (
+        " The file NATS_CREDENTIALS_FILE names does not travel either: put it at that path on the new "
+        "instance (for Docker, the same secret mount)."
+        if ENV_NATS_CREDENTIALS_FILE in named
+        else ""
+    )
     return (
         f"TEAM_LOCAL_NATS_ENABLED does not travel, and neither {'does' if one else 'do'} the {names} "
         f"in this instance's {where}. For the new instance to use that server, set {names} to the same "
-        f"{'value' if one else 'values'} and TEAM_LOCAL_NATS_ENABLED=false {place}"
+        f"{'value' if one else 'values'} and TEAM_LOCAL_NATS_ENABLED=false {place}{credentials_file}"
     )
 
 
@@ -328,9 +344,14 @@ def _log_nats_notice(
 
 
 def _nats_login_outcome(
-    instance_generates: bool, values: Mapping[str, str], environment_mode: bool
+    instance_generates: bool,
+    values: Mapping[str, str],
+    environment: Mapping[str, str],
+    environment_mode: bool,
 ) -> str:
     """Whether the NATS login travels, and why, in one sentence without its full stop."""
+
+    from assistant_gateway.instance_secrets import ENV_NATS_CREDENTIALS_FILE
 
     settings = _instance_settings(environment_mode)
     if instance_generates:
@@ -340,9 +361,15 @@ def _nats_login_outcome(
         )
     carried = _carried_nats_names(values)
     if not carried:
+        # A credentials file holds the login itself; _keep_server_sentence says it stays behind.
+        held = (
+            "and it signs in with the file NATS_CREDENTIALS_FILE names"
+            if environment.get(ENV_NATS_CREDENTIALS_FILE)
+            else "but they hold no such login"
+        )
         return (
             f"No NATS_USER or NATS_PASSWORD was carried: {settings} say it uses an external "
-            "NATS server, but they hold no such login"
+            f"NATS server, {held}"
         )
     verb = "was" if len(carried) == 1 else "were"
     return f"{_join_names(carried)} {verb} carried: {settings} say it uses an external NATS server"

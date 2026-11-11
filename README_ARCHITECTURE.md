@@ -4299,11 +4299,13 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   (saved `instance_config.yaml` plus `team.env`, or the environment with
   environment secrets) name an external server. The export command's shell
   does not decide, because it may hold variables the instance never used. The
-  server's address from `team.env` or the environment and the image's
-  `TEAM_LOCAL_NATS_ENABLED` switch do not travel yet, so the export names what
-  the new instance needs and the import refuses the login, with the steps,
-  while the new instance's settings name a local server. One shared decision of
-  local or external NATS that travels with the transfer is a proposed follow-up.
+  server's address or credentials file from `team.env` or the environment, the
+  file itself and the image's `TEAM_LOCAL_NATS_ENABLED` switch do not travel
+  yet, so the export names what the new instance needs whenever the instance's
+  settings name an external server, login carried or not, and the import
+  refuses the login, with the steps, while the new instance's settings name a
+  local server. One shared decision of local or external NATS that travels
+  with the transfer is a proposed follow-up.
 
 Transfer confidence relies primarily on integration tests with real repositories
 and HTTP routes, plus a process-level CLI/broker round trip. Parser tests and
