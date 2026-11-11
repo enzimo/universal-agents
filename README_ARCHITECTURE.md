@@ -1527,6 +1527,39 @@ for the other kinds. The site host adds no Content-Security-Policy to
 added there later must allow inline styles (`style-src 'unsafe-inline'`) or the
 report loses its design.
 
+A real run's `stats.json` is about 170 KB, too large for a model to repeat as
+a tool argument, so an agent passes `site_kind="report"` with the file's path
+in `site_spec_path` instead of its text in `site_spec_json`; the text form
+remains for small statistics, and the tool takes exactly one of the two. The
+tool reads the file through `custom_tools.file_access`, so the task's folders,
+the person from the signed context, the access service, link handling and a
+2 MB cap (`REPORT_STATS_MAX_BYTES`) apply as for `file_read` and `notify_user`
+attachments, and every refusal keeps the file tools' reason code
+(`failure_stage` `read_spec_file`). The file's text then takes the same path
+as `site_spec_json`, so both give the same page. `site_spec_path` is refused
+for the other kinds before anything is read. To publish any page again in
+place, the agent names it in the `update_site_id` parameter (its id or URL).
+The spec's update keys still work for `site_spec_json`, and a parameter and a
+spec key that name different pages are refused. A statistics file that carries
+them is refused (`update_key_in_spec_file`): nobody sees what a 170 KB file
+says, editing it would be undone by the next `cct.py stats` run, and a file in
+a shared folder must not choose which of the person's pages is replaced.
+
+The renderer draws a round's critiques and lead notes once per mention, a
+review stage's findings once per review of that stage, a round's label once
+per critique in that round and per finding addressed in it, and a lens-grid
+cell once per round with its key, so statistics that repeated a mention could
+multiply the page: a 1 MB file could ask for hundreds of MB of HTML. `cct.py`
+gives each round its own key, names each critique and intervention in one
+round, writes one review per stage and short round labels, so the tool
+refuses statistics that repeat one, or whose critiques and findings would
+repeat more than 64 Ki characters of round labels (`invalid_report_stats`),
+before rendering. The renderer is a
+checked copy, so this check lives in the tool. Any page larger than the site
+host serves (`MAX_SITE_FILE_BYTES`, 16 MB) is refused (`page_too_large`)
+before anything is written, so neither a new page nor the page being updated
+is replaced by one the host would not serve.
+
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
 deletes files there older than `tool_policy.scratch_retention_days` (21 by
