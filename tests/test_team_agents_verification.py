@@ -79,12 +79,16 @@ async def _until(check):
 
 
 @asynccontextmanager
-async def _reading(*, store=None, closed_before_start=False):
+async def _reading(*, store=None, closed_before_start=False, preload=None):
+    """A running reader. By default the lead is live; ``preload`` (record -> key -> raw) is what the
+    buckets held before it started, and then nothing more is written."""
+
     store = store or trust_store()
     records = _Records(store)
     if closed_before_start:
-        key, raw = _closed_lead_session()
-        records.values["agent_session"][key] = raw
+        preload = {"agent_session": dict([_closed_lead_session()])}
+    for record, values in (preload or {}).items():
+        records.values[record].update(values)
 
     async def fetch(raw):
         return False
@@ -96,7 +100,7 @@ async def _reading(*, store=None, closed_before_start=False):
     task = asyncio.create_task(reader.run(stop))
     try:
         await asyncio.wait_for(reader.ready.wait(), 2)
-        if not closed_before_start:
+        if preload is None:
             await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
             await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
             await records.feed("agent", KEY, _signed(_agent()))
@@ -445,6 +449,173 @@ async def test_a_forged_exit_from_another_host_is_not_an_exit():
         await asyncio.sleep(0.1)
 
         assert reader.lead() is not None and not reader.left_for_good("lead") and changes == []
+
+
+# -- which session's end counts as the end of a run (F1, A1) --------------------------------------
+# One run of an agent can hold more than one session: a refused renewal, a missing placement or a
+# lost sessions.open reply opens another, each with a later placed_at. Only the newest one's end
+# says the run ended, and only while nothing else the reader holds says it goes on.
+
+
+def _lead_session(session_id, *, revision, started, ends, sequence=1, issued=None):
+    """The lead's session example signed again as ``session_id``, a session of the same agent run."""
+
+    session = json.loads((EXAMPLES / "trust" / "sessions" / "lead.json").read_bytes())
+    session.update(key=f"session.{INSTALL}.{TEAM}.{session_id}", sequence=sequence,
+                   issued_at=format_timestamp(issued or started))
+    session["body"].update(session=session_id, placement_revision=revision, started_at=format_timestamp(started),
+                           ends_at=format_timestamp(ends))
+    return session["key"], _signed(session)
+
+
+def _current_lead_session():
+    """``s-lead-1`` as the example has it: open until the next day."""
+
+    session = json.loads((EXAMPLES / "trust" / "sessions" / "lead.json").read_bytes())
+    return session["key"], _signed(session)
+
+
+def _superseded_lead_session(*, ended=True):
+    """``s-lead-0``: the run's earlier session, opened an hour before ``s-lead-1`` and never renewed."""
+
+    started = NOW - timedelta(minutes=90)
+    return _lead_session("s-lead-0", revision=6, started=started,
+                         ends=NOW - timedelta(seconds=1) if ended else NOW + timedelta(hours=1))
+
+
+def _placed():
+    return {KEY: _signed(_example("placement/lead.json"))}
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_session_running_out_is_not_the_exit_of_an_agent_out_of_view_for_long():
+    """The host stops reporting for twelve minutes, so the agent's last view entry is no longer kept."""
+
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        await records.feed("agent_session", *_current_lead_session())
+        await records.feed("agent_session", *_superseded_lead_session())
+        assert len(reader._sessions) == 2
+        host.clock = lambda: NOW + timedelta(seconds=31)
+        await _until(lambda: reader.agent("lead") is None)
+        host.clock = lambda: NOW + timedelta(minutes=12)
+        await _until(lambda: reader.departed_agent("lead") is None)
+        await asyncio.sleep(0.1)  # several more checks
+
+        assert reader.departure_reason("lead") == "host_unavailable" and not reader.left_for_good("lead")
+        assert not any(exited for _, exited in changes)
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_reader_without_the_host_record_does_not_count_an_earlier_session_as_the_exit():
+    preload = {"agent_session": dict([_current_lead_session(), _superseded_lead_session()]),
+               "placement": _placed(), "agent": {KEY: _signed(_agent())}}
+    async with _reading(preload=preload) as (reader, records, host):
+        assert reader.agent("lead") is None  # its host's record has not arrived
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead") and reader.departed_agent("lead") is None
+
+        await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+        await _until(lambda: reader.lead() is not None)
+
+
+@pytest.mark.asyncio
+async def test_the_newest_session_alone_says_the_run_goes_on():
+    """Nothing else is held for the agent: the open later session decides."""
+
+    preload = {"agent_session": dict([_current_lead_session(), _superseded_lead_session()])}
+    async with _reading(preload=preload) as (reader, records, host):
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead")
+
+
+@pytest.mark.asyncio
+async def test_a_closed_newest_session_counts_once_the_agent_is_no_longer_placed():
+    """A held placement (a newer placement, or one a handover keeps) says the agent may still run."""
+
+    preload = {"agent_session": dict([_closed_lead_session()]), "placement": _placed()}
+    async with _reading(preload=preload) as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead")
+
+        await records.feed("placement", KEY, None)
+        await _until(lambda: reader.left_for_good("lead"))
+        assert reader.departure_reason("lead") == "session_closed"
+        await asyncio.sleep(0.1)
+        assert [exited for _, exited in changes if "lead" in exited] == [frozenset({"lead"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("sessions", "record_session", "exits"), [
+    # Its record names the closed newest session: after a crash the record can outlive its expiry in a
+    # running reader (expiry gives no deletion), and the restarted host's close is the evidence.
+    ("closed newest", "s-lead-1", True),
+    # Its host crashed after opening s-lead-1 but before rewriting the record, which still names s-lead-0;
+    # the restart closed both. A record naming an older known session is stale.
+    ("both closed", "s-lead-0", True),
+    # Its record names a session this reader does not hold: it may be newer than any it knows.
+    ("only the earlier one", "s-lead-1", False),
+])
+async def test_a_held_record_keeps_the_agent_only_while_it_names_a_session_the_reader_does_not_know(
+        sessions, record_session, exits):
+    held = {"closed newest": [_closed_lead_session()],
+            "both closed": [_superseded_lead_session(), _closed_lead_session()],
+            "only the earlier one": [_superseded_lead_session()]}[sessions]
+    preload = {"agent_session": dict(held), "placement": _placed(),
+               "agent": {KEY: _signed(_agent(session=record_session))}}
+    async with _reading(preload=preload) as (reader, records, host):
+        await _until(lambda: "lead" in reader._agents)
+        assert not reader.left_for_good("lead")  # still placed
+
+        await records.feed("placement", KEY, None)
+        if exits:
+            await _until(lambda: reader.left_for_good("lead"))
+        else:
+            await asyncio.sleep(0.1)
+            assert not reader.left_for_good("lead") and "lead" in reader._agents
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_left_the_view_under_an_earlier_session_has_not_left_for_good_when_a_later_one_exists():
+    """The departure path: the session its last record named ends, but the run already has a later session."""
+
+    preload = {"agent_session": dict([_superseded_lead_session(ended=False)])}
+    async with _reading(preload=preload) as (reader, records, host):
+        await records.feed("placement", KEY, _placed()[KEY])
+        await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+        await records.feed("agent", KEY, _signed(_agent(session="s-lead-0")))
+        await _until(lambda: reader.lead() is not None)
+        changes = []
+        _heard(reader, changes)
+
+        await records.feed("agent_session", *_current_lead_session())
+        await records.feed("agent_session", *_lead_session(
+            "s-lead-0", revision=6, started=NOW - timedelta(minutes=90), ends=NOW - timedelta(seconds=1), sequence=2,
+            issued=NOW - timedelta(seconds=1)))
+        await _until(lambda: reader.agent("lead") is None)
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead") and not any(exited for _, exited in changes)
+
+        # The host rewrites the record with the session it holds now.
+        await records.feed("agent", KEY, _signed(_agent(sequence=101, session="s-lead-1")))
+        await _until(lambda: reader.lead() is not None)
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_agents_last_session_record_forgets_its_departure():
+    """F3: what the reader keeps about departures is bounded by how long session records are kept."""
+
+    async with _reading(closed_before_start=True) as (reader, records, host):
+        assert reader.left_for_good("lead")
+        key, _ = _closed_lead_session()
+
+        await records.feed("agent_session", key, None)
+
+        assert reader.departure_reason("lead") is None and reader.departed_agent("lead") is None
+        assert not reader.left_for_good("lead")
 
 
 def _worker_host_record(host):
