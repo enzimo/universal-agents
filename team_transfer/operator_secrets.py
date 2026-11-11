@@ -82,10 +82,12 @@ def _generated_names(
 def _process_environment() -> dict[str, str]:
     """This command's process environment, without empty values.
 
-    It is the instance's environment only when the instance takes its secrets
-    from the environment and the command runs where the instance runs (for
-    example inside its container); otherwise it may hold the operator's own
-    variables, which the instance never used.
+    The export reads it as the old instance's environment, and the import's
+    plan as the new instance's, only when that instance takes its secrets
+    from the environment: the command then runs where the instance runs (for
+    example inside its container, or onboarding's Import inside the new one).
+    Otherwise it may hold the operator's own variables, which the instance
+    never used.
     """
 
     return {key: value for key, value in os.environ.items() if value}
@@ -194,10 +196,13 @@ def _command_nats_notice(
         "team_transfer_nats_environment_differs", source, command, instance_generates, values
     )
     if not instance_generates:
-        return [
-            f"{login}. This command's own {names} would mean a local server; {unused} not used. "
-            "The new instance keeps the login only if it names the same server; the import says how."
-        ]
+        # Only a carried login can be kept; with none carried there is nothing to refuse either.
+        keeps = (
+            " The new instance keeps the login only if it names the same server; the import says how."
+            if _carried_nats_names(values)
+            else ""
+        )
+        return [f"{login}. This command's own {names} would mean a local server; {unused} not used.{keeps}"]
     one = len(command) == 1
     return [
         f"{login}. This command's own {names} would mean an external server; {unused} not used. "
@@ -361,7 +366,11 @@ class OperatorSecretsSection:
         if isinstance(config, GatewayInstanceConfig):
             environment_mode = bool(config.launch.secrets_from_environment)
         auth_names = {path.name for path in _auth_files(context.layout)}
+        env_path = _target_env_path(context)
         existing = _target_env(context)
+        generated = _generated_names(
+            config, _new_instance_environment(environment_mode, existing)
+        )
         planned = []
         for secret in secrets:
             key = f"{secret.kind.value}/{secret.name}"
@@ -386,16 +395,13 @@ class OperatorSecretsSection:
                         "a sign-in already exists in the new instance; it is kept",
                     )
                 )
-            elif (
-                secret.kind is SecretKind.ENVIRONMENT
-                and secret.name in _generated_names(config, existing)
-            ):
+            elif secret.kind is SecretKind.ENVIRONMENT and secret.name in generated:
                 planned.append(
                     PlannedRecord(
                         self.name,
                         key,
                         RecordOutcome.REFUSED,
-                        "the new instance generates its own",
+                        _generated_reason(secret.name, environment_mode, env_path),
                     )
                 )
             elif secret.kind is SecretKind.ENVIRONMENT and existing.get(secret.name):
@@ -462,17 +468,69 @@ class OperatorSecretsSection:
         )
 
 
+def _target_env_path(context: ImportContext) -> Path:
+    """The new instance's env file: ``launch.env_file_path`` as planned, or its ``team.env``."""
+
+    config = context.scratch.get("settings.config")
+    return Path(
+        getattr(getattr(config, "launch", None), "env_file_path", None)
+        or context.layout.team_env_path
+    )
+
+
 def _target_env(context: ImportContext) -> dict[str, str]:
     """Values the operator already put in the new instance's team.env (they win over imported ones)."""
 
     from internal_credentials import parse_env_file
 
-    config = context.scratch.get("settings.config")
-    path = Path(
-        getattr(getattr(config, "launch", None), "env_file_path", None)
-        or context.layout.team_env_path
-    )
+    path = _target_env_path(context)
     return parse_env_file(path) if path.is_file() else {}
+
+
+def _new_instance_environment(
+    environment_mode: bool, env_file_values: Mapping[str, str]
+) -> Mapping[str, str]:
+    """The new instance's environment, from which the import decides which values it generates.
+
+    Its env file, or, with secrets from the environment, the environment this
+    import runs in (the new container for onboarding's Import), as the export
+    reads the old instance's (``_environment``). In that mode the import
+    writes nothing and the settings section generates nothing, so reading
+    the process environment cannot change what the new instance generates.
+    """
+
+    return _process_environment() if environment_mode else env_file_values
+
+
+def _generated_reason(name: str, environment_mode: bool, env_path: Path) -> str:
+    """Why the import refuses a carried value the new instance generates, and for the NATS login what to do.
+
+    The NATS user and password travel when the old instance's own settings
+    named an external server, but the server's address and the image's
+    local-server switch do not travel. So a new instance whose settings name
+    a local server refuses them and makes its own login. If the old instance
+    did use an external server, the operator names it where this import reads
+    the decision (``plan``), then validates again: the carried login is then
+    imported, or listed to set in the environment.
+    """
+
+    from assistant_gateway.instance_secrets import NATS_CREDENTIAL_ENV_NAMES
+
+    if name not in NATS_CREDENTIAL_ENV_NAMES:
+        return "the new instance generates its own"
+    where = (
+        "in the new instance's environment. This import reads NATS_URL and NATS_SERVERS from the "
+        "environment it runs in (the new container for onboarding's Import, or for the host command your "
+        "shell, where a value already set wins over --env), so set them there too"
+        if environment_mode
+        else f"in the new instance's env file, {env_path}"
+    )
+    return (
+        "the new instance's settings name a local NATS server, and it makes its own login for that. "
+        "If the old instance used an external NATS server, set NATS_URL or NATS_SERVERS to that server, "
+        f"and TEAM_LOCAL_NATS_ENABLED=false so the image does not start its own server, {where}; then "
+        "validate the selected records again. Otherwise unselect this record."
+    )
 
 
 def _is_path_variable(name: str) -> bool:
