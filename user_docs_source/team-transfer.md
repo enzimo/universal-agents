@@ -239,12 +239,28 @@ the other operator secrets. These do not move:
 The export decides from the old instance's own settings: `instance_config.yaml`
 and its `team.env`, or its environment when it takes secrets from there. It
 moves the user and password only when those settings name an external server.
-With secrets in `team.env`, NATS variables set only in the container's
-environment or in your shell are not used. When they would have decided
-otherwise, the export prints a line naming them and what to do. Whenever those
-settings name an external server, it also prints what the new instance needs,
-whether or not a user and password moved. These lines name variables, never
-their values.
+It prints at most two lines about this, each starting with `NATS:` and naming
+variables, never their values:
+
+- Whenever those settings name an external server: the login that moved
+  (`NATS_USER`, `NATS_PASSWORD`, or none) and what to set on the new instance
+  before importing (the steps below).
+- With secrets in `team.env`, the export does not use NATS variables set only
+  in the container's environment or your shell, but the instance runs with the
+  container's values laid over `team.env`. When the instance would then use
+  NATS variables the export did not, a line names them: when they would decide
+  local or external otherwise, or, with an external server, when they set
+  another address, user or password.
+
+If the instance really runs with the variables that line names (for example
+from its container's environment in a compose file), put them in its
+`team.env` and export again: the server's address together with the
+`NATS_USER` and `NATS_PASSWORD` the instance runs with, in place of the lines
+onboarding wrote. When you give the user or password as a file (`NATS_USER_FILE`
+or `NATS_PASSWORD_FILE`), delete the plain `NATS_USER` or `NATS_PASSWORD` line:
+the export reads a plain value before its file, while the instance does the
+reverse, so the export would move onboarding's unused login. If the variables
+are left over from another setup, nothing was lost.
 
 Before importing, set these on the new instance:
 

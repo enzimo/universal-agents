@@ -4304,7 +4304,12 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   yet, so the export names what the new instance needs whenever the instance's
   settings name an external server, login carried or not, and the import
   refuses the login, with the steps, while the new instance's settings name a
-  local server. One shared decision of local or external NATS that travels
+  local server. Because the launcher lays the container's environment over
+  `team.env`, the export also names any NATS address or login the instance
+  would use with the command's environment that it did not, comparing the
+  login by the variable each side reads (the instance a `_FILE` form first,
+  the export the plain value first); the guide's advice then puts the login
+  the instance runs with into `team.env` beside the address. One shared decision of local or external NATS that travels
   with the transfer is a proposed follow-up.
 
 Transfer confidence relies primarily on integration tests with real repositories
