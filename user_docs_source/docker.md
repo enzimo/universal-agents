@@ -366,13 +366,50 @@ container waits until the authority has signed its own certificate and a current
 list (`event=installation_authority_started`) before it starts anything else. If
 the authority cannot start, or is not ready within a minute, the container stops
 the services it started and refuses to start
-(`event=installation_authority_start_failed`). The authority's own log line
+(`event=message_services_start_failed`). The authority's own log line
 `event=installation_authority_start_refused` says why and what to do.
 
-The authority creates the `UA1_*` key-value buckets in NATS on its first start.
-With an external NATS server, the instance's NATS login must therefore be allowed
-to create and update JetStream streams and key-value buckets; a login limited to
-the team's own streams makes the start fail.
+Only part of the traffic is signed in 0.10: processes joining the installation;
+agent sessions; the commands the team services answer, such as memory, knowledge
+and topic commands; pausing, resuming or shutting down an agent, and asking it
+for its status or about a task; the notice that the team's skills changed; and
+the records of which agents and hosts are running. Everything else stays unsigned
+until a later release, including queued work and its results; stopping a
+delegated task; creating schedules and scheduled runs; the gateway's commands for
+cancelling or listing running work, for Objectives and for a person's standing; a
+lead's guidance to its workers; notices to people and agents; and dead letters.
+These messages name their sender without proving it, so any process that holds
+the instance's NATS login could send them in another agent's name. People's
+requests, scheduled runs and those gateway commands also carry a signed statement
+of whom the work is for, from the gateway or the scheduler, which the agents
+check. A process that has seen such a statement could still reuse it. Keep the
+NATS login private to this instance.
+
+The authority creates the `UA1_*` key-value buckets in NATS on its first start and
+updates their settings on every later start. NATS lists each bucket as a stream
+named `KV_` and the bucket's name, for example `KV_UA1_CERTS`.
+
+Every process of the instance uses the same NATS login. With an external NATS
+server, give the instance a NATS account that no other application uses, and give
+the login every right in that account, as the included server's login has. That is
+the setup the runtime is tested with. Compared with 0.9, the login also needs:
+
+- To create the `KV_UA1_*` streams and to update them. A login that may create
+  them but not update them gets through the first start; every later start stops
+  with `event=message_services_start_failed`.
+- To read, write and watch the `UA1_*` buckets, and to send and receive on
+  subjects that start with `ua.v1.`. Without the right to write to the buckets
+  the authority cannot store its records, and without those subjects the other
+  processes cannot join; either way the start stops with
+  `event=message_services_start_failed`.
+- To delete the team's old presence stream once, after an upgrade from 0.9.
+  Without that right the start goes on, but each start waits about 5 seconds and
+  logs a warning until someone deletes the stream, as the paragraph about the old
+  presence stream above describes.
+
+This list names what changed since 0.9. It is not a tested set of NATS
+permissions: apart from a login that may not delete streams, the runtime's
+tests use only logins with every right in their account.
 
 The trust records live in the instance's `trust/` folder, readable only by their
 owner:
@@ -923,7 +960,7 @@ Verify:
 - The team lead or an agent stops with "Stream ... is missing; start the topology owner first": the container sets up the streams before any service starts, so they were removed from NATS while the runtime ran, for example by a restart of an external NATS server with `transport.storage: memory`. Restart the container to set them up again.
 - The container takes about 40 seconds longer to start after it was stopped uncleanly (killed, or the machine lost power), and the log says "Still waiting for the team services": the team services wait until the stopped container's hold on the team's lock runs out, and the team lead and the gateway start once they serve. A normal stop releases the lock at once. If the wait ends after 98 seconds with "Headless launch refused", another container serving the same team on the same NATS server holds the lock; stop it.
 - Multiple instances under `/data`: set `TEAM_INSTANCE_ROOT` or `TEAM_INSTANCE_CONFIG`.
-- The container stops with `event=installation_authority_start_failed`: read the authority's `event=installation_authority_start_refused` line and follow [Message host trust](#message-host-trust). With an external NATS server, also check that its login may create streams and key-value buckets.
+- The container stops with `event=message_services_start_failed`: its error names the service that did not start. When the team services did not get ready in time, another container may hold the team's lock (see the entry above). When the installation authority did not start, read its `event=installation_authority_start_refused` line, if it logged one, and follow [Message host trust](#message-host-trust). With an external NATS server, in both cases also check the NATS login as [Message host trust](#message-host-trust) describes.
 - Generated site links unreachable: publish the website port and set `network.public_origin` plus `interactive_apps.plugins.builtin.internal_website.settings.public_port` to browser-reachable values.
 - Auth links unreachable: publish the broker port and set `network.public_origin` plus `security_layer.broker_public_port` to browser-reachable values.
 - WhatsApp webhook rejected: verify `whatsapp.public_base_url`, webhook path, and Twilio signature validation.

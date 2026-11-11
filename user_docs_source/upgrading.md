@@ -21,6 +21,12 @@ supported, because it may not read what a newer one saved.
   chat. A restart planned by those releases cannot be approved after the
   upgrade: approving it then only says it was planned by another version, and
   Team Architect has to plan it again and ask you again.
+- **From 0.9 with an external NATS server:** prepare the server first. 0.10
+  needs NATS Server 2.15.1 or later with two server settings
+  ([Surviving a power loss](configuration.md#surviving-a-power-loss)), and more
+  from its NATS login ([Message host trust](docker.md#message-host-trust)). The
+  runtime reports a server that is too old only for the NATS server it
+  includes, so check an external server yourself.
 - **PostgreSQL:** an instance that keeps its data in PostgreSQL gets the same
   upgrade steps, but release tests check them on SQLite only. Back up the
   database first.
