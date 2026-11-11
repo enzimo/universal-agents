@@ -23,6 +23,9 @@ signatures, replay) happened before.
   approval a restart needs. Anything else is answered ``not_allowed`` and logged
   (``event=agent_control_refused``).
 - **Task probes** answer whether the agent holds the task, its state and whether it runs now.
+  Only the signed lead session, team services, or the current custodian of the
+  parent task may ask. Current custody survives requester restarts; the earlier
+  requester id is not authority. Other callers receive ``wrong_sender`` without task data.
 """
 
 from __future__ import annotations
@@ -30,11 +33,13 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, Optional
 
 from custom_messages.enums import ControlType
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
+from custom_messages.wire.refusals import FrameRefused
 
 _LOGGER = logging.getLogger(__name__)
 _DIAGNOSTIC_MAX = 65536
@@ -213,6 +218,14 @@ async def task_probe(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
     task_id = str(verified.raw["body"]["task_id"])
     task_manager = agent.task_manager
     task_info = await task_manager.operations_runtime.run(task_manager.get_task_info, task_id)
+    if not await task_manager.operations_runtime.run(partial(_may_probe_task, agent, verified, task_id, task_info)):
+        issuer = verified.frame.issuer
+        agent._logger.warning(
+            "A task probe was refused. event=task_probe_refused agent_id=%s task_id=%s from_runtime=%s from_agent=%s",
+            agent.id, task_id, issuer.runtime, getattr(issuer, "agent", None),
+        )
+        raise FrameRefused("wrong_sender", "Only the lead, team services or current requester may probe a task.",
+                           at="/issuer/agent")
     reply: dict[str, Any] = {"outcome": "ok", "known": task_info is not None,
                              "current": task_info is not None and task_id in executing_task_ids(agent),
                              "executing": bool(agent.is_executing), "exiting": _exiting(agent)}
@@ -225,6 +238,30 @@ async def task_probe(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:
             if updated:
                 reply["last_update_at"] = updated
     return reply
+
+
+def _may_probe_task(agent: Any, verified: VerifiedFrame, task_id: str, task_info: Any) -> bool:
+    """Use current parent custody, never the original requester's now-stale agent id.
+
+    The delegated record also links an unknown worker's probe to its parent, so a
+    requester may ask every worker of a type without learning unrelated tasks.
+    Store errors propagate; an unreadable ownership record never grants access.
+    """
+
+    if _from_lead(verified):
+        return True
+    if verified.session is None:
+        return verified.certificate is not None and _TEAM_SERVICES_ROLE in verified.certificate.roles
+    from custom_agents.delegated_work_runtime import delegated_tasks
+
+    record = delegated_tasks(agent).get(str(agent.team_id), task_id)
+    parent = record.parent_task_id if record is not None else (
+        task_info.task.parent_task_id if task_info is not None else None
+    )
+    if not parent:
+        return False
+    custody = agent.task_manager.runtime_state_store.get_task_custody(str(agent.team_id), [parent]).get(parent)
+    return custody is not None and custody.holder_agent_id == str(verified.session.agent)
 
 
 async def skills_changed(agent: Any, verified: VerifiedFrame) -> dict[str, Any]:

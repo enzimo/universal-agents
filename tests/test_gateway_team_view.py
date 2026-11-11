@@ -713,6 +713,31 @@ async def test_a_lead_on_another_contract_keeps_the_waiting_replies_until_it_lea
 
 
 @pytest.mark.asyncio
+async def test_each_draining_lead_keeps_only_its_own_waiting_replies(monkeypatch):
+    reader = Reader()
+    first = member("lead_1", lead=True)
+    second = member("lead_2", lead=True)
+    reader.publish(first)
+    async with Following(monkeypatch, reader) as following:
+        await following.follower.start(limit=1)
+        following.follow()
+        following.client.register_response_channel("reply_first")
+        draining_first = member("lead_1", lead=True, other_contract="2" * 64)
+        reader.publish(draining_first, second)
+        await until(lambda: following.client.manager_id == "lead_2")
+        following.client.register_response_channel("reply_second")
+        draining_second = member("lead_2", lead=True, other_contract="2" * 64)
+        reader.publish(draining_first, draining_second)
+        await until(lambda: following.client.manager_id is None)
+        reader.publish(draining_second, reasons={"lead_1": "exiting"})
+        await until(lambda: following.waiting.failed != [])
+        assert following.waiting.failed == [["reply_first"]]
+        reader.publish(reasons={"lead_2": "exiting"})
+        await until(lambda: len(following.waiting.failed) == 2)
+        assert following.waiting.failed == [["reply_first"], ["reply_second"]]
+
+
+@pytest.mark.asyncio
 async def test_a_refused_join_clears_the_route_whenever_it_comes_until_the_host_joins_again(monkeypatch) -> None:
     """Review F4 and critique C02: a final refusal after the start limit still stops chats to a lead nobody sees."""
 

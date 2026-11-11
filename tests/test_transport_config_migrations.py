@@ -20,8 +20,8 @@ from config_loader import (
 
 
 def test_public_config_schema_versions_are_current() -> None:
-    assert CONFIG_SCHEMA_VERSION == 11
-    assert INSTANCE_CONFIG_SCHEMA_VERSION == 13
+    assert CONFIG_SCHEMA_VERSION == 12
+    assert INSTANCE_CONFIG_SCHEMA_VERSION == 14
 
 
 @pytest.mark.parametrize(
@@ -455,7 +455,7 @@ def test_upgrading_a_0_9_instance_config_file_removes_the_setting_and_keeps_a_ba
 
     result = migrate_instance_config_file(path)
 
-    assert (result.original_version, result.migrated_version) == (12, 13)
+    assert (result.original_version, result.migrated_version) == (12, INSTANCE_CONFIG_SCHEMA_VERSION)
     assert any(step.startswith("12 -> 13: the presence stream was removed;") for step in result.applied_steps)
     assert "presence_max_age_seconds" not in yaml.safe_load(path.read_text(encoding="utf-8"))["transport"]
     assert yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["transport"]["presence_max_age_seconds"] == 600.0
@@ -471,7 +471,7 @@ def test_upgrading_a_config_yaml_removes_the_setting_and_keeps_a_backup(tmp_path
 
     result = migrate_config_file(path)
 
-    assert (result.original_version, result.migrated_version) == (10, 11)
+    assert (result.original_version, result.migrated_version) == (10, CONFIG_SCHEMA_VERSION)
     assert "10 -> 11: the presence stream was removed; transport.presence_max_age_seconds removed" in result.applied_steps
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["transport"] == {"max_deliver": 5}
     assert yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["transport"]["presence_max_age_seconds"] == 600.0
@@ -480,7 +480,7 @@ def test_upgrading_a_config_yaml_removes_the_setting_and_keeps_a_backup(tmp_path
 def test_the_upgrade_step_without_the_setting_only_advances_the_version(tmp_path: Path) -> None:
     migrated, steps = _migrate_config_dict({"schema_version": 10}, source_path=tmp_path / "config.yaml")
 
-    assert migrated == {"schema_version": 11}
+    assert migrated == {"schema_version": CONFIG_SCHEMA_VERSION}
     assert "10 -> 11: the presence stream was removed" in steps
 
 
@@ -495,3 +495,27 @@ def test_current_files_naming_the_presence_setting_are_refused(tmp_path: Path) -
             {"schema_version": INSTANCE_CONFIG_SCHEMA_VERSION, "instance_name": "test",
              "instance_root": str(tmp_path), **transport}
         )
+
+
+@pytest.mark.parametrize("migrate,previous,current", [
+    (_migrate_config_dict, 11, CONFIG_SCHEMA_VERSION),
+    (_migrate_instance_config_dict, 13, INSTANCE_CONFIG_SCHEMA_VERSION),
+])
+def test_the_concurrency_upgrade_removes_the_obsolete_value_without_mutating_its_source(
+    tmp_path, migrate, previous, current,
+):
+    source = {"schema_version": previous, "agent": {
+        "max_concurrent_top_level_tasks": 4, "max_queued_top_level_tasks": 22}}
+    upgraded, steps = migrate(source, source_path=tmp_path / "config.yaml")
+    assert upgraded == {"schema_version": current, "agent": {"max_queued_top_level_tasks": 22}}
+    assert source["agent"]["max_concurrent_top_level_tasks"] == 4
+    assert any("agent.max_concurrent_top_level_tasks removed" in step for step in steps)
+
+
+def test_current_files_reject_the_retired_concurrency_setting(tmp_path):
+    setting = {"agent": {"max_concurrent_top_level_tasks": 1}}
+    with pytest.raises(ValueError, match="agent.max_concurrent_top_level_tasks has been removed"):
+        _migrate_config_dict({"schema_version": CONFIG_SCHEMA_VERSION, **setting}, source_path=tmp_path / "config.yaml")
+    with pytest.raises(ValueError, match="agent.max_concurrent_top_level_tasks has been removed"):
+        GatewayInstanceConfig.model_validate({"schema_version": INSTANCE_CONFIG_SCHEMA_VERSION,
+            "instance_name": "test", "instance_root": str(tmp_path), **setting})

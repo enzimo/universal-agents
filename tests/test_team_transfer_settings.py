@@ -128,6 +128,7 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
                 SettingV1(path=("heartbeat", "interval_seconds"), value="not a number"),
                 SettingV1(path=("llm", "model_id", "nested"), value="x"),
             ]
+            records.append(SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
@@ -138,7 +139,8 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
 
     outcomes = {record.key: record for record in plan.records}
     assert outcomes["heartbeat.enabled"].outcome is RecordOutcome.IMPORT
-    for refused in ("agent.setting_removed_long_ago", "heartbeat.interval_seconds", "llm.model_id.nested"):
+    for refused in ("agent.setting_removed_long_ago", "heartbeat.interval_seconds", "llm.model_id.nested",
+                    "agent.max_concurrent_top_level_tasks"):
         assert outcomes[refused].outcome is RecordOutcome.REFUSED, refused
     assert "no setting group llm.model_id" in outcomes["llm.model_id.nested"].reason
     imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
@@ -148,7 +150,7 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7, 8])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
@@ -171,9 +173,10 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
             ]
             if exported_version >= 7:
                 records.append(SettingV1(path=("tool_policy", "output_retention_days"), value=0))
-            if exported_version == 8:
+            if exported_version >= 8:
                 records.append(SettingV1(path=("gateway", "storage_warnings", "person_step_gb"), value=7))
                 records.append(SettingV1(path=("transport", "presence_max_age_seconds"), value=900.0))
+            records.append(SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
@@ -186,6 +189,7 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     assert outcomes["heartbeat.enabled"].outcome is RecordOutcome.IMPORT
     assert outcomes["agent.max_queued_top_level_tasks"].outcome is RecordOutcome.IMPORT
     assert "transport.presence_max_age_seconds" not in outcomes
+    assert "agent.max_concurrent_top_level_tasks" not in outcomes
     assert not plan.by_outcome(RecordOutcome.REFUSED)
     imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
     assert imported.heartbeat.enabled is False
@@ -193,7 +197,7 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     assert imported.agent.request_conflict_checks is True
     assert imported.tool_policy.output_retention_days == (0 if exported_version >= 7 else 90)
     assert imported.gateway.storage_warnings.model_dump() == {
-        "person_step_gb": 7 if exported_version == 8 else 5,
+        "person_step_gb": 7 if exported_version >= 8 else 5,
         "nearing_limit_percent": 80,
         "nearly_full_percent": 95,
     }

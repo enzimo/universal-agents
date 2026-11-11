@@ -59,7 +59,7 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
         # cases in test_team_transfer_settings, including keep-forever output retention
         # and, for 8 (the releases before message contract step 7d), the retired presence setting.
         if name == "settings":
-            allowed.update((6, 7, 8))
+            allowed.update((6, 7, 8, 9))
         assert version in allowed, f"the conversion step from {name} version {version} has no supported export case"
         assert target == sections[name].schema_version
     for name, raw in fixtures.items():
@@ -173,7 +173,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
     source_sections, expected_problem = {
         "0.8.5": (
             (SettingsAsV085(), PeopleSection(), AccessAsV085()),
-            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7, 8 and 9.",
+            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7, 8, 9 and 10.",
         ),
         "0.9.0": (
             (SettingsSection(), PeopleSection(), AccessSection(), KnowledgeAsV090()),

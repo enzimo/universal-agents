@@ -126,6 +126,10 @@ edge address names its edges, and the generator refuses `none` there: the lead's
 role: any agent may delegate, and its subtask watchdog asks the holder whether it still has
 the task (decision 70). `team-topologies.yaml` lists such kinds as `requester_kinds`, a fixed
 rule `edge_allowed` applies in every topology; worker hosts are among `task.probe`'s senders.
+The runtime also checks the signed sender against the parent task's current custody.
+Only that requester, the lead's own session, or the team services without an agent session
+may probe; another sender receives `wrong_sender` without task state. Custody follows a
+recovered parent, so its original requester's agent id grants no lasting access.
 Messages that hosts send without an agent (gateway, scheduler, team services) are not
 topology checks either.
 
@@ -1216,14 +1220,18 @@ session record:
   will run. The team services check the host's certificate (its agent types and session
   limit) and the id limits, write the placement with compare-and-set, store the signed
   session in `UA1_CERTS` and return it. They give the lead role only to the team lead's agent
-  type on a host whose certificate holds the `lead_host` role; until a team has a roster,
-  nothing else limits it to one lead. An agent that runs on another host is refused with
+  type on a host whose certificate holds the `lead_host` role. They refuse a second
+  unended lead session for the team with `not_allowed`, including after the team services
+  restart. Reopening the same lead ends its earlier sessions before signing a replacement;
+  a restarting lead host closes its earlier sessions before opening its new lead. An agent
+  that runs on another host is refused with
   `already_placed`, naming that host: agents stay on their host and move only by a handover
   ("Custody windows"). A host that already runs as many agents as its certificate allows, or
   as its NATS credential can name ("Credential size"), gets `limit_reached`. An open for an
   agent already placed on the asking host places it there again, with the placement's next
   sequence, and signs a new session; the earlier session names the earlier placement, so it
-  can no longer be renewed and ends with its end time.
+  can no longer be renewed and ends with its end time. A lead's earlier session is ended
+  immediately so it cannot authorize controls alongside the new session.
 - **`sessions.renew`** re-signs one of the host's sessions while the host is connected: the
   next sequence and a new end, at most 7 days away, and every other field as it was. It is
   refused with `not_allowed` when the session has ended (closed, or past its end) or names an

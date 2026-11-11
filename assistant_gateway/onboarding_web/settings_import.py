@@ -19,6 +19,7 @@ connection strings are simply not in the field list.
 
 from __future__ import annotations
 
+from runtime_settings.retired_concurrency import RETIRED_CONCURRENCY_SETTING
 from dataclasses import dataclass
 from functools import lru_cache
 import logging
@@ -71,8 +72,7 @@ SECTION_REASONS: dict[str, str] = {
 
 # Removed settings, each reported as "Removed in this version". Most also have
 # a refusing validator (GatewayInstanceConfig and the config.yaml migrations);
-# a removed key the loader simply ignores, such as
-# agent.max_concurrent_top_level_tasks, has none. The shared helpers below
+# the concurrency key is removed by the configuration upgrade steps. The shared helpers below
 # cover access, location and MCP server settings.
 _REMOVED_PATHS: tuple[tuple[str, ...], ...] = (
     ("manager",),
@@ -89,7 +89,7 @@ _REMOVED_PATHS: tuple[tuple[str, ...], ...] = (
     *(("security_layer", "credential_catalog", key) for key in REMOVED_CREDENTIAL_CATALOG_KEYS),
     ("interactive_apps", "website"),
     REMOVED_TEAM_MODEL_KEYS_SETTING,
-    ("agent", "max_concurrent_top_level_tasks"),
+    RETIRED_CONCURRENCY_SETTING,
 )
 _SILENT_TOP_LEVEL = frozenset({"schema_version"})
 _MAX_NAMES_PER_LINE = 8

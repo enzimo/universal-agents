@@ -119,6 +119,36 @@ def _notes(agent) -> list[str]:
 
 
 @pytest.mark.asyncio
+async def test_recovered_work_finds_its_workers_progress_and_check_backs_under_a_new_agent_id(tmp_path, monkeypatch):
+    agent, resume = _lead(tmp_path, monkeypatch, children=4)
+    repository = delegated_tasks(agent)
+    repository.record_claim(team_id="team", task_id="child_0", worker_agent_id="worker_old",
+                            worker_agent_name="Researcher", claimed_at=NOW)
+    repository.set_check_back(team_id="team", parent_task_id="root", requester_agent_id="lead", at=NOW)
+    # The saved task tree belongs to this runtime after recovery, but the delegated
+    # rows and check-back still name the earlier requester.
+    agent.id = "lead_after_restart"
+    holders = await subtask_watchdog_runtime._delegated_holders(agent)
+    assert holders["child_0"].holder_agent_id == "worker_old"
+    assert await delegation_wake.send_progress_notes(agent, now=NOW) == 1
+    assert "1 running" in _notes(agent)[0]
+    assert await delegation_wake.wake_due_check_backs(agent, now=NOW) == 1
+    assert resume.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_custody_before_the_claim_reply_starts_the_watchdogs_clock_at_actual_admission(tmp_path, monkeypatch):
+    agent, _ = _lead(tmp_path, monkeypatch, children=1)
+    admitted = NOW + timedelta(minutes=10)
+    monkeypatch.setattr(agent.task_manager.runtime_state_store, "get_task_custody", lambda *_: {
+        "child_0": SimpleNamespace(holder_agent_id="replacement_worker", claimed_at=admitted.isoformat())})
+    records = await subtask_watchdog_runtime._delegated_holders(agent)
+    child = agent.task_manager.get_task_info("child_0")
+    assert records["child_0"].holder_agent_id == "replacement_worker"
+    assert await subtask_watchdog_runtime._queue_tracking(agent, records, child) == (False, admitted.isoformat())
+
+
+@pytest.mark.asyncio
 async def test_progress_notes_send_counts_at_most_every_interval_and_only_on_change(tmp_path, monkeypatch):
     agent, _ = _lead(tmp_path, monkeypatch, children=4)
     assert await delegation_wake.send_progress_notes(agent, now=NOW) == 1

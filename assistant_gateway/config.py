@@ -90,6 +90,9 @@ from runtime_settings.storage import (
     StateStorageSettings,
 )
 from runtime_settings.telemetry import ActivityCollectorSettings, OTelSettings
+from runtime_settings.retired_concurrency import (
+    drop_retired_concurrency_setting, refuse_retired_concurrency_setting,
+)
 from runtime_settings.transport import (
     TransportSettings,
     drop_retired_presence_setting,
@@ -106,7 +109,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INSTANCE_ROOT = Path.home() / GATEWAY_DEFAULTS.instance_root_name.value
 
 
-INSTANCE_CONFIG_SCHEMA_VERSION = 13
+INSTANCE_CONFIG_SCHEMA_VERSION = 14
 
 
 DIRECTLY_COMPATIBLE_INSTANCE_CONFIG_VERSIONS = {INSTANCE_CONFIG_SCHEMA_VERSION}
@@ -1528,6 +1531,15 @@ def _migrate_instance_config_dict(
         )
         version = 13
 
+    if version == 13:
+        removed = drop_retired_concurrency_setting(migrated)
+        migrated["schema_version"] = 14
+        applied_steps.append(
+            "13 -> 14: remove the obsolete per-agent concurrency setting"
+            + ("; agent.max_concurrent_top_level_tasks removed" if removed else "")
+        )
+        version = 14
+
     return migrated, tuple(applied_steps)
 
 
@@ -2019,9 +2031,10 @@ class GatewayInstanceConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _reject_retired_presence_setting(cls, value: Any) -> Any:
-        # transport.presence_max_age_seconds; the 12 -> 13 upgrade step removes it from older files.
+    def _reject_retired_runtime_settings(cls, value: Any) -> Any:
+        # Configuration upgrades remove both keys from older files before validation.
         refuse_retired_presence_setting(value)
+        refuse_retired_concurrency_setting(value)
         return value
 
     @model_validator(mode="before")

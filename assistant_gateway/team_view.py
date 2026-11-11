@@ -679,7 +679,7 @@ class TeamLeadFollower:
         self._logger = logger or _LOGGER
         self._check_seconds = check_seconds
         # The lead on another contract whose people's waiting replies were kept, and those replies.
-        self._kept: Optional[tuple[str, frozenset[str]]] = None
+        self._kept: dict[str, frozenset[str]] = {}
         self._leads_logged: frozenset[str] = frozenset()
 
     @property
@@ -759,7 +759,10 @@ class TeamLeadFollower:
         """Mark the current lead unavailable: gone from the records, or live on another contract."""
 
         if record is not None and record.other_contract is not None:
-            self._kept = (current, frozenset(self._route.pending_response_ids))
+            already_kept = frozenset().union(*self._kept.values())
+            self._kept[current] = self._kept.get(current, frozenset()) | (
+                frozenset(self._route.pending_response_ids) - already_kept
+            )
             await self._route.mark_manager_unavailable(
                 expected_manager_id=current, source=SOURCE, keep_waiting=True,
                 reason="the team lead's process runs another message contract; it finishes the tasks it holds "
@@ -773,17 +776,17 @@ class TeamLeadFollower:
     async def _end_kept_waits(self) -> None:
         """Fail the kept waiting replies once their lead left the records (critique C01)."""
 
-        if self._kept is None or not self._view.ready.is_set():
+        if not self._kept or not self._view.ready.is_set():
             return
-        lead, kept = self._kept
-        if lead in self._view.live():
-            return
-        self._kept = None
-        waiting = set(self._route.pending_response_ids)
-        ended = sorted(kept & waiting)
-        self._logger.info("A team lead that ran another contract left; the replies still waiting for it are failed. "
-                          "event=gateway_kept_waits_ended manager_id=%s waiting=%d", lead, len(ended))
-        await self._waiting.fail_waiting(ended)
+        live = self._view.live()
+        for lead, kept in list(self._kept.items()):
+            if lead in live:
+                continue
+            ended = sorted(kept & set(self._route.pending_response_ids))
+            await self._waiting.fail_waiting(ended)
+            self._kept.pop(lead)
+            self._logger.info("A team lead that ran another contract left; the replies still waiting for it are failed. "
+                              "event=gateway_kept_waits_ended manager_id=%s waiting=%d", lead, len(ended))
 
     def _choose(self, current: Optional[str], live: Mapping[str, TeamAgent]) -> Optional[str]:
         """The lead to route chats to (class docstring, "Which lead"), or None."""

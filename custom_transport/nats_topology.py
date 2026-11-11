@@ -13,9 +13,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from nats.errors import Error as NatsError
 from nats.js.errors import NotFoundError
-from custom_transport.subjects import NatsSubjectMapper, encode_durable_name
+from custom_transport.subjects import NatsSubjectMapper
 
 if TYPE_CHECKING:
     from custom_transport.nats_adapter import NatsTransportConfig
@@ -93,45 +92,6 @@ class NatsStreamTopology:
         )
         return specifications
 
-    def retired_stream_names(self) -> tuple[str, ...]:
-        """Streams earlier versions created that nothing uses now; the topology owner deletes them.
-
-        ``<PREFIX>_PRESENCE`` held the presence heartbeat until message contract step 7d
-        (who is live comes from the team's signed agent records); deleting it also removes the
-        gateway's durable presence consumer on it.
-        """
-
-        return (encode_durable_name(f"{self.mapper.prefix}_PRESENCE").upper(),)
-
-    async def _delete_retired_streams(self, jetstream: Any, logger: logging.Logger) -> None:
-        """Delete each retired stream that still exists; never stop the start for one.
-
-        It is looked up first, so a fresh install sends no delete. Deleting is a one-time
-        clean-up of an upgraded installation: a NATS login without the right to delete
-        streams (an external server whose login may only create and update them) gets a
-        warning naming the stream and how to remove it by hand, and the start goes on;
-        nothing uses the stream. Such a login waits for the request to time out (about
-        5 seconds) on every start until the stream is removed.
-        """
-
-        for name in self.retired_stream_names():
-            try:
-                await jetstream.stream_info(name)
-                await jetstream.delete_stream(name)
-            except NotFoundError:
-                # Never created, or another owner deleted it meanwhile.
-                continue
-            except (NatsError, TimeoutError) as exc:
-                logger.warning(
-                    "Could not delete stream %s, which this version no longer uses; nothing reads or writes it. "
-                    "Remove it with a NATS login that may delete streams, for example `nats stream rm %s`. "
-                    "event=nats_retired_stream_not_deleted stream=%s error_type=%s",
-                    name, name, name, type(exc).__name__,
-                )
-                continue
-            logger.info("Deleted a stream this version no longer uses. event=nats_retired_stream_deleted stream=%s",
-                        name)
-
     @staticmethod
     def differences(expected: Any, actual: Any) -> dict[str, tuple[Any, Any]]:
         fields = ("subjects", "retention", "storage", "num_replicas", "discard",
@@ -167,7 +127,6 @@ class NatsStreamTopology:
                 )
 
     async def reconcile(self, jetstream: Any, logger: logging.Logger) -> None:
-        await self._delete_retired_streams(jetstream, logger)
         if str(self.config.storage).lower() != "file":
             # Flushing to disk (sync_interval: always) cannot keep what is only in memory.
             logger.warning(

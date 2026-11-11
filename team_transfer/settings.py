@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Iterator
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
+from runtime_settings.retired_concurrency import RETIRED_CONCURRENCY_SETTING
 from runtime_settings.transport import RETIRED_PRESENCE_SETTING
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
@@ -93,7 +94,8 @@ class SettingsSection:
     # 7: tool_policy.output_retention_days (how long saved tool outputs are kept) joined it.
     # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
     # 9: transport.presence_max_age_seconds left it (the presence stream was removed, message contract step 7d).
-    schema_version: ClassVar[int] = 9
+    # 10: remove the obsolete concurrency key that earlier loaders left in saved files.
+    schema_version: ClassVar[int] = 10
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -307,6 +309,9 @@ def _applied(
         _set_path(candidate, path, value)
     for setting in settings:
         if setting.dotted in refused or setting.path in destination:
+            continue
+        if setting.path in {RETIRED_CONCURRENCY_SETTING, RETIRED_PRESENCE_SETTING}:
+            refused[setting.dotted] = "this version no longer has this setting"
             continue
         problem = _later_storage_problem(setting, base, context) or _set_path(
             candidate, setting.path, _under_root(setting.value, root)
@@ -675,12 +680,13 @@ __all__ = [
 # only values that differ from defaults, so old choices pass on unchanged and
 # settings absent from an older export use the current defaults. V9 removed
 # transport.presence_max_age_seconds (RETIRED_PRESENCE_SETTING): an older
-# export's value for it is dropped.
+# export's value for it is dropped. V10 also removes the obsolete concurrency key.
 
 
 def _without_retired_settings(records: SectionRecords) -> SectionRecords:
-    return [record for record in records if tuple(record.get("path", ())) != RETIRED_PRESENCE_SETTING]
+    retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
+    return [record for record in records if tuple(record.get("path", ())) not in retired]
 
 
-for _source in (5, 6, 7, 8):
+for _source in (5, 6, 7, 8, 9):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _without_retired_settings

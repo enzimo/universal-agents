@@ -29,7 +29,9 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Optional
 
-from custom_agents.delegated_work_runtime import delegated_tasks
+from custom_agents.delegated_work_runtime import (
+    delegated_tasks, open_delegations_for_owned_parents, pending_delegation_parents,
+)
 from custom_agents.execution_lanes_runtime import lane_of
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -203,7 +205,10 @@ async def wake_due_check_backs(agent: Any, *, now: Optional[datetime] = None) ->
     repository = delegated_tasks(agent)
     run = agent.task_manager.operations_runtime.run
     woken = 0
-    for wait in await run(repository.waits_for_requester, str(agent.team_id), str(agent.id)):
+    for parent_id in sorted(await run(partial(pending_delegation_parents, agent))):
+        wait = await run(repository.get_wait, str(agent.team_id), parent_id)
+        if wait is None:
+            continue
         if wait.check_back_at_utc is None or wait.check_back_at_utc > moment:
             continue
         if agent._execution_lanes.lane_busy(await lane_of(agent, wait.parent_task_id)):
@@ -338,7 +343,7 @@ async def send_progress_notes(agent: Any, *, now: Optional[datetime] = None) -> 
     repository = delegated_tasks(agent)
     manager = agent.task_manager
     run = manager.operations_runtime.run
-    open_records = await run(repository.list_open, str(agent.team_id), str(agent.id))
+    open_records = await run(partial(open_delegations_for_owned_parents, agent))
     sent = 0
     for root_id in sorted({record.root_task_id for record in open_records}):
         root = await run(manager.get_task_info, root_id)
