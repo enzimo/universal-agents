@@ -8,6 +8,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -85,6 +86,24 @@ def nats_transport_config_from_env(
     values["servers"] = servers or settings.nats_servers or [settings.nats_url]
     values.update(overrides)
     return NatsTransportConfig(**values)
+
+
+def nats_connect_options(config: NatsTransportConfig) -> dict[str, Any]:
+    """``nats.connect`` arguments for ``config``'s servers and login, as the transport adapter passes them.
+
+    For a test helper's own plain connection to the live server. The credentials file counts
+    too: a server that accepts only that file refuses a connection without it.
+    """
+
+    options: dict[str, Any] = {"servers": list(config.servers)}
+    for option, value in (
+        ("user", config.user),
+        ("password", config.password),
+        ("user_credentials", config.credentials_file),
+    ):
+        if value:
+            options[option] = value
+    return options
 
 
 def response_route_for_team(team_id: str) -> str:

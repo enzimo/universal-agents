@@ -6,13 +6,19 @@ connection plays another run, creating and updating streams the way another proc
 past this process's recorders. Requests are intercepted at ``JetStreamManager._api_request``
 to place another run's create at an exact moment, or to lose the reply of a create the server
 carried out.
+
+Streams every run shares by design are created by the real installation authority and
+transport adapter. The cleanup's own connection is checked against a server that refuses it,
+one that never answers, and one that requires a login.
 """
 
 from __future__ import annotations
 
 import json
+import socket
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +31,22 @@ from nats.js.api import ObjectStoreConfig, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 from nats.js.manager import JetStreamManager
 
-from custom_transport.nats_adapter import NatsTransportConfig
-from tests.live_nats_support import OWNER_METADATA_KEY, OwnedStreams, deleting_created_streams
+from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+from custom_transport.subjects import NatsSubjectMapper
+from runtime_settings.instance_layout import InstanceLayout
+from team_services.process import team_services_profile
+from tests import live_nats_support
+from tests.live_nats_client import nats_connect_options, nats_transport_config_from_env
+from tests.live_nats_support import (
+    OWNER_METADATA_KEY,
+    OwnedStreams,
+    delete_owned_streams,
+    deleting_created_streams,
+    shared_stream_names,
+)
 from tests.own_nats_server import own_nats_server
 from tests.test_live_message_contract import nats_server
+from tests.test_live_team_services import TEAM, installation
 
 pytestmark = [pytest.mark.live, pytest.mark.nats, pytest.mark.asyncio]
 
@@ -126,8 +144,9 @@ async def test_a_failing_test_removes_what_it_created_and_nothing_that_was_there
     assert await _stream_names(mine) == {"OTHER"}
 
 
+@pytest.mark.parametrize("afterwards", ["nothing", "a look-up and an update"])
 async def test_a_stream_another_run_creates_between_the_look_up_and_the_create_stays(
-    server: str, connections: tuple[Client, Client], monkeypatch: pytest.MonkeyPatch
+    server: str, connections: tuple[Client, Client], monkeypatch: pytest.MonkeyPatch, afterwards: str
 ) -> None:
     """The name is free when this test looks it up; another run creates it before this test's create arrives."""
 
@@ -144,6 +163,11 @@ async def test_a_stream_another_run_creates_between_the_look_up_and_the_create_s
             await mine.jetstream().stream_info("RACED")
         answered = await mine.jetstream().add_stream(config)  # the same settings: answered as without the recorder
         assert answered.config.name == "RACED"
+        if afterwards == "a look-up and an update":
+            # What InstallationAuthority._ensure_bucket does when it runs again. The name is
+            # one this test tried, but the stream it updates is another run's: not claimed.
+            await mine.jetstream().stream_info("RACED")
+            await mine.jetstream().update_stream(config)
 
     assert await _messages(mine, "RACED") == 1
 
@@ -244,3 +268,123 @@ async def test_a_recorder_opened_inside_another_keeps_its_own_mark(
         assert info.config.metadata[OWNER_METADATA_KEY] == outer.token
 
     assert await _stream_names(mine) == set()
+
+
+async def test_a_name_nats_py_refuses_is_not_kept_for_the_end(
+    server: str, connections: tuple[Client, Client]
+) -> None:
+    """nats-py refuses the name before sending; the end of the block has nothing to look up."""
+
+    mine, _ = connections
+    with _recording(server) as ownership:
+        with pytest.raises(ValueError, match="invalid stream name"):
+            await mine.jetstream().add_stream(_stream("TWO WORDS"))
+
+    assert ownership.tried == {}
+
+
+#: The contract's buckets without a team: one per server, which every installation on it uses.
+INSTALLATION_WIDE_BUCKETS = {"KV_UA1_AGENTS", "KV_UA1_CERTS", "KV_UA1_HOSTS", "KV_UA1_LOCKS", "KV_UA1_PLACEMENT"}
+
+
+async def test_the_shared_names_are_the_contracts_names_without_a_team_and_the_websites_default() -> None:
+    names = shared_stream_names(NatsTransportConfig(servers=["nats://127.0.0.1:4222"]))
+
+    assert names == INSTALLATION_WIDE_BUCKETS | {"UA1_WORK", "OBJ_UA1_BLOBS", "OBJ_ua_attachments"}
+
+
+async def test_buckets_every_installation_shares_are_neither_marked_nor_deleted(
+    server: str, connections: tuple[Client, Client], tmp_path: Path
+) -> None:
+    """The installation authority creates the contract's buckets: the team's are this test's, the rest the server's."""
+
+    mine, _ = connections
+    with _recording(server) as ownership:
+        async with AsyncExitStack() as stack:
+            await installation(stack, server, InstanceLayout.at(tmp_path / "instance"), team_services_profile(TEAM))
+
+    assert set(ownership.tried) == {f"KV_UA1_BLOCK_LIST_{TEAM}", f"KV_UA1_TEAM_VIEW_{TEAM}"}
+    assert await _stream_names(mine) == INSTALLATION_WIDE_BUCKETS
+    for name in INSTALLATION_WIDE_BUCKETS:
+        assert OWNER_METADATA_KEY not in ((await mine.jetstream().stream_info(name)).config.metadata or {})
+
+
+async def test_streams_every_team_shares_under_a_subject_prefix_are_neither_marked_nor_deleted(
+    server: str, connections: tuple[Client, Client]
+) -> None:
+    mine, _ = connections
+    config = NatsTransportConfig(servers=[server], subject_prefix="ua.shared", storage="memory")
+    adapter = NatsTransportAdapter(config=config, mapper=NatsSubjectMapper(team_id="team_a", subject_prefix="ua.shared"))
+    with deleting_created_streams(config) as ownership:
+        await adapter.connect(reconcile_topology=True)
+        await adapter.close()
+
+    created = {"UA_SHARED_WORK", "UA_SHARED_DEAD_LETTER"}
+    assert ownership.tried == {}
+    assert created <= ownership.shared_names
+    assert await _stream_names(mine) == created
+
+
+def _left_behind(url: str) -> OwnedStreams:
+    ownership = OwnedStreams([url])
+    ownership.tried["LEFT_BEHIND"] = None
+    return ownership
+
+
+async def test_the_cleanup_fails_at_once_naming_the_server_and_the_streams_when_the_server_refuses() -> None:
+    with socket.socket() as refusing:  # bound, never listening: every connection is refused
+        refusing.bind(("127.0.0.1", 0))
+        url = f"nats://127.0.0.1:{refusing.getsockname()[1]}"
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="LEFT_BEHIND") as raised:
+            delete_owned_streams(_left_behind(url), NatsTransportConfig(servers=[url]))
+
+    assert time.monotonic() - started < 5  # not the two minutes of nats-py's default retries
+    assert url in str(raised.value)
+
+
+async def test_the_cleanup_gives_up_on_a_server_that_never_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(live_nats_support, "CLEANUP_TIMEOUT_SECONDS", 1.0)
+    with socket.socket() as silent:  # accepts connections and never says a word
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        url = f"nats://127.0.0.1:{silent.getsockname()[1]}"
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="LEFT_BEHIND.* within 1 s: TimeoutError"):
+            delete_owned_streams(_left_behind(url), NatsTransportConfig(servers=[url]))
+
+    assert time.monotonic() - started < 3
+
+
+async def test_the_cleanup_logs_in_as_the_live_transport_does(tmp_path: Path) -> None:
+    with own_nats_server(nats_server(), tmp_path, "--user", "team", "--pass", "team-pass") as url:
+        config = NatsTransportConfig(servers=[url], user="team", password="team-pass")
+        connection = await nats.connect(**nats_connect_options(config), allow_reconnect=False)
+        try:
+            with deleting_created_streams(config):
+                await connection.jetstream().add_stream(_stream("GUARDED"))
+            assert await _stream_names(connection) == set()
+        finally:
+            await connection.close()
+
+
+async def test_the_connect_options_carry_the_credentials_file() -> None:
+    """A server that accepts only a credentials file refuses a connection without it (not run here: it needs an operator setup)."""
+
+    config = NatsTransportConfig(servers=["nats://a:4222", "nats://b:4222"], credentials_file="/run/secrets/team.creds")
+
+    assert nats_connect_options(config) == {
+        "servers": ["nats://a:4222", "nats://b:4222"],
+        "user_credentials": "/run/secrets/team.creds",
+    }
+
+
+async def test_every_test_marked_nats_runs_inside_a_recorder_for_the_live_server(
+    delete_streams_a_live_nats_test_created: OwnedStreams | None,
+) -> None:
+    ownership = delete_streams_a_live_nats_test_created
+
+    assert isinstance(ownership, OwnedStreams)
+    assert ownership.token in live_nats_support._active_tokens
+    assert JetStreamManager.add_stream.__name__ == "recording_add_stream"
+    assert ownership.shared_names == shared_stream_names(nats_transport_config_from_env())

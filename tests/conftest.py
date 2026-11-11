@@ -4,9 +4,13 @@ import os
 import sys
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    # Imported where the fixture runs: it loads nats-py, which unmarked tests do not need.
+    from tests.live_nats_support import OwnedStreams
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -128,19 +132,20 @@ def restore_process_environment_between_tests():
 @pytest.fixture(autouse=True)
 def delete_streams_a_live_nats_test_created(
     request: pytest.FixtureRequest,
-) -> Generator[None, None, None]:
+) -> Generator[OwnedStreams | None, None, None]:
     """Remove the streams a test marked ``nats`` created on the shared server, passed or failed.
 
-    See ``tests.live_nats_support.deleting_created_streams``.
+    Yields the recorder (``None`` for other tests). See
+    ``tests.live_nats_support.deleting_created_streams``.
     """
 
     if request.node.get_closest_marker("nats") is None:
-        yield
+        yield None
         return
     from tests.live_nats_support import deleting_created_streams
 
-    with deleting_created_streams():
-        yield
+    with deleting_created_streams() as ownership:
+        yield ownership
 
 
 @pytest.fixture

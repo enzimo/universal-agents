@@ -29,14 +29,13 @@ from custom_transport.protocol1.host_keys import load_authority_keys, load_host_
 from custom_transport.protocol1.host_runtime import MessageHost
 from docker import message_hosts
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
-from live_nats_client import delete_team_streams, nats_transport_config_from_env
+from live_nats_client import delete_team_streams, nats_connect_options, nats_transport_config_from_env
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 
 
 async def _connect(stack: AsyncExitStack, runtime: str):
-    config = nats_transport_config_from_env()
-    connection = await nats.connect(servers=list(config.servers), user=config.user, password=config.password,
+    connection = await nats.connect(**nats_connect_options(nats_transport_config_from_env()),
                                     inbox_prefix=f"_INBOX.{runtime}".encode(), allow_reconnect=False)
     stack.push_async_callback(connection.close)
     return connection

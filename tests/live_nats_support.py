@@ -15,7 +15,9 @@ import pytest
 from nats.aio.client import Client
 from nats.js.api import StreamConfig, StreamInfo
 from nats.js.errors import APIError, NotFoundError
-from nats.js.manager import JetStreamManager
+
+# nats-py's own check of a stream name, which add_stream and stream_info run before sending.
+from nats.js.manager import JetStreamManager, _validate_stream_name
 
 if TYPE_CHECKING:
     # Only for the annotation: the protocol 1 contract test uses this module
@@ -63,11 +65,47 @@ OWNER_METADATA_KEY = "ua.test.owner"
 #: JetStream's error code when a stream with the name exists with another configuration
 #: (JSStreamNameExistErr). Metadata takes part in that comparison.
 STREAM_NAME_IN_USE = 10058
+#: The longest a test's teardown spends deleting its streams, connecting included.
+CLEANUP_TIMEOUT_SECONDS = 30.0
 
 # Tokens of the OwnedStreams active in this process. A create that already carries one was
 # marked by a recorder opened inside another, and keeps that mark; any other token was left
 # in a configuration object reused from an earlier test, and is replaced.
 _active_tokens: set[str] = set()
+
+
+def shared_stream_names(config: NatsTransportConfig) -> frozenset[str]:
+    """The streams on ``config``'s server that every run shares by design; no test may delete them.
+
+    - The message contract's streams, key-value buckets (``KV_<name>``) and object stores
+      (``OBJ_<name>``) whose names hold no ``{team}``: the server keeps one of each for every
+      installation on it (``custom_messages.wire.buckets``).
+    - The Website's attachment object store under its default name: every gateway on the server
+      that keeps the default shares it.
+    - With a subject prefix, the prefix's work and dead-letter streams, which every team using
+      that prefix shares (``NatsStreamTopology``).
+
+    A contract name without ``{team}`` counts as shared even if only one run used it: the worst a
+    wrong entry here does is leave a stream behind, never delete one another run uses.
+    """
+
+    from custom_messages.wire.buckets import TEAM_PLACEHOLDER
+    from custom_transport.protocol1.contract_files import transport
+    from default_values import INTERACTIVE_APP_DEFAULTS
+
+    contract = transport()
+    names = {name for name in contract["streams"] if TEAM_PLACEHOLDER not in name}
+    names |= {f"KV_{name}" for name in contract["key_value"] if TEAM_PLACEHOLDER not in name}
+    names |= {f"OBJ_{name}" for name in contract["object_store"] if TEAM_PLACEHOLDER not in name}
+    names.add(f"OBJ_{INTERACTIVE_APP_DEFAULTS.internal_website_attachment_nats_object_bucket.value}")
+    if config.subject_prefix:
+        from custom_transport.nats_topology import NatsStreamTopology
+        from custom_transport.subjects import NatsSubjectMapper
+
+        # The prefix replaces the team in every stream name, so any team id gives the same names.
+        mapper = NatsSubjectMapper(team_id="any_team", subject_prefix=config.subject_prefix)
+        names |= {str(spec.name) for spec in NatsStreamTopology(config, mapper).specifications()}
+    return frozenset(names)
 
 
 class OwnedStreams:
@@ -93,10 +131,23 @@ class OwnedStreams:
     - at the end, a stream is deleted only when it carries the token or a recorded
       generation. A stream another client created, before or after, has neither, and stays.
 
+    Streams every run on the server shares by design (``shared_stream_names``) belong to the
+    server, not to a test: their creates are neither marked nor recorded.
+
     Nothing adds the token to a stream that exists already, so no other client's stream is
-    ever claimed. One gap remains: between the last look-up and the delete, another client
-    could delete this test's stream and create a new one with the same name. No participant
-    deletes a stream it does not own, and JetStream has no conditional delete.
+    ever claimed. One gap can delete another client's stream: between the last look-up and
+    the delete, another client could delete this test's stream and create a new one with the
+    same name. No participant deletes a stream it does not own, and JetStream has no
+    conditional delete.
+
+    Two gaps leave a stream this test created behind, and delete nothing; JetStream has no
+    create that says who made the stream, so neither can be closed:
+
+    - after ``STREAM_NAME_IN_USE``, the caller's unchanged create makes the stream when its
+      holder deleted it in between; that stream carries no token;
+    - a create whose reply was lost is confirmed only by this process's own later create or
+      update. When another process updates the stream first, the token is gone and no
+      generation was recorded.
 
     A side effect: while a stream carries the token, another client's create of it with the
     same settings also answers ``STREAM_NAME_IN_USE``. Product code looks a stream up before
@@ -105,13 +156,14 @@ class OwnedStreams:
     before this test created it would see that.
     """
 
-    def __init__(self, servers: Iterable[str]) -> None:
+    def __init__(self, servers: Iterable[str], shared_names: Iterable[str] = ()) -> None:
         self.token = uuid.uuid4().hex
         # Names whose create was sent, in order; noted before sending, so a create whose
         # outcome is unknown is still checked at the end.
         self.tried: dict[str, None] = {}
+        self.shared_names = frozenset(shared_names)
         self._generations: dict[str, set[datetime]] = {}
-        self._shared = {_server_address(server) for server in servers}
+        self._watched = {_server_address(server) for server in servers}
 
     def owns(self, info: StreamInfo) -> bool:
         """Whether this test created the stream ``info`` describes."""
@@ -125,7 +177,7 @@ class OwnedStreams:
         """Whether ``manager``'s requests go to the shared server this recorder watches."""
 
         url = manager._nc.connected_url
-        return url is not None and _server_address(url.geturl()) in self._shared
+        return url is not None and _server_address(url.geturl()) in self._watched
 
     def _remember(self, info: StreamInfo) -> None:
         if info.created is not None and info.config.name:
@@ -163,8 +215,11 @@ class OwnedStreams:
         ) -> StreamInfo:
             requested = (config or StreamConfig()).evolve(**params)
             name = requested.name
-            if not name or not ownership._records(self):
+            if not name or name in ownership.shared_names or not ownership._records(self):
                 return await add_stream(self, config, **params)
+            # A name nats-py refuses never reaches the server, and the look-up at the end would
+            # refuse it too: raise before noting it, as add_stream would.
+            _validate_stream_name(name)
             ownership.tried[name] = None
             marked = ownership._marked(requested)
             try:
@@ -213,25 +268,26 @@ def delete_owned_streams(ownership: OwnedStreams, config: NatsTransportConfig) -
     """Delete the streams ``ownership`` owns on the server ``config`` names; returns their names.
 
     Runs on its own thread and event loop, so it works from a fixture's teardown whether or
-    not the test used an event loop.
+    not the test used an event loop. It logs in as the live transport does, and gives up after
+    ``CLEANUP_TIMEOUT_SECONDS`` with an error naming the server and the streams: a server that
+    is down or does not answer fails the teardown instead of holding it.
     """
 
     import nats
 
+    from tests.live_nats_client import nats_connect_options
+
     if not ownership.tried:
         return []
-    options: dict[str, Any] = {
-        "servers": config.servers,
+    # One attempt and one retry half a second later. Otherwise nats-py retries a refused first
+    # connection about 60 times, 2 s apart, whatever allow_reconnect says; 0 means no limit.
+    options = {
+        **nats_connect_options(config),
         "allow_reconnect": False,
+        "max_reconnect_attempts": 1,
+        "reconnect_time_wait": 0.5,
         "connect_timeout": 5,
     }
-    for option, value in (
-        ("user", config.user),
-        ("password", config.password),
-        ("user_credentials", config.credentials_file),
-    ):
-        if value:
-            options[option] = value
 
     async def delete() -> list[str]:
         connection = await nats.connect(**options)
@@ -245,17 +301,21 @@ def delete_owned_streams(ownership: OwnedStreams, config: NatsTransportConfig) -
 
     def run() -> None:
         try:
-            results.append(asyncio.run(delete()))
+            results.append(asyncio.run(asyncio.wait_for(delete(), CLEANUP_TIMEOUT_SECONDS)))
         except BaseException as error:  # raised again on the caller's thread
             failures.append(error)
 
-    thread = threading.Thread(target=run, name="delete-test-streams")
+    # A daemon thread, joined with a bound of its own: a connection whose close hangs after the
+    # timeout can neither hold the teardown nor keep the test process from ending.
+    thread = threading.Thread(target=run, name="delete-test-streams", daemon=True)
     thread.start()
-    thread.join()
-    if failures:
+    thread.join(CLEANUP_TIMEOUT_SECONDS + 5)
+    if failures or thread.is_alive():
+        error = failures[0] if failures else TimeoutError("the deletion did not end")
         raise RuntimeError(
-            f"Could not delete the test's NATS streams among {list(ownership.tried)}: {failures[0]}"
-        ) from failures[0]
+            f"Could not delete the test's NATS streams among {list(ownership.tried)} on "
+            f"{list(config.servers)} within {CLEANUP_TIMEOUT_SECONDS:g} s: {type(error).__name__}: {error}"
+        ) from error
     return results[0]
 
 
@@ -268,17 +328,18 @@ def deleting_created_streams(config: NatsTransportConfig | None = None) -> Itera
     deleted; a shared test server ran out of storage after about 1,500 of
     them. ``tests/conftest.py`` wraps every test marked ``nats`` in this, so a
     test removes what it created whether it passed or failed. ``OwnedStreams``
-    says how a stream is known to be this test's own.
+    says how a stream is known to be this test's own; streams every run shares
+    by design stay (``shared_stream_names``).
 
-    ``config`` names the server; by default the live server from the environment, read
-    before the test runs, because a test may point NATS_URL at a temporary server.
+    ``config`` names the server and its login; by default the live server from the environment,
+    read before the test runs, because a test may point NATS_URL at a temporary server.
     """
 
     if config is None:
         from tests.live_nats_client import nats_transport_config_from_env
 
         config = nats_transport_config_from_env()
-    ownership = OwnedStreams(config.servers)
+    ownership = OwnedStreams(config.servers, shared_stream_names(config))
     _active_tokens.add(ownership.token)
     try:
         with pytest.MonkeyPatch.context() as patch:
