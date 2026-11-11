@@ -209,7 +209,7 @@ from custom_agents.strands_model_factory import (
     build_strands_model,
     resolve_context_window_tokens,
 )
-from custom_agents.agent_host import attach_agent, detach_agent, report_agent_state
+from custom_agents.agent_host import attach_agent, detach_agent, report_agent_state, report_restored_work
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.context_engine import (
     ContextEngine,
@@ -4969,6 +4969,9 @@ class UniversalAgent(BaseModel):
             schedule_pending_work(self)
 
             report_agent_state(self)
+            # Its saved subtasks are restored now: fail those sent by name to agents that
+            # left for good while it was down, once the team's view is read.
+            report_restored_work(self)
             self._logger.info(
                 "[%s] NATS transport ready; waiting for messages until exit.", self.id
             )
@@ -5537,7 +5540,13 @@ class UniversalAgent(BaseModel):
         msg_meta: MessageMeta,
     ):
         """
-        Handles messages with a ControlInstruction payload.
+        Handles messages with a ControlInstruction payload: only ``stop`` for a task.
+
+        Pausing, resuming or stopping an agent comes only as the team lead's signed
+        ``agent.pause``, ``agent.resume`` and ``agent.exit`` (``custom_agents.live_controls``),
+        which check the sender's session. This message's sender is whatever it says
+        (``from_agent_id``), and any process with the team's NATS login can publish it, so
+        every other instruction is dropped and logged with the sender it claims.
 
         Args:
             control_instruction (ControlInstruction): The extracted ControlInstruction object.
@@ -5547,22 +5556,7 @@ class UniversalAgent(BaseModel):
             instruct_string = control_instruction.instruction.instruction
 
             if control_type == ControlType.CONTROL_MSG:
-                if instruct_string == "exit":
-                    self._logger.info(
-                        f"[{self.id}] Agent received 'exit' control instruction."
-                    )
-                    await self.exit_agent()
-                elif instruct_string == "pause":
-                    self._logger.info(
-                        f"[{self.id}] Agent received 'pause' control instruction."
-                    )
-                    await self.pause()
-                elif instruct_string == "resume":
-                    self._logger.info(
-                        f"[{self.id}] Agent received 'resume' control instruction."
-                    )
-                    await self.resume()
-                elif instruct_string == "stop":
+                if instruct_string == "stop":
                     self._logger.info(
                         f"[{self.id}] Agent received 'stop' control instruction: "
                         f"target_task_id={control_instruction.target_task_id or 'unknown'} "
@@ -5647,7 +5641,15 @@ class UniversalAgent(BaseModel):
                     )
                 else:
                     self._logger.warning(
-                        f"[{self.id}] Received unknown CONTROL_MSG instruction: '{instruct_string}'"
+                        "[%s] A control message other than a task stop was dropped: an agent is paused, "
+                        "resumed or stopped only by the team lead's signed request. "
+                        "event=agent_control_instruction_dropped agent_id=%s instruction=%s "
+                        "claimed_from_agent_id=%s claimed_from_agent_name=%s",
+                        self.id,
+                        self.id,
+                        instruct_string,
+                        getattr(msg_header, "from_agent_id", None),
+                        getattr(msg_meta, "from_agent_name", None),
                     )
         except Exception as e:
             self._logger.error(

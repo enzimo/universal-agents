@@ -494,14 +494,18 @@ other agents stops too.
 When an agent leaves the team for good (it stops, or its process restarts after a
 crash), work that was sent to it by name and that it never started fails at once
 with a message saying so, so the agent that asked for it can decide what to do
-next. Work it had already started is not failed: a restarted agent picks it up
-from where it was saved, and work it handed back goes to another agent of the
-same kind. An agent that only stopped answering for a while is not given up on;
-its work is checked again later and times out as usual if it never comes back.
+next: only that piece fails, and the rest of your request goes on. This also
+happens when the asking agent was itself restarted meanwhile: once it is back, it
+checks what it was waiting for. Work it had already started is not failed: a
+restarted agent picks it up from where it was saved, and work it handed back goes
+to another agent of the same kind. An agent that only stopped answering for a
+while is not given up on; its work is checked again later and times out as usual
+if it never comes back.
 
 The team lead can pause, resume or stop other agents. Only the team lead does
 this, never another agent, and never for itself: stopping the team lead would
-end its process without the approval a restart needs. When an agent's answer is
+end its process without the approval a restart needs. The team has one lead: the
+team lead cannot start another TeamArchitect. When an agent's answer is
 lost, the team lead says it cannot tell whether the change happened, and checks
 the agent's state before asking again.
 

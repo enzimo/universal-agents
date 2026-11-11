@@ -80,25 +80,36 @@ async def _until(check):
             await asyncio.sleep(0.005)
 
 
-@asynccontextmanager
-async def _reading(*, store=None, closed_before_start=False):
-    store = store or trust_store()
-    records = _Records(store)
-    if closed_before_start:
-        key, raw = _closed_lead_session()
-        records.values["agent_session"][key] = raw
-
+def _reader_host(records, store):
     async def fetch(raw):
         return False
 
-    host = SimpleNamespace(identity=SimpleNamespace(installation=INSTALL), clock=lambda: NOW,
+    return SimpleNamespace(identity=SimpleNamespace(installation=INSTALL), clock=lambda: NOW,
                            live=SimpleNamespace(trust=SimpleNamespace(store=store)), records=records, fetch_trust=fetch)
+
+
+@asynccontextmanager
+async def _reading(*, store=None, closed_before_start=False, preload=None, on_reader=None):
+    """A running reader. By default the lead is live; ``preload`` (record -> key -> raw) is what the
+    buckets held before it started, and then nothing more is written. ``on_reader`` gets the reader
+    before it starts, to listen from its first reading on."""
+
+    store = store or trust_store()
+    records = _Records(store)
+    if closed_before_start:
+        preload = {"agent_session": dict([_closed_lead_session()])}
+    for record, values in (preload or {}).items():
+        records.values[record].update(values)
+
+    host = _reader_host(records, store)
     reader = TeamAgents(host, TEAM, recheck_seconds=0.02)
+    if on_reader is not None:
+        on_reader(reader)
     stop = asyncio.Event()
     task = asyncio.create_task(reader.run(stop))
     try:
         await asyncio.wait_for(reader.ready.wait(), 2)
-        if not closed_before_start:
+        if preload is None:
             await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
             await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
             await records.feed("agent", KEY, _signed(_agent()))
@@ -485,6 +496,277 @@ async def test_a_forged_exit_from_another_host_is_not_an_exit():
         await asyncio.sleep(0.1)
 
         assert reader.lead() is not None and not reader.left_for_good("lead") and changes == []
+
+
+# -- which session's end counts as the end of a run (F1, A1) --------------------------------------
+# One run of an agent can hold more than one session: a refused renewal, a missing placement or a
+# lost sessions.open reply opens another, each with a later placed_at. Only the newest one's end
+# says the run ended, and only while nothing else the reader holds says it goes on.
+
+
+def _lead_session(session_id, *, revision, started, ends, sequence=1, issued=None):
+    """The lead's session example signed again as ``session_id``, a session of the same agent run."""
+
+    session = json.loads((EXAMPLES / "trust" / "sessions" / "lead.json").read_bytes())
+    session.update(key=f"session.{INSTALL}.{TEAM}.{session_id}", sequence=sequence,
+                   issued_at=format_timestamp(issued or started))
+    session["body"].update(session=session_id, placement_revision=revision, started_at=format_timestamp(started),
+                           ends_at=format_timestamp(ends))
+    return session["key"], _signed(session)
+
+
+def _current_lead_session():
+    """``s-lead-1`` as the example has it: open until the next day."""
+
+    session = json.loads((EXAMPLES / "trust" / "sessions" / "lead.json").read_bytes())
+    return session["key"], _signed(session)
+
+
+def _superseded_lead_session(*, ended=True):
+    """``s-lead-0``: the run's earlier session, opened an hour before ``s-lead-1`` and never renewed."""
+
+    started = NOW - timedelta(minutes=90)
+    return _lead_session("s-lead-0", revision=6, started=started,
+                         ends=NOW - timedelta(seconds=1) if ended else NOW + timedelta(hours=1))
+
+
+def _placed():
+    return {KEY: _signed(_example("placement/lead.json"))}
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_session_running_out_is_not_the_exit_of_an_agent_out_of_view_for_long():
+    """The host stops reporting for twelve minutes, so the agent's last view entry is no longer kept."""
+
+    async with _reading() as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        await records.feed("agent_session", *_current_lead_session())
+        await records.feed("agent_session", *_superseded_lead_session())
+        assert len(reader._sessions) == 2
+        host.clock = lambda: NOW + timedelta(seconds=31)
+        await _until(lambda: reader.agent("lead") is None)
+        host.clock = lambda: NOW + timedelta(minutes=12)
+        await _until(lambda: reader.departed_agent("lead") is None)
+        await asyncio.sleep(0.1)  # several more checks
+
+        assert reader.departure_reason("lead") == "host_unavailable" and not reader.left_for_good("lead")
+        assert not any(exited for _, exited in changes)
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_reader_without_the_host_record_does_not_count_an_earlier_session_as_the_exit():
+    preload = {"agent_session": dict([_current_lead_session(), _superseded_lead_session()]),
+               "placement": _placed(), "agent": {KEY: _signed(_agent())}}
+    async with _reading(preload=preload) as (reader, records, host):
+        assert reader.agent("lead") is None  # its host's record has not arrived
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead") and reader.departed_agent("lead") is None
+
+        await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+        await _until(lambda: reader.lead() is not None)
+
+
+@pytest.mark.asyncio
+async def test_the_newest_session_alone_says_the_run_goes_on():
+    """Nothing else is held for the agent: the open later session decides."""
+
+    preload = {"agent_session": dict([_current_lead_session(), _superseded_lead_session()])}
+    async with _reading(preload=preload) as (reader, records, host):
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead")
+
+
+@pytest.mark.asyncio
+async def test_a_closed_newest_session_counts_once_the_agent_is_no_longer_placed():
+    """A held placement (a newer placement, or one a handover keeps) says the agent may still run."""
+
+    preload = {"agent_session": dict([_closed_lead_session()]), "placement": _placed()}
+    async with _reading(preload=preload) as (reader, records, host):
+        changes = []
+        _heard(reader, changes)
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead")
+
+        await records.feed("placement", KEY, None)
+        await _until(lambda: reader.left_for_good("lead"))
+        assert reader.departure_reason("lead") == "session_closed"
+        await asyncio.sleep(0.1)
+        assert [exited for _, exited in changes if "lead" in exited] == [frozenset({"lead"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("sessions", "record_session", "exits"), [
+    # Its record names the closed newest session: after a crash the record can outlive its expiry in a
+    # running reader (expiry gives no deletion), and the restarted host's close is the evidence.
+    ("closed newest", "s-lead-1", True),
+    # Its host crashed after opening s-lead-1 but before rewriting the record, which still names s-lead-0;
+    # the restart closed both. A record naming an older known session is stale.
+    ("both closed", "s-lead-0", True),
+    # Its record names a session this reader does not hold: it may be newer than any it knows.
+    ("only the earlier one", "s-lead-1", False),
+])
+async def test_a_held_record_keeps_the_agent_only_while_it_names_a_session_the_reader_does_not_know(
+        sessions, record_session, exits):
+    held = {"closed newest": [_closed_lead_session()],
+            "both closed": [_superseded_lead_session(), _closed_lead_session()],
+            "only the earlier one": [_superseded_lead_session()]}[sessions]
+    preload = {"agent_session": dict(held), "placement": _placed(),
+               "agent": {KEY: _signed(_agent(session=record_session))}}
+    async with _reading(preload=preload) as (reader, records, host):
+        await _until(lambda: "lead" in reader._agents)
+        assert not reader.left_for_good("lead")  # still placed
+
+        await records.feed("placement", KEY, None)
+        if exits:
+            await _until(lambda: reader.left_for_good("lead"))
+        else:
+            await asyncio.sleep(0.1)
+            assert not reader.left_for_good("lead") and "lead" in reader._agents
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_left_the_view_under_an_earlier_session_has_not_left_for_good_when_a_later_one_exists():
+    """The departure path: the session its last record named ends, but the run already has a later session."""
+
+    preload = {"agent_session": dict([_superseded_lead_session(ended=False)])}
+    async with _reading(preload=preload) as (reader, records, host):
+        await records.feed("placement", KEY, _placed()[KEY])
+        await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+        await records.feed("agent", KEY, _signed(_agent(session="s-lead-0")))
+        await _until(lambda: reader.lead() is not None)
+        changes = []
+        _heard(reader, changes)
+
+        await records.feed("agent_session", *_current_lead_session())
+        await records.feed("agent_session", *_lead_session(
+            "s-lead-0", revision=6, started=NOW - timedelta(minutes=90), ends=NOW - timedelta(seconds=1), sequence=2,
+            issued=NOW - timedelta(seconds=1)))
+        await _until(lambda: reader.agent("lead") is None)
+        await asyncio.sleep(0.1)
+        assert not reader.left_for_good("lead") and not any(exited for _, exited in changes)
+
+        # The host rewrites the record with the session it holds now.
+        await records.feed("agent", KEY, _signed(_agent(sequence=101, session="s-lead-1")))
+        await _until(lambda: reader.lead() is not None)
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_agents_last_session_record_forgets_its_departure():
+    """F3: what the reader keeps about departures is bounded by how long session records are kept.
+
+    The team services delete records in the order they were last signed, so the run's earlier
+    session goes first; while the closed newest one is held, the exit is kept and not heard again.
+    """
+
+    superseded, closed = _superseded_lead_session(), _closed_lead_session()
+    async with _reading(preload={"agent_session": dict([superseded, closed])}) as (reader, records, host):
+        assert reader.left_for_good("lead")
+        changes = []
+        _heard(reader, changes)
+
+        await records.feed("agent_session", superseded[0], None)
+        await asyncio.sleep(0.1)  # several more checks
+        assert reader.left_for_good("lead") and changes == []
+
+        await records.feed("agent_session", closed[0], None)
+        assert reader.departure_reason("lead") is None and reader.departed_agent("lead") is None
+        assert not reader.left_for_good("lead")
+
+
+# -- exits found at the first reading are recorded, not told (F3, A3; C02) ---------------------------
+
+
+def _closed_session_of(agent):
+    """A closed session of another agent run, as weeks of pool workers leave behind."""
+
+    session = json.loads((EXAMPLES / "trust" / "sessions" / "lead.json").read_bytes())
+    session_id = f"s-{agent}-1"
+    session.update(key=f"session.{INSTALL}.{TEAM}.{session_id}", sequence=2,
+                   issued_at=format_timestamp(NOW - timedelta(seconds=1)))
+    session["body"].update(session=session_id, agent=agent, ends_at=format_timestamp(NOW - timedelta(seconds=1)))
+    return session["key"], _signed(session)
+
+
+@pytest.mark.asyncio
+async def test_a_start_with_many_retained_exits_tells_nobody_and_reads_each_agents_work_once(caplog, monkeypatch):
+    """A3: no 'left for good' line and no read per retained exit; one read when the agent restored its work."""
+
+    from custom_agents import agent_requests
+    from custom_agents.agent_host import report_restored_work
+    from tests.test_agent_host_sessions import _hosted, _process
+    from tests.test_team_directory import directory_owner, subtask
+
+    process, _ = _process()
+    owner = directory_owner(pending=[subtask("sub_1", "worker_quiet")])  # nothing waits for an agent that left
+    reads = []
+    pending = owner.task_manager.get_pending_subtasks
+    owner.task_manager.get_pending_subtasks = lambda: reads.append(True) or pending()
+    hosted = _hosted(owner.id)
+    hosted.agent = owner
+    process.agents[owner.id] = hosted
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", process)
+    heard = []
+
+    def attach(reader):
+        process.team_agents = reader
+        reader.listen(heard.append)
+        reader.listen(process._team_changed)
+
+    retained = dict(_closed_session_of(f"worker_{index}") for index in range(40))
+    with caplog.at_level(logging.INFO):
+        async with _reading(preload={"agent_session": retained}, on_reader=attach) as (reader, records, host):
+            assert all(reader.left_for_good(f"worker_{index}") for index in range(40))
+            await asyncio.wait_for(report_restored_work(owner), 2)
+            await asyncio.sleep(0.1)  # several more checks
+            assert heard == []
+
+    assert len(reads) == 1
+    assert [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING] == []
+    [counted] = [record.getMessage() for record in caplog.records
+                 if "event=team_agents_unseen_exits " in record.getMessage()]
+    assert "count=40" in counted and "event=team_agents_unseen_exit " not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_exit_while_the_readers_run_was_restarting_is_told():
+    """C02: an error ends the reader's run and the host's supervisor runs it again; an exit meanwhile is told."""
+
+    store = trust_store()
+    records = _Records(store)
+    reader = TeamAgents(_reader_host(records, store), TEAM, recheck_seconds=0.02)
+    changes = []
+    _heard(reader, changes)
+    stop = asyncio.Event()
+    first = asyncio.create_task(reader.run(stop))
+    await asyncio.wait_for(reader.ready.wait(), 2)
+    await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
+    await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+    await records.feed("agent", KEY, _signed(_agent()))
+    await _until(lambda: reader.lead() is not None)
+
+    checks = reader._retry_pending
+
+    async def broken():
+        raise RuntimeError("a check failed")
+
+    reader._retry_pending = broken
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(first, 2)
+    reader._retry_pending = checks
+    # Meanwhile the lead exits. The buckets keep delete markers, which a new watch gives as deletions.
+    records.values["agent"][KEY] = None
+    records.values["placement"][KEY] = None
+    records.values["agent_session"].update([_closed_lead_session()])
+
+    second = asyncio.create_task(reader.run(stop))
+    try:
+        await _until(lambda: reader.left_for_good("lead"))
+        await asyncio.sleep(0.1)
+        assert [exited for _, exited in changes if "lead" in exited] == [frozenset({"lead"})], "heard once"
+    finally:
+        stop.set()
+        await asyncio.wait_for(second, 2)
 
 
 def _worker_host_record(host):
