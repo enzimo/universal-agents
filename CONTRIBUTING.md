@@ -287,6 +287,10 @@ It starts isolated Sealbox and broker services using `sealbox-server` and
 `SEALBOX_CLI_PATH`. It checks the first team and personal saves, onboarding
 handover consumption, signed lookup, owner isolation, restart persistence and
 damaged tenant refusal. Missing binaries are an explicit coverage gap.
+Each test's `sealbox-server` writes its output to a log file beside its token
+file; a start counts only when that log names the readiness check's
+`x-request-id`, so the binary must log request ids with
+`RUST_LOG=info,tower_http=debug`, as every Sealbox release so far does.
 Container acceptance must verify a real onboarding credential save and signed
 lookup before and after restart; service health alone does not prove storage
 works. Never include the key in logs or acceptance output.

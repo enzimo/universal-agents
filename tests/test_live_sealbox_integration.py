@@ -5,10 +5,12 @@ import json
 import hashlib
 import logging
 import os
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -98,7 +100,7 @@ SEALBOX_TEST_LOG_FILTER = "info,tower_http=debug"
 
 
 def _start_own_sealbox(
-    server: Path, server_env: dict[str, str], port: int, token_file: Path
+    server: Path, server_env: dict[str, str], port: int, token_file: Path, *, wait_seconds: float = 8
 ) -> subprocess.Popen[str] | None:
     """Start sealbox-server on ``port``; None when another program already listens there.
 
@@ -108,7 +110,9 @@ def _start_own_sealbox(
     200 answer alone: any HTTP server may answer one. The start is done when a request
     carrying a random ``x-request-id`` gets a 200 and this server's own log holds that id,
     so this process served it. Another program on the port fails that check, and this
-    server then stops with "Failed to bind address".
+    server then stops with "Failed to bind address". A sealbox-server that answers but
+    does not log request ids under ``SEALBOX_TEST_LOG_FILTER`` can never pass the check;
+    the error at the deadline says so rather than calling it unreachable.
 
     The server's output goes to a log file of its own beside ``token_file``, named in the
     errors: a pipe nobody reads would stall a server that logs every request once it filled.
@@ -129,7 +133,8 @@ def _start_own_sealbox(
         )
     try:
         token = token_file.read_text().strip()
-        deadline = time.time() + 8
+        answered_without_id = False
+        deadline = time.time() + wait_seconds
         while time.time() < deadline:
             if process.poll() is not None:
                 if "Failed to bind address" in log_file.read_text(errors="replace"):
@@ -147,11 +152,20 @@ def _start_own_sealbox(
             except httpx.HTTPError:
                 time.sleep(0.1)
                 continue
-            # The server logs the request before it answers, so the id is in its log by now.
-            if answer.status_code == 200 and request_id in log_file.read_text(errors="replace"):
-                return process
-            # Another program answered: this server stops once it fails to bind.
+            if answer.status_code == 200:
+                # The server logs the request before it answers, so the id is in its log by now.
+                if request_id in log_file.read_text(errors="replace"):
+                    return process
+                # Either another program answered (this server stops once it fails to bind)
+                # or this server does not log request ids; the deadline tells them apart.
+                answered_without_id = True
             time.sleep(0.1)
+        if answered_without_id:
+            raise RuntimeError(
+                f"a server on port {port} answered the check with 200, but this sealbox-server's log "
+                "never named the check's x-request-id; the check needs a sealbox-server that logs "
+                f"request ids with RUST_LOG={SEALBOX_TEST_LOG_FILTER}; its output is in {log_file}"
+            )
         raise RuntimeError(f"sealbox-server did not become reachable; its output is in {log_file}")
     except BaseException:
         stop_owned_process(process, name=f"sealbox-server on port {port}", timeout=3)
@@ -1276,6 +1290,45 @@ def test_a_sealbox_start_does_not_take_a_server_that_answers_every_request_for_i
         catch_all.shutdown()
         catch_all.server_close()
     assert answered  # the program on the port did answer the check with 200
+
+
+def test_a_sealbox_start_names_a_server_that_answers_without_logging_the_checks_request_id(
+    tmp_path: Path,
+) -> None:
+    # A stand-in for a sealbox-server that binds its port and answers every check with 200
+    # but logs nothing, as one that does not log request ids would.
+    program = tmp_path / "answer_without_logging.py"
+    program.write_text(
+        "import os\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "\n"
+        "class AnswerEverything(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Length', '0')\n"
+        "        self.end_headers()\n"
+        "\n"
+        "    def log_message(self, *_args):\n"
+        "        pass\n"
+        "\n"
+        "host, port = os.environ['LISTEN_ADDR'].rsplit(':', 1)\n"
+        "HTTPServer((host, int(port)), AnswerEverything).serve_forever()\n"
+    )
+    stand_in = tmp_path / "sealbox-server"
+    stand_in.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -I {shlex.quote(str(program))}\n")
+    stand_in.chmod(0o755)
+    token_file = tmp_path / "root_token"
+    token_file.write_text("root-token\n")
+
+    with record_started_processes() as started:
+        with pytest.raises(RuntimeError) as raised:
+            _start_own_sealbox(stand_in, dict(os.environ), _free_port(), token_file, wait_seconds=2)
+        [server] = started
+        assert server.returncode == -signal.SIGTERM  # it still ran at the deadline; the start stopped it
+    message = str(raised.value)
+    assert "answered the check with 200, but this sealbox-server's log never named the check's x-request-id" in message
+    assert f"RUST_LOG={SEALBOX_TEST_LOG_FILTER}" in message
+    assert "did not become reachable" not in message
 
 
 def test_a_sealbox_server_the_start_began_is_stopped_when_the_wait_for_it_fails(
