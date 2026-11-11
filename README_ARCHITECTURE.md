@@ -4309,8 +4309,12 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   would use with the command's environment that it did not, comparing the
   login by the variable each side reads (the instance a `_FILE` form first,
   the export the plain value first); the guide's advice then puts the login
-  the instance runs with into `team.env` beside the address. One shared decision of local or external NATS that travels
-  with the transfer is a proposed follow-up.
+  the instance runs with into `team.env` beside the address. An import that
+  cannot read the new instance's NATS address stops in its plan, before
+  writing, with an error naming only the variable and where it was read: the
+  same decision runs again after the write, where its error would hold the
+  host. One shared decision of local or external NATS that travels with the
+  transfer is a proposed follow-up.
 
 Transfer confidence relies primarily on integration tests with real repositories
 and HTTP routes, plus a process-level CLI/broker round trip. Parser tests and

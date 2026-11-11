@@ -14,7 +14,8 @@ from assistant_gateway.instance_secrets import NATS_CREDENTIAL_ENV_NAMES, NATS_D
 from internal_credentials import parse_env_file
 from team_transfer.container import TransferReader
 from team_transfer.crypto import new_key_derivation
-from team_transfer.operator_secrets import EXTERNAL_NATS_DOCS, OperatorSecretsSection
+from team_transfer.errors import TransferError
+from team_transfer.operator_secrets import EXTERNAL_NATS_DOCS, IMPORT_ENVIRONMENT, OperatorSecretsSection
 from team_transfer.sections import RecordOutcome, read_section_records
 from team_transfer.service import export_source, export_team, import_team
 from team_transfer.settings import SettingsSection
@@ -189,7 +190,7 @@ def _cli_export(
 # The names and decision each fixed line gives; the words around them may change.
 NATS_LINES = (
     re.compile(r"NATS: .* would use (?P<unused>.+), which this export did not use\. .* is (?P<decided>local|external)\. "),
-    re.compile(r"NATS: .* Login carried: (?P<carried>.+?)\. .* before importing: (?P<needed>.+?)\. "),
+    re.compile(r"NATS: .* Login carried: (?P<carried>.+?)\. .* do not travel: (?P<needed>.+?)\. "),
 )
 
 
@@ -408,7 +409,7 @@ def test_following_the_exports_nats_advice_carries_the_login_the_instance_runs_w
 def test_the_nats_lines_point_to_a_section_of_the_team_transfer_guide() -> None:
     # Every NATS line and reason ends with this link and names the section;
     # renaming the section must update both.
-    from markdown.extensions.toc import slugify
+    from markdown.extensions.toc import slugify  # type: ignore[import-untyped]
 
     from team_transfer.operator_secrets import _SEE_THE_GUIDE
 
@@ -436,6 +437,13 @@ def _assert_no_values(text: str, team_env: str, shell: dict[str, str]) -> None:
 
 NATS_KEYS = {f"environment/{name}" for name in NATS_CREDENTIAL_ENV_NAMES}
 IN_THE_ENVIRONMENT = "this instance takes secrets from the environment: set it there or as a Docker secret"
+
+
+def _assert_the_steps(reason: str, where: str) -> None:
+    """The refusal of the NATS login names what to set, where, and the guide; the words around them may change."""
+
+    for part in ("NATS_URL", "NATS_SERVERS", SWITCH, f" in {where}, ", f"({EXTERNAL_NATS_DOCS})."):
+        assert part in reason, (part, reason)
 
 
 def _new_root(tmp_path: Path, team_env: str) -> Path:
@@ -561,15 +569,12 @@ def test_an_external_server_named_only_in_the_old_team_env_is_refused_with_the_s
     with pytest.raises(SystemExit) as exited:
         _cli_import(tmp_path, out, target, review, "--dry-run")
     assert exited.value.code == 1
-    reason = (
-        "the new instance's settings name a local NATS server, and it makes its own login for that. "
-        "If the old instance used an external NATS server, set NATS_URL or NATS_SERVERS to that server, "
-        "and TEAM_LOCAL_NATS_ENABLED=false so the image does not start its own server, "
-        f"in the new instance's env file, {target / 'team.env'}; then validate the selected records again. "
-        "Otherwise unselect this record."
-    )
     refused = [line for line in capsys.readouterr().out.splitlines() if line.startswith("- operator_secrets")]
-    assert refused == [f"- operator_secrets environment/{name}: {reason}" for name in ("NATS_PASSWORD", "NATS_USER")]
+    assert [line.split(":", 1)[0] for line in refused] == [
+        f"- operator_secrets environment/{name}" for name in ("NATS_PASSWORD", "NATS_USER")
+    ]
+    for line in refused:
+        _assert_the_steps(line, str(target / "team.env"))
 
     with pytest.raises(SystemExit, match="Selected records were refused"):
         _cli_import(tmp_path, out, target, review)
@@ -622,9 +627,7 @@ def test_with_secrets_from_the_environment_the_import_decides_from_the_environme
             assert not result["valid"]
             for record in nats:
                 assert record["outcome"] == RecordOutcome.REFUSED.value
-                assert "TEAM_LOCAL_NATS_ENABLED=false so the image does not start its own server, in the new instance's environment." in record["reason"]
-                assert "This import reads NATS_URL and NATS_SERVERS from the environment it runs in" in record["reason"]
-                assert "where a value already set wins over --env), so set them there too;" in record["reason"]
+                _assert_the_steps(record["reason"], IMPORT_ENVIRONMENT)
             return
         assert result["valid"]
         assert [(record["outcome"], record["reason"]) for record in nats] == [
@@ -633,6 +636,61 @@ def test_with_secrets_from_the_environment_the_import_decides_from_the_environme
         asyncio.run(session.apply(ReviewApplyV1(digest=result["digest"])))
     assert (target / "instance_config.yaml").is_file()
     assert not set(NATS_CREDENTIAL_ENV_NAMES) & set(_new_team_env(target)), "nothing is written in this mode"
+
+
+UNREADABLE_HOST = "secret-host.internal"
+UNREADABLE_NATS = f"nats://u:p@[{UNREADABLE_HOST}]:4222"
+
+
+@pytest.mark.parametrize("login_carried", [True, False], ids=["login-carried", "no-login-carried"])
+@pytest.mark.parametrize(
+    ("secrets_source", "name", "value"),
+    [
+        pytest.param("environment", "NATS_URL", UNREADABLE_NATS, id="environment-url"),
+        pytest.param("environment", "NATS_SERVERS", MALFORMED_NATS, id="environment-servers"),
+        pytest.param("env_file", "NATS_URL", UNREADABLE_NATS, id="env-file-url"),
+    ],
+)
+def test_an_unreadable_nats_address_stops_the_import_before_anything_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    login_carried: bool,
+    secrets_source: str,
+    name: str,
+    value: str,
+) -> None:
+    # FIN-2: the plan runs whatever is selected, so the import stops there,
+    # before writing, with names only; an address may hold a login.
+    import asyncio
+
+    from team_transfer.review import prepare_review
+    from team_transfer.review_session import ReviewSession
+    from team_transfer.sections import DestinationChoices
+
+    caplog.set_level(logging.INFO)
+    out = _cli_export(tmp_path, monkeypatch, team_env=EXTERNAL_ENV if login_carried else "", shell={})
+    assert (set(NATS_CREDENTIAL_ENV_NAMES) <= set(_carried(out))) is login_carried
+    in_the_environment = secrets_source == "environment"
+    if in_the_environment:
+        monkeypatch.setenv(name, value)
+    target = _new_root(tmp_path, "" if in_the_environment else f"{name}={value}\n")
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        session = ReviewSession(
+            prepare_review(reader, target, tmp_path / "review"),
+            destination=DestinationChoices(secrets_source=secrets_source),
+        )
+        with pytest.raises(TransferError) as stopped:
+            asyncio.run(session.validate())
+
+    error = str(stopped.value)
+    where = IMPORT_ENVIRONMENT if in_the_environment else str(target / "team.env")
+    assert f" in {where}: {name}. " in error and error.endswith(f"({EXTERNAL_NATS_DOCS})."), error
+    assert stopped.value.__cause__ is None and stopped.value.__context__ is None, "no chained error holds the host"
+    assert f"event=team_transfer_import_nats_address_unreadable team_id=team_old names={name} " in caplog.text
+    assert not (target / "instance_config.yaml").exists(), "nothing is written"
+    for part in (UNREADABLE_HOST, "u:p@", "[::1"):
+        assert part not in error + caplog.text, part
 
 
 def test_an_environment_mode_instance_lists_its_external_servers_login_for_the_new_environment(

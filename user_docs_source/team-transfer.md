@@ -250,7 +250,9 @@ variables, never their values:
   container's values laid over `team.env`. When the instance would then use
   NATS variables the export did not, a line names them: when they would decide
   local or external otherwise, or, with an external server, when they set
-  another address, user or password.
+  another address, user or password. An address there that the export cannot
+  read, such as a mistyped `NATS_URL`, is named the same way; the export did
+  not use it.
 
 If the instance really runs with the variables that line names (for example
 from its container's environment in a compose file), put them in its
@@ -283,9 +285,18 @@ Docker guide.
 
 While the new instance's settings still name its own local server (the
 default), the import refuses `NATS_USER` and `NATS_PASSWORD`, says what to set
-and where, and a reviewed import stops. Set the values and choose **Validate
-selected records** again, or unselect the two records so that the new
-instance makes its own login.
+and where, and a reviewed import stops. "Where" is the new `team.env`, or,
+when the new instance takes its secrets from the environment, the environment
+the import runs in: the new container for onboarding's Import, or your shell
+for the host command, where a value already set wins over one from `--env`.
+Set the values and choose **Validate selected records** again, or unselect
+the two records so that the new instance makes its own login.
+
+If the import cannot read `NATS_URL` or `NATS_SERVERS` in that same place, for
+example a mistyped address, it cannot tell whether the new instance's server
+is external. It then stops before writing anything, whichever records are
+selected, and names the variable and where it read it, never its value.
+Correct the value or unset the variable, then validate again.
 
 If the new instance already started without these settings, stop it and set
 them by hand in its `team.env` or environment: `TEAM_LOCAL_NATS_ENABLED=false`,

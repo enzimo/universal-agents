@@ -31,8 +31,10 @@ What travels (owner's decision 2026-10-05: credentials move with the team):
   following the guide then puts the login the instance runs with into
   ``team.env`` beside the address. The import refuses the login, with the
   steps, while the new instance's settings name a local server
-  (``_generated_reason``). The lines name variables, have one fixed form each
-  and point to the guide (``EXTERNAL_NATS_DOCS``), which holds the details;
+  (``_generated_reason``), and stops before writing anything when it cannot
+  read the new instance's NATS address (``_new_instance_generated``). The
+  lines name variables, have one fixed form each and point to the guide
+  (``EXTERNAL_NATS_DOCS``), which holds the details;
 - the model-provider sign-in files ``auth/openai_codex_auth.json`` and
   ``auth/xai_oauth_auth.json``. Their refresh tokens rotate, so the old
   instance must stop right after the export (the export says so).
@@ -59,6 +61,7 @@ from typing import Any, ClassVar, Mapping
 
 from pydantic import BaseModel, Field
 
+from team_transfer.errors import TransferError
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     ExportSource,
@@ -77,6 +80,8 @@ _FILE_SUFFIX = "_FILE"
 # holds the details the lines leave out (user_docs_source/team-transfer.md).
 EXTERNAL_NATS_DOCS = "/docs/team-transfer/#an-external-nats-server"
 _SEE_THE_GUIDE = f'See "An external NATS server" in the team transfer guide ({EXTERNAL_NATS_DOCS}).'
+# Where the import reads the new instance's NATS decision when it takes secrets from the environment.
+IMPORT_ENVIRONMENT = "the environment this import runs in"
 
 
 class SecretKind(StrEnum):
@@ -187,14 +192,14 @@ def _nats_notices(
     if unused := _unused_command_nats(source, config, environment, instance_generates, values):
         lines.append(
             f"NATS: run with this command's environment over team.env, the instance would use {', '.join(unused)}, "
-            f"which this export did not use. It decided from instance_config.yaml and team.env that the NATS server "
-            f"is {side}. {_SEE_THE_GUIDE}"
+            f"which this export did not use. The export decided from instance_config.yaml and team.env that the NATS "
+            f"server is {side}. {_SEE_THE_GUIDE}"
         )
     if not instance_generates:
         needed = [f"{LOCAL_NATS_ENABLED_ENV}=false", *(name for name in NATS_DECISION_ENV_NAMES if environment.get(name))]
         lines.append(
             f"NATS: the server is external. Login carried: {', '.join(_carried_nats_names(values)) or 'none'}. "
-            f"These do not travel; set them on the new instance before importing: {', '.join(needed)}. {_SEE_THE_GUIDE}"
+            f"Set these on the new instance before importing; they do not travel: {', '.join(needed)}. {_SEE_THE_GUIDE}"
         )
     return lines
 
@@ -365,11 +370,10 @@ class OperatorSecretsSection:
         if isinstance(config, GatewayInstanceConfig):
             environment_mode = bool(config.launch.secrets_from_environment)
         auth_names = {path.name for path in _auth_files(context.layout)}
-        env_path = _target_env_path(context)
         existing = _target_env(context)
-        generated = _generated_names(
-            config, _new_instance_environment(environment_mode, existing)
-        )
+        # Where the new instance's NATS decision is read; the refusal and the error name it.
+        where = IMPORT_ENVIRONMENT if environment_mode else str(_target_env_path(context))
+        generated = _new_instance_generated(config, environment_mode, existing, where)
         planned = []
         for secret in secrets:
             key = f"{secret.kind.value}/{secret.name}"
@@ -400,7 +404,7 @@ class OperatorSecretsSection:
                         self.name,
                         key,
                         RecordOutcome.REFUSED,
-                        _generated_reason(secret.name, environment_mode, env_path),
+                        _generated_reason(secret.name, where),
                     )
                 )
             elif secret.kind is SecretKind.ENVIRONMENT and existing.get(secret.name):
@@ -486,49 +490,76 @@ def _target_env(context: ImportContext) -> dict[str, str]:
     return parse_env_file(path) if path.is_file() else {}
 
 
-def _new_instance_environment(
-    environment_mode: bool, env_file_values: Mapping[str, str]
-) -> Mapping[str, str]:
-    """The new instance's environment, from which the import decides which values it generates.
+def _new_instance_generated(
+    config: Any, environment_mode: bool, env_file_values: Mapping[str, str], where: str
+) -> frozenset[str]:
+    """The values the new instance generates, decided from its env file or its environment.
 
-    Its env file, or, with secrets from the environment, the environment this
-    import runs in (the new container for onboarding's Import), as the export
-    reads the old instance's (``_environment``). In that mode the import
-    writes nothing and the settings section generates nothing, so reading
-    the process environment cannot change what the new instance generates.
+    With secrets from the environment, that is the environment this import
+    runs in (the new container for onboarding's Import), as the export reads
+    the old instance's (``_environment``). In that mode the import writes
+    nothing and the settings section generates nothing, so reading the
+    process environment cannot change what the new instance generates.
+
+    A NATS address there that the decision cannot read stops the plan, in
+    either mode, with an error that names the variable and ``where``. The plan
+    runs whatever is selected, so the import stops before writing anything;
+    letting it through would fail later, after the write, where the same
+    decision runs again (onboarding's completion, the env file's generated
+    credentials) with the host in the error. The error is raised outside the
+    ``except`` so it carries no ValueError, whose text may hold the host.
     """
 
-    return _process_environment() if environment_mode else env_file_values
+    environment = _process_environment() if environment_mode else env_file_values
+    try:
+        return _generated_names(config, environment)
+    except ValueError:
+        if not (unreadable := _unreadable_nats_names(config, environment)):
+            raise
+    logger.warning(
+        "The new instance's NATS address could not be read; the import stops. "
+        "event=team_transfer_import_nats_address_unreadable team_id=%s names=%s secrets_source=%s",
+        config.gateway.team_id, ",".join(unreadable), "environment" if environment_mode else "env_file",
+    )
+    raise TransferError(
+        f"The import cannot tell whether the new instance's NATS server is external, because it could not read these "
+        f"variables in {where}: {', '.join(unreadable)}. Correct or unset them, then validate again. {_SEE_THE_GUIDE}"
+    )
 
 
-def _generated_reason(name: str, environment_mode: bool, env_path: Path) -> str:
-    """Why the import refuses a carried value the new instance generates, and for the NATS login what to do.
+def _unreadable_nats_names(config: Any, environment: Mapping[str, str]) -> list[str]:
+    """The NATS variables set in ``environment`` that the decision cannot read, each tried alone through it."""
 
-    The NATS user and password travel when the old instance's own settings
-    named an external server, but the server's address and the image's
-    local-server switch do not travel. So a new instance whose settings name
-    a local server refuses them and makes its own login. If the old instance
-    did use an external server, the operator names it where this import reads
-    the decision (``plan``), then validates again: the carried login is then
-    imported, or listed to set in the environment.
+    from assistant_gateway.instance_secrets import NATS_DECISION_ENV_NAMES, should_generate_internal_nats_credentials
+
+    unreadable = []
+    for name in NATS_DECISION_ENV_NAMES:
+        try:
+            if environment.get(name):
+                should_generate_internal_nats_credentials(config, {name: environment[name]})
+        except ValueError:
+            unreadable.append(name)
+    return unreadable
+
+
+def _generated_reason(name: str, where: str) -> str:
+    """Why the import refuses a carried value the new instance generates; for the NATS login, what to do.
+
+    The NATS login travels when the old instance's own settings named an
+    external server, but the address and the image's local-server switch do
+    not, so a new instance whose settings name a local server refuses it until
+    the operator names the server in ``where``, which the plan reads.
     """
 
-    from assistant_gateway.instance_secrets import NATS_CREDENTIAL_ENV_NAMES
+    from assistant_gateway.instance_secrets import ENV_NATS_SERVERS, ENV_NATS_URL, NATS_CREDENTIAL_ENV_NAMES
+    from docker.nats_service import LOCAL_NATS_ENABLED_ENV
 
     if name not in NATS_CREDENTIAL_ENV_NAMES:
         return "the new instance generates its own"
-    where = (
-        "in the new instance's environment. This import reads NATS_URL and NATS_SERVERS from the "
-        "environment it runs in (the new container for onboarding's Import, or for the host command your "
-        "shell, where a value already set wins over --env), so set them there too"
-        if environment_mode
-        else f"in the new instance's env file, {env_path}"
-    )
     return (
-        "the new instance's settings name a local NATS server, and it makes its own login for that. "
-        "If the old instance used an external NATS server, set NATS_URL or NATS_SERVERS to that server, "
-        f"and TEAM_LOCAL_NATS_ENABLED=false so the image does not start its own server, {where}; then "
-        "validate the selected records again. Otherwise unselect this record."
+        f"the new instance's settings name a local NATS server, so it makes its own login. To keep this one, set "
+        f"{ENV_NATS_URL} or {ENV_NATS_SERVERS} to the external server and {LOCAL_NATS_ENABLED_ENV}=false in "
+        f"{where}, then validate again; or unselect this record. {_SEE_THE_GUIDE}"
     )
 
 
