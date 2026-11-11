@@ -3216,6 +3216,22 @@ async def test_live_manager_plan_step_delegates_to_specialist_and_continues_plan
                 await connection.close()
 
 
+def _launched_lead_lookup(team_id: str):
+    """What a launcher-started lead has for a by-name lookup: a message host whose read view has nobody by that name.
+
+    These tests' lead runs without a message host, and such a lead refuses a delegation by name
+    with its own reason before looking the worker up (``custom_agents.team_directory.
+    live_named_agent``; unit tests cover that). Here the subject is a worker that is not running.
+    """
+
+    from custom_transport.protocol1.team_agents import TeamAgents
+
+    view = TeamAgents(None, team_id)
+    view.ready.set()
+    return (patch("custom_agents.agent_requests.cannot_ask", return_value=None),
+            patch("custom_agents.agent_requests.team_view", return_value=view))
+
+
 async def test_live_turn_action_delegation_aborts_before_publish_when_target_unavailable() -> (
     None
 ):
@@ -3240,12 +3256,15 @@ async def test_live_turn_action_delegation_aborts_before_publish_when_target_una
             )
         )
 
+        lookup_can_ask, lookup_view = _launched_lead_lookup(team_id)
         with (
             patch("custom_agents.strands_agent.Agent", return_value=manager_llm),
             patch(
                 "custom_agents.strands_agent.UniversalAgent._configure_model",
                 return_value=MagicMock(),
             ),
+            lookup_can_ask,
+            lookup_view,
             # By name, the lead first waits a bounded time for a just-started worker to appear
             # (custom_agents.team_directory); nobody starts here, so a short wait is enough.
             patch("custom_agents.team_directory.NAMED_AGENT_START_SECONDS", 0.5),
@@ -3497,12 +3516,15 @@ async def test_live_failed_predispatch_availability_reenters_manager_with_runtim
             ),
         )
 
+        lookup_can_ask, lookup_view = _launched_lead_lookup(team_id)
         with (
             patch("custom_agents.strands_agent.Agent", return_value=manager_llm),
             patch(
                 "custom_agents.strands_agent.UniversalAgent._configure_model",
                 return_value=MagicMock(),
             ),
+            lookup_can_ask,
+            lookup_view,
         ):
             manager = _agent(
                 agent_id=manager_id,
