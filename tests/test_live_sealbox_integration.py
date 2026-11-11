@@ -49,7 +49,12 @@ from tests.broker_access_support import (
     gateway_headers,
     open_gate,
 )
-from tests.owned_processes import record_started_processes, stop_owned_process
+from tests.owned_processes import (
+    record_started_processes,
+    require_graceful_stop,
+    stop_owned_process,
+    stopped_at_exit,
+)
 
 
 pytestmark = [
@@ -252,7 +257,7 @@ def live_sealbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
         def restart() -> None:
             nonlocal process
-            stop_owned_process(process, name=f"sealbox-server on port {port}", timeout=3)
+            require_graceful_stop(process, name=f"sealbox-server on port {port}", timeout=3)
             restarted = _start_own_sealbox(server, server_env, port, token_file)
             if restarted is None:
                 pytest.fail(f"another program took port {port} while sealbox-server restarted")
@@ -268,8 +273,14 @@ def live_sealbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "server": server,
             "store_path": store_path,
         }
-    finally:
+    except BaseException:
+        # Only the setup's own error gets here, and it stays the one reported. pytest resumes
+        # the fixture normally after a failing test, so a kill below is reported as a
+        # teardown error beside the test's own failure.
         stop_owned_process(process, name=f"sealbox-server on port {port}", timeout=3)
+        raise
+    # restart() may have replaced the server, so this stops the one running now.
+    require_graceful_stop(process, name=f"sealbox-server on port {port}", timeout=3)
 
 
 async def _assert_unknown_form_result_after_broker_restart(tmp_path: Path, session_id: str) -> None:
@@ -1202,26 +1213,21 @@ def test_a_sealbox_start_does_not_take_another_tests_server_on_its_port_for_its_
     server = _find_binary("SEALBOX_SERVER_PATH", ("sealbox-server",))
     if server is None:
         pytest.skip("sealbox-server is required for live Sealbox tests")
-    servers: list[subprocess.Popen[str]] = []
-    try:
-        for name in ("other", "own"):
-            (tmp_path / name).mkdir()
-            (tmp_path / name / "root_token").write_text(f"{name}-root-token-{os.getpid()}\n")
-        other_env = {**os.environ, "STORE_PATH": str(tmp_path / "other" / "sealbox.db"),
-                     "AUTH_TOKEN_FILE": str(tmp_path / "other" / "root_token")}
-        port = _free_port()
-        other = _start_own_sealbox(server, other_env, port, tmp_path / "other" / "root_token")
-        assert other is not None
-        servers.append(other)
+    for name in ("other", "own"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "root_token").write_text(f"{name}-root-token-{os.getpid()}\n")
+    other_env = {**os.environ, "STORE_PATH": str(tmp_path / "other" / "sealbox.db"),
+                 "AUTH_TOKEN_FILE": str(tmp_path / "other" / "root_token")}
+    port = _free_port()
+    other = _start_own_sealbox(server, other_env, port, tmp_path / "other" / "root_token")
+    assert other is not None
+    with stopped_at_exit(other, name="the other test's sealbox-server", timeout=3):
         own_env = {**os.environ, "STORE_PATH": str(tmp_path / "own" / "sealbox.db"),
                    "AUTH_TOKEN_FILE": str(tmp_path / "own" / "root_token")}
 
         # The other test's server answers on the port but refuses this test's token.
         assert _start_own_sealbox(server, own_env, port, tmp_path / "own" / "root_token") is None
         assert other.poll() is None
-    finally:
-        for process in servers:
-            stop_owned_process(process, name="the other test's sealbox-server", timeout=3)
 
 
 def test_a_sealbox_server_the_start_began_is_stopped_when_the_wait_for_it_fails(

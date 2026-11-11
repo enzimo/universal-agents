@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.owned_processes import record_started_processes, stop_owned_process
+from tests.owned_processes import record_started_processes, stop_owned_process, stopped_at_exit
 
 REPO = Path(__file__).resolve().parents[1]
 BASE = REPO / "test_results" / "team_transfer_live"
@@ -154,11 +154,9 @@ def run(base: Path) -> None:
     out = BASE / "team.uatransfer"
     old_broker, port = start_broker(config_path, config)
     cli_env = dict(os.environ, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port}")
-    try:
+    with stopped_at_exit(old_broker, name="old instance's broker", timeout=10):
         exported = cli("team", "export", "--config", str(config_path), "--owner", "usr_ana", "--out", str(out),
                        "--passphrase-file", str(passfile), env=cli_env)
-    finally:
-        stop_owned_process(old_broker, name="old instance's broker", timeout=10)
     assert exported.returncode == 0
     raw = out.read_bytes()
     for secret in (GITHUB, MODEL, "e2e-bot-token"):
@@ -180,14 +178,12 @@ def run(base: Path) -> None:
 
     new_config = GatewayInstanceConfig.load(new_root / "instance_config.yaml")
     new_broker, port2 = start_broker(new_root / "instance_config.yaml", new_config)
-    try:
+    with stopped_at_exit(new_broker, name="new instance's broker", timeout=10):
         creds = cli("team", "import-credentials", "--in", str(out), "--config", str(new_root / "instance_config.yaml"),
                     "--review", str(review_dir), "--passphrase-file", str(passfile), env=dict(clean_env, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port2}"))
         repeated = cli("team", "import-credentials", "--in", str(out), "--config", str(new_root / "instance_config.yaml"),
                        "--review", str(review_dir), "--passphrase-file", str(passfile), env=dict(clean_env, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port2}"))
         assert repeated.returncode == 0 and "Stored 0 of 0" in repeated.stdout
-    finally:
-        stop_owned_process(new_broker, name="new instance's broker", timeout=10)
     assert creds.returncode == 0
 
     for key in list(os.environ):
@@ -253,11 +249,9 @@ def test_the_broker_start_skips_a_port_another_server_took_first(
     ensure_internal_credential_env_file(config)
     try:
         broker, port = start_broker(config_path, config)
-        try:
+        with stopped_at_exit(broker, name="broker", timeout=10):
             assert port != taken and broker.poll() is None
             assert "address already in use" in (tmp_path / f"broker-{taken}.log").read_text()
-        finally:
-            stop_owned_process(broker, name="broker", timeout=10)
     finally:
         other.shutdown()
 

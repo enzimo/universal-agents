@@ -69,10 +69,12 @@ def test_a_server_that_cannot_start_fails_the_test_instead_of_lending_it_another
             pass
 
 
-def test_a_server_that_ignores_the_stop_request_is_killed_and_the_tests_own_error_is_kept(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("body_fails", [True, False], ids=["the test failed", "the test passed"])
+def test_a_server_that_ignores_the_stop_request_is_killed_and_the_test_reports_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, body_fails: bool
 ) -> None:
-    """A server that hangs while stopping no longer stays running or hides the test's error."""
+    """A server that hangs while stopping no longer stays running, hides the test's own error,
+    or lets a test that passed hide the hang."""
 
     stand_in = tmp_path / "hanging-nats-server"
     stand_in.write_text(
@@ -85,9 +87,14 @@ def test_a_server_that_ignores_the_stop_request_is_killed_and_the_tests_own_erro
     )
     stand_in.chmod(0o755)
     caplog.set_level(logging.WARNING, logger="tests.owned_processes")
-    with pytest.raises(RuntimeError, match="the test's own error"):
-        with own_nats_server_process(str(stand_in), tmp_path) as (_url, process):
-            raise RuntimeError("the test's own error")
+    if body_fails:
+        with pytest.raises(RuntimeError, match="the test's own error"):
+            with own_nats_server_process(str(stand_in), tmp_path) as (_url, process):
+                raise RuntimeError("the test's own error")
+    else:
+        with pytest.raises(pytest.fail.Exception, match="did not stop within 5.0 s of SIGTERM and was killed"):
+            with own_nats_server_process(str(stand_in), tmp_path) as (_url, process):
+                pass
     assert process.returncode == -signal.SIGKILL
     assert f"event=owned_process_killed name=nats-server in {tmp_path} pid={process.pid}" in caplog.text
 

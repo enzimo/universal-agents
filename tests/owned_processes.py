@@ -11,8 +11,15 @@ enough on its own:
   process running, holding its port and store until the test session ends.
 
 ``stop_owned_process`` resumes the process, asks it to stop, and kills and reaps it when it
-has not stopped in time, logging a warning that names it. A test body's error then stays the
-error the test reports.
+has not stopped in time, logging a warning that names it. It is the stop for error paths:
+the error already raised stays the one the test reports.
+
+A server that needs a kill to stop is still a defect (a shutdown that waits on a thread or
+task that never finishes), and only a failing test makes it visible: pytest shows logged
+warnings for failing tests alone. ``stopped_at_exit`` therefore fails the test when the
+block itself succeeded but the server had to be killed, and keeps the block's own error
+otherwise; ``require_graceful_stop`` is the same check for a stop outside a block (a
+restart, a fixture's teardown).
 
 ``record_started_processes`` lets a test check that a start helper stopped the process it
 began when its wait for that process failed.
@@ -27,26 +34,29 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest import mock
 
+import pytest
+
 logger = logging.getLogger(__name__)
 
 
-def stop_owned_process(process: subprocess.Popen, *, name: str, timeout: float = 5.0) -> int:
-    """Stop ``process`` and reap it; returns its exit code.
+def stop_owned_process(process: subprocess.Popen, *, name: str, timeout: float = 5.0) -> bool:
+    """Stop ``process`` and reap it; returns True when SIGTERM was not enough and it was killed.
 
-    ``name`` says which server it is in the warning logged when SIGTERM was not enough.
+    ``name`` says which server it is in the warning logged when it had to be killed.
     ``timeout`` bounds each wait: for the SIGTERM, and for the SIGKILL after it. A process
     that has not exited even after SIGKILL is a fault worth seeing, so that ``TimeoutExpired``
     is raised (chained to any error the test body raised).
     """
 
     if process.poll() is not None:
-        return process.returncode
+        return False
     # Popen.send_signal skips a process that has exited meanwhile, so this cannot signal a
     # reused pid.
     process.send_signal(signal.SIGCONT)  # a test may have paused it
     process.terminate()
     try:
-        return process.wait(timeout=timeout)
+        process.wait(timeout=timeout)
+        return False
     except subprocess.TimeoutExpired:
         logger.warning(
             "event=owned_process_killed name=%s pid=%s timeout_seconds=%s "
@@ -54,7 +64,32 @@ def stop_owned_process(process: subprocess.Popen, *, name: str, timeout: float =
             name, process.pid, timeout,
         )
         process.kill()
-        return process.wait(timeout=timeout)
+        process.wait(timeout=timeout)
+        return True
+
+
+def require_graceful_stop(process: subprocess.Popen, *, name: str, timeout: float = 5.0) -> None:
+    """Stop ``process`` like ``stop_owned_process``; fail the test when it had to be killed."""
+
+    if stop_owned_process(process, name=name, timeout=timeout):
+        pytest.fail(f"{name} did not stop within {timeout} s of SIGTERM and was killed")
+
+
+@contextmanager
+def stopped_at_exit(process: subprocess.Popen, *, name: str,
+                    timeout: float = 5.0) -> Iterator[subprocess.Popen]:
+    """Stop ``process`` when the block ends, and kill and reap it if SIGTERM is not enough.
+
+    When the block raised, that error is the one raised. When it succeeded, a server that
+    had to be killed fails the test.
+    """
+
+    try:
+        yield process
+    except BaseException:
+        stop_owned_process(process, name=name, timeout=timeout)
+        raise
+    require_graceful_stop(process, name=name, timeout=timeout)
 
 
 @contextmanager
