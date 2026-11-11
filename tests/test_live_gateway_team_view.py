@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from assistant_gateway.message_host import GATEWAY_RUNTIME, GatewayMessageHost, gateway_profile
+from assistant_gateway.team_presence import GatewayTeamPresence
 from assistant_gateway.team_view import GatewayTeamView
 from custom_agents.agent_host import (
     LEAD_HOST_RUNTIME,
@@ -37,6 +38,26 @@ pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
 WORKER_RUNTIME = "agent-Researcher"
 DEFINITION = definition_sha256("ab" * 32)
+
+
+async def _serve(stack: AsyncExitStack, services_host: MessageHost, stop: asyncio.Event, *args) -> None:
+    """Run the team services until the test ends, however it ends (review F10: a failed check must not leave them
+    running and hang the test)."""
+
+    serving = asyncio.create_task(serve_team(services_host, TEAM, stop, *args))
+
+    async def stop_serving() -> None:
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+
+    stack.push_async_callback(stop_serving)
+
+
+def _started(stack: AsyncExitStack, host: AgentProcessHost) -> AgentProcessHost:
+    """An agent host, stopped when the test ends; stopping it twice is harmless."""
+
+    stack.push_async_callback(host.stop)
+    return host
 
 
 async def _until(condition, timeout: float = 20.0) -> None:
@@ -68,11 +89,12 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), lead_profile,
                            worker_profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
-        serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
+        await _serve(stack, services_host, stop)
         gateway = GatewayMessageHost(layout, TEAM)
         view = GatewayTeamView(TEAM, on_change=statuses.append)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        stack.push_async_callback(gateway.close)
         await _until(view.ready.is_set)
 
         lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True)
@@ -81,8 +103,9 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
             self_id="worker_1", team_id=TEAM, name="Researcher-1", named_agent_type="Researcher",
             agent_role="worker", is_paused=False, is_executing=False, has_execution_capacity=True,
             accepting_work=True, status_type="response", available_skills=["grill-me"])
-        lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
-        worker_host = AgentProcessHost(layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
+        lead_host = _started(stack, AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS)))
+        worker_host = _started(stack, AgentProcessHost(layout, worker_profile, TEAM,
+                                                       handlers=dict(LIVE_CONTROL_HANDLERS)))
         lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION,
                          nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
         worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
@@ -111,11 +134,6 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         await _until(lambda: "lead_1" not in view.live())
         assert latest("lead_1").is_exiting and view.departure_reason("lead_1") == "exiting"
 
-        await worker_host.stop()
-        await gateway.close()
-        stop.set()
-        await asyncio.wait_for(serving, timeout=10)
-
 
 @pytest.mark.asyncio
 async def test_the_status_page_shows_an_agent_without_a_session_until_its_session_opens(
@@ -132,11 +150,12 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
     async with AsyncExitStack() as stack:
         await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), lead_profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
-        serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
+        await _serve(stack, services_host, stop)
         gateway = GatewayMessageHost(layout, TEAM)
         view = GatewayTeamView(TEAM)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        stack.push_async_callback(gateway.close)
         await _until(view.ready.is_set)
 
         async def no_keys() -> dict:
@@ -149,8 +168,8 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
             return [finding for finding in (await page.report()).findings
                     if finding.finding_id.startswith("agent_without_session:")]
 
-        lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
-                                     refused_retry_seconds=(0.3, 1.0))
+        lead_host = _started(stack, AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
+                                                     refused_retry_seconds=(0.3, 1.0)))
         lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
                          definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
         lead_host.attach(stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False), agent_type="Researcher",
@@ -181,11 +200,6 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
             await asyncio.sleep(0.05)
         assert found == []
 
-        await lead_host.stop()
-        await gateway.close()
-        stop.set()
-        await asyncio.wait_for(serving, timeout=10)
-
 
 @pytest.mark.asyncio
 async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_on_the_status_page(
@@ -206,12 +220,13 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
     async with AsyncExitStack() as stack:
         await installation(stack, broker, layout, team_services_profile(TEAM), gateway_profile(TEAM), lead_profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
-        serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
+        await _serve(stack, services_host, stop)
         gateway = GatewayMessageHost(layout, TEAM)
         shown: list[AgentStatus] = []
         view = GatewayTeamView(TEAM, on_change=shown.append)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
+        stack.push_async_callback(gateway.close)
         await _until(view.ready.is_set)
 
         async def no_keys() -> dict:
@@ -226,8 +241,8 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
         async def holds(agent):
             return True  # it still holds work: it drains, and keeps its agents meanwhile
 
-        lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
-                                     drain_agent=keeps, holds_work=holds)
+        lead_host = _started(stack, AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
+                                                     drain_agent=keeps, holds_work=holds))
         lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
                          definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
         await _until(lambda: "lead_1" in view.live())
@@ -242,8 +257,139 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
         found = [finding for finding in (await page.report()).findings
                  if finding.finding_id == f"host_other_contract:{LEAD_HOST_RUNTIME}"]
         assert len(found) == 1 and OTHER_CONTRACT in found[0].details and CONTRACT_SHA256 in found[0].details
+        # The Team page says so (review F22).
+        [shown_member] = GatewayTeamPresence(members=view.statuses, want_details=view.want_details,
+                                             list_agent_classes=list).list_web_chat_team_members(
+            presence_only=True).members
+        assert (shown_member.agent_id, shown_member.status.label) == ("lead_1", "Not accepting work")
 
-        await lead_host.stop()
-        await gateway.close()
-        stop.set()
-        await asyncio.wait_for(serving, timeout=10)
+
+# -- the gateway itself: UserGateway with the gateway service's runtime ---------------------------------
+
+
+def _gateway_config(tmp_path: Path, nats_url: str, saved: str):
+    """A gateway's configuration as the launcher saves it, on this test's NATS server, with the route to the team
+    lead its previous run saved."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    config = GatewayInstanceConfig.create(
+        instance_name="live_team_view", instance_root=str(tmp_path / "instance"), team_id=TEAM, timezone="UTC",
+        display_name="Team view", manager_agent_id=saved, manager_storage_sqlite_path=str(tmp_path / "manager.db"),
+        state_storage_sqlite_path=str(tmp_path / "gateway.db"), named_agent_type="TeamArchitect",
+    )
+    config.transport.nats_url = nats_url
+    config.transport.nats_servers = [nats_url]
+    return config
+
+
+async def _running_gateway(stack: AsyncExitStack, config, transitions: list):
+    """UserGateway with ``NatsGatewayManagerRuntime.for_gateway_service``, the one that runs the gateway's protocol
+    1 host (as run-gateway builds it), its availability transitions recorded, closed when the test ends."""
+
+    from assistant_gateway.gateway import UserGateway
+    from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+    from assistant_gateway.store import GatewayStateStore
+
+    gateway = UserGateway(config, output_sink=None, state_store=GatewayStateStore(str(config.layout.root / "s.db")),
+                          manager_runtime=NatsGatewayManagerRuntime.for_gateway_service(config))
+    assert gateway._team_view is not None  # the gateway service's runtime has the message host
+
+    async def available(transition) -> None:
+        transitions.append(("available", transition.manager_id, transition.became_available))
+        await gateway.manager_transitions.handle_available(transition)
+
+    async def unavailable(transition) -> None:
+        transitions.append(("unavailable", transition.manager_id))
+        await gateway.manager_transitions.handle_unavailable(transition)
+
+    gateway._manager_client.bind_inbound_handlers(on_unsolicited=gateway.inbound_messages.handle,
+                                                  on_manager_available=available, on_manager_unavailable=unavailable)
+    stack.push_async_callback(gateway.close)
+    await gateway.connect(start_services=False)
+    return gateway
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_itself_follows_its_lead_from_the_records(
+    broker: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Review F9, through UserGateway and the gateway service's runtime: the saved route of a previous run is cleared
+    when the records are read and have no lead; the lead's record sets the route; the Status page shows what the
+    lead's host lists; the lead leaving makes it unavailable."""
+
+    from assistant_gateway import team_view
+
+    monkeypatch.setattr(team_view, "LEAD_START_SECONDS", 2.0)
+    config = _gateway_config(tmp_path, broker, saved="lead_from_last_run")
+    lead_profile = lead_host_profile(TEAM, ("TeamArchitect", "Researcher"), 2)  # the lead and one worker
+    transitions: list = []
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, config.layout, team_services_profile(TEAM), gateway_profile(TEAM),
+                           lead_profile)
+        services_host = MessageHost(config.layout, team_services_profile(TEAM),
+                                    await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        await _serve(stack, services_host, stop)
+
+        gateway = await _running_gateway(stack, config, transitions)
+        # No lead in the records: the previous run's route is cleared, once.
+        assert config.manager.manager_agent_id is None
+        assert transitions == [("unavailable", "lead_from_last_run")]
+
+        lead_host = _started(stack, AgentProcessHost(config.layout, lead_profile, TEAM,
+                                                     handlers=dict(LIVE_CONTROL_HANDLERS),
+                                                     refused_retry_seconds=(0.3, 1.0)))
+        lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
+                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME),
+                         state=("idle", True))
+        await _until(lambda: config.manager.manager_agent_id == "lead_1")
+        assert transitions[-1] == ("available", "lead_1", True)
+
+        # Two workers where the lead's process has room for one: the second gets no session, and the gateway's own
+        # Status page shows it, with no lead problem while the lead runs.
+        for worker in ("worker_1", "worker_2"):
+            lead_host.attach(stand_in(worker, worker, "Researcher", is_lead=False), agent_type="Researcher",
+                             definition=DEFINITION, nc=None, state=("idle", True))
+        found: list[str] = []
+        for _ in range(200):
+            found = [finding.finding_id for finding in (await gateway.application.status.report()).findings]
+            if "agent_without_session:lead:session_limit_reached" in found:
+                break
+            await asyncio.sleep(0.05)
+        assert "agent_without_session:lead:session_limit_reached" in found
+        assert "team_lead_not_reporting" not in found
+
+        # The lead leaves: unavailable at once.
+        await asyncio.wrap_future(lead_host.detach("lead_1"))
+        await _until(lambda: config.manager.manager_agent_id is None)
+        assert transitions[-1] == ("unavailable", "lead_1")
+
+
+@pytest.mark.asyncio
+async def test_a_lead_running_when_the_gateway_starts_is_followed_without_any_transition_notice(
+    broker: str, tmp_path: Path,  # noqa: F811 - the shared live NATS fixture
+) -> None:
+    """Review F5: the gateway's start replaces the previous run's saved route with the running lead directly: no
+    unavailable transition, and the route is the lead's when connect returns."""
+
+    config = _gateway_config(tmp_path, broker, saved="lead_from_last_run")
+    lead_profile = lead_host_profile(TEAM, ("TeamArchitect",), 1)
+    transitions: list = []
+    stop = asyncio.Event()
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, config.layout, team_services_profile(TEAM), gateway_profile(TEAM),
+                           lead_profile)
+        services_host = MessageHost(config.layout, team_services_profile(TEAM),
+                                    await connect(stack, broker, TEAM_SERVICES_RUNTIME))
+        await _serve(stack, services_host, stop)
+        lead_host = _started(stack, AgentProcessHost(config.layout, lead_profile, TEAM,
+                                                     handlers=dict(LIVE_CONTROL_HANDLERS)))
+        lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
+                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME),
+                         state=("idle", True))
+
+        await _running_gateway(stack, config, transitions)
+        assert config.manager.manager_agent_id == "lead_1"
+        assert transitions == [("available", "lead_1", False)]
+
