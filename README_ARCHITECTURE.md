@@ -5009,9 +5009,13 @@ it by id or name (`UniversalAgent._operational_target_matches`; the gateway name
 lead in all three) and ignores one naming no agent with `event=operational_command_unaddressed`;
 other message types on it are dropped with `event=operational_message_ignored`. No agent
 publishes a status there: a status request left in a mailbox by a 0.9 sender is logged
-(`event=agent_status_request_ignored`) and not answered. A lead's guidance for a delegated task goes to the worker holding it
-through its control mailbox (`agent.<id>.control`, durable, read while it works; plan
-decision 59), and a subtask no worker has taken yet gets none. The holder of each subtask
+(`event=agent_status_request_ignored`) and not answered. A lead's guidance for a delegated
+task goes to the worker holding it through its control mailbox (`agent.<id>.control`,
+durable, read while it works; plan decision 59), and a subtask no worker has taken yet gets
+none. Only that guidance takes this route (`custom_transport.subjects._is_passed_on_guidance`,
+checked after the lead, gateway and type-queue routes): every other `TaskSteering` (status
+answers, input requests and their answers) and guidance sent to a type queue keep the
+routes they had, so a type queue's name never becomes a control mailbox nobody reads. The holder of each subtask
 comes from team-wide task custody first, then the parent's delegated-task records looked up
 by team and parent, then, for a subtask asked of an agent by name, the team's directory
 (`delegated_work_runtime.current_holders`): custody names the worker before its claim reaches

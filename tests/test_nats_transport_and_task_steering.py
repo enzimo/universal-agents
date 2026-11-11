@@ -482,3 +482,59 @@ async def test_terminal_task_response_is_deferred_when_pending_guidance_exists()
     )
     task_manager.enqueue_task.assert_called_once_with(task_id, front=True)
     assert agent._pending_proactive_task_steering == {}
+
+
+# -- where each TaskSteering goes (plan decision 59, message contract step 7d) ---------------
+
+_ROUTES = {
+    # route kind: (routing key, the meta's named type, the subject every TaskSteering got at b936a1dd)
+    "agent id": ("worker_7", None, "team_303.agent.worker_7.work"),
+    "type queue by map": ("team_303_WebResearchAgent", None, "team_303.type.WebResearchAgent.work"),
+    "type queue by meta": ("team_303_CodeWritingAgent", "CodeWritingAgent", "team_303.type.CodeWritingAgent.work"),
+    "the lead": ("team_303", None, "team_303.lead.work"),
+    "the gateway": ("team_303_gateway_response", None, "team_303.gateway.team_303_gateway_response.response"),
+}
+
+
+def _routed(kind: TaskSteeringType, route_kind: str):
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+
+    routing_key, named_type, _before = _ROUTES[route_kind]
+    envelope = MessageEnvelope(
+        msg_content=TaskSteering(steering_type=kind, target_task_id="task_1", guidance_text="Only vegetarian soups."),
+        msg_header=MessageHeader(from_agent_id="manager", to_routing_path=routing_key),
+        msg_meta=MessageMeta(to_named_agent_type=named_type),
+    )
+    mapper = NatsSubjectMapper(team_id="team_303", named_agent_type_queue_map={"WebResearchAgent": "team_303_WebResearchAgent"})
+    return mapper.route_subject(routing_key, envelope=envelope)
+
+
+@pytest.mark.parametrize("route_kind", list(_ROUTES))
+@pytest.mark.parametrize("kind", list(TaskSteeringType))
+def test_only_guidance_passed_on_to_an_agent_goes_to_its_control_mailbox(kind, route_kind):
+    """The lead passes guidance on to the worker holding a subtask through that worker's control
+    mailbox, which it reads while it works. Every other TaskSteering, and guidance sent to a type
+    queue, the lead or the gateway, keeps the route it had before message contract step 7d: a
+    type queue's name used as an agent id would name a control mailbox nobody reads."""
+
+    expected = (
+        "team_303.agent.worker_7.control"
+        if kind == TaskSteeringType.PROACTIVE_GUIDANCE and route_kind == "agent id"
+        else _ROUTES[route_kind][2]
+    )
+    assert _routed(kind, route_kind) == expected
+
+
+def test_the_gateways_commands_to_the_lead_still_go_to_its_control_mailbox():
+    from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+
+    command = MessageEnvelope(
+        msg_content=ManagerRuntimeWorkCommand(command_id="cmd_1", command_type=MessageMetaType.REQUEST,
+                                              action="cancel", scope="user"),
+        msg_header=MessageHeader(from_agent_id="gateway", to_routing_path="manager_1"),
+        msg_meta=MessageMeta(),
+    )
+    assert NatsSubjectMapper(team_id="team_303").route_subject("manager_1", envelope=command) == (
+        "team_303.agent.manager_1.control"
+    )

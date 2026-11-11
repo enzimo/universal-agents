@@ -537,13 +537,23 @@ async def test_live_task_steering_routes_to_active_agent(
     adapter = _adapter(team_id)
     try:
         await adapter.connect(reconcile_topology=True)
-        # Steering goes to the agent's control mailbox, which it reads while it works (plan decision 59).
-        queue = await _subscribe_queue(
-            adapter,
-            name="steering-target",
-            subject=adapter.mapper.agent_control_subject(route),
-            durable_name=adapter.mapper.durable_name(f"agent_{route}_control"),
-        )
+        if steering_type == TaskSteeringType.PROACTIVE_GUIDANCE:
+            # A lead's guidance passed on to an agent goes to its control mailbox, which it reads
+            # while it works (plan decision 59).
+            queue = await _subscribe_queue(
+                adapter,
+                name="steering-target",
+                subject=adapter.mapper.agent_control_subject(route),
+                durable_name=adapter.mapper.durable_name(f"agent_{route}_control"),
+            )
+        else:
+            # Every other steering message sent to an agent keeps its work mailbox.
+            queue = await _subscribe_queue(
+                adapter,
+                name="steering-target",
+                routing_key=route,
+                durable_name=adapter.mapper.durable_name(f"agent_{route}"),
+            )
         await _publish(
             adapter,
             route,
