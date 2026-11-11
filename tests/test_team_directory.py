@@ -282,7 +282,8 @@ class _Reader:
         self.view: dict[str, TeamAgent] = {}
         self.reasons: dict[str, str] = {}
         self.departed: dict[str, TeamAgent] = {}
-        self.ready = SimpleNamespace(is_set=lambda: True)
+        self.ready = asyncio.Event()
+        self.ready.set()
 
     def show(self, view: dict[str, TeamAgent], **left: str) -> frozenset[str]:
         """The next view; ``left`` names agents that left and why. Returns what changed."""
@@ -299,6 +300,9 @@ class _Reader:
     def live(self):
         return MappingProxyType(self.view)
 
+    def agent(self, agent_id):
+        return self.view.get(agent_id)
+
     def departure_reason(self, agent_id):
         return self.reasons.get(agent_id)
 
@@ -307,9 +311,6 @@ class _Reader:
 
     def departed_agent(self, agent_id):
         return self.departed.get(agent_id)
-
-    def departed_agents(self):
-        return {agent: item for agent, item in self.departed.items() if self.left_for_good(agent)}
 
 
 @contextmanager
@@ -346,21 +347,91 @@ async def _settle(loop: asyncio.AbstractEventLoop, seconds: float = 0.6) -> None
 
 
 @pytest.mark.asyncio
-async def test_a_late_requester_receives_retained_exits_once() -> None:
+async def test_a_restored_agent_fails_only_subtasks_whose_target_left_for_good() -> None:
+    """F2: the targets of its own waiting by-name subtasks, checked against who left for good."""
+
+    from custom_agents.team_directory import check_departed_targets
+
+    reader = _Reader()
+    reader.show({"worker_1": member("worker_1", "Researcher-1"), "worker_2": member("worker_2", "Researcher-2"),
+                 "worker_3": member("worker_3", "Researcher-3")})
+    reader.show({"worker_2": member("worker_2", "Researcher-2")}, worker_1="session_closed")  # worker_3 went quiet
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1"), subtask("sub_2", "worker_2"),
+                                     subtask("sub_3", "worker_3"), subtask("sub_4", "team_Researcher")])
+
+    await check_departed_targets(owner, reader)
+
+    [call] = owner._fail_subtask_and_reconcile_parent.await_args_list
+    assert call.kwargs["subtask_info"].task.task_id == "sub_1"
+    assert "Researcher-1 left before taking it" in call.kwargs["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_a_restored_agent_reads_its_waiting_subtasks_once_and_says_when_it_cannot(caplog) -> None:
+    from custom_agents.team_directory import check_departed_targets
+
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1")])
+    owner.task_manager.get_pending_subtasks = lambda: (_ for _ in ()).throw(OSError("database is locked"))
+
+    with caplog.at_level(logging.ERROR):
+        await check_departed_targets(owner, _Reader())
+
+    assert "event=team_exit_recovery_unread" in caplog.text
+    owner._fail_subtask_and_reconcile_parent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("view_read_first", [True, False])
+async def test_an_agent_that_restored_its_work_checks_it_once_the_view_is_read(monkeypatch, view_read_first) -> None:
+    """F2, F4: the agent starts the check when it restored its work; it waits for the view whichever comes first.
+
+    The agent runs on its own loop, as a thread worker does; the view is read on the host's loop.
+    """
+
+    from custom_agents.agent_host import report_restored_work
+
     reader = _Reader()
     reader.show({"worker_1": member("worker_1", "Researcher-1")})
-    changed = reader.show({}, worker_1="session_closed")
+    reader.show({}, worker_1="session_closed")
+    if not view_read_first:
+        reader.ready.clear()
     with _own_loop() as loop:
         owner = directory_owner(pending=[subtask("sub_1", "worker_1")])
         owner._runtime_loop = loop
         host = _host_with(owner, reader)
-        hosted = host.agents[owner.id]
-        host._sync_directory(hosted)
-        # Catch-up or a repeated attachment must not launch another reconciliation.
-        host._team_changed(changed)
-        host._sync_directory(hosted)
-        await _settle(loop)
+        monkeypatch.setattr(agent_requests, "_PROCESS_HOST", host)
+
+        async def restored():
+            return report_restored_work(owner)
+
+        check = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(restored(), loop))
+        await asyncio.sleep(0.2)
+        if not view_read_first:
+            owner._fail_subtask_and_reconcile_parent.assert_not_awaited()  # it waits for the view
+            reader.ready.set()
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(asyncio.wait_for(check, 2), loop))
+
         owner._fail_subtask_and_reconcile_parent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_whose_host_stops_before_the_view_is_read_checks_nothing(monkeypatch) -> None:
+    from custom_agents.agent_host import report_restored_work
+
+    reader = _Reader()
+    reader.ready.clear()
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1")])
+    host = _host_with(owner, reader)
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", host)
+
+    check = report_restored_work(owner)
+    await asyncio.sleep(0.05)
+    host._stop.set()
+    await asyncio.wait_for(check, 2)
+
+    owner._fail_subtask_and_reconcile_parent.assert_not_awaited()
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", None)
+    assert report_restored_work(owner) is None  # without the launcher there is no host and nothing to check
 
 
 @pytest.mark.asyncio

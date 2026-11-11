@@ -43,6 +43,16 @@ own loop, here. Nothing else writes these two maps.
   go on, and the parent's turn resumes to decide again (``_fail_untaken``). An agent whose
   host only stopped reporting has not left for good: the host may be unreachable for a
   while, and the watchdog handles work that never comes back.
+- **Exits while the requester was down** (``check_departed_targets``). An exit is handed to
+  the agents running when the reader learns of it (``agent_exited``). A requester that was
+  down then restores its saved subtasks only during its start, after the view may already
+  have been read, so it checks them itself: once it restored them and its process read the
+  view (``agent_host.report_restored_work``), it reads its waiting subtasks once and fails
+  those whose target is not live and left for good, the same way. The reader does not tell
+  listeners about the exits it finds at its first reading, so a start costs one read per
+  restored agent, not one per retained exit and agent. If an exit is also told while the
+  check runs, a subtask is still failed once: a second failure is refused by the subtask's
+  state change, and only one withdrawal of its message succeeds.
 - **Finding a named agent to give work to** (``live_named_agent``). A by-name delegation goes
   to the agent's own mailbox, so the agent must be there to take it. The lookup waits up to
   ``NAMED_AGENT_START_SECONDS`` for the name to appear in the view, so an agent started just
@@ -62,7 +72,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, NamedTuple, Optional
 
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.enums import MessageMetaType
@@ -152,6 +162,15 @@ def _note_ambiguous_names(agent: Any, ambiguous: dict[str, tuple[str, ...]]) -> 
     earlier.update(ambiguous)
 
 
+class _Untaken(NamedTuple):
+    """A waiting subtask sent by name to an agent that left for good, with who that was and why."""
+
+    subtask: Any
+    departed_id: str
+    label: str
+    reason: str
+
+
 async def agent_exited(agent: Any, departed: TeamAgent, reason: str) -> None:
     """``departed`` left for good: fail what this agent sent to its mailbox that nobody took (module docstring).
 
@@ -171,11 +190,52 @@ async def agent_exited(agent: Any, departed: TeamAgent, reason: str) -> None:
                        "event=team_agent_left_for_good agent_id=%s departed_agent_id=%s departed_agent_type=%s "
                        "reason=%s subtasks=%s", agent.id, departed.display_name or departed.agent, departed.agent,
                        agent.id, departed.agent, departed.agent_type, reason, len(in_its_mailbox))
-    await _fail_untaken(agent, departed.agent, departed.display_name or departed.agent, reason, in_its_mailbox)
+    label = departed.display_name or departed.agent
+    await _fail_untaken(agent, [_Untaken(item, departed.agent, label, reason) for item in in_its_mailbox])
 
 
-async def _fail_untaken(agent: Any, departed_id: str, label: str, reason: str, subtasks: list[Any]) -> None:
-    """Fail each of ``subtasks`` that still waits untaken in ``departed_id``'s mailbox (module docstring).
+async def check_departed_targets(agent: Any, team_agents: Any) -> None:
+    """After a restart: fail the agent's waiting by-name subtasks whose target left for good meanwhile.
+
+    Run once the agent restored its saved work and its process read the team's view
+    (``agent_host.report_restored_work``): one read of its waiting subtasks, however many
+    exits the view retained. A subtask's target counts when it is not live and left for good
+    (``team_agents.agent`` and ``left_for_good``, read from this agent's thread: the view is
+    replaced whole and the departures are single dictionary reads). The rest is as for an exit
+    seen while the agent runs (``_fail_untaken``). A failed read leaves the work to the
+    subtask watchdog.
+    """
+
+    task_manager = agent.task_manager
+    try:
+        pending = await task_manager.operations_runtime.run(task_manager.get_pending_subtasks)
+    except Exception:
+        agent._logger.exception("[%s] The agent's waiting subtasks could not be read to check them against agents "
+                                "that left while it was down; they are left to the subtask watchdog. "
+                                "event=team_exit_recovery_unread agent_id=%s", agent.id, agent.id)
+        return
+    untaken: list[_Untaken] = []
+    for subtask_info in pending:
+        target = getattr(getattr(subtask_info, "header", None), "to_routing_path", None)
+        if not target or team_agents.agent(target) is not None or not team_agents.left_for_good(target):
+            continue
+        departed = team_agents.departed_agent(target)
+        label = ((departed.display_name if departed is not None else None)
+                 or getattr(getattr(subtask_info, "meta", None), "to_agent_name", None) or target)
+        untaken.append(_Untaken(subtask_info, target, label, team_agents.departure_reason(target) or ""))
+    if not untaken:
+        agent._logger.debug("[%s] No waiting subtask was sent to an agent that left while this agent was down. "
+                            "event=team_exit_recovery_checked agent_id=%s waiting=%s", agent.id, agent.id,
+                            len(pending))
+        return
+    agent._logger.info("[%s] Subtasks this agent sent by name wait for agents that left for good while it was down. "
+                       "event=team_exit_recovery_found agent_id=%s subtasks=%s departed_agent_ids=%s", agent.id,
+                       agent.id, len(untaken), ",".join(sorted({item.departed_id for item in untaken})))
+    await _fail_untaken(agent, untaken)
+
+
+async def _fail_untaken(agent: Any, untaken: list[_Untaken]) -> None:
+    """Fail each subtask that still waits untaken in its departed agent's mailbox (module docstring).
 
     Only the subtask fails, as when the subtask watchdog times one out, a worker hands one back
     or a delegated task keeps losing its workers: the parent task and its other subtasks go on,
@@ -187,26 +247,26 @@ async def _fail_untaken(agent: Any, departed_id: str, label: str, reason: str, s
     """
 
     task_manager = agent.task_manager
-    by_request: dict[str, list[Any]] = {}
-    for subtask_info in subtasks:
-        task_id = subtask_info.task.task_id
+    by_request: dict[str, list[_Untaken]] = {}
+    for item in untaken:
+        task_id = item.subtask.task.task_id
         try:
             request = await task_manager.operations_runtime.run(task_manager.resolve_root_task_id, task_id)
         except Exception as error:
             agent._logger.error("[%s] A subtask left in the mailbox of an agent that left for good could not be "
                                 "failed (its request could not be read); it is left to the subtask watchdog. "
                                 "event=team_agent_left_subtask_fail_error agent_id=%s subtask_id=%s "
-                                "departed_agent_id=%s", agent.id, agent.id, task_id, departed_id, exc_info=error)
+                                "departed_agent_id=%s", agent.id, agent.id, task_id, item.departed_id, exc_info=error)
             continue
-        by_request.setdefault(request or task_id, []).append(subtask_info)
-    await asyncio.gather(*(_fail_in_order(agent, departed_id, label, reason, group) for group in by_request.values()))
+        by_request.setdefault(request or task_id, []).append(item)
+    await asyncio.gather(*(_fail_in_order(agent, group) for group in by_request.values()))
 
 
-async def _fail_in_order(agent: Any, departed_id: str, label: str, reason: str, subtasks: list[Any]) -> None:
+async def _fail_in_order(agent: Any, untaken: list[_Untaken]) -> None:
     """One request's subtasks, one after another (``_fail_untaken``); one subtask's error does not stop the others."""
 
     task_manager = agent.task_manager
-    for subtask_info in subtasks:
+    for subtask_info, departed_id, label, reason in untaken:
         task_id = subtask_info.task.task_id
         parent_task_id: Optional[str] = None
         try:

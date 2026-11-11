@@ -78,10 +78,19 @@ async def _until(check):
             await asyncio.sleep(0.005)
 
 
+def _reader_host(records, store):
+    async def fetch(raw):
+        return False
+
+    return SimpleNamespace(identity=SimpleNamespace(installation=INSTALL), clock=lambda: NOW,
+                           live=SimpleNamespace(trust=SimpleNamespace(store=store)), records=records, fetch_trust=fetch)
+
+
 @asynccontextmanager
-async def _reading(*, store=None, closed_before_start=False, preload=None):
+async def _reading(*, store=None, closed_before_start=False, preload=None, on_reader=None):
     """A running reader. By default the lead is live; ``preload`` (record -> key -> raw) is what the
-    buckets held before it started, and then nothing more is written."""
+    buckets held before it started, and then nothing more is written. ``on_reader`` gets the reader
+    before it starts, to listen from its first reading on."""
 
     store = store or trust_store()
     records = _Records(store)
@@ -90,12 +99,10 @@ async def _reading(*, store=None, closed_before_start=False, preload=None):
     for record, values in (preload or {}).items():
         records.values[record].update(values)
 
-    async def fetch(raw):
-        return False
-
-    host = SimpleNamespace(identity=SimpleNamespace(installation=INSTALL), clock=lambda: NOW,
-                           live=SimpleNamespace(trust=SimpleNamespace(store=store)), records=records, fetch_trust=fetch)
+    host = _reader_host(records, store)
     reader = TeamAgents(host, TEAM, recheck_seconds=0.02)
+    if on_reader is not None:
+        on_reader(reader)
     stop = asyncio.Event()
     task = asyncio.create_task(reader.run(stop))
     try:
@@ -625,6 +632,101 @@ async def test_deleting_an_agents_last_session_record_forgets_its_departure():
         await records.feed("agent_session", closed[0], None)
         assert reader.departure_reason("lead") is None and reader.departed_agent("lead") is None
         assert not reader.left_for_good("lead")
+
+
+# -- exits found at the first reading are recorded, not told (F3, A3; C02) ---------------------------
+
+
+def _closed_session_of(agent):
+    """A closed session of another agent run, as weeks of pool workers leave behind."""
+
+    session = json.loads((EXAMPLES / "trust" / "sessions" / "lead.json").read_bytes())
+    session_id = f"s-{agent}-1"
+    session.update(key=f"session.{INSTALL}.{TEAM}.{session_id}", sequence=2,
+                   issued_at=format_timestamp(NOW - timedelta(seconds=1)))
+    session["body"].update(session=session_id, agent=agent, ends_at=format_timestamp(NOW - timedelta(seconds=1)))
+    return session["key"], _signed(session)
+
+
+@pytest.mark.asyncio
+async def test_a_start_with_many_retained_exits_tells_nobody_and_reads_each_agents_work_once(caplog, monkeypatch):
+    """A3: no 'left for good' line and no read per retained exit; one read when the agent restored its work."""
+
+    from custom_agents import agent_requests
+    from custom_agents.agent_host import report_restored_work
+    from tests.test_agent_host_sessions import _hosted, _process
+    from tests.test_team_directory import directory_owner, subtask
+
+    process, _ = _process()
+    owner = directory_owner(pending=[subtask("sub_1", "worker_quiet")])  # nothing waits for an agent that left
+    reads = []
+    pending = owner.task_manager.get_pending_subtasks
+    owner.task_manager.get_pending_subtasks = lambda: reads.append(True) or pending()
+    hosted = _hosted(owner.id)
+    hosted.agent = owner
+    process.agents[owner.id] = hosted
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", process)
+    heard = []
+
+    def attach(reader):
+        process.team_agents = reader
+        reader.listen(heard.append)
+        reader.listen(process._team_changed)
+
+    retained = dict(_closed_session_of(f"worker_{index}") for index in range(40))
+    with caplog.at_level(logging.INFO):
+        async with _reading(preload={"agent_session": retained}, on_reader=attach) as (reader, records, host):
+            assert all(reader.left_for_good(f"worker_{index}") for index in range(40))
+            await asyncio.wait_for(report_restored_work(owner), 2)
+            await asyncio.sleep(0.1)  # several more checks
+            assert heard == []
+
+    assert len(reads) == 1
+    assert [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING] == []
+    [counted] = [record.getMessage() for record in caplog.records
+                 if "event=team_agents_unseen_exits " in record.getMessage()]
+    assert "count=40" in counted and "event=team_agents_unseen_exit " not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_exit_while_the_readers_run_was_restarting_is_told():
+    """C02: an error ends the reader's run and the host's supervisor runs it again; an exit meanwhile is told."""
+
+    store = trust_store()
+    records = _Records(store)
+    reader = TeamAgents(_reader_host(records, store), TEAM, recheck_seconds=0.02)
+    changes = []
+    _heard(reader, changes)
+    stop = asyncio.Event()
+    first = asyncio.create_task(reader.run(stop))
+    await asyncio.wait_for(reader.ready.wait(), 2)
+    await records.feed("placement", KEY, _signed(_example("placement/lead.json")))
+    await records.feed("host", "lead-host-1", _signed(_example("host/lead-host.json")))
+    await records.feed("agent", KEY, _signed(_agent()))
+    await _until(lambda: reader.lead() is not None)
+
+    checks = reader._retry_pending
+
+    async def broken():
+        raise RuntimeError("a check failed")
+
+    reader._retry_pending = broken
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(first, 2)
+    reader._retry_pending = checks
+    # Meanwhile the lead exits. The buckets keep delete markers, which a new watch gives as deletions.
+    records.values["agent"][KEY] = None
+    records.values["placement"][KEY] = None
+    records.values["agent_session"].update([_closed_lead_session()])
+
+    second = asyncio.create_task(reader.run(stop))
+    try:
+        await _until(lambda: reader.left_for_good("lead"))
+        await asyncio.sleep(0.1)
+        assert [exited for _, exited in changes if "lead" in exited] == [frozenset({"lead"})], "heard once"
+    finally:
+        stop.set()
+        await asyncio.wait_for(second, 2)
 
 
 def _worker_host_record(host):

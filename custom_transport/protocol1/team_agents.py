@@ -43,8 +43,15 @@ How it reads:
   another host cannot forge either. A closed session ends that run of the agent, not its
   work: work it had claimed lives in saved state, which the restarted agent takes over.
   A fresh reader also recovers departures directly from retained signed closed sessions,
-  even if the agent's record and placement disappeared before the reader started. An
-  agent attached after catch-up receives those retained departures too, once per requester.
+  even if the agent's record and placement disappeared before the reader started. Those
+  found at its first reading (a process start can find weeks of them) are recorded, so
+  ``left_for_good`` answers, but listeners do not hear them, and one line counts them: the
+  agents of a starting process have not restored their saved work yet, and each checks its
+  own waiting work against them once it has (``custom_agents.team_directory.
+  check_departed_targets``). Exits found later, also after the reader's run restarted, are
+  told as usual (``_read_once``). ``agent``, ``left_for_good``, ``departure_reason`` and
+  ``departed_agent`` may be read from any thread: the view is replaced whole, and the others
+  are single dictionary reads.
 - **Which session's end counts.** One run of an agent can hold several sessions: a refused
   renewal, a missing placement or a lost ``sessions.open`` reply opens another, with a later
   ``placed_at``, and the earlier one is never closed and runs out seven days later. So a
@@ -189,6 +196,9 @@ class TeamAgents:
         self._listeners: list[Callable[[frozenset[str]], None]] = []
         self.ready = asyncio.Event()
         self.running = False
+        # Set once this reader object finished its first reading, and never cleared: exits found
+        # before that are recorded but not told; later ones are told, also after a rerun of run().
+        self._read_once = False
 
     # -- reading the view (any thread) ----------------------------------------------------
 
@@ -263,11 +273,6 @@ class TeamAgents:
         departed = self._departed.get(agent_id)
         return departed.last if departed is not None else None
 
-    def departed_agents(self) -> Mapping[str, TeamAgent]:
-        """Retained exits for a requester attached after the reader caught up."""
-
-        return {agent: departed.last for agent, departed in self._departed.items() if self.left_for_good(agent)}
-
     def listen(self, listener: Callable[[frozenset[str]], None]) -> None:
         """Call ``listener`` on the reader's loop with the ids whose view changed (appeared, changed or left).
 
@@ -296,6 +301,7 @@ class TeamAgents:
             await asyncio.gather(*(event.wait() for event in caught_up))
             await self._retry_pending()
             self._rebuild()
+            self._read_once = True
             self.ready.set()
 
         ready = asyncio.create_task(all_caught_up())
@@ -508,7 +514,15 @@ class TeamAgents:
             self._departures.pop(agent_id, None)
             self._departed.pop(agent_id, None)
         late = self._late_departures(leaving, now)
-        self._publish(view, late | self._unseen_exits(view, now))
+        unseen = self._unseen_exits(view, now)
+        if not self._read_once:
+            # Exits from before this reader started (module docstring): recorded, counted once, not told.
+            if unseen:
+                self._logger.info("Read agents that exited before this reader started; each agent checks its own "
+                                  "waiting work against them. event=team_agents_unseen_exits team=%s count=%s",
+                                  self.team, len(unseen))
+            unseen = frozenset()
+        self._publish(view, late | unseen)
 
     def _unseen_exits(self, view: Mapping[str, TeamAgent], now: datetime) -> frozenset[str]:
         """Recover missed exits from signed sessions, without needing a previous live view.
@@ -532,8 +546,9 @@ class TeamAgents:
             self._departed[session.agent] = _Departed(last, now, told=True)
             self._departures[session.agent] = SESSION_CLOSED
             found.add(session.agent)
-            self._logger.info("An agent exited before this reader saw it. event=team_agents_unseen_exit "
-                              "team=%s agent=%s session=%s", self.team, session.agent, session.session)
+            if self._read_once:
+                self._logger.info("An agent exited before this reader saw it. event=team_agents_unseen_exit "
+                                  "team=%s agent=%s session=%s", self.team, session.agent, session.session)
         return frozenset(found)
 
     def _newest_sessions(self) -> dict[str, AgentSession]:

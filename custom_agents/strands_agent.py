@@ -209,7 +209,7 @@ from custom_agents.strands_model_factory import (
     build_strands_model,
     resolve_context_window_tokens,
 )
-from custom_agents.agent_host import attach_agent, detach_agent, report_agent_state
+from custom_agents.agent_host import attach_agent, detach_agent, report_agent_state, report_restored_work
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.context_engine import (
     ContextEngine,
@@ -4969,6 +4969,9 @@ class UniversalAgent(BaseModel):
             schedule_pending_work(self)
 
             report_agent_state(self)
+            # Its saved subtasks are restored now: fail those sent by name to agents that
+            # left for good while it was down, once the team's view is read.
+            report_restored_work(self)
             self._logger.info(
                 "[%s] NATS transport ready; waiting for messages until exit.", self.id
             )

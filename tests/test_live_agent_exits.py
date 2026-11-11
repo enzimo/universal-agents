@@ -19,7 +19,14 @@ from types import SimpleNamespace
 import nats
 import pytest
 
-from custom_agents.agent_host import LEAD_HOST_RUNTIME, AgentProcessHost, lead_host_profile, startup_agent_host_profile
+from custom_agents import agent_requests
+from custom_agents.agent_host import (
+    LEAD_HOST_RUNTIME,
+    AgentProcessHost,
+    lead_host_profile,
+    report_restored_work,
+    startup_agent_host_profile,
+)
 from custom_agents.live_controls import LIVE_CONTROL_HANDLERS
 from custom_transport.protocol1.host_runtime import MessageHost
 from runtime_settings.instance_layout import InstanceLayout
@@ -108,11 +115,14 @@ async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool,
             await asyncio.wrap_future(worker_host.detach("worker_1"))  # exiting, session closed, record removed
             if process_down:
                 # A fresh host and requester have no in-memory history of the worker.
-                # Pending subtasks are the work recovered by the restarted lead.
+                # Pending subtasks are the work recovered by the restarted lead, which then
+                # checks them as UniversalAgent._connect_nats does.
                 lead = stand_in("lead_2", "TeamLead", "TeamArchitect", is_lead=True, pending=[subtask])
                 lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
+                agent_requests.configure_process_host(lead_host)
                 lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION,
                                  nc=await connect(stack, broker_url, LEAD_HOST_RUNTIME), state=("idle", True))
+                report_restored_work(lead)
             if connection_down:
                 await asyncio.sleep(2.0)
                 proxy.refusing = False
@@ -122,6 +132,7 @@ async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool,
             return lead._fail_subtask_and_reconcile_parent.await_count
         finally:
             # Stopped also when a check above fails, so the test ends rather than hangs.
+            agent_requests.configure_process_host(None)
             await lead_host.stop()
             await worker_host.stop()
             stop.set()
