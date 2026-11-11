@@ -408,8 +408,8 @@ the setup the runtime is tested with. Compared with 0.9, the login also needs:
   presence stream above describes.
 
 This list names what changed since 0.9. It is not a tested set of NATS
-permissions: a login with fewer rights than its whole account has not been
-tested.
+permissions: apart from a login that may not delete streams, the runtime's
+tests use only logins with every right in their account.
 
 The trust records live in the instance's `trust/` folder, readable only by their
 owner:
