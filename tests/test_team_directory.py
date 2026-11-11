@@ -30,6 +30,13 @@ from custom_transport.protocol1.team_agents import TeamAgent
 NOW = datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def the_requester_can_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The asking agent's own process is joined and its session open; the F10 tests change this."""
+
+    monkeypatch.setattr(agent_requests, "cannot_ask", lambda agent, *, need_view: None)
+
+
 def member(agent: str, name: str, agent_type: str = "Researcher", *, state: str = "idle", accepting: bool = True,
            lead: bool = False) -> TeamAgent:
     return TeamAgent(agent=agent, agent_type=agent_type, display_name=name, state=state, accepting_work=accepting,
@@ -100,8 +107,11 @@ def test_the_directory_takes_the_whole_view_with_names_types_and_the_lead() -> N
     assert owner._agent_id_by_name == {"Researcher-1": "worker_1", "Researcher-2": "worker_2"}
 
     # An unchanged entry is kept as it is (its last_seen_at says when this directory took it).
+    names = owner._agent_id_by_name
     sync_directory(owner, view)
     assert owner.known_agents.agent_map["worker_1"] is busy
+    # F11: the name map is built whole and assigned; the one a worker thread may be reading is never emptied.
+    assert names == {"Researcher-1": "worker_1", "Researcher-2": "worker_2"} and owner._agent_id_by_name is not names
     # A later view replaces the whole directory.
     sync_directory(owner, {"worker_2": member("worker_2", "Researcher-2")})
     assert set(owner.known_agents.agent_map) == {"worker_2"} and owner._agent_id_by_name == {"Researcher-2": "worker_2"}
@@ -869,3 +879,65 @@ async def test_a_worker_delegating_by_name_passes_over_one_that_takes_no_work_or
     with caplog.at_level(logging.ERROR):
         assert await exact_delegation_route(requester, "Researcher", "Researcher-1") is None
     assert "event=exact_delegation_target_unavailable" in caplog.text
+
+
+# -- the requester itself cannot ask yet (F10) -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_lead_whose_own_session_is_not_open_yet_waits_for_it_and_then_asks(monkeypatch) -> None:
+    import time
+
+    from custom_agents.agent_requests import AskBlocked
+
+    opened_at = time.monotonic() + 0.3
+    monkeypatch.setattr(agent_requests, "cannot_ask", lambda agent, *, need_view: (
+        AskBlocked("agent lead_1 has no session yet", clears=True) if time.monotonic() < opened_at else None))
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    asked = AsyncMock(return_value=_status_answer())
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    monkeypatch.setattr(team_directory, "VIEW_POLL_SECONDS", 0.02)
+
+    found = await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-1", start_seconds=5)
+
+    assert found is not None and found.self_id == "worker_1" and asked.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clears", [False, True])
+async def test_a_lead_that_cannot_ask_is_refused_with_its_own_reason_and_the_worker_is_not_judged(
+        monkeypatch, caplog, clears) -> None:
+    """A reason that does not clear refuses at once; one that does not clear in time, after the budget."""
+
+    from custom_agents.agent_requests import AgentUnreachable, AskBlocked
+
+    reason = "agent lead_1 has no session yet" if clears else "this process runs another message contract"
+    monkeypatch.setattr(agent_requests, "cannot_ask", lambda agent, *, need_view: AskBlocked(reason, clears=clears))
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    asked = AsyncMock()
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    monkeypatch.setattr(team_directory, "VIEW_POLL_SECONDS", 0.02)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with caplog.at_level(logging.WARNING), pytest.raises(AgentUnreachable, match=reason) as refused:
+        await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-1", start_seconds=0.3)
+
+    assert refused.value.clears is clears and asked.await_count == 0
+    assert (loop.time() - started >= 0.3) is clears
+    assert "event=named_agent_requester_cannot_ask" in caplog.text
+    assert "event=named_agent_not_answering" not in caplog.text and "event=named_agent_not_live" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_lead_whose_session_goes_while_it_asks_is_not_told_the_worker_failed(monkeypatch, caplog) -> None:
+    from custom_agents.agent_requests import AgentUnreachable
+
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    monkeypatch.setattr(agent_requests, "ask_agent",
+                        AsyncMock(side_effect=AgentUnreachable("agent lead_1 has no session yet", clears=True)))
+
+    with caplog.at_level(logging.WARNING), pytest.raises(AgentUnreachable):
+        await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-1")
+
+    assert "event=named_agent_requester_cannot_ask" in caplog.text and "event=named_agent_not_answering" not in caplog.text

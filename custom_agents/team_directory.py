@@ -124,9 +124,9 @@ def sync_directory(agent: Any, view: Mapping[str, TeamAgent]) -> None:
         if earlier is None or earlier.model_dump(include=_RECORD_FIELDS) != entry.model_dump(include=_RECORD_FIELDS):
             directory[agent_id] = entry
     holders = _name_holders(others)
-    names = agent._agent_id_by_name
-    names.clear()
-    names.update({name: ids[0] for name, ids in holders.items() if len(ids) == 1})
+    # Built whole, then assigned once: a worker thread reading it (query_agent_state) sees the old map or the
+    # new one, never an empty one. Callers read the attribute each time; none keeps the dictionary.
+    agent._agent_id_by_name = {name: ids[0] for name, ids in holders.items() if len(ids) == 1}
     _note_ambiguous_names(agent, {name: ids for name, ids in holders.items() if len(ids) > 1})
 
 
@@ -392,14 +392,25 @@ async def live_named_agent(agent: Any, named_agent_type: Optional[str], target_a
                            start_seconds: Optional[float] = None, ask: bool = True) -> Optional[AgentStatus]:
     """The named agent, when it is live, takes work and (with ``ask``) answers its status now; None otherwise.
 
-    Module docstring: only the team lead may ask, so other requesters pass ``ask=False``.
+    Module docstring: only the team lead may ask, so other requesters pass ``ask=False``. When
+    it is the asking agent itself that cannot ask (its process has not joined, its own session
+    is not open, it drains), the named agent is not judged: this waits within the same budget
+    while that clears by itself, and otherwise raises ``AgentUnreachable`` with that reason.
     """
 
-    from custom_agents.agent_requests import ask_agent
+    from custom_agents.agent_requests import AgentUnreachable, ask_agent, cannot_ask
 
     start_seconds = NAMED_AGENT_START_SECONDS if start_seconds is None else start_seconds
     loop = asyncio.get_running_loop()
     deadline = loop.time() + start_seconds
+    if ask:
+        blocked = cannot_ask(agent, need_view=True)
+        while blocked is not None and blocked.clears and loop.time() < deadline:
+            await asyncio.sleep(VIEW_POLL_SECONDS)
+            blocked = cannot_ask(agent, need_view=True)
+        if blocked is not None:
+            raise _requester_cannot_ask(agent, target_agent_name, AgentUnreachable(blocked.reason,
+                                                                                   clears=blocked.clears))
     status = live_agent_status(agent, named_agent_type, target_agent_name, quiet=True)
     while status is None and loop.time() < deadline:
         await asyncio.sleep(VIEW_POLL_SECONDS)
@@ -415,6 +426,8 @@ async def live_named_agent(agent: Any, named_agent_type: Optional[str], target_a
     timeout = max(0.1, float(getattr(agent, "subtask_status_probe_timeout_seconds", None) or 5.0))
     try:
         reply = await ask_agent(agent, "agent.status", {"level": "basic"}, str(status.self_id), timeout=timeout)
+    except AgentUnreachable as error:  # this agent cannot ask now (its session went meanwhile): not the target's doing
+        raise _requester_cannot_ask(agent, target_agent_name, error) from error
     except Exception as error:  # noqa: BLE001 - no answer, a refusal or a broken reply: it cannot take the task now
         why = f"{type(error).__name__}: {error}"
     else:
@@ -430,6 +443,16 @@ async def live_named_agent(agent: Any, named_agent_type: Optional[str], target_a
                           "is refused. event=named_agent_not_answering agent_id=%s target_agent_id=%s "
                           "target_agent_name=%s reason=%s", agent.id, agent.id, status.self_id, target_agent_name, why)
     return None
+
+
+def _requester_cannot_ask(agent: Any, target_agent_name: str, error: Exception) -> Exception:
+    """Log that the asking agent itself cannot ask, so the named agent was not checked; returns ``error`` to raise."""
+
+    agent._logger.warning("[%s] This agent cannot send requests yet, so its delegation by name is refused; the named "
+                          "agent was not checked. event=named_agent_requester_cannot_ask agent_id=%s "
+                          "target_agent_name=%s reason=%s clears=%s", agent.id, agent.id, target_agent_name, error,
+                          getattr(error, "clears", None))
+    return error
 
 
 def live_agent_status(agent: Any, named_agent_type: Optional[str],

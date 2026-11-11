@@ -906,6 +906,54 @@ def test_delegation_outbox_does_not_register_or_publish_to_unavailable_worker(
     )
 
 
+def test_a_delegation_by_name_the_lead_cannot_ask_for_yet_is_refused_with_the_leads_reason(tmp_path) -> None:
+    """F10: when the lead's own session is not open, the worker was not checked and is not called gone."""
+
+    from custom_agents.agent_requests import AgentUnreachable
+    from custom_agents.strands_agent import TurnActionRecoveryScheduled
+
+    manager = _make_task_manager(tmp_path)
+    parent = _add_active_parent_task(manager)
+    agent = _make_agent(tmp_path, task_manager=manager)
+    availability = AsyncMock(side_effect=AgentUnreachable("agent lead_1 has no session yet", clears=True))
+    object.__setattr__(agent, "_probe_live_named_agent_type", availability)
+    decision = StructuredAgentTurnDecision(
+        actions=[
+            DelegateTaskAction(
+                task=StructuredTaskPayload(
+                    task_type=MessageMetaType.REQUEST,
+                    problem_statement="Research with a named worker.",
+                ),
+                target_agent_name="Researcher-1",
+                target_named_agent_type="WebResearchAgent",
+                requester_type=RequesterType.AGENT_REQUESTER,
+            )
+        ]
+    )
+
+    with pytest.raises(TurnActionRecoveryScheduled):
+        asyncio.run(
+            agent._execute_turn_decision_outbox(
+                decision=decision,
+                incoming_content=parent,
+                incoming_header=manager.get_task_info(parent.task_id).header,
+                incoming_meta=manager.get_task_info(parent.task_id).meta,
+            )
+        )
+
+    agent.team_comms.send_message.assert_not_awaited()
+    [abort] = [
+        entry
+        for entry in manager.get_task_history_entries(parent.task_id, limit=None)
+        if entry.details.get("event") == "delegation_subtask_registration_aborted"
+    ]
+    assert abort.details["final_failure_phase"] == "requester_cannot_ask"
+    assert abort.details["detail"] == (
+        "This agent cannot send requests yet (agent lead_1 has no session yet); the named worker was not "
+        "checked. Try again shortly."
+    )
+
+
 @pytest.mark.parametrize(
     ("decision_text", "expected_action"),
     [

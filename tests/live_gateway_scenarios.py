@@ -1657,6 +1657,11 @@ async def run_test_45(
             # Stopped as the launcher stops it: SIGTERM, which strands_main turns into a graceful
             # exit. An agent obeys an exit request only from the team lead's signed agent.exit.
             graceful_exit_code = await manager.stop(timeout_seconds=30)
+            if graceful_exit_code != 0:
+                # stop() kills a manager that has not exited within 30 s (-9): that is no graceful exit.
+                raise AssertionError(
+                    f"The manager did not exit gracefully on SIGTERM: exit code {graceful_exit_code}"
+                )
             await _wait_for_manager_unavailable(gateway, timeout_seconds=30)
 
             unavailable = await gateway.send_user_message(
