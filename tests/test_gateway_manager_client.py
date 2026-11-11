@@ -262,6 +262,56 @@ async def test_runtime_backed_publish_requires_explicit_connection() -> None:
 
 
 @pytest.mark.asyncio
+async def test_set_lead_routes_chats_and_says_whether_the_lead_became_available() -> None:
+    """The lead follower's route set (assistant_gateway.team_view.TeamLeadFollower)."""
+
+    route_writes: list[str | None] = []
+    available: list = []
+    client = _client(_FakeManagerRuntime(), settings=_settings(manager_id=None), route_writes=route_writes,
+                     available=available)
+    await client.set_lead("lead_1", source="agent_records")
+    await client.set_lead("lead_1", source="agent_records")
+    await client.set_lead("lead_2", source="agent_records")
+
+    assert route_writes == ["lead_1", "lead_2"] and client.manager_id == "lead_2"
+    assert [(item.manager_id, item.became_available) for item in available] == [("lead_1", True), ("lead_2", False)]
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_lead_that_finishes_its_tasks_keeps_the_waiting_replies() -> None:
+    unavailable: list = []
+    client = _client(_FakeManagerRuntime(), settings=_settings(manager_id="lead_1"), unavailable=unavailable)
+    await client.mark_manager_unavailable(expected_manager_id="lead_1", reason="another contract",
+                                          source="agent_records", keep_waiting=True)
+    assert client.manager_id is None and [item.keep_waiting for item in unavailable] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_route_that_cannot_be_saved_still_changes_and_its_transition_runs(caplog) -> None:
+    """Critique C03: the route in memory rules while the gateway runs; a failed save must not skip the transition,
+    or the lead follower would see nothing left to repair."""
+
+    available: list = []
+    unavailable: list = []
+
+    def read_only(manager_id: str | None) -> None:
+        raise OSError("read-only file system")
+
+    client = GatewayManagerClient(
+        settings=_settings(manager_id=None), clock=_FixedClock(datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)),
+        id_generator=_FixedIds(), logger=logging.getLogger("test.gateway.manager_client"),
+        runtime=_FakeManagerRuntime(), write_manager_route=read_only,
+        on_manager_available=available.append, on_manager_unavailable=unavailable.append)
+    await client.set_lead("lead_1", source="agent_records")
+    await client.mark_manager_unavailable(expected_manager_id="lead_1", reason="it left", source="agent_records")
+
+    assert [item.manager_id for item in available] == ["lead_1"] and [item.manager_id for item in unavailable] == [
+        "lead_1"]
+    assert client.manager_id is None
+    assert "event=gateway_manager_route_save_failed manager_id=lead_1 error_type=OSError" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_the_lead_from_the_records_sets_and_clears_the_route() -> None:
     """The team view applies the lead's records (assistant_gateway.team_view); a leaving lead clears the route."""
 

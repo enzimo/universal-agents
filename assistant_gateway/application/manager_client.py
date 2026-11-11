@@ -59,6 +59,9 @@ class GatewayManagerTransition:
     source: str
     reason: str
     became_available: bool = False
+    # An unavailable lead that still finishes the tasks it holds (its process runs another message contract):
+    # people's waiting replies are left to arrive (assistant_gateway.team_view.TeamLeadFollower).
+    keep_waiting: bool = False
 
 
 class GatewayManagerClient:
@@ -618,6 +621,42 @@ class GatewayManagerClient:
                 source=source,
             )
 
+    async def set_lead(self, lead_id: str, *, source: str) -> None:
+        """Route people's chats to ``lead_id``, the team lead the team's records name, and emit one available
+        transition (``became_available`` when there was no route). The team view's lead follower is its caller
+        (``assistant_gateway.team_view.TeamLeadFollower``)."""
+
+        async with self._manager_status_lock:
+            previous = self._manager_id
+            if previous == lead_id:
+                return
+            await self._set_manager_id_locked(lead_id)
+        if previous is not None:
+            self._logger.warning(
+                "The gateway's route to the team lead moved to another agent. event=gateway_team_lead_followed "
+                "manager_id=%s previous_manager_id=%s source=%s",
+                lead_id,
+                previous,
+                source,
+            )
+        else:
+            self._logger.info(
+                "The gateway routes chats to the team lead. event=gateway_team_lead_followed manager_id=%s "
+                "source=%s",
+                lead_id,
+                source,
+            )
+        await self._run_transition_handler(
+            self._on_manager_available,
+            GatewayManagerTransition(
+                manager_id=lead_id,
+                available=True,
+                source=source,
+                reason="the team lead is live in the team's records",
+                became_available=previous is None,
+            ),
+        )
+
     async def mark_manager_unavailable(
         self,
         *,
@@ -625,8 +664,13 @@ class GatewayManagerClient:
         status_timestamp: datetime | None = None,
         reason: str,
         source: str = "liveness",
+        keep_waiting: bool = False,
     ) -> None:
-        """Clear the current route and emit one unavailable transition."""
+        """Clear the current route and emit one unavailable transition.
+
+        ``keep_waiting``: the lead still finishes the tasks it holds, so people's waiting
+        replies are not failed (``GatewayManagerTransition.keep_waiting``).
+        """
 
         async with self._manager_status_lock:
             current_manager_id = self._manager_id
@@ -648,9 +692,12 @@ class GatewayManagerClient:
             self._manager_status_updated_at = status_timestamp or self._clock.now_utc()
 
         self._logger.warning(
-            "Gateway marked manager %s unavailable (%s).",
+            "The gateway marked the team lead unavailable. event=gateway_manager_unavailable manager_id=%s "
+            "reason=%s source=%s keep_waiting=%s",
             current_manager_id,
             reason,
+            source,
+            keep_waiting,
         )
         await self._run_transition_handler(
             self._on_manager_unavailable,
@@ -659,16 +706,30 @@ class GatewayManagerClient:
                 available=False,
                 source=source,
                 reason=reason,
+                keep_waiting=keep_waiting,
             ),
         )
 
     async def _set_manager_id_locked(self, manager_id: str | None) -> None:
+        """Change the route, then save it. The route in memory is the one the gateway uses while it runs, so a
+        save that fails (a full disk, a read-only mount, a saved file another writer left invalid) is logged and
+        the transition still runs: the lead follower would see no difference to repair (critique C03)."""
+
         self._manager_id = manager_id
         if self._write_manager_route is None:
             return
-        result = self._write_manager_route(manager_id)
-        if inspect.isawaitable(result):
-            await result
+        try:
+            result = self._write_manager_route(manager_id)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as error:
+            self._logger.error(
+                "The route to the team lead could not be saved; the gateway uses it while it runs and saves it "
+                "again at the next change. event=gateway_manager_route_save_failed manager_id=%s error_type=%s",
+                manager_id,
+                type(error).__name__,
+                exc_info=error,
+            )
 
     @staticmethod
     async def _run_transition_handler(
