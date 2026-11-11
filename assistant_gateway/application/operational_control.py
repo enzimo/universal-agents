@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
 from assistant_gateway.application.debug_controls import normalize_context_dump_mode
@@ -17,6 +17,7 @@ from assistant_gateway.application.objective_control_text import (
     objective_control_text,
     objective_status_words,
 )
+from assistant_gateway.application.local_responses import GatewayLocalResponseFactory
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
     GatewayCommandPerson,
@@ -28,15 +29,16 @@ from assistant_gateway.application.response_coordinator import (
     GatewayResponseCoordinator,
 )
 from assistant_gateway.application.response_models import GatewayResponse
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from assistant_gateway.application.session_service import (
     GatewaySessionRoute,
     GatewaySessionService,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from custom_messages.contracts.control_v1 import PAUSE_OBJECTIVE, ControlInstruction, Instruction, ManagerRuntimeWorkCommand, RuntimeWorkSummary, SystemStatusMessage
+from custom_messages.contracts.control_v1 import PAUSE_OBJECTIVE, ManagerRuntimeWorkCommand, RuntimeWorkSummary, SystemStatusMessage
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, ObjectiveStatus, RequesterType, RoutingType
+from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.enums import ObjectiveStatus
 
 
 @dataclass(frozen=True)
@@ -57,13 +59,10 @@ class GatewayStopControlRequest:
     conversation_id: str | None = None
     action: str = "inventory"
     scope: str = "user"
-    target_agent_id: str | None = None
     target_task_id: str | None = None
     target_objective_id: str | None = None
     expected_objective_digest: str | None = None
     inventory_digest: str | None = None
-    task_offset: int = 0
-    task_limit: int = 20
     command_text: str = "/stop"
     route: GatewayRequestRoute = GatewayRequestRoute()
     reason: str = "Stop requested by user."
@@ -254,6 +253,8 @@ class GatewayOperationalControlApplication:
         manager_commands: GatewayManagerCommandService,
         responses: GatewayResponseCoordinator,
         id_generator: GatewayIdGenerator,
+        team_commands: GatewayTeamCommandService,
+        local_responses: GatewayLocalResponseFactory,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -264,6 +265,9 @@ class GatewayOperationalControlApplication:
         self._manager_commands = manager_commands
         self._responses = responses
         self._id_generator = id_generator
+        # The team lead's context dump setting goes to the team services (debug.dump).
+        self._team_commands = team_commands
+        self._local_responses = local_responses
         self._logger = logger or logging.getLogger(__name__)
 
     async def stop(self, request: GatewayStopControlRequest) -> GatewayResponse:
@@ -304,8 +308,6 @@ class GatewayOperationalControlApplication:
             target_objective_id=request.target_objective_id,
             expected_objective_digest=request.expected_objective_digest,
             inventory_digest=request.inventory_digest,
-            task_offset=request.task_offset,
-            task_limit=request.task_limit,
             session_key=resolved.session_key,
             conversation_id=resolved.conversation_id,
             reason=request.reason,
@@ -319,7 +321,7 @@ class GatewayOperationalControlApplication:
         command: ManagerRuntimeWorkCommand,
         person: GatewayCommandPerson,
     ) -> GatewayResponse:
-        if self._manager.manager_id is None and request.target_agent_id is None:
+        if self._manager.manager_id is None:
             self._logger.warning(
                 "Gateway cannot inspect or cancel runtime work because no manager "
                 "route is currently known. "
@@ -330,13 +332,12 @@ class GatewayOperationalControlApplication:
                 resolved.session_key,
             )
             return await self._manager_unavailable(resolved)
-        responder = "The agent" if request.target_agent_id else "The TeamLead"
+        responder = "The TeamLead"
         try:
             response = await self._manager_commands.request(
                 GatewayManagerCommandRequest(
                     command=command,
                     person=person,
-                    target_agent_id=request.target_agent_id,
                     session=resolved.session,
                     route=resolved.route,
                 )
@@ -377,15 +378,13 @@ class GatewayOperationalControlApplication:
                 resolved.session_key,
                 exc,
             )
-            if request.target_agent_id:
-                raise RuntimeError("The selected agent could not be reached. Refresh Tasks to retry.") from exc
             return await self._manager_unavailable(resolved)
         if not isinstance(response, ManagerRuntimeWorkCommand):
             raise RuntimeError("Manager returned an invalid runtime-work response.")
         raw_envelope = MessageEnvelope(
             msg_content=response,
             msg_header=MessageHeader(
-                from_agent_id=request.target_agent_id or self._manager.manager_id or "manager",
+                from_agent_id=self._manager.manager_id or "manager",
                 to_routing_path=self._settings.response_route,
                 agent_signature="",
             ),
@@ -437,7 +436,7 @@ class GatewayOperationalControlApplication:
         self,
         request: GatewayContextDebugControlRequest,
     ) -> GatewayResponse:
-        """Publish one correlated context-dump settings control."""
+        """Change the team lead's context dump setting through the team services (``debug.dump``)."""
 
         normalized_mode = normalize_context_dump_mode(request.mode)
         resolved = self._resolve(
@@ -445,61 +444,30 @@ class GatewayOperationalControlApplication:
             conversation_id=request.conversation_id,
             route=request.route,
         )
-        async with self._manager.response_channel(resolved.correlation_id):
-            self._requests.record(
-                correlation_id=resolved.correlation_id,
-                session_key=resolved.session_key,
-                request_kind="interactive_control",
-                request_text=(
-                    "/debug context_dump "
-                    f"enabled={str(bool(request.enabled)).lower()} "
-                    f"mode={normalized_mode}"
-                ),
-                conversation_id=resolved.conversation_id,
-                followup_to_task_id=None,
+        person = str(resolved.route.canonical_user_id or "").strip()
+        live_applied = False
+        try:
+            reply = await self._team_commands.request(
+                "debug.dump", {"enabled": bool(request.enabled), "mode": normalized_mode}, person_id=person
             )
-            if self._manager.manager_id is None:
-                self._logger.warning(
-                    "Gateway cannot publish context debug control because no manager "
-                    "route is currently known. "
-                    "event=gateway_context_debug_control_no_manager_route "
-                    "correlation_id=%s conversation_id=%s session_key=%s "
-                    "enabled=%s mode=%s",
-                    resolved.correlation_id,
-                    resolved.conversation_id,
-                    resolved.session_key,
-                    bool(request.enabled),
-                    normalized_mode,
-                )
-                return await self._manager_unavailable(resolved)
-
-            envelope = self._build_envelope(
-                resolved,
-                content=ControlInstruction(
-                    type=ControlType.CONTROL_MSG,
-                    instruction=Instruction(instruction="debug_context_dump"),
-                    reason="Web Chat debug context dump control.",
-                    cascade_to_subtasks=False,
-                    runtime_settings={
-                        "enabled": bool(request.enabled),
-                        "mode": normalized_mode,
-                    },
-                ),
+        except Exception as error:  # noqa: BLE001 - told to the person; nothing changed
+            self._logger.warning(
+                "The context dump setting could not be changed. event=gateway_context_debug_control_failed "
+                "session_key=%s enabled=%s mode=%s error=%s",
+                resolved.session_key, bool(request.enabled), normalized_mode, error,
             )
-            self._logger.info(
-                "Gateway publishing context debug control. "
-                "event=gateway_context_debug_control_publish correlation_id=%s "
-                "conversation_id=%s session_key=%s cached_manager_id=%s "
-                "enabled=%s mode=%s",
-                resolved.correlation_id,
-                resolved.conversation_id,
-                resolved.session_key,
-                self._manager.manager_id,
-                bool(request.enabled),
-                normalized_mode,
-            )
-            await self._manager.publish_operational(envelope)
-            return await self._await_response(resolved)
+            text = "Could not confirm the live context dump setting. Refresh its status before trying again."
+        else:
+            if reply.get("outcome") == "ok":
+                live_applied = True
+                state = "on" if reply["enabled"] else "off"
+                text = f"Context debug dump is {state} (mode {reply['mode']})."
+            elif reply.get("outcome") == "runtime_error":
+                text = str(reply.get("message") or "Could not confirm the live context dump setting.")
+            else:
+                text = f"The context dump setting was not changed: {reply.get('message') or reply.get('outcome')}"
+        response = self._local_responses.create(text=text, conversation_id=resolved.conversation_id)
+        return replace(response, live_applied=live_applied)
 
     def _resolve(
         self,
@@ -545,39 +513,6 @@ class GatewayOperationalControlApplication:
             request_timezone=presentation.timezone,
             route=resolved_route,
             session=session,
-        )
-
-    def _build_envelope(
-        self,
-        resolved: _ResolvedOperationalControl,
-        *,
-        content: ControlInstruction,
-        followup_to_task_id: str | None = None,
-    ) -> MessageEnvelope:
-        return MessageEnvelope(
-            msg_content=content,
-            msg_meta=MessageMeta(
-                from_agent_name=resolved.requester_display_name,
-                to_named_agent_type=self._settings.manager_named_agent_type,
-                msg_correlation_id=resolved.correlation_id,
-                conversation_id=resolved.conversation_id,
-                followup_to_task_id=followup_to_task_id,
-                request_timezone=resolved.request_timezone,
-                requester_type=RequesterType.USER_REQUESTER,
-                is_response_requested=True,
-                gateway_context=self._request_context.build_gateway_context(
-                    session_key=resolved.session_key,
-                    delivery_mode=DELIVERY_MODE_INTERACTIVE,
-                    route=resolved.route,
-                    manager_agent_id=self._manager.manager_id,
-                ),
-            ),
-            msg_header=MessageHeader(
-                from_agent_id=self._settings.response_route,
-                to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-                response_routing_key=self._settings.response_route,
-                agent_signature="",
-            ),
         )
 
     async def _manager_unavailable(

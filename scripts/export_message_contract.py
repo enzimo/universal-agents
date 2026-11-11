@@ -360,6 +360,10 @@ def check_registry(registry: dict[str, Any], transport: dict[str, Any], topologi
         check_wake_alternatives(where, entry, schemas)
         check_reply_errors(where, entry, schemas)
         check_covered_change(where, entry, registry, schemas)
+    for kind in topologies.get("requester_kinds", []):
+        entry = registry["kinds"].get(kind)
+        if entry is None or "down" not in topology_edges(entry):
+            raise ContractError(f"team-topologies.yaml: requester_kinds names {kind}, which is not a kind sent down")
     check_shared_addresses(registry, transport)
     check_ledger_waits(registry)
     names: dict[str, str] = {}
@@ -1223,16 +1227,100 @@ def check_message_sizes(transport: dict[str, Any], schemas: dict[str, dict[str, 
 def check_stream_management(registry: dict[str, Any], transport: dict[str, Any]) -> None:
     """The topology owner and the withdrawal role are host roles; withdrawal deletes only from durable work streams."""
 
-    withdrawal = transport.get("withdrawal")
-    if transport.get("topology_owner") not in registry["host_roles"] or not isinstance(withdrawal, dict) \
-            or set(withdrawal) != {"role", "streams"} or withdrawal["role"] not in registry["host_roles"]:
+    if transport.get("topology_owner") not in registry["host_roles"]:
         raise ContractError("transport.yaml: topology_owner and withdrawal.role name host roles")
-    work = set(transport["classes"]["durable"]["streams"])
-    if not withdrawal["streams"] or not set(withdrawal["streams"]) <= work:
-        raise ContractError("transport.yaml: withdrawal deletes queued work only from the durable class's streams")
-    if not all("{team}" in stream for stream in withdrawal["streams"]):
-        raise ContractError("transport.yaml: withdrawal reads and deletes only in per-team streams ({team}), so it never "
-                            "reaches another team's messages")
+    for key, class_name in (("withdrawal", "durable"), ("dead_letter_custody", "dead_letter")):
+        custody = transport.get(key)
+        if not isinstance(custody, dict) or set(custody) != {"role", "streams"} or custody["role"] not in registry["host_roles"]:
+            raise ContractError(f"transport.yaml: topology_owner and {key}.role name host roles")
+        streams = set(transport["classes"][class_name]["streams"])
+        if not custody["streams"] or not set(custody["streams"]) <= streams:
+            raise ContractError(f"transport.yaml: {key} deletes queued work only from the {class_name} class's streams")
+        if not all("{team}" in stream for stream in custody["streams"]):
+            raise ContractError(f"transport.yaml: {key} reads and deletes only in per-team streams ({{team}}), so it never "
+                                "reaches another team's messages")
+    for stream in transport["dead_letter_custody"]["streams"]:
+        # A raw copy is found by its subject and deleted by the sequence that read returns; a second
+        # copy under the same subject, from a retried publish, would survive that delete.
+        if transport["streams"][stream].get("max_msgs_per_subject") != 1:
+            raise ContractError(f"transport.yaml: stream {stream} keeps one message per subject (max_msgs_per_subject: 1)")
+    check_key_value(registry, transport)
+
+
+# What a key template may name: the host itself, each team it serves, each agent it runs, its own
+# installation and each installation an agreement names.
+KEY_PLACEHOLDERS = {"self", "team", "agent", "installation", "peer"}
+# What a bucket name may name: a bucket per team holds that team's records only.
+BUCKET_PLACEHOLDERS = {"team"}
+# The stream settings every bucket has (transport.yaml key_value_stream): only the consumer
+# limit and the storage are a choice. Rollup headers would let a writer of one key purge every
+# key; no role purges or deletes messages through the stream API; readers use direct gets.
+KEY_VALUE_STREAM = {"history": 1, "allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": True,
+                    "allow_direct": True}
+
+
+def check_key_value(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """Each bucket names its readers and, per writer role, the keys it may write (README, "Key-value grants").
+
+    A record's writers in the registry are among its bucket's writers, so the generated
+    grants let every writer store its records. Key templates hold only placeholders
+    membership code fills for a host, and never make a wildcard of one.
+    """
+
+    roles = set(registry["host_roles"])
+    check_key_value_stream(transport.get("key_value_stream"))
+    for bucket, spec in transport["key_value"].items():
+        where = f"transport.yaml key_value.{bucket}"
+        if set(re.findall(r"\{([a-z_]+)\}", bucket)) - BUCKET_PLACEHOLDERS \
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", re.sub(r"\{[a-z_]+\}", "x", bucket)):
+            raise ContractError(f"{where}: a bucket name holds letters, digits, _ and -, and only {{team}} as a "
+                                "placeholder")
+        if set(spec) != {"description", "per_key_ttl_seconds", "readers", "writers"}:
+            raise ContractError(f"{where}: fields are description, per_key_ttl_seconds, readers and writers")
+        if not spec["readers"] or not set(spec["readers"]) <= roles or len(set(spec["readers"])) != len(spec["readers"]):
+            raise ContractError(f"{where}: readers are distinct host roles")
+        if not isinstance(spec["writers"], dict) or not spec["writers"] or not set(spec["writers"]) <= roles:
+            raise ContractError(f"{where}: writers name host roles")
+        for role, keys in spec["writers"].items():
+            if not isinstance(keys, list) or not keys or not all(isinstance(key, str) and key for key in keys):
+                raise ContractError(f"{where}: writer {role} lists the key templates it may write")
+            for key in keys:
+                check_key_template(where, key)
+    for name, entry in registry["state_records"].items():
+        writers = set(transport["key_value"][entry["bucket"]]["writers"])
+        if not set(entry["writers"]) <= writers:
+            raise ContractError(f"registry.yaml state_records.{name}: its writers {sorted(set(entry['writers']) - writers)} "
+                                f"have no key template in transport.yaml key_value.{entry['bucket']}")
+
+
+def check_key_value_stream(settings: Any) -> None:
+    """Every bucket's stream refuses rollup headers and stream-API deletes and serves direct reads (README, "Key-value grants")."""
+
+    where = "transport.yaml key_value_stream"
+    if not isinstance(settings, dict) or set(settings) != {*KEY_VALUE_STREAM, "storage", "max_consumers"}:
+        raise ContractError(f"{where}: fields are {sorted({*KEY_VALUE_STREAM, 'storage', 'max_consumers'})}")
+    for field_name, value in KEY_VALUE_STREAM.items():
+        if type(settings[field_name]) is not type(value) or settings[field_name] != value:
+            raise ContractError(f"{where}: {field_name} is {value} (README, \"Every bucket's stream settings\")")
+    if settings["storage"] not in {"file", "memory"}:
+        raise ContractError(f"{where}: storage is file or memory")
+    if type(settings["max_consumers"]) is not int or settings["max_consumers"] < 1:
+        raise ContractError(f"{where}: max_consumers is a positive whole number")
+
+
+def check_key_template(where: str, key: str) -> None:
+    """A key template names only known placeholders and subject characters, and never starts with a wildcard.
+
+    A template that starts with ``*`` or ``>`` would reach every key of the bucket, every
+    other host's or agent's record included; ``>`` may only end a template, as in NATS.
+    """
+
+    if set(re.findall(r"\{([a-z_]+)\}", key)) - KEY_PLACEHOLDERS or re.search(r"[\s/\\]", key):
+        raise ContractError(f"{where}: key template {key!r} uses only {sorted(KEY_PLACEHOLDERS)} and subject characters")
+    tokens = key.split(".")
+    if tokens[0] in {"*", ">"} or ">" in tokens[:-1] or "" in tokens:
+        raise ContractError(f"{where}: key template {key!r} starts with a fixed word or a placeholder, has no empty "
+                            "token, and ends with > if it holds one")
 
 
 def check_class_streams(name: str, spec: dict[str, Any], transport: dict[str, Any], skew: int) -> None:
@@ -1379,7 +1467,8 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
     topology owner.
     """
 
-    expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address
+    # A dead-letter address names the copy id, which no consumer filters on.
+    expected_filter = transport["subject_prefix"].replace("{sender}", "*") + "." + address.replace("{copy}", "*")
     matches = [consumer for consumer in transport["consumers"].values() if consumer["filter"] == expected_filter]
     if not matches:
         raise ContractError(f"no pull consumer for {address}")
@@ -1407,16 +1496,56 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     """
 
     owner: set[str] = set()
-    for stream in transport["streams"]:
+    buckets = [bucket_stream(bucket) for bucket in transport["key_value"]]
+    for stream in [*transport["streams"], *buckets]:
         owner |= {f"$JS.API.STREAM.{action}.{stream}" for action in ("CREATE", "UPDATE", "INFO")}
     for stream in {consumer["stream"] for consumer in transport["consumers"].values()}:
         owner |= {f"$JS.API.CONSUMER.CREATE.{stream}.*", f"$JS.API.CONSUMER.CREATE.{stream}.*.>",
                   f"$JS.API.CONSUMER.DURABLE.CREATE.{stream}.*", f"$JS.API.CONSUMER.INFO.{stream}.*",
                   f"$JS.API.CONSUMER.DELETE.{stream}.*"}
+    # Readers create the buckets' watch consumers; the owner finds and deletes them when a
+    # host left too many behind and filled a bucket's consumer limit.
+    for stream in buckets:
+        owner |= {f"$JS.API.CONSUMER.NAMES.{stream}", f"$JS.API.CONSUMER.LIST.{stream}",
+                  f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.API.CONSUMER.DELETE.{stream}.*"}
     grants = {transport["topology_owner"]: owner}
-    withdrawal = transport["withdrawal"]
-    grants.setdefault(withdrawal["role"], set()).update(
-        f"$JS.API.STREAM.MSG.{action}.{stream}" for stream in withdrawal["streams"] for action in ("GET", "DELETE"))
+    # Withdrawal and dead-letter custody read a message by its sequence and delete it there.
+    for key in ("withdrawal", "dead_letter_custody"):
+        custody = transport[key]
+        grants.setdefault(custody["role"], set()).update(
+            f"$JS.API.STREAM.MSG.{action}.{stream}" for stream in custody["streams"] for action in ("GET", "DELETE"))
+    return grants
+
+
+def bucket_stream(bucket: str) -> str:
+    """The JetStream stream behind a key-value bucket."""
+
+    return f"KV_{bucket}"
+
+
+def key_value_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
+    """Per role: the subjects that read and write the key-value buckets (README, "Key-value grants").
+
+    A reader gets the bucket's stream information, its direct reads, and what a watch
+    needs: creating an unnamed consumer, whose deliveries arrive on the reader's own inbox
+    (every role already subscribes to it), reading that consumer's information (the server
+    names it, so the grant covers any name; it only reads), and answering its flow control.
+    Only the unnamed create: NATS refuses a durable consumer through it, and a request that
+    names no consumer cannot change an existing one, so no host changes another host's
+    watch; no reader may delete a consumer either. A writer publishes the keys its templates
+    name; membership code fills them like subjects, so a host writes only its own records and
+    its own agents'. A bucket per team is filled per team, so its grants reach no other team.
+    """
+
+    grants: dict[str, set[str]] = {}
+    for bucket, spec in transport["key_value"].items():
+        stream = bucket_stream(bucket)
+        reads = {f"$JS.API.STREAM.INFO.{stream}", f"$JS.API.DIRECT.GET.{stream}", f"$JS.API.DIRECT.GET.{stream}.>",
+                 f"$JS.API.CONSUMER.CREATE.{stream}", f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.FC.{stream}.>"}
+        for role in spec["readers"]:
+            grants.setdefault(role, set()).update(reads)
+        for role, keys in spec["writers"].items():
+            grants.setdefault(role, set()).update(f"$KV.{bucket}.{key}" for key in keys)
     return grants
 
 
@@ -1434,9 +1563,10 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
 
     reply_window = transport["classes"]["request_reply"]["max_expiry_seconds"] + transport["clock_skew_seconds"]
     management = stream_management_grants(transport)
+    buckets = key_value_grants(transport)
     result = {}
     for role in registry["host_roles"]:
-        publish: set[str] = set(management.get(role, set()))
+        publish: set[str] = set(management.get(role, set())) | buckets.get(role, set())
         subscribe = {f"{transport['reply_inbox_prefix'].replace('{runtime}', '{self}')}.>"}
         answers_requests = False
         for entry in registry["kinds"].values():
@@ -1445,11 +1575,10 @@ def permissions(registry: dict[str, Any], transport: dict[str, Any]) -> dict[str
             for address in entry_addresses(entry):
                 if role not in receiving_roles(entry, address, transport):
                     continue
-                if entry["class"] == "durable":
+                if entry["class"] in {"durable", "dead_letter"}:
+                    # Queued work and dead-letter notices are pulled from their consumers.
                     publish.update(consumer_permissions(address, transport))
-                elif entry["class"] != "dead_letter":
-                    # Dead letters wait in UA1_DLQ; its read grants come with the services
-                    # that read it, not as a subscription.
+                else:
                     subscribe.add(full_subject(address, "*"))
                 answers_requests = answers_requests or entry["class"] == "request_reply"
         document: dict[str, Any] = {"role": role, "publish": sorted(publish), "subscribe": sorted(subscribe)}
@@ -1876,6 +2005,7 @@ def render_python(registry: dict[str, Any], schemas: dict[str, dict[str, Any]], 
         f"RETRY_OUTCOMES = frozenset({sorted(registry['retry_outcomes'])!r})\n"
         f"HOST_ROLES = {tuple(registry['host_roles'])!r}\n"
         f"TOPOLOGIES = { {name: {role: tuple(edges) for role, edges in spec['allowed_edges'].items()} for name, spec in topologies['topologies'].items()}!r}\n"
+        f"REQUESTER_KINDS = frozenset({sorted(topologies.get('requester_kinds', []))!r})\n"
         f"FRAME_SHAPE = {shape(writer, 'frame.schema.json', schemas['frame.schema.json'])!r}\n"
         f"STATE_SHAPE = {shape(writer, registry['state_schema'], schemas[registry['state_schema']])!r}\n\n"
         "KINDS: dict[str, KindSpec] = {\n" + "\n".join(specs) + "\n}\n\n"

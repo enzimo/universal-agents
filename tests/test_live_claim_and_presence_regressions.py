@@ -1,19 +1,18 @@
-"""Real JetStream admission claims and late presence replay."""
+"""Real JetStream admission claims and receipts waiting for the team lead."""
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from custom_agents.delegated_work_runtime import send_task_claim
 from assistant_gateway.application.deferred_delivery import GatewayDeferredDeliveryApplication, GatewayDeferredDeliverySettings
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType, RequesterType, RoutingType
+from custom_messages.enums import MessageMetaType, RequesterType
 from custom_tools.comms_tools import TeamComms
 from test_live_nats_replacement_semantics import _adapter, _subscribe_queue, _team
 
@@ -63,21 +62,3 @@ async def test_same_worker_reclaims_within_duplicate_window():
         await adapter.close()
 
 
-async def test_presence_older_than_three_minutes_replays_within_retention():
-    team = _team("presence_age")
-    adapter = _adapter(team)
-    await adapter.connect(reconcile_topology=True)
-    comms = TeamComms(team_id=team, nats_adapter=adapter)
-    try:
-        envelope = MessageEnvelope(
-            msg_content=AgentStatus(self_id="worker", team_id=team, named_agent_type="ResearchAgent", name="Worker", agent_role="Researcher", is_paused=False, is_busy=False, status_type=MessageMetaType.RESPONSE),
-            msg_header=MessageHeader(from_agent_id="worker", to_routing_path=RoutingType.ALL_AGENTS_ROUTE, timestamp=(datetime.now(timezone.utc) - timedelta(seconds=240)).isoformat()),
-            msg_meta=MessageMeta(),
-        )
-        await comms.broadcast_message(envelope, team)
-        replay = await _subscribe_queue(adapter, name="late-presence", subject=f"{adapter.mapper.prefix}.presence.*", durable_name="late_presence", deliver_last_per_subject=True)
-        delivery = await asyncio.wait_for(replay.get(), 3)
-        assert delivery.envelope.msg_content.self_id == "worker"
-        await delivery.ack()
-    finally:
-        await adapter.close()

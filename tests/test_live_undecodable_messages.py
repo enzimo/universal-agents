@@ -79,7 +79,6 @@ async def _consumer_settled(js, stream: str, durable: str) -> bool:
 async def _delete_streams(adapter: NatsTransportAdapter) -> None:
     for stream in (
         adapter.mapper.work_stream_name(),
-        adapter.mapper.presence_stream_name(),
         adapter.mapper.dead_letter_stream_name(),
     ):
         try:

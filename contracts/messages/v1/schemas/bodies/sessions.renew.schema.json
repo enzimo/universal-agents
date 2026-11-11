@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/sessions.renew.schema.json",
+  "title": "sessions.renew request",
+  "description": "A host renews one of its agents' sessions while it is connected.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The host's id for this request; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "session": {
+      "$ref": "../common.schema.json#/$defs/session_id"
+    }
+  },
+  "required": [
+    "request_id",
+    "session"
+  ],
+  "additionalProperties": false
+}

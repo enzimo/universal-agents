@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from assistant_gateway.bootstrap import bootstrap_instance
-from assistant_gateway.application.thread_guidance import NOT_STARTED_TEXT
+from assistant_gateway.application.thread_guidance import NOT_STARTED_TEXT, UNCONFIRMED_TEXT
 from assistant_gateway.domain.request_state import RUN_STATE_RUNNING
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import (
@@ -491,6 +491,68 @@ async def test_newer_guidance_waits_for_an_older_in_flight_publication(tmp_path:
     assert [envelope.msg_content.guidance_text for envelope, _ in transport.operational] == [
         "First guidance", "Second guidance"
     ]
+    assert gateway.request_repository.get_held_guidance(second.correlation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_pending_answer_keeps_the_guidance_and_the_later_messages_behind_it(tmp_path: Path) -> None:
+    """The lead saved the guidance but could not pass it on to every worker yet (task_steering_runtime).
+
+    It answers pending; the gateway keeps the message, sends it again and keeps the
+    thread's later messages behind it until the lead accepts it.
+    """
+
+    class PendingTwice(_SteeringTransport):
+        def __init__(self):
+            super().__init__()
+            self.pending_left = {"First guidance": 2}
+
+        async def publish_operational(self, envelope, *, routing_key):
+            steering = envelope.msg_content
+            if not self.pending_left.get(steering.guidance_text):
+                await super().publish_operational(envelope, routing_key=routing_key)
+                return
+            self.pending_left[steering.guidance_text] -= 1
+            self.operational.append((envelope, routing_key))
+            await self.gateway._manager_client.handle_response(
+                MessageEnvelope(
+                    msg_content=TaskSteering(
+                        steering_type=TaskSteeringType.STATUS,
+                        target_task_id=steering.target_task_id,
+                        conversation_id=steering.conversation_id,
+                        status=TaskSteeringStatus.PENDING,
+                        status_reason="The guidance was saved for the task, but it could not be passed on yet.",
+                        idempotency_key=steering.idempotency_key,
+                    ),
+                    msg_header=MessageHeader(from_agent_id="manager_agent_1", to_routing_path="team_steering_gateway"),
+                    msg_meta=MessageMeta(msg_correlation_id=envelope.msg_meta.msg_correlation_id,
+                                         requester_type=RequesterType.AGENT_REQUESTER),
+                )
+            )
+
+    transport = PendingTwice()
+    gateway = UserGateway(_config(tmp_path), manager_transport=transport)
+    transport.gateway = gateway
+    session = gateway.application.start_new_session()
+
+    first = await _send_task_steering(
+        gateway, "First guidance", session_key=session.session_key, target_task_id="task_running"
+    )
+    assert first.text == UNCONFIRMED_TEXT
+    assert gateway.request_repository.get_held_guidance(first.correlation_id) is not None
+
+    # A later message: the held one goes first, is answered pending again, and keeps it back.
+    second = await gateway.application.send_user_message("Second guidance", session_key=session.session_key)
+    assert second.text == UNCONFIRMED_TEXT
+    assert [envelope.msg_content.guidance_text for envelope, _ in transport.operational] == ["First guidance"] * 2
+
+    # The retry timer's next send is accepted; then the later message goes.
+    await gateway._thread_guidance.retry_held()
+
+    assert [envelope.msg_content.guidance_text for envelope, _ in transport.operational] == [
+        "First guidance", "First guidance", "First guidance", "Second guidance"
+    ]
+    assert gateway.request_repository.get_held_guidance(first.correlation_id) is None
     assert gateway.request_repository.get_held_guidance(second.correlation_id) is None
 
 

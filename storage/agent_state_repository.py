@@ -37,8 +37,6 @@ class AgentStateQuery:
 class AgentStateRepository(Protocol):
     def upsert(self, status: AgentStatus) -> None: ...
 
-    def upsert_if_newer(self, status: AgentStatus) -> bool: ...
-
     def remove(self, agent_id: str) -> bool: ...
 
     def remove_unseen(self, agent_id: str, last_seen_at: Optional[str]) -> bool: ...
@@ -122,18 +120,9 @@ class _RelationalAgentStateRepository:
 
     def upsert(self, status: AgentStatus) -> None:
         """Write an agent's own status (its own refresh is always current)."""
-        self._write_status(status, only_if_newer=False)
+        self._write_status(status)
 
-    def upsert_if_newer(self, status: AgentStatus) -> bool:
-        """Write a status another agent sent only if it is newer than the stored row.
-
-        The team lead stores received presence this way, in one statement, so
-        a delayed older status cannot overwrite what the agent wrote itself
-        (such as its exiting mark), however the two writes interleave.
-        """
-        return self._write_status(status, only_if_newer=True)
-
-    def _write_status(self, status: AgentStatus, *, only_if_newer: bool) -> bool:
+    def _write_status(self, status: AgentStatus) -> bool:
         agent_id = status.self_id
         if not agent_id:
             self._logger.warning("Cannot upsert AgentStatus without self_id.")
@@ -143,14 +132,6 @@ class _RelationalAgentStateRepository:
         is_executing = status.is_executing if status.is_executing is not None else status.is_busy
         has_capacity = None if status.has_execution_capacity is None else int(bool(status.has_execution_capacity))
         bind = self._dialect.bind
-        # Postgres compares text by the database collation; "C" compares bytes like SQLite.
-        collate = ' COLLATE "C"' if self._dialect == POSTGRES else ""
-        newer_only = (
-            f" WHERE agent_states.last_seen_at IS NULL OR agent_states.last_seen_at{collate}"
-            f" < excluded.last_seen_at{collate}"
-            if only_if_newer
-            else ""
-        )
         try:
             with self._connect() as conn:
                 cursor = conn.execute(
@@ -180,7 +161,7 @@ class _RelationalAgentStateRepository:
                         diagnostic_json = excluded.diagnostic_json,
                         last_seen_at = excluded.last_seen_at,
                         is_exiting = excluded.is_exiting,
-                        full_status_json = excluded.full_status_json{newer_only}
+                        full_status_json = excluded.full_status_json
                     """,
                     (
                         agent_id,
@@ -339,7 +320,10 @@ class SqliteAgentStateRepository(_RelationalAgentStateRepository):
 
 
     def _connect(self) -> sqlite3.Connection:
-        return connect_sqlite(self._db_path, logger=self._logger)
+        # Status rows an agent rewrites every few seconds; in an agent process
+        # they are flushed before its next send (storage.sqlite_connection,
+        # "Flushing before sending").
+        return connect_sqlite(self._db_path, logger=self._logger, defer_flush=True)
 
 
 class PostgresAgentStateRepository(_RelationalAgentStateRepository):

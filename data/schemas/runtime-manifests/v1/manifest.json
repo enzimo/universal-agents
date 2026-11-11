@@ -6,7 +6,7 @@
     {
       "filename": "GatewayRuntimeManifestV1.schema.json",
       "model": "GatewayRuntimeManifestV1",
-      "sha256": "b22e44c3ea14a167a5dcb476816cb3b2a4a0a049e662185c5ce3c9089f176133"
+      "sha256": "18b70e87505b1ad20da2fbe3d621d2dbeb77768d331b21ce6116f8718eccb36e"
     },
     {
       "filename": "ActivityCollectorRuntimeManifestV1.schema.json",
@@ -21,7 +21,7 @@
     {
       "filename": "ExecutionControllerRuntimeManifestV1.schema.json",
       "model": "ExecutionControllerRuntimeManifestV1",
-      "sha256": "c80247a8ea83b23c5b1edc620e5fab81e14309f89e9d3f0abdd59f930288f2e8"
+      "sha256": "f277ca92ee3340c57f3aaf14706c08e4e28c385c3cccd3388c3f98c46cb6f0d7"
     },
     {
       "filename": "AdapterHostRuntimeManifestV1.schema.json",

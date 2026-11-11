@@ -16,7 +16,6 @@ class SubscriptionDelivery(StrEnum):
     """Transport delivery mode for a subscription."""
 
     CORE = "core"
-    JETSTREAM_EPHEMERAL = "jetstream_ephemeral"
     JETSTREAM_DURABLE = "jetstream_durable"
 
 
@@ -47,8 +46,6 @@ class TransportPublishOptions:
 
     durable: bool = True
     operational: bool = False
-    broadcast: bool = False
-    presence: bool = False
     reply: bool = False
     ttl_seconds: Optional[float] = None
     idempotency_key: Optional[str] = None

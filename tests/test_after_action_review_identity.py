@@ -43,7 +43,7 @@ from custom_agents.task_context_runtime import scheduler_signer
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_manager_after_action_reports import UNVERIFIED_IDENTITY_STALE_REASON
 from custom_agents.task_records import ReportedWorkIdentity
-from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1, new_person_ref
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import AfterActionReport, Task
@@ -123,6 +123,7 @@ def _record_people(tasks: TaskManager, standings: dict[str, PersonStanding]) -> 
         TEAM,
         [
             TeamPersonV1(
+                person_ref=new_person_ref(),
                 team_id=TEAM,
                 person_id=person_id,
                 standing=standing,

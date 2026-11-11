@@ -6,7 +6,8 @@ internal UUID. Manager-control replies, agent memory tools and memory reviews
 used to receive the whole row; only Pydantic silently dropping undeclared keys
 kept provenance out of the Settings reply, and agent tools returned all of it to
 the model. ``public_pinned_memory_fact`` (agents, reviews: with metadata) and
-``pinned_memory_reply`` (Settings: without) now build the views field by field.
+``team_services.memory.wire_fact`` (people's ``memory.*`` replies: without) now
+build the views field by field.
 The agent view also carries ``source_key``, the key trusted imports use to stay
 idempotent (an importer name, not a person or chat).
 """
@@ -27,10 +28,10 @@ from custom_agents.pinned_memory_runtime import (
     PinnedMemoryRequestContext,
     PinnedMemoryService,
     PinnedMemorySource,
-    pinned_memory_reply,
     public_pinned_memory_fact,
 )
 from custom_messages.contracts.control_v1 import PinnedMemoryFactPayload
+from team_services.memory import wire_fact
 from storage.config import SqliteStorageSettings, StorageSettings
 from storage.pinned_memory_repository import create_pinned_memory_repository
 
@@ -48,8 +49,9 @@ PROVENANCE_VALUES = (
     SOURCE_TASK,
     SOURCE_CONVERSATION,
 )
-REPLY_FIELDS = set(PinnedMemoryFactPayload.model_fields)
-AGENT_FIELDS = REPLY_FIELDS | {"metadata", "source_key"}
+AGENT_FIELDS = set(PinnedMemoryFactPayload.model_fields) | {"metadata", "source_key"}
+# A people's reply fact (the contract's memory.* replies); "expires" only when one is set.
+WIRE_FIELDS = {"memory_id", "fact_text", "valid_from", "tags", "created_at", "updated_at", "seen_version"}
 
 
 def _service(tmp_path: Path) -> PinnedMemoryService:
@@ -88,11 +90,11 @@ def _assert_public(result: dict) -> None:
         assert value not in text
     for fact in _facts(result):
         assert set(fact) == AGENT_FIELDS
-    reply = pinned_memory_reply(result).model_dump(mode="json")
-    for value in PROVENANCE_VALUES:
-        assert value not in json.dumps(reply)
-    for fact in _facts(reply):
-        assert set(fact) == REPLY_FIELDS
+    for fact in _facts(result):
+        wire = wire_fact(fact)
+        assert set(wire) - {"expires"} == WIRE_FIELDS
+        for value in PROVENANCE_VALUES:
+            assert value not in json.dumps(wire)
 
 
 @pytest.mark.parametrize("bank", [COREMEM_BANK, USERMEM_BANK])
@@ -138,7 +140,7 @@ def test_every_service_result_shows_only_the_public_view(
     assert listed["facts"][0]["record_digest"] == shown["fact"]["record_digest"]
     # Agents read back what they attached (the onboarding guide resumes from it).
     assert listed["facts"][0]["metadata"]["resume_section"] == "step_3"
-    assert "metadata" not in pinned_memory_reply(listed).model_dump()["facts"][0]
+    assert "metadata_json" not in wire_fact(listed["facts"][0])
     # Delete moves the original metadata into its undo snapshot without exposing it.
     assert run("list")["facts"] == []
     restored = run("undo", event_id=deleted["event_id"])

@@ -92,8 +92,6 @@ from runtime_settings.stuck_tasks import StuckTaskSettings
 from storage.agent_launch_repository import ACTIVE_LAUNCH_STATES, AgentLaunchRepository
 
 _ENDED_LAUNCH_STATES = frozenset({AgentLaunchState.RETIRED, AgentLaunchState.FAILED})
-# A sender's own time may run this far ahead of the lead's clock before it is logged.
-STATUS_CLOCK_TOLERANCE = timedelta(seconds=5)
 # How often the team lead removes status rows of agents that are gone.
 AGENT_ROW_PRUNE_SECONDS = 60.0
 # What LocalAgentTeamRuntime.inspect_launch answers for a start whose process is gone.
@@ -180,46 +178,6 @@ def parse_utc(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def newest_agent_status(incoming: AgentStatus, *known: Optional[AgentStatus]) -> AgentStatus:
-    """Select the newest sender-written status, preferring known records on ties.
-
-    Own database refreshes can be newer than retained presence. Reconcile both
-    before discovery or exit effects, without inventing an arrival timestamp.
-    """
-    oldest = datetime.min.replace(tzinfo=timezone.utc)
-    return max(
-        [status for status in known if status is not None] + [incoming],
-        key=lambda status: parse_utc(status.last_seen_at) or oldest,
-    )
-
-
-async def reconcile_received_status(agent: Any, status: AgentStatus) -> AgentStatus:
-    """Persist and select current sender-written evidence before status effects.
-
-    A newer own refresh, or a status already received in memory, wins over
-    retained presence. Every receiver reads the shared store, but only the
-    team lead writes other agents' records. Keep this ordering here so exit
-    effects and discovery cannot disagree with the liveness store.
-    """
-    agent_id = status.self_id
-    status.last_seen_at = received_status_time(agent, status)
-    status = newest_agent_status(status, agent.known_agents.agent_map.get(agent_id))
-    stored_status = None
-    if agent._agent_state_store:
-        written = False
-        if agent.is_team_lead:
-            written = await agent.task_manager.operations_runtime.run(
-                agent._agent_state_store.upsert_if_newer, status
-            )
-        if not written:
-            stored_status = await agent.task_manager.operations_runtime.run(
-                agent._agent_state_store.get_by_id, agent_id
-            )
-    return newest_agent_status(
-        status, stored_status, agent.known_agents.agent_map.get(agent_id)
-    )
 
 
 def owner_gone_after(agent: Any) -> timedelta:
@@ -454,42 +412,3 @@ async def prune_departed_agent_rows_when_due(agent: Any, *, clock: float | None 
     return removed
 
 
-def received_status_time(agent: Any, status: AgentStatus, *, now: datetime | None = None) -> str:
-    """The time the lead stores for a received status: the sender's own, never later than now.
-
-    Presence is replayed when the lead subscribes, so the arrival time would
-    make an agent that just crashed look alive. The sender's time is used
-    instead, but a sender whose clock runs ahead must not stay fresh (and
-    unpruned) on that clock, so the earlier of the two is kept. Being ahead
-    by more than ``STATUS_CLOCK_TOLERANCE`` is logged when it starts and ends.
-    """
-    arrived = now or datetime.now(timezone.utc)
-    agent_id = status.self_id or ""
-    sent = parse_utc(status.last_seen_at)
-    if sent is None:
-        agent._logger.warning(
-            "An agent status arrived without the time it was sent; storing the time it "
-            "arrived. event=agent_status_without_sent_time agent_id=%s",
-            agent_id,
-        )
-        return arrived.isoformat()
-    ahead: set[str] = _observer_memory(agent, "_status_clock_ahead", set)
-    if sent - arrived > STATUS_CLOCK_TOLERANCE:
-        if agent_id not in ahead:
-            ahead.add(agent_id)
-            agent._logger.warning(
-                "An agent's clock runs ahead of the team lead's; storing the arrival time. "
-                "event=agent_status_clock_ahead agent_id=%s sent_at=%s arrived_at=%s ahead_seconds=%.1f",
-                agent_id,
-                sent.isoformat(),
-                arrived.isoformat(),
-                (sent - arrived).total_seconds(),
-            )
-    elif agent_id in ahead:
-        ahead.discard(agent_id)
-        agent._logger.info(
-            "An agent's clock no longer runs ahead of the team lead's. "
-            "event=agent_status_clock_ahead_cleared agent_id=%s",
-            agent_id,
-        )
-    return min(sent, arrived).isoformat()

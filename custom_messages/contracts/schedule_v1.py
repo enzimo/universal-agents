@@ -4,7 +4,6 @@ from custom_messages.contracts.common_v1 import contract_sha256
 from custom_messages.contracts.routing_v1 import MessageHeader
 from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType
 from custom_messages.enums import ScheduleManagementClass
 from custom_messages.enums import SystemScheduleKind
 from datetime import datetime
@@ -27,16 +26,6 @@ from zoneinfo import ZoneInfoNotFoundError
 # approves each exact change (custom_agents.system_schedule_changes); in the
 # gateway, the people who could approve one may make it directly.
 SYSTEM_SCHEDULE_CHANGE_KIND = "system_schedule"
-# ManagerScheduleCommand.message when the person may not change a schedule the
-# runtime manages (custom_agents.manager_control_runtime decides it with the
-# command's verified signed person).
-SYSTEM_SCHEDULE_CHANGE_NOT_ALLOWED = "system_schedule_change_not_allowed"
-# ManagerScheduleCommand.message when the schedule changed after it was listed
-# (expected_record_digest), checked in the store's write transaction.
-SCHEDULE_CHANGED_SINCE_LISTED = "schedule_changed"
-# ManagerScheduleCommand.message when the store refused a change to a schedule
-# the runtime manages for lack of an exact permit (team, owner or state mismatch).
-SYSTEM_SCHEDULE_CHANGE_REFUSED = "system_schedule_change_refused"
 
 
 class AutomationEnvelopeSnapshot(BaseModel):
@@ -476,7 +465,7 @@ def schedule_listing_digest(schedule: ScheduledMessage) -> str:
     changes when a writer explicitly changes timing, so a delayed retime
     cannot replace another retime while normal runs leave the digest valid.
     The gateway lists
-    schedules with it and the manager's store checks it in the write
+    schedules with it and the schedule store checks it in the write
     transaction (``custom_agents.schedule_store``).
     """
 
@@ -512,24 +501,3 @@ class ScheduleWorkerAssignmentV1(BaseModel):
     not_running_explanation: str | None = None
 
 
-class ManagerScheduleCommand(BaseModel):
-    """Durable gateway-to-manager schedule query or mutation."""
-
-    message_class: Literal["ManagerScheduleCommand"] = "ManagerScheduleCommand"
-    command_id: str = Field(default_factory=lambda: new_id("mgr_sched"))
-    command_type: MessageMetaType = MessageMetaType.REQUEST
-    action: Literal["list", "pause", "resume", "disable", "remove"]
-    schedule_id: Optional[str] = None
-    session_key: Optional[str] = None
-    paused_until: Optional[str] = None
-    expected_record_digest: Optional[str] = Field(
-        default=None,
-        pattern=r"^[0-9a-f]{64}$",
-    )
-    success: Optional[bool] = None
-    schedules: List[ScheduledMessage] = Field(default_factory=list)
-    worker_assignments: Dict[str, ScheduleWorkerAssignmentV1] = Field(default_factory=dict)
-    message: str = ""
-
-    def get_id(self) -> str:
-        return self.command_id

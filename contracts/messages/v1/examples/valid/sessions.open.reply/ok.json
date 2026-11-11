@@ -1,0 +1,60 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "sessions.open.reply",
+  "message_id": "01928f3a-7b2c-7d02-8000-000000000d02",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "host",
+    "id": "worker-host-1",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7d01-8000-000000000d01",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "session": {
+      "record": "agent_session",
+      "protocol": "1.0-pre",
+      "key": "session.install_example.team_example.s-researcher-3-1",
+      "writer": {
+        "type": "host",
+        "installation": "install_example",
+        "runtime": "team-services-1",
+        "membership_epoch": 2,
+        "key_id": "test-services-key-1"
+      },
+      "sequence": 1,
+      "issued_at": "2026-10-22T04:30:00.000Z",
+      "body": {
+        "session": "s-researcher-3-1",
+        "installation": "install_example",
+        "team": "team_example",
+        "agent": "researcher-3",
+        "agent_type": "researcher",
+        "agent_role": "worker",
+        "runtime": "worker-host-1",
+        "placement_revision": 13,
+        "started_at": "2026-10-22T04:30:00.000Z",
+        "ends_at": "2026-10-29T04:00:00.000Z"
+      },
+      "algorithm": "ed25519",
+      "body_digest": "8IE76WfWECjaDhMWneXMQk0Mejypf4eLJtJGNnLcL4s",
+      "signature": "jdKg6ybBMm_Xy9t2--gd-DgHFhSqWMC3DhxpiZXdTcNZ1WOgu5QkNJwU-nLqCNBmgTE5DtmU2J693oFJyW31DQ"
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7d01-8000-000000000d01",
+  "idempotency_key": "sessions.open.reply:qmtAD6PHu3tQl7GC5BTqgfjITseV0dTWp-i3NnOdKLo",
+  "body_digest": "fufXr01tMHwCfXBqu_VvedNAs4kuMM3Y_inxwGvf-1A",
+  "signature": "hXPrIT4d7KkeDNZeg0TlV3nAWi2LxvUzC25hlu3orXkonfowAwmmIdWre5r7YFSKj0wk3qzmPkA38jZ9TddnAQ"
+}

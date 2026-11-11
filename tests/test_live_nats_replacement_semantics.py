@@ -2,7 +2,7 @@
 
 These tests are intentionally deterministic and avoid LLM calls. They exercise
 the broker contracts that the runtime relies on: durable work, queue
-groups, redelivery, duplicate suppression, replayable presence, and reconnect
+groups, redelivery, duplicate suppression, and reconnect
 behavior.
 """
 
@@ -28,7 +28,6 @@ from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskSteering
 from custom_messages.enums import ControlType, MessageMetaType, RoutingType
 from custom_messages.enums import TaskSteeringStatus, TaskSteeringType
-from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 from custom_transport.base import (
     ConsumerScope,
     FetchPolicy,
@@ -39,7 +38,7 @@ from custom_transport.base import (
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from tests.live_nats_support import flush_adapter_fully
-from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
+from live_nats_client import delete_team_streams, nats_transport_config_from_env, resolve_live_transport_settings
 from config_loader import CONFIG_SCHEMA_VERSION
 from id_generation import new_id, new_id_suffix
 from scripts.reconcile_nats_consumers import reconcile_nats_consumers
@@ -196,7 +195,6 @@ async def _subscribe_queue(
     consumer_scope: ConsumerScope = ConsumerScope.ROUTE,
     consumer_role: str = "test",
     owner_agent_id: str | None = None,
-    deliver_last_per_subject: bool = False,
 ) -> asyncio.Queue[InboundDelivery]:
     queue: asyncio.Queue[InboundDelivery] = asyncio.Queue()
 
@@ -217,7 +215,6 @@ async def _subscribe_queue(
             consumer_scope=consumer_scope,
             consumer_role=consumer_role,
             owner_agent_id=owner_agent_id,
-            deliver_last_per_subject=deliver_last_per_subject,
         )
     elif routing_key is not None:
         await adapter.subscribe_route(
@@ -230,7 +227,6 @@ async def _subscribe_queue(
             ready=(lambda: True) if worker_queue else None,
             consumer_role=consumer_role,
             owner_agent_id=owner_agent_id,
-            deliver_last_per_subject=deliver_last_per_subject,
         )
     else:  # pragma: no cover - helper misuse
         raise ValueError("routing_key or subject is required")
@@ -243,8 +239,6 @@ async def _publish(
     envelope: MessageEnvelope,
     *,
     durable: bool = True,
-    broadcast: bool = False,
-    presence: bool = False,
     operational: bool = False,
     idempotency_key: str | None = None,
 ) -> None:
@@ -253,8 +247,6 @@ async def _publish(
         routing_key=routing_key,
         options=TransportPublishOptions(
             durable=durable,
-            broadcast=broadcast,
-            presence=presence,
             operational=operational,
             idempotency_key=idempotency_key,
         ),
@@ -479,107 +471,7 @@ async def test_live_work_max_age_expires_undelivered_work() -> None:
         await adapter.close()
 
 
-async def test_live_broadcast_control_reaches_all_current_subscribers() -> None:
-    team_id = _team("nats_broadcast")
-    mapper = NatsSubjectMapper(team_id=team_id)
-    adapters = [
-        _adapter(team_id, mapper=mapper, name=f"broadcast-{idx}") for idx in range(3)
-    ]
-    try:
-        queues = []
-        for idx, adapter in enumerate(adapters):
-            await adapter.connect(reconcile_topology=(idx == 0))
-            queues.append(
-                await _subscribe_queue(
-                    adapter,
-                    name=f"broadcast-sub-{idx}",
-                    subject=mapper.broadcast_subject(),
-                    durable=False,
-                )
-            )
-        for adapter in adapters:
-            await flush_adapter_fully(adapter)
-        await _publish(
-            adapters[0],
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            _control(RoutingType.ALL_AGENTS_ROUTE.value, "pause"),
-            durable=False,
-            broadcast=True,
-        )
-        deliveries = [
-            await asyncio.wait_for(queue.get(), timeout=5) for queue in queues
-        ]
-        for delivery in deliveries:
-            await delivery.ack()
-            assert isinstance(delivery.envelope.msg_content, ControlInstruction)
-            assert delivery.envelope.msg_content.instruction.instruction == "pause"
-    finally:
-        for adapter in adapters:
-            await adapter.close()
-
-
-async def test_live_managed_skill_change_reaches_all_operational_subscribers() -> None:
-    team_id = _team("nats_skill_cat")
-    mapper = NatsSubjectMapper(team_id=team_id)
-    adapters = [
-        _adapter(team_id, mapper=mapper, name=f"skill-catalog-{idx}")
-        for idx in range(3)
-    ]
-    try:
-        queues = []
-        for idx, adapter in enumerate(adapters):
-            await adapter.connect(reconcile_topology=(idx == 0))
-            queues.append(
-                await _subscribe_queue(
-                    adapter,
-                    name=f"skill-catalog-sub-{idx}",
-                    subject=mapper.operational_subject(),
-                    durable=False,
-                )
-            )
-        for adapter in adapters:
-            await flush_adapter_fully(adapter)
-
-        notification = ManagedSkillCatalogChangedV1(
-            team_id=team_id,
-            source_agent_id="agent_team_architect",
-            operation="install",
-            change_id="skill_install_0123456789ab",
-            skill_name="grill-me",
-            installed_tree_sha256="a" * 64,
-        )
-        envelope = MessageEnvelope(
-            msg_content=notification,
-            msg_meta=MessageMeta(from_agent_name="TeamArchitect-0001"),
-            msg_header=MessageHeader(
-                from_agent_id=notification.source_agent_id,
-                to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-                idempotency_key=notification.notification_id,
-            ),
-        )
-        await _publish(
-            adapters[0],
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            envelope,
-            durable=False,
-            operational=True,
-        )
-
-        deliveries = [
-            await asyncio.wait_for(queue.get(), timeout=5) for queue in queues
-        ]
-        for delivery in deliveries:
-            await delivery.ack()
-            received = delivery.envelope.msg_content
-            assert isinstance(received, ManagedSkillCatalogChangedV1)
-            assert received.notification_id == notification.notification_id
-            assert received.skill_name == "grill-me"
-    finally:
-        for adapter in adapters:
-            await adapter.close()
-
-
-async def test_live_worker_pool_single_delivery_and_broadcast_fanout() -> None:
+async def test_live_worker_pool_single_delivery() -> None:
     team_id = _team("nats_pool")
     named_type = "WebResearchAgent"
     named_queue = f"{team_id}_{named_type}"
@@ -592,7 +484,6 @@ async def test_live_worker_pool_single_delivery_and_broadcast_fanout() -> None:
     ]
     try:
         work_queues = []
-        broadcast_queues = []
         for idx, adapter in enumerate(adapters):
             await adapter.connect(reconcile_topology=(idx == 0))
             work_queues.append(
@@ -602,14 +493,6 @@ async def test_live_worker_pool_single_delivery_and_broadcast_fanout() -> None:
                     routing_key=named_queue,
                     durable_name=queue_group,
                     worker_queue=True,
-                )
-            )
-            broadcast_queues.append(
-                await _subscribe_queue(
-                    adapter,
-                    name=f"pool-broadcast-{idx}",
-                    subject=mapper.broadcast_subject(),
-                    durable=False,
                 )
             )
         for adapter in adapters:
@@ -633,74 +516,10 @@ async def test_live_worker_pool_single_delivery_and_broadcast_fanout() -> None:
         await asyncio.sleep(0.5)
         assert sum(queue.qsize() for queue in work_queues) == 0
 
-        await _publish(
-            adapters[0],
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            _control(RoutingType.ALL_AGENTS_ROUTE.value, "status"),
-            durable=False,
-            broadcast=True,
-        )
-        broadcast_deliveries = [
-            await asyncio.wait_for(queue.get(), timeout=5) for queue in broadcast_queues
-        ]
-        for delivery in broadcast_deliveries:
-            await delivery.ack()
-            assert delivery.envelope.msg_content.instruction.instruction == "status"
     finally:
         for adapter in adapters:
             await adapter.close()
-
-
-async def test_live_presence_replays_last_status_to_late_joiner_but_core_broadcast_does_not() -> (
-    None
-):
-    team_id = _team("nats_late_join")
-    mapper = NatsSubjectMapper(team_id=team_id)
-    adapter = _adapter(team_id, mapper=mapper)
-    try:
-        await adapter.connect(reconcile_topology=True)
-        await _publish(
-            adapter,
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            _status("manager_a", team_id),
-            presence=True,
-        )
-        await _publish(
-            adapter,
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            _status("manager_a", team_id, exiting=True),
-            presence=True,
-        )
-
-        presence_queue = await _subscribe_queue(
-            adapter,
-            name="late-presence",
-            subject=f"{mapper.prefix}.presence.*",
-            durable_name=mapper.durable_name(new_id("presence_late")),
-            deliver_last_per_subject=True,
-        )
-        presence = await asyncio.wait_for(presence_queue.get(), timeout=5)
-        await presence.ack()
-        assert isinstance(presence.envelope.msg_content, AgentStatus)
-        assert presence.envelope.msg_content.self_id == "manager_a"
-        assert presence.envelope.msg_content.is_exiting is True
-
-        await _publish(
-            adapter,
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            _control(RoutingType.ALL_AGENTS_ROUTE.value, "resume"),
-            durable=False,
-            broadcast=True,
-        )
-        late_broadcast = await _subscribe_queue(
-            adapter,
-            name="late-core-broadcast",
-            subject=mapper.broadcast_subject(),
-            durable=False,
-        )
-        await _wait_no_delivery(late_broadcast, timeout=0.5)
-    finally:
-        await adapter.close()
+        await delete_team_streams(team_id)
 
 
 @pytest.mark.parametrize(
@@ -718,12 +537,23 @@ async def test_live_task_steering_routes_to_active_agent(
     adapter = _adapter(team_id)
     try:
         await adapter.connect(reconcile_topology=True)
-        queue = await _subscribe_queue(
-            adapter,
-            name="steering-target",
-            routing_key=route,
-            durable_name=adapter.mapper.durable_name(f"agent_{route}"),
-        )
+        if steering_type == TaskSteeringType.PROACTIVE_GUIDANCE:
+            # A lead's guidance passed on to an agent goes to its control mailbox, which it reads
+            # while it works (plan decision 59).
+            queue = await _subscribe_queue(
+                adapter,
+                name="steering-target",
+                subject=adapter.mapper.agent_control_subject(route),
+                durable_name=adapter.mapper.durable_name(f"agent_{route}_control"),
+            )
+        else:
+            # Every other steering message sent to an agent keeps its work mailbox.
+            queue = await _subscribe_queue(
+                adapter,
+                name="steering-target",
+                routing_key=route,
+                durable_name=adapter.mapper.durable_name(f"agent_{route}"),
+            )
         await _publish(
             adapter,
             route,
@@ -742,6 +572,7 @@ async def test_live_task_steering_routes_to_active_agent(
             )
     finally:
         await adapter.close()
+        await delete_team_streams(team_id)
 
 
 async def test_live_multi_team_subjects_are_isolated_on_same_nats_server() -> None:

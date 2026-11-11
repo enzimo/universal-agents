@@ -32,7 +32,7 @@ from custom_agents.storage_usage_runtime import (
     measure_manager_side,
     record_manager_usage,
 )
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from runtime_settings.instance_layout import InstanceLayout, person_folder_name
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
@@ -113,7 +113,7 @@ def _agent(tmp_path: Path, **overrides) -> SimpleNamespace:
     layout.workspaces_dir.mkdir(parents=True, exist_ok=True)
     access = AccessRepository(settings)
     for person, standing in ((ALICE, PersonStanding.ACTIVE), (BOB, PersonStanding.ACTIVE), ("usr_dana", PersonStanding.DISABLED)):
-        access.record_person(TeamPersonV1(team_id=TEAM, person_id=person, standing=standing, changed_at_utc=NOW))
+        access.record_person(TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person, standing=standing, changed_at_utc=NOW))
     values = dict(
         id="lead-1",
         team_id=TEAM,
@@ -179,7 +179,7 @@ def test_an_unreadable_folder_preserves_the_prior_totals_until_they_are_reported
     assert "event=storage_usage_failed" in caplog.text
     notices = StorageUsageNotices(
         team_id=TEAM, step_gb=5,
-        people=lambda: [TeamPersonV1(team_id=TEAM, person_id=ALICE, standing=PersonStanding.ACTIVE, changed_at_utc=NOW)],
+        people=lambda: [TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=ALICE, standing=PersonStanding.ACTIVE, changed_at_utc=NOW)],
         measure=dict, store=lambda: shared, send_notice_once=lambda notice: True, now=lambda: later,
     )
     assert notices.stale_finding() is not None
