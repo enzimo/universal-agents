@@ -337,6 +337,21 @@ is still attempted and the original preparation error is preserved.
 When NATS cannot be reached, that refusal comes after the NATS client's own
 retries, about two minutes.
 
+An upgrade from 0.9 also removes the team's old presence stream
+(`<TEAM>_PRESENCE`, for example `TEAM_303_PRESENCE`) at the first start
+(`event=nats_retired_stream_deleted`); agents now announce themselves through
+the team's signed agent records, so nothing uses it. A new installation never
+had it, and nothing is deleted. With an external NATS server whose login may
+create and update streams but not delete them, the start goes on and the old
+stream stays. Each process that sets up the streams (the container's
+preparation step, the gateway, and a team lead started without an instance
+configuration) then waits about 5 seconds for the refused request and logs two
+lines on every start: the NATS client's
+`NATS client error: nats: permissions violation for publish to "$js.api.stream.delete.<team>_presence"`
+and the warning `event=nats_retired_stream_not_deleted stream=<TEAM>_PRESENCE`.
+To end both, delete the stream once with a login that may, for example
+`nats stream rm TEAM_303_PRESENCE`.
+
 When Kubernetes profiles are enabled, the execution artifact directory must be
 backed by the same PVC that the profile names. Mount it at
 `/data/state/execution_artifacts` in the controller. Use a second PVC for workload data; do not mount the artifact

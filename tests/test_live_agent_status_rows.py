@@ -63,7 +63,7 @@ async def test_live_manager_restart_keeps_startup_worker_rows(tmp_path):
     with patch("custom_agents.strands_agent.Agent", return_value=MagicMock()), patch(
         "custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()
     ), patch(
-        "custom_agents.strands_agent.UniversalAgent._presence_heartbeat_loop", no_heartbeats
+        "custom_agents.strands_agent.UniversalAgent._self_refresh_loop", no_heartbeats
     ):
         try:
             old_lead = start("old lead", "TeamArchitect", is_lead=True)

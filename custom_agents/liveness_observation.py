@@ -14,10 +14,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-NATS_PRESENCE_HEARTBEAT_SECONDS = 20.0
+# How often each agent refreshes its own status row (its heartbeat in ``agent_states``) and
+# checks its skill catalog; until message contract step 7d it also broadcast presence then.
+SELF_REFRESH_SECONDS = 20.0
 MAX_SCHEDULER_SLEEP_SECONDS = 60.0
-HEARTBEAT_REFRESH_SECONDS = 3 * NATS_PRESENCE_HEARTBEAT_SECONDS
-_MAX_CHECK_GAP_SECONDS = MAX_SCHEDULER_SLEEP_SECONDS + NATS_PRESENCE_HEARTBEAT_SECONDS
+HEARTBEAT_REFRESH_SECONDS = 3 * SELF_REFRESH_SECONDS
+_MAX_CHECK_GAP_SECONDS = MAX_SCHEDULER_SLEEP_SECONDS + SELF_REFRESH_SECONDS
 
 
 @dataclass

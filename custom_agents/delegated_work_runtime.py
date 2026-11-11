@@ -36,7 +36,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from id_generation import new_id
 
@@ -149,6 +149,29 @@ def delegation_holder(agent: Any, subtask_id: str) -> Optional[str]:
 
     record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
     return record.holder_agent_id if record is not None else None
+
+
+def current_holders(agent: Any, parent_task_id: str, subtask_ids: Sequence[str]) -> dict[str, str]:
+    """The worker holding each of these delegated subtasks now, by subtask id. Task lane.
+
+    Team-wide task custody first: it names the agent whose saved work holds the
+    subtask, also before that worker's claim reached this requester and after a
+    takeover whose claim is not recorded yet. Then, for subtasks custody does not
+    name, the parent's delegated-task records looked up by team and parent, whoever
+    wrote them: a lead restarted with a new id still finds the records its earlier
+    self wrote (``requester_agent_id`` is that old id). A subtask no worker holds is
+    left out. Raises when either store cannot be read.
+    """
+
+    team_id = str(agent.team_id)
+    wanted = list(dict.fromkeys(subtask_ids))
+    custody = agent.task_manager.runtime_state_store.get_task_custody(team_id, wanted)
+    holders = {task_id: row.holder_agent_id for task_id, row in custody.items() if row.holder_agent_id}
+    if len(holders) < len(wanted):
+        for record in delegated_tasks(agent).list_for_parent(team_id, parent_task_id):
+            if record.task_id in wanted and record.task_id not in holders and record.holder_agent_id:
+                holders[record.task_id] = record.holder_agent_id
+    return holders
 
 
 class DelegatedTaskClaimPending(RuntimeError):

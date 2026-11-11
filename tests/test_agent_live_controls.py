@@ -373,7 +373,7 @@ def _unsigned_control(instruction: str, *, claimed_sender: str = "lead_1"):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("instruction", ["exit", "pause", "resume"])
 async def test_an_unsigned_exit_pause_or_resume_changes_nothing_and_names_its_claimed_sender(caplog, instruction):
-    """On its mailbox or on .operational, both delivered through _dispatch_message."""
+    """On its mailbox, delivered through _dispatch_message (on .operational it is dropped before dispatch)."""
 
     from custom_agents.strands_agent import UniversalAgent
 

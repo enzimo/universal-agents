@@ -27,6 +27,23 @@ def new_instance(tmp_path: Path, name: str, team_id: str, memory: dict[str, Any]
     return path, config
 
 
+def zero_nine_instance(tmp_path: Path, name: str, team_id: str) -> Path:
+    """A saved ``instance_config.yaml`` shaped like 0.9's (schema 12), not yet upgraded.
+
+    0.9 onboarding wrote every default out, ``transport.presence_max_age_seconds`` included;
+    the presence stream it sized was removed in message contract step 7d.
+    """
+
+    import yaml
+
+    path, _config = new_instance(tmp_path, name, team_id)
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    saved["schema_version"] = 12
+    saved["transport"]["presence_max_age_seconds"] = 600.0
+    path.write_text(yaml.safe_dump(saved, sort_keys=False), encoding="utf-8")
+    return path
+
+
 def record_people(config: Any, team_id: str, standing: dict[str, PersonStanding]) -> None:
     """Write the gateway's copy of the team's people, as a started gateway does."""
 

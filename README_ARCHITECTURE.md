@@ -24,7 +24,7 @@ channel adapters and assistant gateway
           |                                        v
           |                                specialist runtimes
           |
-          +----> replies, control, and presence
+          +----> replies and control; signed agent and host records
 
 execution state ----> deterministic execution controller
                               |
@@ -41,8 +41,8 @@ The execution controller is a side service. Normal user requests travel from
 the gateway through NATS to the manager and specialists.
 
 NATS and JetStream are the inter-process transport. They carry work, replies,
-control messages, and presence, but they are not the business-state,
-authorization, or credential database.
+control messages, and the signed records of which agents and hosts are live, but
+they are not the business-state, authorization, or credential database.
 
 ## Component ownership
 
@@ -51,7 +51,7 @@ authorization, or credential database.
 | Assistant gateway | Canonical user identity, human channels, sessions, accepted requests, attachments, presentation history, and delivery |
 | `TeamArchitect` | Root Tasks, Plans, Objectives, schedules that require reasoning, delegation, recovery, and final synthesis |
 | Specialists | One assigned Task and its model and tool loop |
-| NATS and JetStream | Typed message delivery, shared worker queues read by pull consumers, routing, redelivery, control, and presence |
+| NATS and JetStream | Typed message delivery, shared worker queues read by pull consumers, routing, redelivery, control, and the signed agent and host records |
 | Domain repositories | Durable workflow, conversation, memory, authorization, gateway, and execution state |
 | Secure tool broker | Credential catalog, secret-free references, credential hydration and use, external provider access, and redaction. It always runs: every credentialed tool call (web research, GitHub, Google, Hugging Face, X, MCP servers) goes through it, so no setting turns it off |
 | Execution controller | Immutable code revisions, deterministic jobs, fenced attempts, and managed-service reconciliation |
@@ -115,7 +115,8 @@ live on their team from the team's signed agent records ("Agent records and who
 is live", "Agents asking each other"), not from presence messages: a record says
 an agent is live only while its host keeps reporting, so an old message can no
 longer make a stopped worker look alive. The gateway follows its team and its lead from
-the same records ("The gateway follows its team").
+the same records ("The gateway follows its team"), and the presence stream, the heartbeat
+and the broadcast subject were removed in step 7d.
 
 ## Work, scheduling, and recovery
 
@@ -752,8 +753,9 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    after the lease was lost; then they fail with an explanation to the requester,
    their pending subtasks are asked to stop, and an access request they were
    waiting on is withdrawn so the reviewer is not left with an open item.
-4. It exits once it holds no unfinished task. Until then it keeps publishing
-   presence, so a starting worker of the same type does not adopt its tasks.
+4. It exits once it holds no unfinished task. Until then it keeps refreshing its own
+   status row and its record says it takes no work, so a starting worker of the same
+   type does not adopt its tasks (adoption is decided by launch records).
 
 The TeamLead accepts a handback only when the sender owns the stated launch, and
 saves it (`storage/worker_handback_repository.py`) before acting on it. Its runtime
@@ -798,7 +800,7 @@ original reply route so the result reaches the original requester:
 
 Runs of one schedule never overlap across workers. When a schedule comes due
 while an earlier run of it is unfinished on this agent, or on another worker
-whose presence is still live, the new occurrence is recorded as coalesced into
+whose own status row is still fresh, the new occurrence is recorded as coalesced into
 that run instead of starting a second task. A crashed worker's leftover receipt
 does not count, so it cannot block the schedule.
 
@@ -1641,7 +1643,7 @@ worker that cannot start never skips them, and once per occurrence, because
 the scheduler retries such an occurrence every 30 seconds. The manager keeps a
 record of each saved-output run (`state/output_retention.json`: time, last
 success, per kind items, files, bytes and failures), started at manager start;
-from it the manager's status heartbeat reports a Status page warning
+from it the manager's answer to `agent.status` reports a Status page warning
 (`output_retention_overdue`) when no run succeeded for two days. Filesystem
 permission errors and depth limits make a run incomplete and preserve its
 previous success time; expected skips such as links and busy builds do not.
@@ -4069,8 +4071,8 @@ stores, reverse proxies, and adapter hosts. Process separation and external
 services require operators to supply the corresponding network and workload
 identity controls.
 
-Runtime logs, task history, execution digests, schedule telemetry, presence,
-and anomaly records support diagnosis. The activity collector consumes curated
+Runtime logs, task history, execution digests, schedule telemetry, agent and host
+records, and anomaly records support diagnosis. The activity collector consumes curated
 events into a separate read model. It does not route Tasks or treat manager
 tables as its control plane.
 
@@ -5005,6 +5007,69 @@ Restart approvals name other agents' running work by task: the team lead asks ea
 agent for its full status while it captures an `all` restart's state, and shows an agent
 that does not answer, or that a host runs without a session, as unknown work (see the restart
 approvals under "Authorization and credentials").
+
+**The end of presence and fan-out** (step 7d): agents no longer publish presence. Each
+agent refreshes its own `agent_states` row and checks its skill catalog every 20 seconds
+(`UniversalAgent._self_refresh_loop`, `custom_agents.liveness_observation.SELF_REFRESH_SECONDS`):
+the row is the heartbeat the liveness rules read, and the check picks up a missed
+`skills.changed`. The presence stream, the broadcast subject, `TeamComms.broadcast_message`,
+the publish options for them and the JetStream push listener that only presence used are
+removed, so nothing on JetStream is pushed. The topology owner looks for an existing
+`<PREFIX>_PRESENCE` stream at start and deletes it (`event=nats_retired_stream_deleted`),
+which also removes the gateway's old durable consumer on it; a fresh install sends no delete
+(`NatsStreamTopology._delete_retired_streams`). Deleting is a one-time clean-up, not a
+condition for starting: a NATS login without the right to delete streams (an external
+server's login may only create and update them) logs `event=nats_retired_stream_not_deleted`
+with the stream and the manual step, and the start goes on. When per-host permissions apply
+(phase 3) the topology owner needs INFO and DELETE on retired stream names, or the clean-up
+goes. `transport.presence_max_age_seconds` is retired
+through versioned upgrade steps, so the running code reads only the current format: the
+instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
+(`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
+old file), a current file that still names it is refused by name like other removed
+settings, and the team transfer's settings section (version 9) drops it from older exports
+(`RETIRED_PRESENCE_SETTING`, the one name for the path). The settings export reads the file
+through the upgrade steps (`read_upgraded_instance_config`), so an export taken after the
+code upgrade but before the launcher rewrote the file carries only what this version reads.
+The operational subject now carries only
+the gateway's task progress, parent-task probe and thread guidance, with their replies
+(plan decision 68). Every agent receives it, so an agent acts only on a command that names
+it by id or name (`UniversalAgent._operational_target_matches`; the gateway names the team
+lead in all three) and ignores one naming no agent with `event=operational_command_unaddressed`;
+other message types on it are dropped with `event=operational_message_ignored`. No agent
+publishes a status there: a status request left in a mailbox by a 0.9 sender is logged
+(`event=agent_status_request_ignored`) and not answered. A lead's guidance for a delegated
+task goes to the worker holding it through its control mailbox (`agent.<id>.control`,
+durable, read while it works; plan decision 59), and a subtask no worker has taken yet gets
+none. Only that guidance takes this route (`custom_transport.subjects._is_passed_on_guidance`,
+checked after the lead, gateway and type-queue routes): every other `TaskSteering` (status
+answers, input requests and their answers) and guidance sent to a type queue keep the
+routes they had, so a type queue's name never becomes a control mailbox nobody reads. The holder of each subtask
+comes from team-wide task custody first, then the parent's delegated-task records looked up
+by team and parent, then, for a subtask asked of an agent by name, the team's directory
+(`delegated_work_runtime.current_holders`): custody names the worker before its claim reaches
+the lead and after a takeover whose claim is not recorded yet, and records looked up by parent
+are found after the lead restarted with a new id. Each copy's id is
+`<guidance key>:<subtask id>`, so passing guidance on again is safe: NATS drops a repeat within
+its duplicate window and the worker ignores a key it saved. A copy that could not be sent,
+or a subtask whose holder could not be read, is logged with its ids
+(`event=task_steering_forward_failed`, `event=delegated_task_holders_unreadable`) without
+stopping the others, and the lead answers `pending` instead of `accepted`; the gateway keeps
+the guidance and sends it again, and the lead, finding the key already saved, passes it on
+again rather than answering "duplicate". Because the gateway keeps a thread's later messages
+behind a held one, the lead gives up after `GUIDANCE_PASS_ON_ATTEMPTS` (4) sends of the held
+guidance (at most about a minute on the gateway's 15-second retry timer, sooner when the person
+writes again in the thread or the gateway is woken), answers `accepted` naming the subtasks it
+could not reach and logs
+`event=task_steering_forward_abandoned`; its own task applies the guidance either way. The
+skill hint is no longer a message type.
+
+Agents now find each other only through the records, which only an agent holding a session
+has, so a run with several agents needs the launcher (`docker/launch_headless.py`, which
+the container and the desktop app use). Tests and `scripts/launch_agent_type.py` start an
+agent without `--host-runtime`, so without a host and a session: it still works through its
+queues, but other agents, the gateway (its Team and Status pages) and restart approvals do
+not see it, and it can neither ask nor be asked anything.
 
 **The gateway follows its team** (step 7c, `assistant_gateway.team_view`): the gateway's
 host reads the team's live agents once it has joined (the same reader the agents use), and

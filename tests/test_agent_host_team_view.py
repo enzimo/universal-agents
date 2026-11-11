@@ -90,9 +90,10 @@ async def test_a_team_event_reaches_every_agent_the_process_runs(tmp_path: Path)
         assert await process._event(event) == {}
 
         await _until(lambda: "grill-me" in list_agent_skill_names(second_plugin, second._strands_agent)
-                     and "grill-me" in list_agent_skill_names(first_plugin, first._strands_agent))
-        assert first._published_presence == [("base", "grill-me")]
-        assert second._published_presence == [("base", "grill-me")]
+                     and "grill-me" in list_agent_skill_names(first_plugin, first._strands_agent)
+                     and first._refreshed_state and second._refreshed_state)
+        assert first._refreshed_state == [True]
+        assert second._refreshed_state == [True]
 
 
 class _View:

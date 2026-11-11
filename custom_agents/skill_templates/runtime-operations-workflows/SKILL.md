@@ -461,12 +461,14 @@ skill with generic file, shell, GitHub, or Python tools.
    notification must both complete; report its warning if either fails. Activate
    the exact installed skill by semantic name in the same task when it is
    needed. TeamArchitect refreshes immediately. Idle skills-enabled specialists
-   verify the immutable receipt from the typed team notice, reload their caches,
-   and republish presence. Busy specialists wait until their active turn
-   finishes. Their next idle presence heartbeat repairs that deferred refresh
-   or a missed live notice. No manager, gateway, or all-runtime restart is
-   required. If the skill remains absent after the next idle heartbeat, report
-   a runtime defect instead of requesting a restart.
+   verify the immutable receipt from the typed team notice and reload their
+   caches. Busy specialists wait until their active turn finishes. Each agent's
+   own catalog check, every 20 seconds while it is not working, repairs that
+   deferred refresh or a missed notice. The Team page shows each agent's skills
+   as of the last time someone opened the Team tab or pressed Refresh. No
+   manager, gateway, or all-runtime restart is required. If
+   the skill remains absent after the next idle check, report a runtime defect
+   instead of requesting a restart.
 
 Installation copies only the scanned, digest-bound tree into instance-owned
 managed storage at
@@ -526,11 +528,11 @@ or file tools.
    removal path. Skills in `control/skills`
    (operator-added and external) are operator-owned and must be rejected by
    this workflow. Uninstallation reloads
-   TeamArchitect, sends the same receipt-verified team refresh notice, and
-   republishes each idle agent's remaining semantic skill names. A busy agent
-   waits until its active turn finishes. The next idle heartbeat repairs that
-   deferred refresh or a missed notice; do not request a runtime restart to
-   repair the Team roster.
+   TeamArchitect and sends the same receipt-verified team refresh notice; each
+   idle agent reloads its remaining skills. A busy agent waits until its active
+   turn finishes. Its own catalog check, every 20 seconds while it is not
+   working, repairs that deferred refresh or a missed notice; do not request a
+   runtime restart to repair the Team roster.
 
 ## Installed Permission Proposals And Invocation
 

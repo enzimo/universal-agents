@@ -52,7 +52,8 @@ def test_runtime_operations_skill_owns_reviewed_skill_installation_contract() ->
         "if an administrator let you manage them, the skill\n   installs at once",
         "waits until a person approves the exact install in the Inbox",
         "Inspect `runtime_skill_refresh`",
-        "heartbeat repairs that deferred refresh",
+        # The 20-second self-refresh (message contract step 7d) repairs a deferred or missed refresh.
+        "catalog check, every 20 seconds while it is not working, repairs that",
         "`plan_runtime_restart",
         "`apply_change(change_id, reason)`",
         "stage a fresh plan and ask",

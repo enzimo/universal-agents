@@ -39,7 +39,6 @@ class NatsGatewayManagerRuntimeSettings:
     max_deliver: int
     duplicate_window_seconds: float
     work_max_age_seconds: float | None
-    presence_max_age_seconds: float | None
     process_consumer_inactive_threshold_seconds: float
     user: str | None
     password: str | None
@@ -69,7 +68,6 @@ class NatsGatewayManagerRuntimeSettings:
             max_deliver=transport.max_deliver,
             duplicate_window_seconds=transport.duplicate_window_seconds,
             work_max_age_seconds=transport.work_max_age_seconds,
-            presence_max_age_seconds=transport.presence_max_age_seconds,
             process_consumer_inactive_threshold_seconds=(
                 transport.process_consumer_inactive_threshold_seconds
             ),
@@ -110,7 +108,6 @@ class NatsGatewayManagerRuntime:
                 max_deliver=settings.max_deliver,
                 duplicate_window_seconds=settings.duplicate_window_seconds,
                 work_max_age_seconds=settings.work_max_age_seconds,
-                presence_max_age_seconds=settings.presence_max_age_seconds,
                 process_consumer_inactive_threshold_seconds=(
                     settings.process_consumer_inactive_threshold_seconds
                 ),

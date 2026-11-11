@@ -241,7 +241,7 @@ def exiting_agent(team, agent_id, *, is_lead):
         _pending_work_timers=set(),
         _owned_tasks=set(),
         _local_schedule_task=None,
-        _presence_task=None,
+        _self_refresh_task=None,
         _scheduler_task=None,
     )
     agent.get_self_status = lambda is_exiting=False, **_: status(agent_id, exiting=is_exiting, agent_type="TeamArchitect")
@@ -251,8 +251,67 @@ def exiting_agent(team, agent_id, *, is_lead):
     return agent
 
 
+@pytest.mark.asyncio
+async def test_the_self_refresh_loop_checks_the_catalog_and_moves_the_status_row_forward(
+    team, tmp_path, monkeypatch, caplog
+):
+    """Every SELF_REFRESH_SECONDS the agent checks its skill catalog and refreshes its own status row.
+
+    The row's time is the heartbeat the liveness rules read; with the loop broken, live agents
+    would look gone after a minute. The real loop runs here with a short interval and a real
+    store. A failed row write is logged and the next tick writes it (the catalog check catches
+    its own errors, ``repair_agent_skill_catalog``, so a failing write is the failure that matters).
+    """
+
+    import custom_agents.strands_agent as strands_agent
+
+    worker = exiting_agent(team, "agent_worker", is_lead=False)
+    worker.is_executing = False
+    worker.instance_root = str(tmp_path / "instance")  # no managed skills installed
+    catalog_scans: list[bool] = []
+    worker._refresh_skills_plugins = lambda *, force: catalog_scans.append(force)
+    stale = report(team, "agent_worker", seen_ago=timedelta(minutes=5))
+
+    reasons: list[str] = []
+    real_check = strands_agent.repair_agent_skill_catalog
+
+    async def checked(agent, *, reason):
+        reasons.append(reason)
+        return await real_check(agent, reason=reason)
+
+    store = team._agent_state_store
+    real_upsert = store.upsert
+    writes: list[str] = []
+
+    def upsert_failing_once(status):
+        writes.append(status.last_seen_at)
+        if len(writes) == 1:
+            raise OSError("database is locked")
+        return real_upsert(status)
+
+    monkeypatch.setattr(strands_agent, "repair_agent_skill_catalog", checked)
+    monkeypatch.setattr(strands_agent, "SELF_REFRESH_SECONDS", 0.01)
+    monkeypatch.setattr(store, "upsert", upsert_failing_once)
+
+    loop = asyncio.create_task(UniversalAgent._self_refresh_loop(worker))
+    try:
+        async with asyncio.timeout(10):
+            while len(writes) < 3:
+                await asyncio.sleep(0.01)
+                assert store.get_by_id("agent_worker").last_seen_at == stale.last_seen_at or len(writes) >= 2
+    finally:
+        worker.set_exit_flag()
+        await asyncio.wait_for(loop, timeout=5)
+
+    assert "event=agent_state_row_refresh_failed agent_id=agent_worker error_type=OSError" in caplog.text
+    assert "event=agent_self_refresh_failed" not in caplog.text, "the loop went on by itself"
+    assert store.get_by_id("agent_worker").last_seen_at > stale.last_seen_at
+    assert len(reasons) >= 3 and set(reasons) == {"self_refresh"}
+    assert len(catalog_scans) >= 3 and not any(catalog_scans), "the real check scanned without forcing a reload"
+
+
 async def run_exit_cleanup(agent, monkeypatch):
-    monkeypatch.setattr("custom_agents.strands_agent._publish_exit_presence", AsyncMock())
+    monkeypatch.setattr("custom_agents.strands_agent._stop_local_team_members", AsyncMock())
     await UniversalAgent._cleanup_nats_runtime_on_exit(agent, AsyncMock())
 
 

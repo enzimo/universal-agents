@@ -90,7 +90,6 @@ class RuntimeNatsManifestV1(RuntimeManifestModel):
     max_deliver: int = Field(ge=1)
     duplicate_window_seconds: float = Field(gt=0)
     work_max_age_seconds: float | None = Field(default=None, gt=0)
-    presence_max_age_seconds: float | None = Field(default=None, gt=0)
     process_consumer_inactive_threshold_seconds: float = Field(gt=0)
     user: RuntimeSecretReferenceV1
     password: RuntimeSecretReferenceV1

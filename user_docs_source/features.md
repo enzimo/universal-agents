@@ -954,16 +954,16 @@ skills (full access to `fn:team_skills`); then it applies them itself and
 administrators get a notice for each one. Either way, Universal Agents checks
 the tree and report again just before it installs the managed copy, and a
 modified managed tree fails its activation check.
-The runtime immediately reloads TeamArchitect's AgentSkills cache and publishes
-a typed team refresh notice. Each idle skills-enabled specialist verifies the
-immutable installation receipt, reloads its own cache, and republishes its live
-skill list. A busy specialist defers the reload until its active turn finishes.
-A presence-heartbeat fingerprint check repairs that deferred refresh or a
-missed live notice. The Team page shows each agent's skills as of the last time
-someone opened the Team tab or pressed Refresh, but a successful install does not
-require a manager or system restart. If the
-exact semantic name remains unavailable after the next idle presence heartbeat,
-report it as a runtime defect rather than approving a restart workaround.
+The runtime immediately reloads TeamArchitect's AgentSkills cache and sends a
+typed team refresh notice. Each idle skills-enabled specialist verifies the
+immutable installation receipt and reloads its own cache. A busy specialist
+defers the reload until its active turn finishes. Each agent's own catalog
+check, every 20 seconds, repairs that deferred refresh or a missed notice. The
+Team page shows each agent's skills as of the last time someone opened the
+Team tab or pressed Refresh, but a successful install does not require a
+manager or system restart. If the exact semantic name remains unavailable after
+the next idle check, report it as a runtime defect rather than approving a
+restart workaround.
 Installing the skill does not activate it and does not approve its tools, shell
 commands, MCP calls, credentials, or future repository updates.
 

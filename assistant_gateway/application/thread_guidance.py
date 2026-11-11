@@ -15,6 +15,13 @@ settles the held copy:
 
 - accepted: the lead saved it with the request's task, which applies it at
   its next safe point (``custom_agents.task_steering_runtime``);
+- pending: the lead saved it but could not yet pass it on to every worker
+  holding one of the request's delegated tasks; the copy stays held and is
+  sent again like an unanswered one, and the lead passes it on again. The
+  lead accepts it on the fourth send (``GUIDANCE_PASS_ON_ATTEMPTS``): at most
+  about a minute on the retry timer, sooner when the person writes again or
+  the sender is woken, so later messages of the thread are not held back for
+  long;
 - the lead does not hold the request's task yet (it waits behind other work),
   or no answer came in time, or no lead is reachable: the copy stays held and
   is sent again when the lead's record in the team's records changes (its
@@ -235,8 +242,8 @@ class GatewayThreadGuidance:
     async def _attempt(self, held: HeldGuidanceRecord) -> _Attempt:
         if held.correlation_id in self._in_flight:
             return _Attempt(GuidanceDelivery.UNCONFIRMED)
-        # Reserve before the first await. Direct sends, retries and presence
-        # wakeups must not register the same reply wait concurrently.
+        # Reserve before the first await. Direct sends, retries and wakeups from
+        # the lead's record must not register the same reply wait concurrently.
         self._in_flight.add(held.correlation_id)
         try:
             # The durable held copies decide order across gateway processes

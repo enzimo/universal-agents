@@ -32,7 +32,6 @@ from custom_messages.contracts.task_v1 import TaskQuery
 from custom_messages.contracts.task_v1 import TaskStatus
 from custom_messages.contracts.task_v1 import TaskSteering
 from custom_messages.contracts.worker_handback_v1 import WorkerTaskHandbackV1
-from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 from pydantic import BaseModel
 from pydantic import Field
 from typing import Annotated
@@ -53,7 +52,6 @@ ContentType = Annotated[
         DeliveryReceipt,
         Instruction,  # Used directly? Or always via ControlPayload? Let's assume via ControlPayload
         ManagerRuntimeWorkCommand,
-        ManagedSkillCatalogChangedV1,
         NoOpMessage,
         PersonStandingCommandV1,
         # Read only to answer a command queued before an in-place upgrade (control_v1).
