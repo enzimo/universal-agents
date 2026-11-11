@@ -959,8 +959,9 @@ a typed team refresh notice. Each idle skills-enabled specialist verifies the
 immutable installation receipt, reloads its own cache, and republishes its live
 skill list. A busy specialist defers the reload until its active turn finishes.
 A presence-heartbeat fingerprint check repairs that deferred refresh or a
-missed live notice. The Team roster may lag until refreshed presence arrives,
-but a successful install does not require a manager or system restart. If the
+missed live notice. The Team page shows each agent's skills as of the last time
+someone opened the Team tab or pressed Refresh, but a successful install does not
+require a manager or system restart. If the
 exact semantic name remains unavailable after the next idle presence heartbeat,
 report it as a runtime defect rather than approving a restart workaround.
 Installing the skill does not activate it and does not approve its tools, shell
