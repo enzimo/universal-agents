@@ -510,7 +510,7 @@ async def test_an_agent_that_does_not_answer_does_not_hold_the_status_page(monke
         await until(running.view.ready.is_set)
         reader.publish(member("worker_hang"), member("worker_ok"))
         started = asyncio.get_running_loop().time()
-        found = await running.view.agent_findings()
+        found = await asyncio.wait_for(running.view.agent_findings(), timeout=2)  # fails, not hangs, if it waits on
         assert asyncio.get_running_loop().time() - started < 1.0
         assert _finding_ids(found) == ["memory_search_degraded"]
 
