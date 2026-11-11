@@ -47,7 +47,10 @@ Why it is shaped this way:
   from their records (``custom_transport.protocol1.team_agents``), once for the whole
   process, as one of its supervised steps that stops with the host, and keeps every
   attached agent's directory in step with it on the agent's own loop
-  (``custom_agents.team_directory``). It also receives the team's events
+  (``custom_agents.team_directory``). An agent that leaves for good while the process
+  runs is handed to every other attached agent, once; exits from before the process started
+  are not, and each agent checks its own waiting work against them once it has restored it
+  (``report_restored_work``, which waits for the view: ``view_read``). It also receives the team's events
   (``skills.changed``) once and hands each to every agent it runs. Agents ask each other
   through it (``custom_agents.agent_requests``: ``ask_agent``, ``announce``): requests are
   signed with the asking agent's session.
@@ -147,6 +150,8 @@ AGENT_RECORD_CLEANUP_SECONDS = 10.0
 DRAIN_POLL_SECONDS = 5.0
 SESSION_CLEANUP_SECONDS = 10.0
 _LOGGER = logging.getLogger(__name__)
+# The running checks of restored agents' delegated work (``report_restored_work``).
+_DEPARTURE_CHECKS: set[asyncio.Task[None]] = set()
 
 # What an agent answers on its address: the operation's kind, and the handler that runs on
 # the agent's own loop with the agent and the verified request.
@@ -232,8 +237,6 @@ class _HostedAgent:
     session: Optional[str] = None
     subscription: Any = None
     subscription_failures: int = 0
-    # A catch-up notification and attach-time replay must not process one exit twice.
-    notified_exits: set[str] = field(default_factory=set)
     # Why its session was last refused, until one opens (module docstring).
     refusal: Optional[_Refusal] = None
     # Openings that got an answer: the next one has a new request id.
@@ -467,10 +470,12 @@ class AgentProcessHost:
         views were read, so a later view always wins (``custom_agents.team_directory``). An
         agent in ``changed`` that is not live and left for good (``TeamAgents.left_for_good``,
         heard once, possibly after it left) is handed to each other agent as a task of its
-        own, which never touches the directory.
+        own, which never touches the directory. The reader tells each exit once, so nothing
+        here remembers which were handed on; exits from before the process started are not
+        told, and each agent checks its own waiting work against them (``report_restored_work``).
         """
 
-        from custom_agents.team_directory import sync_directory
+        from custom_agents.team_directory import agent_exited, sync_directory
 
         team_agents = self.team_agents
         assert team_agents is not None
@@ -483,17 +488,9 @@ class AgentProcessHost:
             self._call_on_agent_loop(hosted, lambda agent=hosted.agent: sync_directory(agent, view),
                                      what="team_directory")
             for departed, reason in left:
-                self._notify_exit(hosted, departed, reason)
-
-    def _notify_exit(self, hosted: _HostedAgent, departed: Any, reason: str) -> None:
-        """Deliver an exit once per attached requester, including catch-up and attach-time replay."""
-
-        from custom_agents.team_directory import agent_exited
-
-        if departed.agent == str(hosted.agent.id) or departed.agent in hosted.notified_exits:
-            return
-        hosted.notified_exits.add(departed.agent)
-        self._on_agent_loop(hosted, lambda: agent_exited(hosted.agent, departed, reason), what="team_exit")
+                if departed.agent != str(hosted.agent.id):
+                    self._on_agent_loop(hosted, lambda agent=hosted.agent, departed=departed, reason=reason:
+                                        agent_exited(agent, departed, reason), what="team_exit")
 
     def _sync_directory(self, hosted: _HostedAgent) -> None:
         """A newly attached agent gets the whole current view."""
@@ -504,8 +501,27 @@ class AgentProcessHost:
             return  # the view's first reading tells every attached agent
         live = self.team_agents.live()
         self._call_on_agent_loop(hosted, lambda: sync_directory(hosted.agent, live), what="team_directory")
-        for departed in self.team_agents.departed_agents().values():
-            self._notify_exit(hosted, departed, self.team_agents.departure_reason(departed.agent) or "")
+
+    async def view_read(self) -> Optional[TeamAgents]:
+        """The team's view once this process has read it; None when the host stops first or never joins.
+
+        Callable from any agent's loop: it waits on the host's loop. Cancelling the caller
+        cancels the wait there too (``run_coroutine_threadsafe`` passes it on).
+        """
+
+        if self.loop is None or self.loop.is_closed():
+            return None
+
+        async def wait() -> Optional[TeamAgents]:
+            assert self._joined is not None and self._stop is not None
+            await _first_of(self._joined, self._drain_started, self._stop)
+            team_agents = self.team_agents
+            if not self._joined.is_set() or self._stop.is_set() or team_agents is None:
+                return None  # a process on another contract that never joined, or the host stopped
+            await _first_of(team_agents.ready, self._stop)
+            return None if self._stop.is_set() else team_agents
+
+        return await self._on_host_loop(wait())
 
     def _call_on_agent_loop(self, hosted: _HostedAgent, function: Callable[[], Any], *, what: str) -> None:
         """Run ``function`` on the agent's own loop as a plain callback: callbacks run in the order they are handed."""
@@ -1337,6 +1353,50 @@ def report_agent_state(agent: Any) -> None:
     except Exception:
         host.logger.warning("An agent's state could not be reported to its host. event=agent_state_report_failed "
                             "agent=%s", getattr(agent, "id", None), exc_info=True)
+
+
+def report_restored_work(agent: Any) -> Optional[asyncio.Task[None]]:
+    """After the agent restored its saved work (``UniversalAgent._connect_nats``): check what it delegated by name.
+
+    Starts one task on the agent's own loop and returns it at once: the task waits until
+    this process has read the team's view (``AgentProcessHost.view_read``), then fails each
+    of the agent's waiting by-name subtasks whose target left for good while it was down
+    (``custom_agents.team_directory.check_departed_targets``). Started by the agent, it
+    covers both orders: restored before the view is read, or after. Nothing without a host.
+    """
+
+    host = process_host()
+    if host is None:
+        return None
+    from custom_agents.team_directory import check_departed_targets
+
+    async def check() -> None:
+        team_agents = await host.view_read()
+        if team_agents is not None:
+            await check_departed_targets(agent, team_agents)
+
+    def done(task: asyncio.Task[None]) -> None:
+        _DEPARTURE_CHECKS.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            host.logger.error("An agent could not check its delegated work against agents that left while it was "
+                              "down; that work is left to the subtask watchdog. event=team_exit_recovery_failed "
+                              "agent=%s", getattr(agent, "id", None), exc_info=task.exception())
+
+    task = asyncio.get_running_loop().create_task(check(), name=f"departed_targets_{getattr(agent, 'id', '')}")
+    _DEPARTURE_CHECKS.add(task)  # held until it ends: a loop keeps only weak references to its tasks
+    task.add_done_callback(done)
+    return task
+
+
+async def _first_of(*events: asyncio.Event) -> None:
+    """Wait until any of ``events`` is set."""
+
+    waits = [asyncio.ensure_future(event.wait()) for event in events]
+    try:
+        await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for wait in waits:
+            wait.cancel()
 
 
 def agent_definition_sha256(agent: Any) -> str:

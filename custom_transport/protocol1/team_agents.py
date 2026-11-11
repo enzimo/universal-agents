@@ -43,14 +43,39 @@ How it reads:
   another host cannot forge either. A closed session ends that run of the agent, not its
   work: work it had claimed lives in saved state, which the restarted agent takes over.
   A fresh reader also recovers departures directly from retained signed closed sessions,
-  even if the agent's record and placement disappeared before the reader started. An
-  agent attached after catch-up receives those retained departures too, once per requester.
+  even if the agent's record and placement disappeared before the reader started. Those
+  found at its first reading (a process start can find weeks of them) are recorded, so
+  ``left_for_good`` answers, but listeners do not hear them, and one line counts them: the
+  agents of a starting process have not restored their saved work yet, and each checks its
+  own waiting work against them once it has (``custom_agents.team_directory.
+  check_departed_targets``). Exits found later, also after the reader's run restarted, are
+  told as usual (``_read_once``). ``agent``, ``left_for_good``, ``departure_reason`` and
+  ``departed_agent`` may be read from any thread: the view is replaced whole, and the others
+  are single dictionary reads.
+- **Which session's end counts.** One run of an agent can hold several sessions: a refused
+  renewal, a missing placement or a lost ``sessions.open`` reply opens another, with a later
+  ``placed_at``, and the earlier one is never closed and runs out seven days later. So a
+  session's end counts as the run's end only when no later session of the agent is known
+  (``_session_order``), and, for an agent this reader did not see leave, only while no
+  placement of the agent is held and its held record, if any, names a session this reader
+  holds (``_run_may_go_on``). A placement means a newer session or a handover; a record
+  naming an unknown session may name a newer one. When an agent's last session record is
+  deleted, what this reader kept about its departure is dropped. The team services delete a
+  session record ``kept_for("agent_session")`` after it was last signed: its 7-day lifetime
+  plus 30 days' retention, so a closed session (re-signed when it closed) stays about 37
+  days past its end.
 - Failed watches reopen, and a refusal that can pass later is verified again at each check:
   the writer's certificate or session is not readable yet while hosts join
   (``unknown_key``), revocations are not current yet, or a record is dated just ahead of
   this host's clock (``not_yet_valid``). Placements and an idle agent's record are written
   rarely, so dropping them would hide a live agent until it next changed. Stopping the
   reader clears its view and readiness. A listener can read ``departure_reason``.
+- **A reopened watch** is no departure. The records already held stay, and are still
+  judged by their own expiry at each check, until the new watch has delivered the
+  bucket's current values; only then are the held records it did not deliver removed, as
+  deletions (they were deleted while no watch was open). Clearing the bucket at once, as
+  this reader did before, emptied the view for a few seconds, so the gateway marked a
+  healthy team lead unavailable and available again, and agents saw their peers leave.
 
 The hosts' records also say which of their parts are not healthy (``components``), such as
 an agent whose session the team services refused, which has no record of its own and so
@@ -91,6 +116,8 @@ _GONE_STATES = frozenset({"exiting", "stopped"})
 # exiting, or its session was closed.
 EXITING, SESSION_CLOSED = "exiting", "session_closed"
 LEFT_FOR_GOOD = frozenset({EXITING, SESSION_CLOSED})
+# The departure reason of every agent in the view when this reader stops: nobody left, the reader stopped looking.
+READER_STOPPED = "reader_stopped"
 # How long a departed agent's last view entry is kept for evidence that it left for good.
 DEPARTED_KEEP_SECONDS = 600.0
 # Refusals that can pass later; the record is verified again at each check (module docstring).
@@ -177,6 +204,9 @@ class TeamAgents:
         self._listeners: list[Callable[[frozenset[str]], None]] = []
         self.ready = asyncio.Event()
         self.running = False
+        # Set once this reader object finished its first reading, and never cleared: exits found
+        # before that are recorded but not told; later ones are told, also after a rerun of run().
+        self._read_once = False
 
     # -- reading the view (any thread) ----------------------------------------------------
 
@@ -251,11 +281,6 @@ class TeamAgents:
         departed = self._departed.get(agent_id)
         return departed.last if departed is not None else None
 
-    def departed_agents(self) -> Mapping[str, TeamAgent]:
-        """Retained exits for a requester attached after the reader caught up."""
-
-        return {agent: departed.last for agent, departed in self._departed.items() if self.left_for_good(agent)}
-
     def listen(self, listener: Callable[[frozenset[str]], None]) -> None:
         """Call ``listener`` on the reader's loop with the ids whose view changed (appeared, changed or left).
 
@@ -284,6 +309,7 @@ class TeamAgents:
             await asyncio.gather(*(event.wait() for event in caught_up))
             await self._retry_pending()
             self._rebuild()
+            self._read_once = True
             self.ready.set()
 
         ready = asyncio.create_task(all_caught_up())
@@ -302,35 +328,64 @@ class TeamAgents:
             await asyncio.gather(*watches, ready, return_exceptions=True)
             self.running = False
             self.ready.clear()
-            self._departures.update({agent: "reader_stopped" for agent in self._view})
+            self._departures.update({agent: READER_STOPPED for agent in self._view})
             self._publish({})
 
     async def _follow(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event,
                       stop: asyncio.Event) -> None:
-        """Reopen failed watches; a failed host watch must not stop liveness expiry checks."""
+        """Watch one bucket, reopening a failed watch (module docstring, "A reopened watch").
+
+        A failed host watch must not stop the liveness expiry checks, and a reopened watch
+        is no departure: the records already held stay until the new watch has caught up.
+        """
 
         while not stop.is_set():
+            # This watch's own catch-up, and the names it delivers until then (``_take_over``).
+            attempt_caught_up, seen = asyncio.Event(), set()
+            taking_over = asyncio.create_task(self._take_over(record, held, set(held), seen, attempt_caught_up,
+                                                              caught_up))
             try:
-                await self._watch(record, keys, held, caught_up)
+                await self._watch(record, keys, held, attempt_caught_up, seen)
                 if not stop.is_set():
                     raise RuntimeError("the record watch ended before the reader stopped")
             except Exception:
                 self._logger.warning("A team record watch stopped; reopening it. event=team_agents_watch_failed "
                                      "team=%s record=%s", self.team, record, exc_info=True)
-                held.clear()  # the replacement watch supplies a complete current snapshot
                 for slot in list(self._pending):
                     if slot[0] == record:
                         self._pending.pop(slot, None)
-                self._rebuild()
+            finally:
+                taking_over.cancel()
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._recheck_seconds)
             except asyncio.TimeoutError:
                 pass
 
-    async def _watch(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event) -> None:
+    async def _take_over(self, record: str, held: dict[str, _Held], before: set[str], seen: set[str],
+                         attempt_caught_up: asyncio.Event, caught_up: asyncio.Event) -> None:
+        """Once a watch has caught up, forget the held records it did not deliver: they were deleted while
+        no watch was open (a reopened watch, or a reader run started again after an earlier one ended).
+        Then the bucket counts as read for the run's readiness, also when the removal failed: nothing
+        awaits this task, so a failure is logged here rather than left in it."""
+
+        await attempt_caught_up.wait()
+        try:
+            for name in sorted(before - seen):
+                self._remove(record, name if record == "host" else f"{self.team}.{name}", name, held)
+            if self.ready.is_set():
+                self._rebuild()
+        except Exception:
+            self._logger.exception("Records a reopened watch no longer has could not be removed. "
+                                   "event=team_agents_take_over_failed team=%s record=%s", self.team, record)
+        finally:
+            caught_up.set()
+
+    async def _watch(self, record: str, keys: str, held: dict[str, _Held], caught_up: asyncio.Event,
+                     seen: set[str]) -> None:
         records = self._host.records
         async for key, raw in records.watch(record, keys, caught_up=caught_up):
             name = key.removeprefix(f"{self.team}.") if record != "host" else key
+            seen.add(name)
             if raw is None:
                 self._remove(record, key, name, held)
             else:
@@ -343,7 +398,9 @@ class TeamAgents:
         """Forget a deleted record, keeping any last observation of an agent's exit."""
 
         if record == "agent_session":
-            self._sessions.pop(key, None)
+            removed = self._sessions.pop(key, None)
+            if removed is not None:
+                self._forget_departure(removed.agent)
         previous = held.get(name)
         if record == "agent" and previous is not None and not self.left_for_good(name):
             self._departures[name] = EXITING if previous.record.body.state in _GONE_STATES else "record_removed"
@@ -494,21 +551,31 @@ class TeamAgents:
             self._departures.pop(agent_id, None)
             self._departed.pop(agent_id, None)
         late = self._late_departures(leaving, now)
-        self._publish(view, late | self._unseen_exits(view, now))
+        unseen = self._unseen_exits(view, now)
+        if not self._read_once:
+            # Exits from before this reader started (module docstring): recorded, counted once, not told.
+            if unseen:
+                self._logger.info("Read agents that exited before this reader started; each agent checks its own "
+                                  "waiting work against them. event=team_agents_unseen_exits team=%s count=%s",
+                                  self.team, len(unseen))
+            unseen = frozenset()
+        self._publish(view, late | unseen)
 
     def _unseen_exits(self, view: Mapping[str, TeamAgent], now: datetime) -> frozenset[str]:
         """Recover missed exits from signed sessions, without needing a previous live view.
 
-        Agent ids name one run. A closed session is sufficient proof of that run's
-        end even after its agent record and placement were deleted. Retain the
-        departure reason after the replay entry expires, so later checks and watch
-        reconnects do not announce the same exit again.
+        Agent ids name one run, but one run can hold several sessions (module docstring), so
+        only the agent's newest known session counts, and only while nothing else this reader
+        holds says the run goes on (``_run_may_go_on``). Then its end proves the run ended,
+        even after the agent's record and placement were deleted. The departure reason is
+        kept after the last view entry is dropped, so later checks and watch reconnects do
+        not announce the same exit again.
         """
 
         found: set[str] = set()
-        for session in self._sessions.values():
-            if session.ends_at > now or session.agent in view or session.agent in self._departed \
-                    or self.left_for_good(session.agent):
+        for agent_id, session in self._newest_sessions().items():
+            if session.ends_at > now or agent_id in view or agent_id in self._departed \
+                    or self.left_for_good(agent_id) or self._run_may_go_on(agent_id):
                 continue
             last = TeamAgent(agent=session.agent, agent_type=session.agent_type, display_name=None,
                              state="stopped", accepting_work=False, since=session.ends_at,
@@ -516,9 +583,58 @@ class TeamAgents:
             self._departed[session.agent] = _Departed(last, now, told=True)
             self._departures[session.agent] = SESSION_CLOSED
             found.add(session.agent)
-            self._logger.info("An agent exited before this reader saw it. event=team_agents_unseen_exit "
-                              "team=%s agent=%s session=%s", self.team, session.agent, session.session)
+            if self._read_once:
+                self._logger.info("An agent exited before this reader saw it. event=team_agents_unseen_exit "
+                                  "team=%s agent=%s session=%s", self.team, session.agent, session.session)
         return frozenset(found)
+
+    def _newest_sessions(self) -> dict[str, AgentSession]:
+        """Each agent's newest session this reader holds (``_session_order``)."""
+
+        newest: dict[str, AgentSession] = {}
+        for session in self._sessions.values():
+            known = newest.get(session.agent)
+            if known is None or _session_order(session) > _session_order(known):
+                newest[session.agent] = session
+        return newest
+
+    def _later_session_known(self, session: AgentSession) -> bool:
+        """Whether this reader holds a session of the same agent opened after ``session``: its run goes on there."""
+
+        return any(other.agent == session.agent and _session_order(other) > _session_order(session)
+                   for other in self._sessions.values())
+
+    def _run_may_go_on(self, agent_id: str) -> bool:
+        """Whether something besides the agent's newest session says its run may go on (module docstring).
+
+        A held placement: a newer placement belongs to a newer session, and one a handover keeps
+        means the agent moves. A held record naming a session this reader does not hold: that
+        session may be newer than any it knows. A record naming a session it does hold is no
+        such sign: after a crash a record can outlive its expiry here (expiry gives no
+        deletion), and one written before the run's last opening names an older session.
+        """
+
+        if agent_id in self._placements:
+            return True
+        held = self._agents.get(agent_id)
+        if held is None:
+            return False
+        named = f"session.{self._host.identity.installation}.{self.team}.{held.record.body.session}"
+        return named not in self._sessions
+
+    def _forget_departure(self, agent_id: str) -> None:
+        """Drop what this reader keeps about a departure once the agent's last session record is deleted.
+
+        Agent ids are never used again, so nothing can bring it back or announce it again; this
+        keeps the departures bounded by how long the team services keep session records. While
+        another session of the agent is still held, the departure stays: dropping it would let
+        ``_unseen_exits`` announce the same exit again from that session.
+        """
+
+        if agent_id in self._view or any(session.agent == agent_id for session in self._sessions.values()):
+            return
+        self._departures.pop(agent_id, None)
+        self._departed.pop(agent_id, None)
 
     def _late_departures(self, leaving: set[str], now: datetime) -> frozenset[str]:
         """Departed agents found to have left for good only now (module docstring); old entries are dropped."""
@@ -545,7 +661,8 @@ class TeamAgents:
         """Why ``agent_id``, which left the view as ``last``, left for good, or None while nothing says so.
 
         Only its last host's exiting record for its last session (it passed the placement
-        check when it was accepted), or its last session's end as the team services signed it.
+        check when it was accepted), or its last session's end as the team services signed it,
+        when no later session of the agent is known (its run goes on there).
         """
 
         held = self._agents.get(agent_id)
@@ -553,7 +670,8 @@ class TeamAgents:
                 and held.record.signer.runtime == last.host and str(held.record.body.session) == last.session:
             return EXITING
         session = self._host.live.trust.store.agent_session(self._host.identity.installation, self.team, last.session)
-        if session is not None and session.agent == agent_id and session.runtime == last.host and session.ends_at <= now:
+        if session is not None and session.agent == agent_id and session.runtime == last.host \
+                and session.ends_at <= now and not self._later_session_known(session):
             return SESSION_CLOSED
         return None
 
@@ -615,6 +733,16 @@ class TeamAgents:
         if host is None or parse_timestamp(host.record.document.expires_at) <= self._host.clock():
             return "host_unavailable"
         return "session_or_placement_changed"
+
+
+def _session_order(session: AgentSession) -> tuple[datetime, int, str]:
+    """Orders one agent's sessions by when they were opened.
+
+    Each placement of an agent gets a later ``placed_at``, which its session's ``started_at``
+    records (``team_services.sessions``); the placement revision and the id only break ties.
+    """
+
+    return session.started_at, session.placement_revision, session.session
 
 
 def _present(value: Any) -> Any:

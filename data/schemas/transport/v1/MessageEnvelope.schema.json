@@ -971,7 +971,7 @@
       "type": "object"
     },
     "ControlInstruction": {
-      "description": "A message type for controlling the behavior of agents or teams.\n\nAttributes:\n    type (ControlType): The type of control message being sent, such as a control command or a status request.\n    instruction (Instruction): The instruction to execute, if any. This could include commands like 'exit', 'pause', or 'resume'.",
+      "description": "A message type for controlling the behavior of agents or teams.\n\nAttributes:\n    type (ControlType): The type of control message being sent, such as a control command or a status request.\n    instruction (Instruction): The instruction to execute. Agents act only on 'stop', for the task it targets;\n        an agent is paused, resumed or stopped only by the team lead's signed agent.pause, agent.resume and\n        agent.exit (custom_agents.live_controls), and any other instruction is dropped and logged.",
       "properties": {
         "cascade_to_subtasks": {
           "default": true,
@@ -1967,10 +1967,10 @@
       "type": "object"
     },
     "Instruction": {
-      "description": "Definition of a specific instruction.\n\nAttributes:\n    instruction (str): A specific instruction as a string. If used in the context of a ControlInstruction, it directs the Agent to do something: exit, pause, resume or info instructions: 'basic', 'full'",
+      "description": "Definition of a specific instruction.\n\nAttributes:\n    instruction (str): A specific instruction as a string. In a ControlInstruction an agent acts only on\n        'stop', for the task it targets; an agent is paused, resumed or stopped only by the team lead's signed\n        agent.pause, agent.resume and agent.exit (custom_agents.live_controls).",
       "properties": {
         "instruction": {
-          "description": "A specific instruction as a string. If used in the context of a ControlInstruction, it directs the Agent to do something: exit, pause, resume or info instructions: 'basic', 'full'",
+          "description": "A specific instruction as a string. In a ControlInstruction an agent acts only on 'stop', for the task it targets; an agent is paused, resumed or stopped only by the team lead's signed agent.pause, agent.resume and agent.exit.",
           "title": "Instruction",
           "type": "string"
         },

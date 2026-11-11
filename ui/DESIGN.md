@@ -2016,7 +2016,7 @@ its history. Steps with linked requests cannot use this correction.
 - Team displays the gateway's live same-team presence as a table with Agent,
   Type, Status, Skills, and Last Seen columns. Pair every colored status dot
   with a label: green Available, amber Busy, red Exiting, and neutral gray
-  Paused, Stale, or unavailable. Show skills as a count with an expandable
+  Paused or Not accepting work. Show skills as a count with an expandable
   semantic-name list rather than an unbounded cell. The automatic presence
   refresh must preserve each expanded skill row by stable agent identity and
   discard that UI state only after the agent leaves the roster.

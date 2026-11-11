@@ -47,8 +47,6 @@ from assistant_gateway.delivery import (
     summarize_delivery_batch,
 )
 from assistant_gateway.gateway import UserGateway
-from assistant_gateway.team_view import record_status
-from custom_transport.protocol1.team_agents import TeamAgent
 from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.store import GatewayStateStore
 from assistant_gateway.translation import ChannelInboundMessage
@@ -234,30 +232,29 @@ class _FakeGatewayManagerRuntime:
 
 
 
-def _lead_record(agent_id: str) -> TeamAgent:
-    return TeamAgent(agent=agent_id, agent_type="TeamArchitect", display_name="TeamLead", state="idle",
-                     accepting_work=True, since=datetime.now(timezone.utc), host="lead", session=f"s-{agent_id}",
-                     is_lead=True)
-
-
 async def _lead_seen(gateway: UserGateway, agent_id: str) -> None:
-    """The lead appears in the team's records, as the gateway's team view applies it (assistant_gateway.team_view)."""
+    """The lead appears in the team's records: the lead follower sets the route (assistant_gateway.team_view)."""
 
-    status = record_status(_lead_record(agent_id), gateway.config.manager.team_id)
-    await gateway._manager_client.apply_manager_status(status, source="agent_records")
+    await gateway._manager_client.set_lead(agent_id, source="agent_records")
 
 
 async def _lead_left(gateway: UserGateway, agent_id: str) -> None:
-    """The lead leaves the team's records (it exited, or its host stopped reporting)."""
+    """The lead leaves the team's records (it exited, or its host stopped reporting): the follower marks it
+    unavailable."""
 
-    status = record_status(_lead_record(agent_id), gateway.config.manager.team_id, exiting=True)
-    await gateway._manager_client.apply_manager_status(status, source="agent_records")
+    await gateway._manager_client.mark_manager_unavailable(
+        expected_manager_id=agent_id, reason="the team lead is not live in the team's records", source="agent_records")
 
 
 async def _apply_lead_status(gateway: UserGateway, envelope: MessageEnvelope) -> None:
-    """A lead status reaching the manager client as the team view hands it on."""
+    """These transition tests describe the lead's state as an AgentStatus: a leaving one is the follower marking
+    it unavailable, any other the follower setting the route to it."""
 
-    await gateway._manager_client.apply_manager_status(envelope.msg_content, source="agent_records")
+    status = envelope.msg_content
+    if status.is_exiting:
+        await _lead_left(gateway, status.self_id)
+    else:
+        await _lead_seen(gateway, status.self_id)
 
 
 class _FakeIncomingMessage:
@@ -6394,47 +6391,8 @@ async def test_gateway_connect_does_not_subscribe_to_the_old_authorization_strea
 
 
 @pytest.mark.asyncio
-async def test_gateway_manager_status_requires_configured_team(
-    tmp_path: Path, monkeypatch
-):
-    config = _build_test_config(tmp_path)
-    config.manager.manager_agent_id = None
-    save_mock = Mock()
-    monkeypatch.setattr(type(config), "save", lambda self: save_mock())
-
-    gateway = UserGateway(
-        config,
-        output_sink=None,
-        state_store=GatewayStateStore(str(tmp_path / "state.db")),
-    )
-
-    for team_id in (None, "NO_TEAM", "other_team"):
-        await gateway._manager_client.apply_manager_status(
-            AgentStatus(
-                self_id=f"agent_id_{team_id or 'missing'}",
-                team_id=team_id,
-                named_agent_type=config.manager.named_agent_type,
-                is_paused=False,
-                is_executing=False,
-                has_execution_capacity=True,
-                is_busy=False,
-                is_exiting=False,
-                name="manager",
-                agent_role="manager",
-                last_seen_at=datetime.now(timezone.utc).isoformat(),
-                status_type=MessageMetaType.RESPONSE,
-                info_type=ControlType.STATUS_REQUEST_BASIC,
-            ),
-            source="broadcast",
-        )
-
-    assert gateway.config.manager.manager_agent_id is None
-    save_mock.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_gateway_connect_starts_services_without_manager_route(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ):
     config = _build_test_config(tmp_path)
     config.manager.manager_agent_id = None
@@ -6450,13 +6408,15 @@ async def test_gateway_connect_starts_services_without_manager_route(
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
         manager_runtime=manager_runtime,
     )
-    await gateway.connect(start_services=True)
+    with caplog.at_level(logging.WARNING, logger="assistant_gateway.gateway"):
+        await gateway.connect(start_services=True)
     try:
         assert gateway.config.manager.manager_agent_id is None
         task_names = {task.get_name() for task in gateway._background_tasks}
         assert "gateway_delivery_loop" in task_names
-        # The team lead's liveness follows its records; there is no polling loop.
-        assert "gateway_manager_liveness_loop" not in task_names
+        # A gateway without its message host cannot see the team: it says so once and follows no lead.
+        assert caplog.text.count("event=gateway_team_view_unavailable") == 1
+        assert "gateway_team_lead" not in task_names
         if gateway._activity_notices.enabled:
             assert "gateway_activity_plan_notice_loop" in task_names
     finally:

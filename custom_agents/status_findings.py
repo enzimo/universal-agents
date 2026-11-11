@@ -1,11 +1,10 @@
 """What an agent reports about itself on administrators' Status page.
 
-Each agent adds these findings to its answer to ``agent.status``
-(``AgentStatus.status_findings``), which the gateway asks of every live agent
-every 20 seconds (``assistant_gateway.team_view``); the gateway keeps the
-latest answer per agent and drops agents that are no longer live, so a fixed
-problem disappears with the next answer. Before this, the same facts were only
-in logs or in the agent's own diagnostics.
+Each agent adds these findings to its status (``AgentStatus.status_findings``),
+which it gives when it is asked with ``agent.status``; the gateway asks the live
+agents when its Status page is checked (``assistant_gateway.team_view``), so a
+fixed problem disappears at the next check. Before this, the same facts were
+only in logs or in the agent's own diagnostics.
 """
 
 from __future__ import annotations

@@ -30,6 +30,13 @@ from custom_transport.protocol1.team_agents import TeamAgent
 NOW = datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def the_requester_can_ask(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The asking agent's own process is joined and its session open; the F10 tests change this."""
+
+    monkeypatch.setattr(agent_requests, "cannot_ask", lambda agent, *, need_view: None)
+
+
 def member(agent: str, name: str, agent_type: str = "Researcher", *, state: str = "idle", accepting: bool = True,
            lead: bool = False) -> TeamAgent:
     return TeamAgent(agent=agent, agent_type=agent_type, display_name=name, state=state, accepting_work=accepting,
@@ -63,7 +70,9 @@ def directory_owner(*, agent_id: str = "lead_1", is_lead: bool = True, pending: 
         _logger=logging.getLogger("test.team_directory"),
         task_manager=SimpleNamespace(operations_runtime=SimpleNamespace(run=run),
                                      get_pending_subtasks=lambda: subtasks,
-                                     get_parent_task_id=lambda task_id: f"parent_of_{task_id}"),
+                                     get_parent_task_id=lambda task_id: f"parent_of_{task_id}",
+                                     resolve_root_task_id=lambda task_id: "request_1",
+                                     get_task_info=lambda task_id: None, is_terminal_state=lambda state: False),
         _fail_subtask_and_reconcile_parent=AsyncMock(), _delegated_task_repository=records or _Records(),
         team_comms=SimpleNamespace(delete_work_message=AsyncMock(return_value=withdrawn)),
     )
@@ -98,8 +107,11 @@ def test_the_directory_takes_the_whole_view_with_names_types_and_the_lead() -> N
     assert owner._agent_id_by_name == {"Researcher-1": "worker_1", "Researcher-2": "worker_2"}
 
     # An unchanged entry is kept as it is (its last_seen_at says when this directory took it).
+    names = owner._agent_id_by_name
     sync_directory(owner, view)
     assert owner.known_agents.agent_map["worker_1"] is busy
+    # F11: the name map is built whole and assigned; the one a worker thread may be reading is never emptied.
+    assert names == {"Researcher-1": "worker_1", "Researcher-2": "worker_2"} and owner._agent_id_by_name is not names
     # A later view replaces the whole directory.
     sync_directory(owner, {"worker_2": member("worker_2", "Researcher-2")})
     assert set(owner.known_agents.agent_map) == {"worker_2"} and owner._agent_id_by_name == {"Researcher-2": "worker_2"}
@@ -152,6 +164,66 @@ async def test_a_subtask_nobody_took_from_the_departed_agents_mailbox_is_failed(
     call = owner._fail_subtask_and_reconcile_parent.await_args_list[0]
     assert call.kwargs["parent_task_id"] == "parent_of_sub_1"
     assert "Researcher-1 left before taking it" in call.kwargs["error_message"]
+    # Only the subtask fails: the parent's turn resumes to decide again (F6).
+    assert call.kwargs["resume_parent"] is True and "Researcher-1 left the team" in call.kwargs["synthetic_context"]
+
+
+@pytest.mark.asyncio
+async def test_one_subtask_that_cannot_be_failed_does_not_keep_the_others_waiting(caplog) -> None:
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1"), subtask("sub_2", "worker_1")])
+    owner._fail_subtask_and_reconcile_parent.side_effect = [OSError("database is locked"), None]
+
+    with caplog.at_level(logging.INFO):
+        await agent_exited(owner, member("worker_1", "Researcher-1"), "exiting")
+
+    assert [call.kwargs["subtask_info"].task.task_id
+            for call in owner._fail_subtask_and_reconcile_parent.await_args_list] == ["sub_1", "sub_2"]
+    assert "event=team_agent_left_subtask_fail_error" in caplog.text and "subtask_id=sub_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_requests_waiting_on_a_departed_worker_are_failed_side_by_side() -> None:
+    """C08: a parent's turn runs inside the failure step; another request does not wait for it, the same one does."""
+
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1"), subtask("sub_2", "worker_1"),
+                                     subtask("sub_3", "worker_1")])
+    owner.task_manager.resolve_root_task_id = {"sub_1": "request_a", "sub_2": "request_a", "sub_3": "request_b"}.get
+    turn_of_a, started = asyncio.Event(), []
+
+    async def fail(**kwargs) -> None:
+        started.append(kwargs["subtask_info"].task.task_id)
+        if started[-1] == "sub_1":
+            await turn_of_a.wait()  # request_a's parent turn is still running
+
+    owner._fail_subtask_and_reconcile_parent = AsyncMock(side_effect=fail)
+    exiting = asyncio.create_task(agent_exited(owner, member("worker_1", "Researcher-1"), "exiting"))
+    for _ in range(100):
+        if "sub_3" in started:
+            break
+        await asyncio.sleep(0.01)
+
+    assert started == ["sub_1", "sub_3"]  # request_b went ahead; sub_2 waits behind its own request's turn
+    turn_of_a.set()
+    await asyncio.wait_for(exiting, 2)
+    assert started == ["sub_1", "sub_3", "sub_2"]
+
+
+@pytest.mark.asyncio
+async def test_an_exit_is_logged_only_by_a_requester_that_sent_work_there_and_never_as_a_warning(caplog) -> None:
+    """F3: every agent of a process hears every exit; only one that sent work to the agent says so."""
+
+    bystander = directory_owner(agent_id="worker_5", pending=[subtask("sub_9", "worker_2")])
+    requester = directory_owner(pending=[subtask("sub_1", "worker_1")],
+                                records=_Records({"sub_1": taken("worker_1", ("worker_1",))}))
+
+    with caplog.at_level(logging.INFO):
+        await agent_exited(bystander, member("worker_1", "Researcher-1"), "exiting")
+        assert "event=team_agent_left_for_good" not in caplog.text
+        await agent_exited(requester, member("worker_1", "Researcher-1"), "exiting")
+
+    [left] = [record for record in caplog.records if "event=team_agent_left_for_good" in record.getMessage()]
+    assert left.levelno == logging.INFO and "subtasks=1" in left.getMessage()
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
 
 
 @pytest.mark.asyncio
@@ -220,7 +292,8 @@ class _Reader:
         self.view: dict[str, TeamAgent] = {}
         self.reasons: dict[str, str] = {}
         self.departed: dict[str, TeamAgent] = {}
-        self.ready = SimpleNamespace(is_set=lambda: True)
+        self.ready = asyncio.Event()
+        self.ready.set()
 
     def show(self, view: dict[str, TeamAgent], **left: str) -> frozenset[str]:
         """The next view; ``left`` names agents that left and why. Returns what changed."""
@@ -237,6 +310,9 @@ class _Reader:
     def live(self):
         return MappingProxyType(self.view)
 
+    def agent(self, agent_id):
+        return self.view.get(agent_id)
+
     def departure_reason(self, agent_id):
         return self.reasons.get(agent_id)
 
@@ -245,9 +321,6 @@ class _Reader:
 
     def departed_agent(self, agent_id):
         return self.departed.get(agent_id)
-
-    def departed_agents(self):
-        return {agent: item for agent, item in self.departed.items() if self.left_for_good(agent)}
 
 
 @contextmanager
@@ -284,21 +357,91 @@ async def _settle(loop: asyncio.AbstractEventLoop, seconds: float = 0.6) -> None
 
 
 @pytest.mark.asyncio
-async def test_a_late_requester_receives_retained_exits_once() -> None:
+async def test_a_restored_agent_fails_only_subtasks_whose_target_left_for_good() -> None:
+    """F2: the targets of its own waiting by-name subtasks, checked against who left for good."""
+
+    from custom_agents.team_directory import check_departed_targets
+
+    reader = _Reader()
+    reader.show({"worker_1": member("worker_1", "Researcher-1"), "worker_2": member("worker_2", "Researcher-2"),
+                 "worker_3": member("worker_3", "Researcher-3")})
+    reader.show({"worker_2": member("worker_2", "Researcher-2")}, worker_1="session_closed")  # worker_3 went quiet
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1"), subtask("sub_2", "worker_2"),
+                                     subtask("sub_3", "worker_3"), subtask("sub_4", "team_Researcher")])
+
+    await check_departed_targets(owner, reader)
+
+    [call] = owner._fail_subtask_and_reconcile_parent.await_args_list
+    assert call.kwargs["subtask_info"].task.task_id == "sub_1"
+    assert "Researcher-1 left before taking it" in call.kwargs["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_a_restored_agent_reads_its_waiting_subtasks_once_and_says_when_it_cannot(caplog) -> None:
+    from custom_agents.team_directory import check_departed_targets
+
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1")])
+    owner.task_manager.get_pending_subtasks = lambda: (_ for _ in ()).throw(OSError("database is locked"))
+
+    with caplog.at_level(logging.ERROR):
+        await check_departed_targets(owner, _Reader())
+
+    assert "event=team_exit_recovery_unread" in caplog.text
+    owner._fail_subtask_and_reconcile_parent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("view_read_first", [True, False])
+async def test_an_agent_that_restored_its_work_checks_it_once_the_view_is_read(monkeypatch, view_read_first) -> None:
+    """F2, F4: the agent starts the check when it restored its work; it waits for the view whichever comes first.
+
+    The agent runs on its own loop, as a thread worker does; the view is read on the host's loop.
+    """
+
+    from custom_agents.agent_host import report_restored_work
+
     reader = _Reader()
     reader.show({"worker_1": member("worker_1", "Researcher-1")})
-    changed = reader.show({}, worker_1="session_closed")
+    reader.show({}, worker_1="session_closed")
+    if not view_read_first:
+        reader.ready.clear()
     with _own_loop() as loop:
         owner = directory_owner(pending=[subtask("sub_1", "worker_1")])
         owner._runtime_loop = loop
         host = _host_with(owner, reader)
-        hosted = host.agents[owner.id]
-        host._sync_directory(hosted)
-        # Catch-up or a repeated attachment must not launch another reconciliation.
-        host._team_changed(changed)
-        host._sync_directory(hosted)
-        await _settle(loop)
+        monkeypatch.setattr(agent_requests, "_PROCESS_HOST", host)
+
+        async def restored():
+            return report_restored_work(owner)
+
+        check = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(restored(), loop))
+        await asyncio.sleep(0.2)
+        if not view_read_first:
+            owner._fail_subtask_and_reconcile_parent.assert_not_awaited()  # it waits for the view
+            reader.ready.set()
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(asyncio.wait_for(check, 2), loop))
+
         owner._fail_subtask_and_reconcile_parent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_whose_host_stops_before_the_view_is_read_checks_nothing(monkeypatch) -> None:
+    from custom_agents.agent_host import report_restored_work
+
+    reader = _Reader()
+    reader.ready.clear()
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1")])
+    host = _host_with(owner, reader)
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", host)
+
+    check = report_restored_work(owner)
+    await asyncio.sleep(0.05)
+    host._stop.set()
+    await asyncio.wait_for(check, 2)
+
+    owner._fail_subtask_and_reconcile_parent.assert_not_awaited()
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", None)
+    assert report_restored_work(owner) is None  # without the launcher there is no host and nothing to check
 
 
 @pytest.mark.asyncio
@@ -404,6 +547,71 @@ async def test_a_subtask_still_waiting_in_the_departed_workers_mailbox_is_failed
 
     [call] = requester._fail_subtask_and_reconcile_parent.await_args_list
     assert (call.kwargs["parent_task_id"], call.kwargs["subtask_info"].task.task_id) == ("task_parent", "task_sub")
+
+
+@pytest.mark.asyncio
+async def test_a_departure_fails_only_the_untaken_subtask_and_resumes_the_parent(requester) -> None:
+    """F6 with the real failure step: the parent and a sibling subtask another worker holds go on."""
+
+    from functools import partial
+
+    from custom_agents import subtask_watchdog_runtime
+    from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ProgressState
+
+    manager = requester.task_manager
+    sibling = Task(task_id="task_sibling", parent_task_id="task_parent", task_type=MessageMetaType.REQUEST,
+                   problem_statement="other part")
+    assert manager.add_subtask("task_parent", sibling,
+                               MessageHeader(from_agent_id="lead_1", to_routing_path="team_one_Researcher"),
+                               MessageMeta(from_agent_name="TeamLead", to_named_agent_type="Researcher"))
+    requester.name = "TeamLead"
+    requester._runtime_coordinator = lambda: SimpleNamespace(defer_subtask_failure_if_blocked=lambda **_: False)
+    requester._resume_parent_task_if_ready = AsyncMock()
+    requester._send_task_error_response = AsyncMock()
+    requester._fail_subtask_and_reconcile_parent = partial(
+        subtask_watchdog_runtime._fail_subtask_and_reconcile_parent, requester)
+
+    await agent_exited(requester, WORKER_B, "exiting")
+
+    assert manager.get_task_info("task_sub").state == ProgressState.FAILED
+    assert not manager.is_terminal_state(manager.get_task_info("task_sibling").state)
+    assert not manager.is_terminal_state(manager.get_task_info("task_parent").state)
+    requester._resume_parent_task_if_ready.assert_awaited_once_with("task_parent")
+    requester._send_task_error_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("parent_waits", "event", "resumes"), [
+    (True, "team_agent_left_parent_resume_retry", 2),
+    (False, "team_agent_left_parent_not_resumed", 1),
+])
+async def test_a_parent_the_failure_step_could_not_resume_is_resumed_once_more_while_it_waits(
+        requester, caplog, parent_waits, event, resumes) -> None:
+    """C07: the subtask is already failed, so the watchdog no longer sees it; nothing else would resume the parent."""
+
+    from functools import partial
+
+    from custom_agents import subtask_watchdog_runtime
+    from custom_messages.enums import ProgressState
+
+    manager = requester.task_manager
+    state = ProgressState.WAITING if parent_waits else ProgressState.IN_PROGRESS
+    assert manager.update_main_task_state("task_parent", state, datetime.now(timezone.utc).isoformat())
+    requester.name = "TeamLead"
+    requester._runtime_coordinator = lambda: SimpleNamespace(defer_subtask_failure_if_blocked=lambda **_: False)
+    requester._resume_parent_task_if_ready = AsyncMock(side_effect=[OSError("database is locked"), None])
+    requester._fail_subtask_and_reconcile_parent = partial(
+        subtask_watchdog_runtime._fail_subtask_and_reconcile_parent, requester)
+
+    with caplog.at_level(logging.INFO):
+        await agent_exited(requester, WORKER_B, "exiting")
+
+    assert manager.get_task_info("task_sub").state == ProgressState.FAILED and not manager.get_pending_subtasks()
+    assert requester._resume_parent_task_if_ready.await_count == resumes
+    assert f"event={event}" in caplog.text and "parent_task_id=task_parent" in caplog.text
+    assert "event=team_agent_left_subtask_fail_error" not in caplog.text  # it is not left to the watchdog
 
 
 @pytest.mark.asyncio
@@ -671,3 +879,65 @@ async def test_a_worker_delegating_by_name_passes_over_one_that_takes_no_work_or
     with caplog.at_level(logging.ERROR):
         assert await exact_delegation_route(requester, "Researcher", "Researcher-1") is None
     assert "event=exact_delegation_target_unavailable" in caplog.text
+
+
+# -- the requester itself cannot ask yet (F10) -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_lead_whose_own_session_is_not_open_yet_waits_for_it_and_then_asks(monkeypatch) -> None:
+    import time
+
+    from custom_agents.agent_requests import AskBlocked
+
+    opened_at = time.monotonic() + 0.3
+    monkeypatch.setattr(agent_requests, "cannot_ask", lambda agent, *, need_view: (
+        AskBlocked("agent lead_1 has no session yet", clears=True) if time.monotonic() < opened_at else None))
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    asked = AsyncMock(return_value=_status_answer())
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    monkeypatch.setattr(team_directory, "VIEW_POLL_SECONDS", 0.02)
+
+    found = await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-1", start_seconds=5)
+
+    assert found is not None and found.self_id == "worker_1" and asked.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clears", [False, True])
+async def test_a_lead_that_cannot_ask_is_refused_with_its_own_reason_and_the_worker_is_not_judged(
+        monkeypatch, caplog, clears) -> None:
+    """A reason that does not clear refuses at once; one that does not clear in time, after the budget."""
+
+    from custom_agents.agent_requests import AgentUnreachable, AskBlocked
+
+    reason = "agent lead_1 has no session yet" if clears else "this process runs another message contract"
+    monkeypatch.setattr(agent_requests, "cannot_ask", lambda agent, *, need_view: AskBlocked(reason, clears=clears))
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    asked = AsyncMock()
+    monkeypatch.setattr(agent_requests, "ask_agent", asked)
+    monkeypatch.setattr(team_directory, "VIEW_POLL_SECONDS", 0.02)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with caplog.at_level(logging.WARNING), pytest.raises(AgentUnreachable, match=reason) as refused:
+        await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-1", start_seconds=0.3)
+
+    assert refused.value.clears is clears and asked.await_count == 0
+    assert (loop.time() - started >= 0.3) is clears
+    assert "event=named_agent_requester_cannot_ask" in caplog.text
+    assert "event=named_agent_not_answering" not in caplog.text and "event=named_agent_not_live" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_lead_whose_session_goes_while_it_asks_is_not_told_the_worker_failed(monkeypatch, caplog) -> None:
+    from custom_agents.agent_requests import AgentUnreachable
+
+    monkeypatch.setattr(agent_requests, "team_view", lambda: _View(member("worker_1", "Researcher-1")))
+    monkeypatch.setattr(agent_requests, "ask_agent",
+                        AsyncMock(side_effect=AgentUnreachable("agent lead_1 has no session yet", clears=True)))
+
+    with caplog.at_level(logging.WARNING), pytest.raises(AgentUnreachable):
+        await team_directory.live_named_agent(directory_owner(), "Researcher", "Researcher-1")
+
+    assert "event=named_agent_requester_cannot_ask" in caplog.text and "event=named_agent_not_answering" not in caplog.text

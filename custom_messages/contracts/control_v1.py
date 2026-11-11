@@ -28,7 +28,9 @@ class Instruction(BaseModel):
     Definition of a specific instruction.
 
     Attributes:
-        instruction (str): A specific instruction as a string. If used in the context of a ControlInstruction, it directs the Agent to do something: exit, pause, resume or info instructions: 'basic', 'full'
+        instruction (str): A specific instruction as a string. In a ControlInstruction an agent acts only on
+            'stop', for the task it targets; an agent is paused, resumed or stopped only by the team lead's signed
+            agent.pause, agent.resume and agent.exit (custom_agents.live_controls).
     """
 
     instruction_id: str = Field(
@@ -39,7 +41,11 @@ class Instruction(BaseModel):
         default="Instruction", description="Instruction"
     )
     instruction: str = Field(
-        description="A specific instruction as a string. If used in the context of a ControlInstruction, it directs the Agent to do something: exit, pause, resume or info instructions: 'basic', 'full'"
+        description=(
+            "A specific instruction as a string. In a ControlInstruction an agent acts only on 'stop', for the task "
+            "it targets; an agent is paused, resumed or stopped only by the team lead's signed agent.pause, "
+            "agent.resume and agent.exit."
+        )
     )
 
     def get_id(self) -> str:
@@ -76,7 +82,9 @@ class ControlInstruction(BaseModel):
 
     Attributes:
         type (ControlType): The type of control message being sent, such as a control command or a status request.
-        instruction (Instruction): The instruction to execute, if any. This could include commands like 'exit', 'pause', or 'resume'.
+        instruction (Instruction): The instruction to execute. Agents act only on 'stop', for the task it targets;
+            an agent is paused, resumed or stopped only by the team lead's signed agent.pause, agent.resume and
+            agent.exit (custom_agents.live_controls), and any other instruction is dropped and logged.
     """
 
     instruction_id: str = Field(

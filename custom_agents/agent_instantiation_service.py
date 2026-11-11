@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import uuid4
@@ -42,6 +43,9 @@ from storage.agent_launch_repository import (
 PROCESS_HOST_ID = current_process_identity().text()
 
 
+# Why every start of a TeamArchitect is refused (``AgentInstantiationService.validate_type``).
+MANAGER_LAUNCH_FORBIDDEN = "manager_launch_forbidden"
+_LOGGER = logging.getLogger(__name__)
 # Why ``launch`` refused a start: the process runs another message contract than its installation
 # (``custom_agents.contract_drain``), so it takes no new work and starts no agents.
 LAUNCH_REFUSED_OTHER_CONTRACT = "process_runs_another_message_contract"
@@ -108,6 +112,16 @@ class AgentInstantiationService:
     def validate_type(
         self, agent_type: str, *, automatic: bool
     ) -> tuple[dict[str, Any], ScheduleWorkersConfig]:
+        if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
+            # The team lead is the only TeamArchitect, whoever asks for another (manual, pool,
+            # schedule or delegation): on the lead's host the team services sign a TeamArchitect's
+            # session with the lead role (team_services.sessions), so a second one could pause or
+            # stop the real lead through its signed controls (custom_agents.live_controls).
+            _LOGGER.warning(
+                "A start of another TeamArchitect was refused: the team lead is the only one. "
+                "event=manager_launch_refused agent_id=%s automatic=%s", getattr(self.agent, "id", None), automatic,
+            )
+            raise PermissionError(MANAGER_LAUNCH_FORBIDDEN)
         limits = current_worker_limits(self.agent)
         if agent_type in limits.denied_agent_types:
             raise PermissionError("agent_type_disallowed")
@@ -118,19 +132,15 @@ class AgentInstantiationService:
                 and not default_type_allowed(self.agent, agent_type, definition)
             ):
                 raise PermissionError("agent_type_ineligible_for_automatic_launch")
-            if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-                raise PermissionError("automatic_manager_launch_forbidden")
         return definition, limits
 
     def validate_pool_start(self, agent_type: str) -> None:
-        """A worker pool start: pools on, and never TeamArchitect (denies are checked in validate_type)."""
+        """A worker pool start: pools on (denies and the TeamArchitect refusal are checked in validate_type, first)."""
 
         from custom_agents.worker_pool_settings import current_worker_pool_settings
 
         if not current_worker_pool_settings(self.agent).enabled:
             raise PermissionError("worker_pools_disabled")
-        if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-            raise PermissionError("automatic_manager_launch_forbidden")
 
     def capacity(self, agent_type: str, limits: ScheduleWorkersConfig) -> LaunchCapacity:
         """The limits a start is checked against, read now (custom_agents.worker_pool_limits)."""

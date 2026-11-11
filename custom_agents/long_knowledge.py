@@ -21,9 +21,10 @@ process opens it for the knowledge tools, but each would report the same
 count; the team lead already reports the team-wide findings (schedules to
 check, saved output retention), so it alone counts.
 
-How often. Findings travel in every status report, every 20 seconds
-(``custom_agents.status_findings``), and building one runs on the agent's event
-loop. Counting reads every stored text, so it runs at most every
+How often. Findings travel in every status report the agent builds: at each
+refresh of its own status row (every 20 seconds while it runs) and each time it
+is asked with ``agent.status`` (``custom_agents.status_findings``); building one
+runs on the agent's event loop. Counting reads every stored text, so it runs at most every
 ``COUNT_INTERVAL`` and in a thread of its own; each report carries the latest
 finished count. The first report after a start has none yet, and a count that
 fails is logged and tried again after the interval, keeping the last count.

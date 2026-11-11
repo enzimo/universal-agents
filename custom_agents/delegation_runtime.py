@@ -11,6 +11,7 @@ from custom_tools.runtime_context import bound_task_id
 from datetime import datetime, timezone
 from typing import Optional
 
+from custom_agents.agent_requests import AgentUnreachable
 from custom_agents.message_routing import construct_header
 from custom_agents.task_manager import TaskInfo
 from custom_agents.task_transport import (
@@ -38,6 +39,25 @@ def _resolve_manager_identity(self) -> tuple[Optional[str], Optional[str]]:
         if status.team_id == self.team_id and status.is_team_lead:
             return status.self_id, status.name
     return None, None
+
+
+# A delegation by name refused because the requester itself cannot ask yet (``exact_delegation_route``).
+REQUESTER_CANNOT_ASK = "requester_cannot_ask"
+
+
+def requester_cannot_ask_detail(error: Exception) -> str:
+    """What the requester is told when it cannot ask a named worker: its own reason, not the worker's.
+
+    Whether trying again can help depends on whether the reason clears by itself
+    (``AgentUnreachable.clears``): a session still opening does; a process that drains or
+    runs without a message host does not.
+    """
+
+    if getattr(error, "clears", True):
+        return (f"This agent cannot send requests yet ({error}); the named worker was not checked. "
+                "Try again shortly.")
+    return (f"This agent cannot send requests ({error}); the named worker was not checked. That will not change "
+            "while this process runs: delegate by type, do it another way, or tell the person.")
 
 
 async def _record_delegation_subtask_abort(
@@ -108,7 +128,8 @@ async def _probe_live_named_agent_type(
     nothing is sent and nothing waits, because work for a type waits in the type's queue.
     By name, the agent must take the task from its own mailbox, so the lookup waits a
     bounded time for a just-started agent to appear and then asks it for its status: one
-    that does not answer is refused at once (``team_directory.live_named_agent``).
+    that does not answer is refused at once (``team_directory.live_named_agent``). By name,
+    ``AgentUnreachable`` is raised when this agent itself cannot ask yet.
     """
 
     from custom_agents.team_directory import live_agent_status, live_named_agent
@@ -162,7 +183,8 @@ async def exact_delegation_route(
     at once. With ``named_agent_type`` the worker must also be of that type. Other
     agents get the same bounded wait and the records' checks (it takes work, it is
     of that type) without asking: the contract lets only the lead's host, the team
-    services and the gateway ask for a status.
+    services and the gateway ask for a status. Raises ``AgentUnreachable`` when the team lead
+    itself cannot ask yet (``team_directory.live_named_agent``): the worker was not checked.
     """
 
     if not self.is_team_lead:
@@ -210,7 +232,10 @@ async def _verify_delegation_target(
     """
 
     if target_agent_name:
-        return await exact_delegation_route(self, named_agent_type, target_agent_name) is not None
+        try:
+            return await exact_delegation_route(self, named_agent_type, target_agent_name) is not None
+        except AgentUnreachable:
+            return False  # this agent cannot ask yet; logged with its reason (team_directory.live_named_agent)
     if not named_agent_type or not self.is_team_lead:
         return True
     if _delegation_type_is_registered(self, str(named_agent_type)):
@@ -343,9 +368,21 @@ async def _create_subtask_request(
     # always won, so a task meant for one worker went to the shared queue.
     exact_route: Optional[str] = None
     if target_agent_name:
-        exact_route = await exact_delegation_route(
-            self, to_named_agent_type_from_llm, target_agent_name
-        )
+        try:
+            exact_route = await exact_delegation_route(
+                self, to_named_agent_type_from_llm, target_agent_name
+            )
+        except AgentUnreachable as error:
+            # It is this agent that cannot ask yet, not the worker that is gone.
+            await self._record_delegation_subtask_abort(
+                failure_phase=REQUESTER_CANNOT_ASK,
+                parent_task_id=parent_task_id,
+                candidate_task_id=sub_task_to_create.task_id,
+                target_named_agent_type=to_named_agent_type_from_llm,
+                target_agent_name=target_agent_name,
+                detail=requester_cannot_ask_detail(error),
+            )
+            return None
         target_ok = exact_route is not None
     else:
         target_ok = await self._verify_delegation_target(to_named_agent_type_from_llm, None)

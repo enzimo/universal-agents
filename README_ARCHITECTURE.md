@@ -114,9 +114,9 @@ code the only places that reach NATS directly (plan 13B.6). Agents learn who is
 live on their team from the team's signed agent records ("Agent records and who
 is live", "Agents asking each other"), not from presence messages: a record says
 an agent is live only while its host keeps reporting, so an old message can no
-longer make a stopped worker look alive. The gateway reads the same records (step
-7c), and the presence stream, the heartbeat and the broadcast subject were removed in
-step 7d.
+longer make a stopped worker look alive. The gateway follows its team and its lead from
+the same records ("The gateway follows its team"), and the presence stream, the heartbeat
+and the broadcast subject were removed in step 7d.
 
 ## Work, scheduling, and recovery
 
@@ -3285,8 +3285,8 @@ controls for MCP connections and hosted servers
 (`assistant_gateway/installed_procedures.py`, listed, added or rejected in
 Settings → Team) then check with `PersonChangeCheck` what that person may
 change, from their current team roles. `assistant_gateway/team_presence.py`
-keeps the live team presence in memory, filled from the team's agent records
-("The gateway follows its team"). Every live Web Chat page (the
+shows the team as the gateway's team view builds it from the team's agent records at
+each read ("The gateway follows its team"); nothing is stored. Every live Web Chat page (the
 two-second event stream, `website_handlers/conversation.py`) carries it as
 `team_activity` for registered people, and one browser store
 (`assets/team_activity.mjs`) hands that copy to the sidebar activity mesh,
@@ -4832,6 +4832,9 @@ The host's liveness certificate must be at least the placement's `host_epoch`.
 Replay protection is kept per key and signing host, including after deletion. A refused
 record cannot consume another host's sequences. Temporary trust failures retry without
 waiting for an agent to change state; failed watches reopen and expiry checks continue.
+A reopened watch is no departure: the records already held stay until the new watch has
+caught up, and only those it did not deliver are removed then, as deletions; clearing them
+at once had made the gateway mark a healthy lead unavailable and available again.
 `ready` clears when the reader stops, `running` reports its state, and listeners can read
 `departure_reason` to distinguish exit from host unavailability. Duplicate names or lead
 roles produce no selected agent, since sorting attacker-chosen ids proves no authority.
@@ -4919,21 +4922,37 @@ already left the view (a reader that reconnects sees only the record's deletion,
 bucket keeps one value per key; the placement's deletion can be read before the exiting
 record), so the reader keeps a departed agent's last entry for ten minutes and tells its
 listeners once more, once, when the evidence comes. Only the team services' signed session
-or the agent's own last host count, so another host cannot fake an exit. Then every agent
-that delegated work to it by name (not only the lead) fails, at once, each subtask that still
-waits in the departed agent's own mailbox and that nobody took: the requester's
+or the agent's own last host count, so another host cannot fake an exit. One run of an agent
+can hold several sessions (a refused renewal, a missing placement or a lost open reply opens
+another, and the earlier one runs out seven days later), so only the agent's newest known
+session counts, and, for an agent the reader did not see leave, only while no placement of
+the agent is held and its held record does not name a session the reader lacks. Then every
+agent that delegated work to it by name (not only the lead) fails, at once, each subtask that
+still waits in the departed agent's own mailbox and that nobody took: the requester's
 delegated-task record shows no worker took it, and its message can still be withdrawn from
-the work stream. A subtask a worker took is left alone: a restarted agent takes it over from
+the work stream. Only that subtask fails, as with the watchdog's timeout, a handback or a
+worker loss: the parent task and its other subtasks go on, and the parent's turn resumes to
+decide again. Subtasks of different requests are failed side by side, those of one request one
+after another. A subtask a worker took is left alone: a restarted agent takes it over from
 saved state and reports it again, and a handed-back one goes to another worker. An agent
 whose host only stopped reporting is not given up for; the subtask watchdog handles work that
 never comes back.
 
 A fresh reader also recognises agents that exited while its process was down, using the
-retained signed closed sessions without needing the old agent record or placement. A
-requester attached after catch-up receives the retained exits once too. Beyond the session
-retention period the watchdog still decides overdue work. A handback records its worker in
-the delegated task's holder history even if the worker's claim never arrived: its new
-message belongs to the type queue and must never be withdrawn as an abandoned by-name task.
+retained signed closed sessions without needing the old agent record or placement. It records
+those it finds at its first reading without telling anyone and logs one count
+(`event=team_agents_unseen_exits`): a process start can find weeks of them, and its agents
+have not restored their saved work yet. Instead each agent, once it has restored its saved
+work at the end of its start (`agent_host.report_restored_work`), waits until its process has
+read the view, reads its waiting subtasks once and fails those sent by name to an agent that
+is not live and left for good, the same way (`team_directory.check_departed_targets`). So a
+restarted requester fails what its departed workers never took, whichever comes first, and a
+start costs one read per restored agent. Exits found later, also after the reader's run
+restarts, are told as usual. The reader drops what it kept about a departure once the
+agent's last session record is deleted (about 37 days after a closed session ended). Beyond
+that the watchdog still decides overdue work. A handback records its worker in the delegated
+task's holder history even if the worker's claim never arrived: its new message belongs to
+the type queue and must never be withdrawn as an abandoned by-name task.
 
 Agents ask each other on `ctl.agent.<agent>`, signed with the asking agent's session, through
 `custom_agents.agent_requests` (`ask_agent`, `ask_each`, `announce`, `team_view`, which hold
@@ -4945,8 +4964,12 @@ several agents at once under one deadline and keeps each answer or error apart.
 - Delegation by type reads the directory and sends nothing. By name, the requester waits up
   to ten seconds for a just-started worker to take work in the view (a started worker took
   3.6 s in the live tests), and the team lead also asks it for its basic status: one that
-  does not answer, is exiting or takes no work is refused at once. Other agents skip that
-  ask; the contract lets only the lead's host, the team services and the gateway send it.
+  does not answer, is exiting or takes no work is refused at once. When it is the lead that
+  cannot ask yet (its own session is not open after a restart, or its process drains), it
+  waits within the same ten seconds while that clears by itself; otherwise the delegation is
+  refused with the lead's own reason (`requester_cannot_ask`), and the worker is not judged.
+  Other agents skip that ask; the contract lets only the lead's host, the team services and
+  the gateway send it.
   The maintenance worker check accepts a started launch: the occurrence waits in the type's
   queue.
 - The team lead's pause, resume and exit tool sends `agent.pause`, `agent.resume` and
@@ -4954,6 +4977,12 @@ several agents at once under one deadline and keeps each answer or error apart.
   services for pause and resume, and never from its own session: stopping the lead's agent
   would end the manager process without the approval a restart needs. Anything else is
   answered `not_allowed` and logged. The tool refuses to send them to the agent using it.
+  The old unsigned `ControlInstruction` exit, pause and resume are no longer obeyed: their
+  sender is whatever the message says, and any process with the team's NATS login can
+  publish one. An agent acts only on its `stop` for a task and drops any other, logged with
+  the sender it claims (`event=agent_control_instruction_dropped`). Nor can the lead start
+  another TeamArchitect (`manager_launch_forbidden`, for every kind of start): on the lead's
+  host its session would carry the lead role, and it could pause or stop the real lead.
   It waits the request's whole lifetime (30 s), says nothing changed only when nothing can
   have run, and says the outcome is unknown after a lost reply, `handler_failed` or an
   unreadable answer.
@@ -5043,36 +5072,74 @@ queues, but other agents, the gateway (its Team and Status pages) and restart ap
 not see it, and it can neither ask nor be asked anything.
 
 **The gateway follows its team** (step 7c, `assistant_gateway.team_view`): the gateway's
-host reads the team's live agents once it has joined, and hands the team lead's arrival,
-changes and leaving, in order, to the manager client's `apply_manager_status`, so the
-"available" and "unavailable" transitions (notices, maintenance schedules, failing waiting
-replies, pausing Telegram polling) run as before. The lead saying it leaves makes it
-unavailable at once; a lead whose host stopped reporting is unavailable at most 35 seconds
-after the host's last liveness write (its record's 30 seconds plus the reader's 5-second
-check), about the 30 seconds after which the presence heartbeat counted it gone. Every
-member's state
-goes to the Team page's records as it changes; skills, Status page findings and whether a
-busy agent could start more, which records do not carry, are asked with `agent.status`
-(basic) from each live agent every 20 seconds and merged in. An agent whose session was
-refused has no record and no address, so it cannot report findings; the Status page shows
-what the team's live host records list instead (`GatewayTeamView.host_findings`): one
-problem per process and reason, naming the agents (`<agent type>-<agent id>`), saying why
-in plain words (the worker limit reached, a type the process may not run, a type name no
-certificate can carry, ...) and what to do, such as raising the worker limit and making a
-team-wide restart. It goes once the session opens or the agent stops; starting up, before
-the first answer, is no finding. A host whose record names another contract digest than
-the gateway's keeps its agents on the Team page, not accepting work, so people's commands
-about the tasks they hold still reach them; a team lead on such a host counts as
-unavailable, since a chat is new work, and the Status page shows one problem per such host
-naming both digests and saying to install one release everywhere and restart the whole
-team. At start the gateway waits up
-to 15 seconds to read the records, and marks a saved route unavailable when no live lead
-is in them. Before this the gateway asked for the lead on the operational subject at start
-("discovery"), followed presence, and polled the lead's consumer and heartbeat every 5
-seconds; all three are removed, with the transport adapter's consumer probe. A gateway
-started without the launcher runs no host, keeps its saved route to the lead, and says so
-once (`event=gateway_team_view_unavailable`). Agent status messages that still arrive on
-the gateway's routes are ignored, never shown.
+host reads the team's live agents once it has joined (the same reader the agents use), and
+the gateway acts on that view in four places.
+
+- *The route to the team lead.* One `TeamLeadFollower` compares the manager client's route
+  with the records and is its only writer while the gateway runs; comparing state instead
+  of following events means a change it missed, records read late, a clock that steps back
+  or a failed attempt cannot leave a dead or wrong route, since the next check repairs it.
+  At start, before the transitions start and before the chat apps set their hooks and
+  notices, it waits up to 15 seconds for a lead in the records (not only for the records):
+  at a normal team start the gateway reads them before the lead has written its own, and
+  deciding then had marked the lead unavailable and available again (Telegram paused and
+  resumed, a false Status notice). A lead found then is routed to directly, also in place
+  of the route the previous run saved; read records without a lead clear a saved route with
+  one unavailable transition; records not read yet keep it (chats may still reach a live
+  lead), and it is checked as soon as they are read. Afterwards it checks on every change
+  and every 5 seconds, and a differing route goes through the usual transitions (the
+  current lead unavailable, so replies waiting on a dead route are failed, then the new one
+  available). Among several lead records it keeps the current lead while it is live, and
+  otherwise takes the one whose record changed last (a crashed run's lead has not changed
+  since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
+  whose process runs another contract takes no new chats but finishes the tasks it holds,
+  so the replies people wait for are kept, and failed only if that lead then leaves. A join
+  the installation refused for good clears the route whenever it comes. The lead saying it
+  leaves makes it unavailable at once; a lead whose host stopped reporting is unavailable
+  at most 35 seconds after the host's last liveness write (its record's 30 seconds plus the
+  reader's 5-second check), about the 30 seconds after which the presence heartbeat counted
+  it gone. The manager client keeps no clock: the presence-era ordering by report times is
+  gone with the presence.
+- *The Team page.* Members are built from the records each time a page reads them, so a
+  change shows at once and a member is listed while its records say it is live, whether or
+  not it answers anything; one that left is shown as exiting for a minute, and the reader's
+  own stop or restart is no departure. Labels: Available, Busy, Paused, Not accepting work
+  (a member whose record takes no new work, such as one on another contract, unless it is
+  busy with work it holds) and Exiting. A blank display name shows as `Agent_<id>`, and one
+  member that does not fit the page is logged and left out instead of breaking everyone's
+  list.
+- *Details on demand* (decision 69). Skills, an agent's own Status page findings and
+  whether a busy agent could start more are not in the records; the gateway asks for them
+  with `agent.status` (basic) when the Team tab is opened or refreshed and when the Status
+  page is checked, at most once in 10 seconds, one round at a time, at most 16 asks at
+  once, never of agents on another contract. Answers stay with their member while it is
+  shown; an answered capacity counts only while the member's record is the one it was asked
+  under, so an agent that finished is not still Busy.
+- *The Status page.* The view gives the gateway's own judgement of the team: whether a lead
+  record is live (any counts: answers play no part), what the hosts' records list, and
+  whether the gateway can see the team at all (a refused join, saying why and what to do,
+  or records not read for longer than the start's wait). An agent whose session was refused
+  has no record and no address, so it cannot report findings; the hosts' records list it
+  instead (`host_findings`): one problem per process and reason, naming the agents
+  (`<agent type>-<agent id>`), saying why in plain words (the worker limit reached, a type
+  the process may not run, a type name no certificate can carry, ...) and what to do. It
+  goes once the session opens or the agent stops; starting up, before the first answer, is
+  no finding. A host whose record names another contract digest than the gateway's gets one
+  problem naming both digests and saying to install one release everywhere and restart the
+  whole team. The agents' own findings come last, with the source their record names, and
+  the page waits for them at most about one ask, so an agent cannot hide or stand in for a
+  gateway finding and one that does not answer does not hold the page. A gateway without a
+  message host (command-line runs, or a service on an instance the launcher never prepared)
+  has no records: it keeps its saved route, does not judge the team on its Status page, and
+  says so once (`event=gateway_team_view_unavailable`).
+
+Each part of the view (the reader, the details) and the follower run supervised: one that
+fails or ends early is logged and started again after 5 seconds, doubling to 5 minutes,
+and stopping the gateway never waits for the records to be read. Before this the gateway
+asked for the lead on the operational subject at start ("discovery"), followed presence,
+and polled the lead's consumer and heartbeat every 5 seconds; all three are removed, with
+the transport adapter's consumer probe. Agent status messages that still arrive on the
+gateway's routes are ignored, never shown.
 
 **Stored outcomes** (`storage.operation_outcomes`, table `protocol1_operation_outcomes`
 in the manager database): a change command is carried out once however often it is
