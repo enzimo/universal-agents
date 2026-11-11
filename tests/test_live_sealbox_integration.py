@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -48,6 +49,7 @@ from tests.broker_access_support import (
     gateway_headers,
     open_gate,
 )
+from tests.owned_processes import record_started_processes, stop_owned_process
 
 
 pytestmark = [
@@ -94,6 +96,8 @@ def _start_own_sealbox(
     neither that line nor a connection to the port shows that this server listens. A
     request only this test's root token is allowed to make does: another server refuses
     the token or does not know the path, while this one stops with "Failed to bind".
+    A server this start began is stopped however the wait ends (an error, Ctrl-C, the
+    deadline), since no caller holds it yet.
     """
 
     import httpx
@@ -105,30 +109,32 @@ def _start_own_sealbox(
         stderr=subprocess.PIPE,
         text=True,
     )
-    headers = {"Authorization": f"Bearer {token_file.read_text().strip()}"}
-    deadline = time.time() + 8
-    while time.time() < deadline:
-        if process.poll() is not None:
-            output = "".join(process.communicate())
-            if "Failed to bind address" in output:
-                return None
-            raise RuntimeError(
-                f"sealbox-server exited early with code {process.returncode}"
-            )
-        try:
-            answer = httpx.get(
-                f"http://127.0.0.1:{port}/v2/admin/tenants", headers=headers, timeout=0.5
-            )
-        except httpx.HTTPError:
+    try:
+        headers = {"Authorization": f"Bearer {token_file.read_text().strip()}"}
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if process.poll() is not None:
+                output = "".join(process.communicate())
+                if "Failed to bind address" in output:
+                    return None
+                raise RuntimeError(
+                    f"sealbox-server exited early with code {process.returncode}"
+                )
+            try:
+                answer = httpx.get(
+                    f"http://127.0.0.1:{port}/v2/admin/tenants", headers=headers, timeout=0.5
+                )
+            except httpx.HTTPError:
+                time.sleep(0.1)
+                continue
+            if answer.status_code == 200:
+                return process
+            # Another server answers: this one stops once it fails to bind.
             time.sleep(0.1)
-            continue
-        if answer.status_code == 200:
-            return process
-        # Another server answers: this one stops once it fails to bind.
-        time.sleep(0.1)
-    process.kill()
-    process.wait(timeout=3)
-    raise RuntimeError("sealbox-server did not become reachable")
+        raise RuntimeError("sealbox-server did not become reachable")
+    except BaseException:
+        stop_owned_process(process, name=f"sealbox-server on port {port}", timeout=3)
+        raise
 
 
 def _run_cli(
@@ -246,8 +252,7 @@ def live_sealbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
         def restart() -> None:
             nonlocal process
-            process.terminate()
-            process.wait(timeout=3)
+            stop_owned_process(process, name=f"sealbox-server on port {port}", timeout=3)
             restarted = _start_own_sealbox(server, server_env, port, token_file)
             if restarted is None:
                 pytest.fail(f"another program took port {port} while sealbox-server restarted")
@@ -264,11 +269,7 @@ def live_sealbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "store_path": store_path,
         }
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        stop_owned_process(process, name=f"sealbox-server on port {port}", timeout=3)
 
 
 async def _assert_unknown_form_result_after_broker_restart(tmp_path: Path, session_id: str) -> None:
@@ -1220,5 +1221,26 @@ def test_a_sealbox_start_does_not_take_another_tests_server_on_its_port_for_its_
         assert other.poll() is None
     finally:
         for process in servers:
-            process.terminate()
-            process.wait(timeout=3)
+            stop_owned_process(process, name="the other test's sealbox-server", timeout=3)
+
+
+def test_a_sealbox_server_the_start_began_is_stopped_when_the_wait_for_it_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    stand_in = tmp_path / "sealbox-server"
+    stand_in.write_text("#!/bin/sh\nexec sleep 60\n")
+    stand_in.chmod(0o755)
+    token_file = tmp_path / "root_token"
+    token_file.write_text("root-token\n")
+
+    def failing_check(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("the readiness check failed")
+
+    monkeypatch.setattr(httpx, "get", failing_check)
+    with record_started_processes() as started:
+        with pytest.raises(RuntimeError, match="the readiness check failed"):
+            _start_own_sealbox(stand_in, dict(os.environ), _free_port(), token_file)
+        [server] = started
+        assert server.returncode == -signal.SIGTERM

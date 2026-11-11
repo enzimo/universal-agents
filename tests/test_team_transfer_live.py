@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+
+from tests.owned_processes import record_started_processes, stop_owned_process
 
 REPO = Path(__file__).resolve().parents[1]
 BASE = REPO / "test_results" / "team_transfer_live"
@@ -53,7 +56,8 @@ def start_broker(config_path: Path, config) -> tuple[subprocess.Popen, int]:
     broker binds it. Another test's server can take the port in between: the broker then
     stops with "address already in use" while the other server answers on the port. The
     broker counts as started only when its own log says it listens while it still runs;
-    when it could not bind, it starts again on another port.
+    when it could not bind, it starts again on another port. A broker this start began is
+    stopped however the wait ends (an error, Ctrl-C, the deadline), since no caller holds it yet.
     """
 
     for _attempt in range(3):
@@ -66,20 +70,22 @@ def start_broker(config_path: Path, config) -> tuple[subprocess.Popen, int]:
                 cwd=REPO, env=broker_env(config), stdout=log, stderr=subprocess.STDOUT,
             )
         listening = f"Secure tool broker listening on http://127.0.0.1:{port} "
-        deadline = time.monotonic() + 60
-        while True:
-            text = log_path.read_text()
-            if proc.poll() is not None:
-                if "address already in use" in text:
-                    break
-                raise SystemExit(f"broker exited; see {log_path}")
-            if listening in text:
-                return proc, port
-            if time.monotonic() >= deadline:
-                proc.terminate()
-                proc.wait(10)
-                raise SystemExit(f"broker did not start; see {log_path}")
-            time.sleep(0.2)
+        try:
+            deadline = time.monotonic() + 60
+            while True:
+                text = log_path.read_text()
+                if proc.poll() is not None:
+                    if "address already in use" in text:
+                        break
+                    raise SystemExit(f"broker exited; see {log_path}")
+                if listening in text:
+                    return proc, port
+                if time.monotonic() >= deadline:
+                    raise SystemExit(f"broker did not start; see {log_path}")
+                time.sleep(0.2)
+        except BaseException:
+            stop_owned_process(proc, name=f"broker on port {port}", timeout=10)
+            raise
     raise SystemExit("every port the test picked was taken before the broker could listen on it")
 
 
@@ -152,8 +158,7 @@ def run(base: Path) -> None:
         exported = cli("team", "export", "--config", str(config_path), "--owner", "usr_ana", "--out", str(out),
                        "--passphrase-file", str(passfile), env=cli_env)
     finally:
-        old_broker.terminate()
-        old_broker.wait(10)
+        stop_owned_process(old_broker, name="old instance's broker", timeout=10)
     assert exported.returncode == 0
     raw = out.read_bytes()
     for secret in (GITHUB, MODEL, "e2e-bot-token"):
@@ -182,8 +187,7 @@ def run(base: Path) -> None:
                        "--review", str(review_dir), "--passphrase-file", str(passfile), env=dict(clean_env, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port2}"))
         assert repeated.returncode == 0 and "Stored 0 of 0" in repeated.stdout
     finally:
-        new_broker.terminate()
-        new_broker.wait(10)
+        stop_owned_process(new_broker, name="new instance's broker", timeout=10)
     assert creds.returncode == 0
 
     for key in list(os.environ):
@@ -253,7 +257,35 @@ def test_the_broker_start_skips_a_port_another_server_took_first(
             assert port != taken and broker.poll() is None
             assert "address already in use" in (tmp_path / f"broker-{taken}.log").read_text()
         finally:
-            broker.terminate()
-            broker.wait(10)
+            stop_owned_process(broker, name="broker", timeout=10)
     finally:
         other.shutdown()
+
+
+def test_a_broker_the_start_began_is_stopped_when_the_wait_for_it_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    stand_in = tmp_path / "python"
+    stand_in.write_text("#!/bin/sh\nexec sleep 60\n")
+    stand_in.chmod(0o755)
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "PY", str(stand_in))
+    monkeypatch.setattr(module, "BASE", tmp_path)
+
+    def failing_wait(_seconds: float) -> None:
+        raise RuntimeError("the readiness check failed")
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=time.monotonic, sleep=failing_wait))
+    config = SimpleNamespace(
+        layout=SimpleNamespace(team_env_path=tmp_path / "team.env"),
+        broker_credentials_path=tmp_path / "credentials",
+        credential_catalog_database_path=tmp_path / "catalog.db",
+        instance_root_path=tmp_path,
+    )
+    with record_started_processes() as started:
+        with pytest.raises(RuntimeError, match="the readiness check failed"):
+            start_broker(tmp_path / "instance_config.yaml", config)
+        [broker] = started
+        assert broker.returncode == -signal.SIGTERM

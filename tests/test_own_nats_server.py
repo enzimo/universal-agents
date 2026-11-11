@@ -9,15 +9,18 @@ load in about 17 runs.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import signal
 import socket
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from tests.own_nats_server import own_nats_server
+from tests.own_nats_server import own_nats_server, own_nats_server_process
 from tests.test_live_message_contract import nats_server
 
 pytestmark = [pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
@@ -42,10 +45,13 @@ def test_two_tests_starting_at_once_each_talk_to_their_own_server(tmp_path: Path
     found: dict[Path, tuple[str, str]] = {}
 
     def start(folder: Path) -> None:
-        together.wait()
+        # The waits are bounded: when one server fails to start, its thread never reaches
+        # the second wait, and the other thread must still leave its block and stop its
+        # server instead of waiting forever (the pool's exit would then never return).
+        together.wait(timeout=30)
         with own_nats_server(nats_server(), folder) as url:
             found[folder] = (url, _server_id(url))
-            together.wait()  # both servers run at once while each is asked who it is
+            together.wait(timeout=30)  # both servers run at once while each is asked who it is
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         for future in [pool.submit(start, folder) for folder in folders]:
@@ -61,3 +67,39 @@ def test_a_server_that_cannot_start_fails_the_test_instead_of_lending_it_another
     with pytest.raises(pytest.fail.Exception, match="NATS stopped while starting"):
         with own_nats_server(nats_server(), tmp_path, "--no_such_option"):
             pass
+
+
+def test_a_server_that_ignores_the_stop_request_is_killed_and_the_tests_own_error_is_kept(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A server that hangs while stopping no longer stays running or hides the test's error."""
+
+    stand_in = tmp_path / "hanging-nats-server"
+    stand_in.write_text(
+        f"#!{sys.executable}\n"
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('[INF] Listening for client connections on 127.0.0.1:4222', flush=True)\n"
+        "print('[INF] Server is ready', flush=True)\n"
+        "time.sleep(120)\n"
+    )
+    stand_in.chmod(0o755)
+    caplog.set_level(logging.WARNING, logger="tests.owned_processes")
+    with pytest.raises(RuntimeError, match="the test's own error"):
+        with own_nats_server_process(str(stand_in), tmp_path) as (_url, process):
+            raise RuntimeError("the test's own error")
+    assert process.returncode == -signal.SIGKILL
+    assert f"event=owned_process_killed name=nats-server in {tmp_path} pid={process.pid}" in caplog.text
+
+
+def test_a_paused_server_is_resumed_and_stops_when_its_block_ends(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A test that paused its server (an outage) still leaves no server behind."""
+
+    caplog.set_level(logging.WARNING, logger="tests.owned_processes")
+    with own_nats_server_process(nats_server(), tmp_path) as (_url, process):
+        process.send_signal(signal.SIGSTOP)
+    # Stopped by its SIGTERM once resumed, not killed after the wait ran out.
+    assert process.returncode is not None and process.returncode != -signal.SIGKILL
+    assert "owned_process_killed" not in caplog.text
