@@ -353,7 +353,8 @@ async def test_the_gateway_itself_follows_its_lead_from_the_records(
             lead_host.attach(stand_in(worker, worker, "Researcher", is_lead=False), agent_type="Researcher",
                              definition=DEFINITION, nc=None, state=("idle", True))
         found: list[str] = []
-        for _ in range(200):
+        deadline = asyncio.get_running_loop().time() + 20  # each check also asks the broker this test does not run
+        while asyncio.get_running_loop().time() < deadline:
             found = [finding.finding_id for finding in (await gateway.application.status.report()).findings]
             if "agent_without_session:lead:session_limit_reached" in found:
                 break
