@@ -352,17 +352,26 @@ A shared helper whose streams only the fixture deletes calls
 `require_stream_recorder`, so a test that uses it without the marker fails at
 once instead of leaving streams behind. The deletion logs in with the live
 settings, `credentials_file` included. When the server is down or does not
-answer, it gives up after 30 seconds and reports an error at the test's
+answer, it gives up within 30 seconds and reports an error at the test's
 teardown that names the server and the streams.
 
 A test that needs a NATS server of its own uses
 `tests.own_nats_server.own_nats_server`: the server picks its own port, and the
 test reads it from that server's log, so it never talks to another test's
 server. A test that starts nats-server, the broker or `sealbox-server` stops it
-with `tests.owned_processes.stopped_at_exit`, or `stop_owned_process` on an
-error path. These resume a paused process, kill and reap one that does not stop
-within its time limit, keep the test body's own error, and fail a test that
-passed but whose server had to be killed.
+with a helper from `tests.owned_processes`. Each one resumes a paused process,
+and kills and reaps one that does not stop within its time limit:
+
+- `stopped_at_exit` wraps the server's lifetime in a `with` block;
+- `require_graceful_stop` stops it outside such a block, as in a restart or a
+  fixture's teardown;
+- `stop_owned_process` is only for a path that is already raising an error,
+  which stays the error the test reports.
+
+A server that had to be killed has a shutdown defect, and pytest shows the
+warning about it only for a failing test. So the first two fail a test that
+otherwise passed when its server had to be killed; `stopped_at_exit` keeps the
+test body's own error when the body failed.
 
 Until issue #117 is fixed, a failure late in a `tests/test_live_agent_hosts.py`
 test can leave its agent hosts running when pytest closes the event loop, and
