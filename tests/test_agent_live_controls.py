@@ -354,3 +354,57 @@ async def test_a_worker_session_on_the_leads_host_cannot_pause_or_stop_an_agent(
         assert reply["outcome"] == "not_allowed"
     agent.pause.assert_not_awaited()
     agent.exit_agent.assert_not_awaited()
+
+
+# -- the old unsigned control message (F7, A6) -------------------------------------------------------
+
+
+def _unsigned_control(instruction: str, *, claimed_sender: str = "lead_1"):
+    """A ControlInstruction as any process with the team's NATS login can publish one: its sender is self-declared."""
+
+    from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
+    from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+
+    return (ControlInstruction(type=ControlType.CONTROL_MSG, instruction=Instruction(instruction=instruction)),
+            MessageHeader(from_agent_id=claimed_sender, to_routing_path="worker_1"),
+            MessageMeta(from_agent_name="TeamLead"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instruction", ["exit", "pause", "resume"])
+async def test_an_unsigned_exit_pause_or_resume_changes_nothing_and_names_its_claimed_sender(caplog, instruction):
+    """On its mailbox, delivered through _dispatch_message (on .operational it is dropped before dispatch)."""
+
+    from custom_agents.strands_agent import UniversalAgent
+
+    agent = stand_in_agent()
+    agent.handle_control_message = lambda **kwargs: UniversalAgent.handle_control_message(agent, **kwargs)
+    content, header, meta = _unsigned_control(instruction)
+
+    with caplog.at_level(logging.WARNING):
+        await UniversalAgent._dispatch_message(agent, msg_header=header, msg_content=content, msg_meta=meta)
+
+    agent.pause.assert_not_awaited()
+    agent.resume.assert_not_awaited()
+    agent.exit_agent.assert_not_awaited()
+    [dropped] = [record.getMessage() for record in caplog.records
+                 if "event=agent_control_instruction_dropped" in record.getMessage()]
+    assert f"instruction={instruction} " in dropped
+    assert "claimed_from_agent_id=lead_1 " in dropped and "claimed_from_agent_name=TeamLead" in dropped
+
+
+@pytest.mark.asyncio
+async def test_a_task_stop_still_arrives_as_a_control_message() -> None:
+    from custom_agents.strands_agent import UniversalAgent
+
+    agent = stand_in_agent(_resolve_control_target_task_info=AsyncMock(return_value=None),
+                           _send_control_status_response=AsyncMock(),
+                           task_manager=SimpleNamespace(current_task_id=None))
+    content, header, meta = _unsigned_control("stop", claimed_sender="lead_1")
+    content.target_task_id = "task_9"
+
+    await UniversalAgent.handle_control_message(agent, control_instruction=content, msg_header=header, msg_meta=meta)
+
+    agent._resolve_control_target_task_info.assert_awaited_once()
+    assert agent._send_control_status_response.await_args.kwargs["status_text"] == (
+        "No active task matched the stop request.")

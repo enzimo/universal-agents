@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -10,15 +11,15 @@ from assistant_gateway.application.manager_client import (
     GatewayManagerClient,
     GatewayManagerClientSettings,
 )
-from assistant_gateway.team_view import GatewayTeamView
-from custom_messages.contracts.control_v1 import AgentStatus, ManagerRuntimeWorkCommand, SystemStatusMessage
+from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
+from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand, SystemStatusMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.enums import MessageMetaType
 from custom_messages.wire.encoding import format_timestamp
-from custom_transport.protocol1.host_runtime import LIVENESS_INTERVAL, LIVENESS_LIFETIME, MessageHost
-from custom_transport.protocol1.team_agents import RECHECK_SECONDS, TeamAgents, _Held
+from custom_transport.protocol1.host_runtime import LIVENESS_INTERVAL, MessageHost
+from custom_transport.protocol1.team_agents import TeamAgents, _Held
 
 LEAD_HOST = "lead-host"
 
@@ -26,14 +27,6 @@ LEAD_HOST = "lead-host"
 def _lead_session(start):
     return SimpleNamespace(agent="lead_1", runtime=LEAD_HOST, agent_type="TeamArchitect", agent_role="lead",
                            covers=lambda now: now < start + timedelta(hours=1), ends_at=start + timedelta(hours=1))
-
-
-class _FixedClock:
-    def __init__(self, now: datetime) -> None:
-        self.now = now
-
-    def now_utc(self) -> datetime:
-        return self.now
 
 
 class _FixedIds:
@@ -147,7 +140,6 @@ def _client(
     route_writes: list[str | None] | None = None,
     available: list | None = None,
     unavailable: list | None = None,
-    clock: _FixedClock | None = None,
 ) -> GatewayManagerClient:
     async def on_unsolicited(envelope: MessageEnvelope) -> None:
         if unsolicited is not None:
@@ -155,9 +147,6 @@ def _client(
 
     return GatewayManagerClient(
         settings=settings or _settings(),
-        clock=clock or _FixedClock(
-            datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
-        ),
         id_generator=_FixedIds(),
         logger=logging.getLogger("test.gateway.manager_client"),
         runtime=runtime,
@@ -262,27 +251,94 @@ async def test_runtime_backed_publish_requires_explicit_connection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_lead_from_the_records_sets_and_clears_the_route() -> None:
-    """The team view applies the lead's records (assistant_gateway.team_view); a leaving lead clears the route."""
+async def test_set_lead_routes_chats_and_says_whether_the_lead_became_available() -> None:
+    """The lead follower's route set (assistant_gateway.team_view.TeamLeadFollower)."""
 
     route_writes: list[str | None] = []
     available: list = []
-    unavailable: list = []
     client = _client(_FakeManagerRuntime(), settings=_settings(manager_id=None), route_writes=route_writes,
-                     available=available, unavailable=unavailable)
+                     available=available)
+    await client.set_lead("lead_1", source="agent_records")
+    await client.set_lead("lead_1", source="agent_records")
+    await client.set_lead("lead_2", source="agent_records")
 
-    def lead(agent_id: str, *, exiting: bool = False) -> AgentStatus:
-        return AgentStatus(self_id=agent_id, team_id="team_test", name="TeamLead", named_agent_type="TeamArchitect",
-                           agent_role="team_lead", is_paused=False, is_exiting=exiting,
-                           status_type=MessageMetaType.RESPONSE,
-                           last_seen_at=datetime.now(timezone.utc).isoformat())
+    assert route_writes == ["lead_1", "lead_2"] and client.manager_id == "lead_2"
+    assert [(item.manager_id, item.became_available) for item in available] == [("lead_1", True), ("lead_2", False)]
 
-    await client.apply_manager_status(lead("lead_1"), source="agent_records")
-    await client.apply_manager_status(lead("lead_1", exiting=True), source="agent_records")
 
-    assert route_writes == ["lead_1", None] and client.manager_id is None
-    assert [item.manager_id for item in available] == ["lead_1"]
-    assert [item.manager_id for item in unavailable] == ["lead_1"]
+@pytest.mark.asyncio
+async def test_an_unavailable_lead_that_finishes_its_tasks_keeps_the_waiting_replies() -> None:
+    unavailable: list = []
+    client = _client(_FakeManagerRuntime(), settings=_settings(manager_id="lead_1"), unavailable=unavailable)
+    await client.mark_manager_unavailable(expected_manager_id="lead_1", reason="another contract",
+                                          source="agent_records", keep_waiting=True)
+    assert client.manager_id is None and [item.keep_waiting for item in unavailable] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_route_that_cannot_be_saved_still_changes_and_its_transition_runs(caplog) -> None:
+    """Critique C03: the route in memory rules while the gateway runs; a failed save must not skip the transition,
+    or the lead follower would see nothing left to repair."""
+
+    available: list = []
+    unavailable: list = []
+
+    def read_only(manager_id: str | None) -> None:
+        raise OSError("read-only file system")
+
+    client = GatewayManagerClient(
+        settings=_settings(manager_id=None), id_generator=_FixedIds(), logger=logging.getLogger("test.gateway.manager_client"),
+        runtime=_FakeManagerRuntime(), write_manager_route=read_only,
+        on_manager_available=available.append, on_manager_unavailable=unavailable.append)
+    await client.set_lead("lead_1", source="agent_records")
+    await client.mark_manager_unavailable(expected_manager_id="lead_1", reason="it left", source="agent_records")
+
+    assert [item.manager_id for item in available] == ["lead_1"] and [item.manager_id for item in unavailable] == [
+        "lead_1"]
+    assert client.manager_id is None
+    assert "event=gateway_manager_route_save_failed manager_id=lead_1 error_type=OSError" in caplog.text
+
+
+class _Waiting:
+    async def fail_waiting(self, correlation_ids) -> None:
+        pass
+
+
+def _following(client: GatewayManagerClient, agents: TeamAgents) -> TeamLeadFollower:
+    """The gateway's lead follower over a team view whose reader is ``agents``, already read."""
+
+    view = GatewayTeamView("team_test")
+    view._agents = agents
+    agents.listen(view._changed)
+    agents.ready.set()
+    view.ready.set()
+    return TeamLeadFollower(view, client, _Waiting())
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_reads_its_team_with_a_five_second_check(monkeypatch) -> None:
+    """Review F20: the 30-35 s bound below rests on the reader the gateway builds checking every 5 seconds."""
+
+    from assistant_gateway import team_view
+
+    built: list[TeamAgents] = []
+
+    class _Built(TeamAgents):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+        async def run(self, stop) -> None:
+            await stop.wait()
+
+    monkeypatch.setattr(team_view, "TeamAgents", _Built)
+    stop = asyncio.Event()
+    running = asyncio.create_task(GatewayTeamView("team_test").run(object(), stop))
+    await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(running, timeout=2)
+    assert [reader._recheck_seconds for reader in built] == [5.0]
+    assert LIVENESS_INTERVAL == timedelta(seconds=10)  # how often a host writes its liveness record
 
 
 @pytest.mark.asyncio
@@ -290,13 +346,16 @@ async def test_the_lead_from_the_records_sets_and_clears_the_route() -> None:
 async def test_a_lead_whose_host_stops_writing_is_reported_unavailable_within_35_seconds(check_phase: float) -> None:
     """The lead's host crashes right after a liveness write; the gateway marks the lead unavailable in time.
 
-    The host's own upkeep code writes the liveness records (``MessageHost.publish_liveness``) on a
-    fake clock, the team's live view checks every 5 seconds as its loop does (``TeamAgents._rebuild``,
-    at any phase against the writes), and the gateway's team view hands the lead's leaving to the
-    manager client, which marks it unavailable. As with the presence heartbeat, that is about 30
-    seconds after the host stopped: its record's 30 seconds plus at most one 5-second check.
+    The host's own upkeep code writes the liveness records (``MessageHost.publish_liveness``, every
+    10 seconds, as the test above pins) on a fake clock, the team's live view checks every 5 seconds
+    (``TeamAgents._rebuild``, at any phase against the writes), and the gateway's lead follower
+    compares the route with the view on each change. As with the presence heartbeat, the lead is
+    unavailable about 30 seconds after its host stopped: its record's 30 seconds plus at most one
+    5-second check. The periods and the bound are written out here, not read from the code's
+    constants, so a slower check or a longer record fails this test.
     """
 
+    write_every, check_every = timedelta(seconds=10), timedelta(seconds=5)
     start = datetime(2026, 11, 5, 9, 0, tzinfo=timezone.utc)
     now = [start]
     team_host = SimpleNamespace(clock=lambda: now[0], identity=SimpleNamespace(installation="install_test"),
@@ -331,38 +390,26 @@ async def test_a_lead_whose_host_stops_writing_is_reported_unavailable_within_35
 
     unavailable: list = []
     client = _client(_FakeManagerRuntime(), settings=_settings(manager_id=None), unavailable=unavailable)
-
-    async def on_lead(status: AgentStatus) -> None:
-        await client.apply_manager_status(status, source="agent_records")
-
-    view = GatewayTeamView("team_test", on_status=lambda status, reported_at, source: None, on_lead=on_lead)
-    view._agents = agents
-    agents.listen(view._changed)
-
-    async def apply_lead_changes() -> None:
-        # What GatewayTeamView._apply_leads does on its own loop, in order.
-        while not view._leads.empty():
-            await on_lead(view._leads.get_nowait())
+    follower = _following(client, agents)
 
     async def advance_to(moment: datetime) -> None:
-        """Move the clock on, running the view's 5-second checks that fall in between."""
+        """Move the clock on, running the view's 5-second checks that fall in between, each followed by the
+        follower's check against the route (as ``TeamLeadFollower.run`` does on the view's change)."""
 
         nonlocal next_check
         while next_check <= moment:
             now[0] = next_check
             agents._rebuild()
-            await apply_lead_changes()
-            next_check += timedelta(seconds=RECHECK_SECONDS)
+            await follower._check(at_start=False)
+            next_check += check_every
         now[0] = moment
 
     next_check = start + timedelta(seconds=check_phase)
-    agents.ready.set()
-    view.ready.set()
     # The host is up and writes every 10 seconds for a minute: the lead stays available throughout.
     for write in range(7):
-        await advance_to(start + write * LIVENESS_INTERVAL)
+        await advance_to(start + write * write_every)
         await lead_host.publish_liveness("accepting")
-        await apply_lead_changes()
+        await follower._check(at_start=False)
     last_write = now[0]
     assert client.manager_id == "lead_1" and unavailable == []
 
@@ -373,16 +420,16 @@ async def test_a_lead_whose_host_stops_writing_is_reported_unavailable_within_35
         if unavailable:
             reported_at = now[0]
     assert reported_at is not None and [item.manager_id for item in unavailable] == ["lead_1"]
-    assert client.manager_id is None and view.lead() is None
+    assert client.manager_id is None
     gone_after = (reported_at - last_write).total_seconds()
-    assert LIVENESS_LIFETIME.total_seconds() <= gone_after <= 35.0
+    assert 30.0 <= gone_after <= 35.0
 
 
 @pytest.mark.asyncio
 async def test_a_lead_whose_host_runs_another_contract_takes_no_chats() -> None:
     """Contract README "Versions": readers send a host on another contract no new work, and a person's chat is
     new work for the team lead, so the gateway counts that lead unavailable. It stays on the Team page, not
-    accepting work, so commands about the tasks it holds still reach it."""
+    accepting work, so commands about the tasks it holds still reach it, and people's waiting replies are kept."""
 
     start = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
     store = SimpleNamespace(contract_sha256="1" * 64, agent_session=lambda *args: _lead_session(start))
@@ -406,33 +453,18 @@ async def test_a_lead_whose_host_runs_another_contract_takes_no_chats() -> None:
 
     unavailable: list = []
     client = _client(_FakeManagerRuntime(), settings=_settings(manager_id=None), unavailable=unavailable)
-    shown: list[AgentStatus] = []
-
-    async def on_lead(status: AgentStatus) -> None:
-        await client.apply_manager_status(status, source="agent_records")
-
-    view = GatewayTeamView("team_test", on_status=lambda status, reported_at, source: shown.append(status),
-                           on_lead=on_lead)
-    view._agents = agents
-    agents.listen(view._changed)
-    agents.ready.set()
-    view.ready.set()
-
-    async def apply_lead_changes() -> None:
-        while not view._leads.empty():
-            await on_lead(view._leads.get_nowait())
+    follower = _following(client, agents)
 
     agents._hosts[LEAD_HOST] = host_record(None)
     agents._rebuild()
-    await apply_lead_changes()
-    assert client.manager_id == "lead_1" and view.lead() is not None and unavailable == []
+    await follower._check(at_start=False)
+    assert client.manager_id == "lead_1" and unavailable == []
 
     agents._hosts[LEAD_HOST] = host_record("2" * 64)
     agents._rebuild()
-    await apply_lead_changes()
-    assert [item.manager_id for item in unavailable] == ["lead_1"] and client.manager_id is None
-    assert view.lead() is None and view.live_ids() == {"lead_1"}
-    assert shown[-1].self_id == "lead_1" and shown[-1].accepting_work is False and shown[-1].is_exiting is False
+    await follower._check(at_start=False)
+    assert [(item.manager_id, item.keep_waiting) for item in unavailable] == [("lead_1", True)]
+    assert client.manager_id is None and agents.agent("lead_1").other_contract == "2" * 64
 
 
 @pytest.mark.asyncio

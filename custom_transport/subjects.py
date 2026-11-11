@@ -7,28 +7,35 @@ from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from custom_messages.contracts.envelope_v1 import GATEWAY_MANAGER_CONTROL_TYPES, MessageEnvelope
-from custom_messages.enums import RoutingType
 from custom_messages.contracts.task_v1 import TaskSteering
-from custom_messages.enums import MessageMetaType
+from custom_messages.enums import MessageMetaType, RoutingType, TaskSteeringType
 
 _SAFE_TOKEN_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _MANAGER_CONTROL_TYPES = GATEWAY_MANAGER_CONTROL_TYPES
 
 
 def _is_manager_control_request(envelope: Optional[MessageEnvelope]) -> bool:
-    """What goes to an agent's control mailbox (``agent.<id>.control``), which it reads while it works.
+    """The gateway's commands to the team lead: they go to its control mailbox (``agent.<id>.control``)."""
 
-    The gateway's commands to the team lead, and a lead's guidance passed on to the worker
-    holding a delegated task (plan decision 59, until phase 3's ``task.steer``).
-    """
-
-    if envelope is None:
-        return False
-    if isinstance(envelope.msg_content, TaskSteering):
-        return True
-    if not isinstance(envelope.msg_content, _MANAGER_CONTROL_TYPES):
+    if envelope is None or not isinstance(envelope.msg_content, _MANAGER_CONTROL_TYPES):
         return False
     return envelope.msg_content.command_type == MessageMetaType.REQUEST
+
+
+def _is_passed_on_guidance(envelope: Optional[MessageEnvelope]) -> bool:
+    """A lead's guidance passed on to the worker holding a delegated task (plan decision 59).
+
+    Sent to that worker's id, it goes to the worker's control mailbox, which it reads while it
+    works, until phase 3's ``task.steer``. Only guidance: every other ``TaskSteering`` (status
+    answers, input requests and their answers) keeps its route, and guidance sent to a type
+    queue or the lead goes to that queue (``route_subject`` checks those routes first).
+    """
+
+    return (
+        envelope is not None
+        and isinstance(envelope.msg_content, TaskSteering)
+        and envelope.msg_content.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE
+    )
 
 
 def _logical_agent_route(suffix: str) -> Optional[str]:
@@ -104,6 +111,8 @@ class NatsSubjectMapper:
         for named_type, queue_name in dict(self.named_agent_type_queue_map or {}).items():
             if route == queue_name:
                 return self.named_type_work_subject(named_type)
+        if _is_passed_on_guidance(envelope):
+            return self.agent_control_subject(route)
         return self.agent_work_subject(route)
 
     def logical_route_for_subject(self, subject: str) -> str:

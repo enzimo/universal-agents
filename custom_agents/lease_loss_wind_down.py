@@ -20,8 +20,9 @@ refused to start a replacement for the live worker. The wind-down instead:
    which they fail with an explanation to the requester;
 4. exits once it holds no unfinished task.
 
-The worker keeps publishing presence while it winds down so a starting worker
-of the same type does not adopt tasks this worker is still finishing.
+The worker keeps refreshing its own status row (its heartbeat, every 20 seconds)
+while it winds down, so a starting worker of the same type does not judge it
+gone and adopt tasks this worker is still finishing.
 
 A pool worker whose process runs another message contract than its installation
 winds down the same way once its running turns ended (``custom_agents.contract_drain``,

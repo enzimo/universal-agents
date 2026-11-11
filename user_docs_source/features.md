@@ -18,7 +18,11 @@ to stop desktop alerts for this user in this browser.
 
 Reopening Settings returns to the tab you last used until you sign out or reload
 the page. **Team** lists running agents and all defined agent classes with their
-descriptions, including specialists that are not currently running.
+descriptions, including specialists that are not currently running. Each running agent
+shows whether it is Available, Busy, Paused, Not accepting work (for example while it
+starts, or when its process runs another release) or Exiting (for a minute after it
+stops). The skills column is filled when you open the tab or press **Refresh**: the
+gateway asks the agents for them then, not on a timer.
 
 **Access**, next to **Inbox**, is the access map: what each agent type can use
 and where that access came from, what each person has given, and every tool's
@@ -494,14 +498,18 @@ other agents stops too.
 When an agent leaves the team for good (it stops, or its process restarts after a
 crash), work that was sent to it by name and that it never started fails at once
 with a message saying so, so the agent that asked for it can decide what to do
-next. Work it had already started is not failed: a restarted agent picks it up
-from where it was saved, and work it handed back goes to another agent of the
-same kind. An agent that only stopped answering for a while is not given up on;
-its work is checked again later and times out as usual if it never comes back.
+next: only that piece fails, and the rest of your request goes on. This also
+happens when the asking agent was itself restarted meanwhile: once it is back, it
+checks what it was waiting for. Work it had already started is not failed: a
+restarted agent picks it up from where it was saved, and work it handed back goes
+to another agent of the same kind. An agent that only stopped answering for a
+while is not given up on; its work is checked again later and times out as usual
+if it never comes back.
 
 The team lead can pause, resume or stop other agents. Only the team lead does
 this, never another agent, and never for itself: stopping the team lead would
-end its process without the approval a restart needs. When an agent's answer is
+end its process without the approval a restart needs. The team has one lead: the
+team lead cannot start another TeamArchitect. When an agent's answer is
 lost, the team lead says it cannot tell whether the change happened, and checks
 the agent's state before asking again.
 
@@ -951,10 +959,11 @@ typed team refresh notice. Each idle skills-enabled specialist verifies the
 immutable installation receipt and reloads its own cache. A busy specialist
 defers the reload until its active turn finishes. Each agent's own catalog
 check, every 20 seconds, repairs that deferred refresh or a missed notice. The
-Team roster's skill list may lag up to 20 seconds, but a successful install
-does not require a manager or system restart. If the exact semantic name
-remains unavailable after the next idle check, report it as a runtime defect
-rather than approving a restart workaround.
+Team page shows each agent's skills as of the last time someone opened the
+Team tab or pressed Refresh, but a successful install does not require a
+manager or system restart. If the exact semantic name remains unavailable after
+the next idle check, report it as a runtime defect rather than approving a
+restart workaround.
 Installing the skill does not activate it and does not approve its tools, shell
 commands, MCP calls, credentials, or future repository updates.
 
@@ -1224,8 +1233,9 @@ disappears once it is fixed:
 
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
-  is not answering, the secure tool broker does not answer, TeamLead
-  stopped reporting, an agent cannot run its work because the team gave it
+  is not answering, the secure tool broker does not answer, the team's records
+  show no running TeamLead, the gateway cannot see the team (the installation
+  refused its join, or it has not read the team's records), an agent cannot run its work because the team gave it
   no session (the finding says why, for example the worker limit is reached,
   and what to do), or a disk the instance uses is nearly full (95% by
   default).

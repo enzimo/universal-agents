@@ -422,7 +422,8 @@ Ex HUDs, "subtle and indicative of motion or being alive", never jarring
   Hovering one names the agent's class (e.g. WebResearchAgent), not its id;
   the canvas describes which agent classes are working for
   screen readers. It shows the whole team's work, as the Team tab does
-  (owner's decision). Agents broadcast their state when work starts and ends.
+  (owner's decision). Each agent's record in the team's agent records changes
+  when its work starts and ends.
   The mesh, Settings → Team and the Tasks view show one copy of the team's
   status, which arrives with each live update (about every two seconds,
   `team_activity.mjs`); none of them reads it on a timer of its own (owner's
@@ -2015,7 +2016,7 @@ its history. Steps with linked requests cannot use this correction.
 - Team displays the gateway's live same-team presence as a table with Agent,
   Type, Status, Skills, and Last Seen columns. Pair every colored status dot
   with a label: green Available, amber Busy, red Exiting, and neutral gray
-  Paused, Stale, or unavailable. Show skills as a count with an expandable
+  Paused or Not accepting work. Show skills as a count with an expandable
   semantic-name list rather than an unbounded cell. The automatic presence
   refresh must preserve each expanded skill row by stable agent identity and
   discard that UI state only after the agent leaves the roster.

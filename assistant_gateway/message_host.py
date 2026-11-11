@@ -131,6 +131,8 @@ class GatewayMessageHost:
             return
         self._ready, self._stop = asyncio.Event(), asyncio.Event()
         self._joined, self._refusal = False, None
+        if self.team_view is not None:
+            self.team_view.joining()  # a refusal from an earlier start no longer holds
         self.host = MessageHost(self.layout, gateway_profile(self.team), nc, logger=self.logger,
                                 contract_sha256=self.contract_sha256)
         self._task = asyncio.create_task(self._run(), name="gateway_message_host")
@@ -173,6 +175,9 @@ class GatewayMessageHost:
             refused.outcome, f"The installation refused this gateway's join ({refused.outcome}): {refused.message}")
         self.logger.error("The installation refused the gateway's join; it does not ask again until it starts again. "
                           "event=gateway_host_join_refused outcome=%s message=%s", refused.outcome, refused.message)
+        if self.team_view is not None:
+            # Nobody can see the team now: chats stop going to a lead nobody sees (team_view.TeamLeadFollower).
+            self.team_view.refuse(refused.outcome, self._refusal)
         self._ready.set()
 
     def _join_failed(self, failures: int, error: BaseException) -> None:

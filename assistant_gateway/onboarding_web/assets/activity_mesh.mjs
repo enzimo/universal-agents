@@ -7,10 +7,11 @@
  * does (owner's decision, 2026-10-04).
  *
  * Busy state comes from the team's live status (team_activity.mjs), which
- * the gateway adds to every live page (about every two seconds). Agents
- * broadcast it when work starts and ends
- * (UniversalAgent._announce_execution_state). Settings → Team and the Tasks
- * view read the same copy, so the page asks the gateway once for all three.
+ * the gateway adds to every live page (about every two seconds). Each agent's
+ * record in the team's agent records changes when its work starts and ends
+ * (UniversalAgent._announce_execution_state), and the gateway reads the
+ * records (assistant_gateway.team_view). Settings → Team and the Tasks view
+ * read the same copy, so the page asks the gateway once for all three.
  */
 
 const FADE_MS = 700;

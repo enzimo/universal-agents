@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
-    from assistant_gateway.team_view import GatewayTeamView
+    from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
 
 from access_control.identity import ISSUER_GATEWAY, ContextSigner
 from assistant_gateway.access_commands import GatewayAccessCommands
@@ -133,7 +132,6 @@ from assistant_gateway.application.request_context import (
     GatewayRequestContextSettings,
 )
 from assistant_gateway.application.pending_questions import GatewayPendingQuestions
-from custom_messages.contracts.control_v1 import AgentStatus
 from assistant_gateway.application.request_service import (
     GatewayRequestService,
 )
@@ -285,10 +283,6 @@ __all__ = [
     "REQUEST_STATUS_WAITING_FOR_CREDENTIAL_RESULT",
     "UserGateway",
 ]
-# A team member's state on the Team page counts as current this long after it was reported.
-TEAM_MEMBER_STALE_SECONDS = 30.0
-# How long the gateway's start waits to read who leads the team from its records.
-TEAM_VIEW_READY_SECONDS = 15.0
 MANAGER_CONTROL_TIMEOUT_SECONDS = 15.0
 TASK_PROGRESS_STATUS_TIMEOUT_SECONDS = 3.0
 ACTIVITY_NOTICE_POLL_SECONDS = 2.0
@@ -413,7 +407,13 @@ def _compose_transcript_runtime(
     id_generator: GatewayIdGenerator,
     event_output: GatewayEventOutput,
 ) -> tuple[TranscriptRepository, GatewayTranscriptService, GatewayEventOutput]:
-    """Build the language-neutral transcript seam outside the legacy facade."""
+    """Build the transcript repository, the transcript service and the event output.
+
+    ``UserGateway.__init__`` calls this once. The returned event output saves
+    each Web Chat event to the transcript first, then passes every event on to
+    ``event_output`` for delivery. A Web Chat event that cannot be saved is not
+    delivered.
+    """
 
     repository = state_store.transcript_repository
     service = GatewayTranscriptService(
@@ -570,28 +570,13 @@ async def _report_stale_blocks(access_inbox: GatewayAccessInbox, team_id: str) -
         logger.exception("Could not check blocks against the tool catalog. event=stale_block_check_failed team_id=%s", team_id)
 
 
-def _bind_manager_client(gateway: "UserGateway", config: GatewayInstanceConfig, runtime: object) -> GatewayTeamView | None:
-    """The manager client's inbound handlers, and the team view that tells it who leads (``_observe_team``)."""
-
-    gateway._manager_client.bind_inbound_handlers(
-        on_unsolicited=gateway.inbound_messages.handle,
-        on_manager_available=gateway.manager_transitions.handle_available,
-        on_manager_unavailable=gateway.manager_transitions.handle_unavailable,
-    )
-    return _observe_team(config, runtime, gateway._manager_client,
-                         _agent_presence_observer(gateway.team_presence, gateway._thread_guidance))
-
-
-def _observe_team(
-    config: GatewayInstanceConfig,
-    runtime: object,
-    manager_client: GatewayManagerClient,
-    observer: Callable[[AgentStatus, datetime | None, str], None],
-) -> GatewayTeamView | None:
+def _team_view(config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance) -> GatewayTeamView | None:
     """Who is live and who leads, from the team's records through the gateway's host (``assistant_gateway.team_view``).
 
-    ``None`` without a host (a gateway started without the launcher): the saved route to the
-    team lead is used as it is, and that is said once at start (``_follow_team_lead``).
+    ``None`` without a host (command-line runs, or a gateway service on an instance the
+    launcher never prepared): the saved route to the team lead is used as it is, and that is
+    said once at start (``_follow_team_lead_at_start``). A change to the lead's record wakes
+    held guidance.
     """
 
     message_host = getattr(runtime, "message_host", None)
@@ -600,42 +585,65 @@ def _observe_team(
 
     from assistant_gateway.team_view import GatewayTeamView
 
-    async def apply_lead(status: AgentStatus) -> None:
-        await manager_client.apply_manager_status(status, source="agent_records")
-
-    view = GatewayTeamView(config.manager.team_id, on_status=observer, on_lead=apply_lead, logger=logger)
+    view = GatewayTeamView(config.manager.team_id, on_change=guidance.lead_reported, logger=logger)
     message_host.observe_team(view)
     return view
 
 
-async def _follow_team_lead(view: GatewayTeamView | None, manager_client: GatewayManagerClient) -> None:
-    """At start: read who leads from the records (the view applies it), or say the lead is not live."""
+def _team_view_and_presence(
+    config: GatewayInstanceConfig, runtime: object, guidance: GatewayThreadGuidance
+) -> tuple[GatewayTeamView | None, GatewayTeamPresence]:
+    """The team view (``_team_view``) and the Team page's projection of it; without a view the page lists no
+    members. Composed here so the host stays a composition root."""
 
+    view = _team_view(config, runtime, guidance)
+    presence = GatewayTeamPresence(
+        members=view.statuses if view is not None else tuple,
+        want_details=view.want_details if view is not None else lambda: None,
+        list_agent_classes=lambda: configured_agent_classes(config),
+        logger=logger,
+    )
+    return view, presence
+
+
+def _team_lead_tasks(follower: TeamLeadFollower | None, stop_event: asyncio.Event) -> list[asyncio.Task[None]]:
+    """The lead follower's background check (``TeamLeadFollower.run``), when the gateway has a team view."""
+
+    if follower is None:
+        return []
+    return [asyncio.create_task(follower.run(stop_event), name="gateway_team_lead")]
+
+
+def _bind_manager_client(gateway: "UserGateway", view: GatewayTeamView | None) -> TeamLeadFollower | None:
+    """The manager client's inbound handlers, and the team lead follower that keeps its route in step with the
+    team's records (``assistant_gateway.team_view.TeamLeadFollower``), when there is a team view."""
+
+    gateway._manager_client.bind_inbound_handlers(
+        on_unsolicited=gateway.inbound_messages.handle,
+        on_manager_available=gateway.manager_transitions.handle_available,
+        on_manager_unavailable=gateway.manager_transitions.handle_unavailable,
+    )
     if view is None:
-        logger.warning("The gateway cannot follow the team's agents without its message host; it keeps its saved "
-                       "route to the team lead. event=gateway_team_view_unavailable manager_id=%s",
-                       manager_client.manager_id)
+        return None
+
+    from assistant_gateway.team_view import TeamLeadFollower
+
+    return TeamLeadFollower(view, gateway._manager_client, gateway.manager_transitions, logger=logger)
+
+
+async def _follow_team_lead_at_start(follower: TeamLeadFollower | None, manager_client: GatewayManagerClient) -> None:
+    """At start: wait for the team lead in the records and set the route (``TeamLeadFollower.start``).
+
+    It runs before the transitions start and before the chat apps set their hooks and turn
+    notices on (``assistant_cli``), so a lead found now is routed to quietly.
+    """
+
+    if follower is None:
+        logger.warning("The gateway cannot see the team's agents without its message host; it keeps its saved route "
+                       "to the team lead as it is, and its Status page does not judge the team. "
+                       "event=gateway_team_view_unavailable manager_id=%s", manager_client.manager_id)
         return
-    if not await view.wait_ready(TEAM_VIEW_READY_SECONDS):
-        logger.warning("The team's agent records were not read in time; the team lead's route follows them when "
-                       "they are. event=gateway_team_view_not_ready")
-        return
-    if view.lead() is None and manager_client.manager_id is not None:
-        await manager_client.mark_manager_unavailable(reason="no live team lead in the team's records",
-                                                      source="agent_records")
-
-
-def _agent_presence_observer(
-    presence: GatewayTeamPresence,
-    guidance: GatewayThreadGuidance,
-) -> Callable[[AgentStatus, datetime | None, str], None]:
-    """Connect presence recording and held-guidance wakeups during composition."""
-
-    def record(status: AgentStatus, reported_at: datetime | None, source: str) -> None:
-        presence.record_agent_presence(status, reported_at, source)
-        guidance.lead_reported(status, reported_at, source)
-
-    return record
+    await follower.start()
 
 
 def _team_commands(
@@ -893,7 +901,6 @@ class UserGateway:
                 response_route=config.manager.response_queue_name,
                 initial_manager_id=config.manager.manager_agent_id,
             ),
-            clock=self._clock,
             id_generator=self._id_generator,
             logger=logger,
             runtime=resolved_manager_runtime,
@@ -1060,12 +1067,9 @@ class UserGateway:
             logger=logger,
         )
         signed_in = SignedInPerson(sessions=self.session_repository, request_context=self._request_context_service)
-        self.team_presence = GatewayTeamPresence(
-            team_id=config.manager.team_id,
-            clock=self._clock,
-            stale_after_seconds=TEAM_MEMBER_STALE_SECONDS,
-            list_agent_classes=lambda: configured_agent_classes(config),
-            logger=logger,
+        # Who is live and who leads, from the team's records (None without a message host), and the Team page.
+        self._team_view, self.team_presence = _team_view_and_presence(
+            config, resolved_manager_runtime, self._thread_guidance
         )
         # Approving an MCP server stores grants through the Inbox's access
         # service (created below; looked up when a person approves).
@@ -1242,7 +1246,7 @@ class UserGateway:
             ),
             late_guidance_status_handler=self._thread_guidance.handle_late_status,
         )
-        self._team_view = _bind_manager_client(self, config, resolved_manager_runtime)
+        self._team_lead = _bind_manager_client(self, self._team_view)
         self._interactive_submission_service = GatewayInteractiveSubmissionService(
             settings=GatewayInteractiveSubmissionSettings(
                 response_route=config.manager.response_queue_name,
@@ -1426,13 +1430,17 @@ class UserGateway:
             status=StatusPage(
                 config=config,
                 model_key_status=lambda: self._secure_broker.get_model_key_status(),
-                agent_statuses=self.team_presence.current_statuses,
                 send_notice_once=self.access_inbox.send_notice_once,
                 stopped_receivers=resolved_manager_runtime.stopped_receivers,
                 storage=self.stored_data.capacity,
                 person_storage_totals=self.stored_data.usage.stale_finding,
                 jetstream_usage=resolved_manager_runtime.jetstream_usage,
-                host_findings=self._team_view.host_findings if self._team_view is not None else lambda: (),
+                # Without a team view (command-line runs) the gateway does not judge the team (review F11).
+                **(
+                    {"team_findings": self._team_view.team_findings, "agent_findings": self._team_view.agent_findings}
+                    if self._team_view is not None
+                    else {}
+                ),
             ),
             # People's Knowledge page; the team services answer it (team_services.knowledge).
             knowledge=GatewayKnowledgePages(
@@ -1479,18 +1487,20 @@ class UserGateway:
         if self._started:
             return
         await self._manager_client.connect()
-        await _follow_team_lead(self._team_view, self._manager_client)
+        await _follow_team_lead_at_start(self._team_lead, self._manager_client)
         self._clarification_core.expire_stale_on_startup()
         self._started = True
         self._stop_event.clear()
         self.manager_transitions.start()
         # Message routing, not an optional service: held guidance must reach
-        # its request (or the person must hear it did not) in every mode.
+        # its request (or the person must hear it did not) in every mode,
+        # and chats must go to the team lead the records name.
         self._background_tasks = [
             asyncio.create_task(
                 self._thread_guidance.run(self._stop_event),
                 name="gateway_held_guidance_loop",
-            )
+            ),
+            *_team_lead_tasks(self._team_lead, self._stop_event),
         ]
 
         if start_services:

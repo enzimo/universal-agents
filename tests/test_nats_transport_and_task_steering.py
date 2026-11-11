@@ -22,12 +22,10 @@ from custom_agents.task_steering_runtime import (
     ensure_fresh_strands_agent_for_new_turn,
     send_interrupt_request_for_result,
 )
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
 )
-from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.task_v1 import (
     Task,
     TaskSteering,
@@ -37,7 +35,6 @@ from custom_messages.enums import (
     MessageMetaType,
     ProgressState,
     RequesterType,
-    RoutingType,
     TaskSteeringStatus,
     TaskSteeringStatusCode,
     TaskSteeringType,
@@ -439,130 +436,6 @@ def test_interrupt_response_blocks_fill_missing_interrupt_ids_from_live_session(
 
 
 @pytest.mark.asyncio
-async def test_proactive_steering_for_waiting_parent_forwards_to_pending_subtask() -> (
-    None
-):
-    parent_task_id = "task_parent"
-    child_task_id = "task_child"
-    parent_info = TaskInfo(
-        Task(
-            task_id=parent_task_id,
-            task_type=MessageMetaType.REQUEST,
-            problem_statement="Find soup recipes.",
-        ),
-        MessageHeader(from_agent_id="user", to_routing_path="manager"),
-        MessageMeta(msg_correlation_id="corr_parent", conversation_id="conversation_1"),
-        owner_person_id=None,
-    )
-    parent_info.update_state(ProgressState.WAITING, "2026-06-01T00:00:00+00:00")
-    child_info = TaskInfo(
-        Task(
-            task_id=child_task_id,
-            parent_task_id=parent_task_id,
-            task_type=MessageMetaType.REQUEST,
-            problem_statement="Research soup recipes.",
-        ),
-        MessageHeader(
-            from_agent_id="manager", to_routing_path="team_303_WebResearchAgent"
-        ),
-        MessageMeta(
-            msg_correlation_id="corr_parent",
-            conversation_id="conversation_1",
-            to_named_agent_type="WebResearchAgent",
-        ),
-        owner_person_id=None,
-    )
-    child_info.update_state(ProgressState.IN_PROGRESS, "2026-06-01T00:00:01+00:00")
-    sent: list[MessageEnvelope] = []
-    task_manager = SimpleNamespace(
-        operations_runtime=TaskOperationRuntime(),
-        get_task_info=lambda task_id: (
-            parent_info if task_id == parent_task_id else None
-        ),
-        find_task_info_by_correlation_id=lambda correlation_id: (
-            parent_info if correlation_id == "corr_parent" else None
-        ),
-        is_terminal_state=lambda state: False,
-        get_pending_subtasks=lambda task_id: (
-            [child_info] if task_id == parent_task_id else []
-        ),
-        append_history_entry=MagicMock(),
-    )
-
-    routed: list[str] = []
-
-    async def send_message(*, message: MessageEnvelope, routing_key: str) -> None:
-        sent.append(message)
-        routed.append(routing_key)
-
-    agent = SimpleNamespace(
-        id="manager",
-        name="manager-name",
-        named_agent_type="TeamArchitect",
-        team_id="team_303",
-        mid_turn_steering={"enabled": True},
-        task_manager=task_manager,
-        _pending_proactive_task_steering={},
-        _processed_task_steering_ids=set(),
-        _agent_id_by_name={},
-        named_agent_type_queue_map={"WebResearchAgent": "team_303_WebResearchAgent"},
-        team_comms=SimpleNamespace(send_message=send_message),
-        _logger=SimpleNamespace(warning=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None,
-                                exception=lambda *args, **kwargs: None),
-    )
-
-    # The worker holding the delegated subtask, from its record (plan decision 59).
-    from custom_agents import task_steering_runtime
-
-    async def holders(_agent):
-        return {child_task_id: "worker_7"}
-
-    task_steering_runtime._delegated_task_holders, original_holders = holders, task_steering_runtime._delegated_task_holders
-    steering = TaskSteering(
-        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
-        target_task_id=parent_task_id,
-        target_correlation_id="corr_parent",
-        conversation_id="conversation_1",
-        guidance_text="Actually, find meatloaf recipes.",
-        idempotency_key="corr_steering",
-        # Sent as a reply to an earlier chat message: workers get it too.
-        replied_message=RepliedMessage(author="assistant", text="Soup recipes found: 3."),
-    )
-
-    try:
-        await handle_task_steering_message(
-            agent,
-            steering,
-            MessageHeader(
-                from_agent_id="gateway", to_routing_path=RoutingType.ALL_AGENTS_ROUTE
-            ),
-            MessageMeta(
-                msg_correlation_id="corr_steering",
-                conversation_id="conversation_1",
-                requester_type=RequesterType.USER_REQUESTER,
-                is_response_requested=False,
-            ),
-        )
-    finally:
-        task_steering_runtime._delegated_task_holders = original_holders
-
-    assert agent._pending_proactive_task_steering[parent_task_id] == [steering]
-    assert len(sent) == 1
-    forwarded = sent[0]
-    assert isinstance(forwarded.msg_content, TaskSteering)
-    assert forwarded.msg_content.target_task_id == child_task_id
-    assert forwarded.msg_content.target_named_agent_type == "WebResearchAgent"
-    assert forwarded.msg_content.guidance_text == "Actually, find meatloaf recipes."
-    assert forwarded.msg_content.replied_message == steering.replied_message
-    assert forwarded.msg_meta.to_named_agent_type == "WebResearchAgent"
-    assert forwarded.msg_meta.is_response_requested is False
-    # To the holder's own control mailbox, durably; it reads it while it works.
-    assert forwarded.msg_header.to_routing_path == "worker_7" and routed == ["worker_7"]
-    assert NatsSubjectMapper(team_id="team_303").route_subject("worker_7", envelope=forwarded) == (
-        NatsSubjectMapper(team_id="team_303").agent_control_subject("worker_7"))
-
-
-@pytest.mark.asyncio
 async def test_terminal_task_response_is_deferred_when_pending_guidance_exists() -> (
     None
 ):
@@ -609,3 +482,59 @@ async def test_terminal_task_response_is_deferred_when_pending_guidance_exists()
     )
     task_manager.enqueue_task.assert_called_once_with(task_id, front=True)
     assert agent._pending_proactive_task_steering == {}
+
+
+# -- where each TaskSteering goes (plan decision 59, message contract step 7d) ---------------
+
+_ROUTES = {
+    # route kind: (routing key, the meta's named type, the subject every TaskSteering got at b936a1dd)
+    "agent id": ("worker_7", None, "team_303.agent.worker_7.work"),
+    "type queue by map": ("team_303_WebResearchAgent", None, "team_303.type.WebResearchAgent.work"),
+    "type queue by meta": ("team_303_CodeWritingAgent", "CodeWritingAgent", "team_303.type.CodeWritingAgent.work"),
+    "the lead": ("team_303", None, "team_303.lead.work"),
+    "the gateway": ("team_303_gateway_response", None, "team_303.gateway.team_303_gateway_response.response"),
+}
+
+
+def _routed(kind: TaskSteeringType, route_kind: str):
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+
+    routing_key, named_type, _before = _ROUTES[route_kind]
+    envelope = MessageEnvelope(
+        msg_content=TaskSteering(steering_type=kind, target_task_id="task_1", guidance_text="Only vegetarian soups."),
+        msg_header=MessageHeader(from_agent_id="manager", to_routing_path=routing_key),
+        msg_meta=MessageMeta(to_named_agent_type=named_type),
+    )
+    mapper = NatsSubjectMapper(team_id="team_303", named_agent_type_queue_map={"WebResearchAgent": "team_303_WebResearchAgent"})
+    return mapper.route_subject(routing_key, envelope=envelope)
+
+
+@pytest.mark.parametrize("route_kind", list(_ROUTES))
+@pytest.mark.parametrize("kind", list(TaskSteeringType))
+def test_only_guidance_passed_on_to_an_agent_goes_to_its_control_mailbox(kind, route_kind):
+    """The lead passes guidance on to the worker holding a subtask through that worker's control
+    mailbox, which it reads while it works. Every other TaskSteering, and guidance sent to a type
+    queue, the lead or the gateway, keeps the route it had before message contract step 7d: a
+    type queue's name used as an agent id would name a control mailbox nobody reads."""
+
+    expected = (
+        "team_303.agent.worker_7.control"
+        if kind == TaskSteeringType.PROACTIVE_GUIDANCE and route_kind == "agent id"
+        else _ROUTES[route_kind][2]
+    )
+    assert _routed(kind, route_kind) == expected
+
+
+def test_the_gateways_commands_to_the_lead_still_go_to_its_control_mailbox():
+    from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+
+    command = MessageEnvelope(
+        msg_content=ManagerRuntimeWorkCommand(command_id="cmd_1", command_type=MessageMetaType.REQUEST,
+                                              action="cancel", scope="user"),
+        msg_header=MessageHeader(from_agent_id="gateway", to_routing_path="manager_1"),
+        msg_meta=MessageMeta(),
+    )
+    assert NatsSubjectMapper(team_id="team_303").route_subject("manager_1", envelope=command) == (
+        "team_303.agent.manager_1.control"
+    )

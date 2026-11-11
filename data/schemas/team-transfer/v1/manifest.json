@@ -91,7 +91,7 @@
     {
       "filename": "GatewayInstanceConfig.schema.json",
       "model": "GatewayInstanceConfig",
-      "sha256": "46a4303bea36c4729e20dae1be7cd795a03974b7f5e975904f2d9904de8fcb26"
+      "sha256": "01306c4840a1bc02d24b82338d7b6821dba52dbe65afc6a48b5935f28dcc325f"
     },
     {
       "filename": "AgentCatalogDocument.schema.json",

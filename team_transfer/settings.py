@@ -33,9 +33,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Iterator
 
-import yaml
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
+from runtime_settings.transport import RETIRED_PRESENCE_SETTING
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     SECTION_UPGRADES,
@@ -101,9 +101,11 @@ class SettingsSection:
     # -- export ----------------------------------------------------------------
 
     def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
-        from assistant_gateway.config import GatewayInstanceConfig
+        from assistant_gateway.config import GatewayInstanceConfig, read_upgraded_instance_config
 
-        saved = _read_yaml(source.layout.instance_config_path)
+        # As this version reads the file: one the launcher has not rewritten since the
+        # code was upgraded still holds settings this version removed.
+        saved = read_upgraded_instance_config(source.layout.instance_config_path)
         baseline = GatewayInstanceConfig.create(
             instance_name=source.instance_name,
             instance_root=str(source.layout.root),
@@ -659,13 +661,6 @@ def planned_config(context: ImportContext) -> "GatewayInstanceConfig":
     return config
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"{path} does not hold a configuration mapping.")
-    return data
-
-
 __all__ = [
     "INSTANCE_ROOT_TOKEN",
     "SettingV1",
@@ -679,12 +674,12 @@ __all__ = [
 # and V8 gateway.storage_warnings. Their records keep the same shape and carry
 # only values that differ from defaults, so old choices pass on unchanged and
 # settings absent from an older export use the current defaults. V9 removed
-# transport.presence_max_age_seconds: an older export's value for it is dropped.
-_RETIRED_SETTING_PATHS = frozenset({("transport", "presence_max_age_seconds")})
+# transport.presence_max_age_seconds (RETIRED_PRESENCE_SETTING): an older
+# export's value for it is dropped.
 
 
 def _without_retired_settings(records: SectionRecords) -> SectionRecords:
-    return [record for record in records if tuple(record.get("path", ())) not in _RETIRED_SETTING_PATHS]
+    return [record for record in records if tuple(record.get("path", ())) != RETIRED_PRESENCE_SETTING]
 
 
 for _source in (5, 6, 7, 8):

@@ -148,11 +148,16 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
-    """Older choices survive while newly introduced storage warnings use defaults."""
+    """Older choices survive while settings an export predates use defaults.
+
+    Version 8 is what the releases before message contract step 7d export; it carries the
+    presence stream's setting, which this version no longer has: the conversion drops it,
+    so nothing is refused.
+    """
 
     from assistant_gateway.config import GatewayInstanceConfig
 
@@ -164,8 +169,11 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
                 SettingV1(path=("heartbeat", "enabled"), value=False),
                 SettingV1(path=("agent", "max_queued_top_level_tasks"), value=22),
             ]
-            if exported_version == 7:
+            if exported_version >= 7:
                 records.append(SettingV1(path=("tool_policy", "output_retention_days"), value=0))
+            if exported_version == 8:
+                records.append(SettingV1(path=("gateway", "storage_warnings", "person_step_gb"), value=7))
+                records.append(SettingV1(path=("transport", "presence_max_age_seconds"), value=900.0))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
@@ -177,13 +185,15 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     outcomes = {record.key: record for record in plan.records}
     assert outcomes["heartbeat.enabled"].outcome is RecordOutcome.IMPORT
     assert outcomes["agent.max_queued_top_level_tasks"].outcome is RecordOutcome.IMPORT
+    assert "transport.presence_max_age_seconds" not in outcomes
+    assert not plan.by_outcome(RecordOutcome.REFUSED)
     imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
     assert imported.heartbeat.enabled is False
     assert imported.agent.max_queued_top_level_tasks == 22
     assert imported.agent.request_conflict_checks is True
-    assert imported.tool_policy.output_retention_days == (0 if exported_version == 7 else 90)
+    assert imported.tool_policy.output_retention_days == (0 if exported_version >= 7 else 90)
     assert imported.gateway.storage_warnings.model_dump() == {
-        "person_step_gb": 5,
+        "person_step_gb": 7 if exported_version == 8 else 5,
         "nearing_limit_percent": 80,
         "nearly_full_percent": 95,
     }
@@ -296,16 +306,27 @@ def test_choosing_environment_secrets_writes_no_team_env(tmp_path: Path) -> None
     assert not (target / "team.env").exists()
 
 
-def test_a_version_8_export_drops_the_retired_presence_setting_and_keeps_the_rest() -> None:
-    """The presence stream left in message contract step 7d; an older export's value for it is dropped."""
+@pytest.mark.parametrize("upgraded_first", [True, False])
+def test_a_0_9_instance_exports_no_retired_setting_and_a_reviewed_import_refuses_nothing(
+    tmp_path: Path, upgraded_first: bool
+) -> None:
+    """A 0.9 instance holds transport.presence_max_age_seconds (message contract step 7d removed it).
 
-    from team_transfer.sections import SectionDocumentV1, upgrade_records
-    from team_transfer.settings import SettingsSection
+    Upgraded first: the launcher rewrote the file at its first start. Not upgraded: the export
+    ran after the code was upgraded, before any start; the export reads the file as this
+    version does, through the upgrade steps.
+    """
 
-    records = [
-        {"path": ["transport", "presence_max_age_seconds"], "value": 900.0},
-        {"path": ["transport", "work_max_age_seconds"], "value": 86400.0},
-    ]
-    document = SectionDocumentV1.model_validate({"section": "settings", "schema_version": 8, "records": records})
+    from assistant_gateway.config import migrate_instance_config_file
+    from tests.pinned_memory_support import zero_nine_instance
 
-    assert upgrade_records(document, SettingsSection.schema_version) == [records[1]]
+    path = zero_nine_instance(tmp_path, "alpha", "team_a")
+    if upgraded_first:
+        migrate_instance_config_file(path)
+
+    out = _export(tmp_path, path)
+
+    assert [record.dotted for record in _records(out)] == []
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        plan = import_team(reader, tmp_path / "new", dry_run=False, sections=(SettingsSection(),), require_valid=True)
+    assert plan.records == [] and not plan.by_outcome(RecordOutcome.REFUSED)

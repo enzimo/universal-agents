@@ -383,8 +383,6 @@ async def _first_start_with_a_model_key(instance: Path, running, *, roles: tuple
     from assistant_gateway.config import GatewayInstanceConfig
     from assistant_gateway.status_page import StatusPage
     from custom_messages.contracts.access_v2 import OnboardingModelKeyV1
-    from custom_messages.contracts.control_v1 import AgentStatus
-    from custom_messages.enums import MessageMetaType
     from model_providers.endpoints import EndpointKind
     from storage.access_repository import AccessRepository
 
@@ -406,13 +404,9 @@ async def _first_start_with_a_model_key(instance: Path, running, *, roles: tuple
         events.append(f"checked, key {'saved' if saved else 'not saved'}")
         return await client.get_model_key_status()
 
-    lead = AgentStatus(
-        self_id="lead-1", team_id=TEST_TEAM, named_agent_type="TeamArchitect", name="Nova", is_paused=False,
-        agent_role="lead", is_team_lead=True, status_type=MessageMetaType.RESPONSE,
-    )
     notices = AccessRepository(config.manager_storage_settings)
     page = StatusPage(
-        config=config, model_key_status=model_key_status, agent_statuses=lambda: [lead],
+        config=config, model_key_status=model_key_status,
         send_notice_once=notices.create_notice_if_absent,
     )
 

@@ -35,10 +35,10 @@ from assistant_gateway.application.session_service import (
     GatewaySessionService,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from custom_messages.contracts.control_v1 import PAUSE_OBJECTIVE, ControlInstruction, ManagerRuntimeWorkCommand, RuntimeWorkSummary, SystemStatusMessage
+from custom_messages.contracts.control_v1 import PAUSE_OBJECTIVE, ManagerRuntimeWorkCommand, RuntimeWorkSummary, SystemStatusMessage
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
-from custom_messages.enums import ObjectiveStatus, RequesterType, RoutingType
+from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.enums import ObjectiveStatus
 
 
 @dataclass(frozen=True)
@@ -513,39 +513,6 @@ class GatewayOperationalControlApplication:
             request_timezone=presentation.timezone,
             route=resolved_route,
             session=session,
-        )
-
-    def _build_envelope(
-        self,
-        resolved: _ResolvedOperationalControl,
-        *,
-        content: ControlInstruction,
-        followup_to_task_id: str | None = None,
-    ) -> MessageEnvelope:
-        return MessageEnvelope(
-            msg_content=content,
-            msg_meta=MessageMeta(
-                from_agent_name=resolved.requester_display_name,
-                to_named_agent_type=self._settings.manager_named_agent_type,
-                msg_correlation_id=resolved.correlation_id,
-                conversation_id=resolved.conversation_id,
-                followup_to_task_id=followup_to_task_id,
-                request_timezone=resolved.request_timezone,
-                requester_type=RequesterType.USER_REQUESTER,
-                is_response_requested=True,
-                gateway_context=self._request_context.build_gateway_context(
-                    session_key=resolved.session_key,
-                    delivery_mode=DELIVERY_MODE_INTERACTIVE,
-                    route=resolved.route,
-                    manager_agent_id=self._manager.manager_id,
-                ),
-            ),
-            msg_header=MessageHeader(
-                from_agent_id=self._settings.response_route,
-                to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-                response_routing_key=self._settings.response_route,
-                agent_signature="",
-            ),
         )
 
     async def _manager_unavailable(

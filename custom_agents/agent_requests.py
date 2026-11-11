@@ -11,7 +11,10 @@ agent yet (it has not joined, the agent's session is not open, the team's view i
 read yet), callers that judge other agents by their answers wait instead of counting
 everyone as silent (``cannot_ask``). Some reasons never clear by themselves (no message
 host at all, a process on another message contract, an agent type no certificate can
-carry), and callers treat those as nobody answering, as before. ``ask_each`` asks several
+carry): the subtask watchdog counts those as no answer at once, while a restart's capture
+and a delegation by name are refused with the asking side's own reason
+(``custom_agents.runtime_restart_service``, ``custom_agents.team_directory.live_named_agent``),
+so no other agent is called silent or gone for something about the asker. ``ask_each`` asks several
 agents at once under one deadline and keeps each target's answer or error apart, so one
 target's failure never loses another's answer.
 """

@@ -2,17 +2,53 @@
 
 from __future__ import annotations
 import logging
-from typing import Any, Optional
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any, Final, Optional
+from pydantic import BaseModel, Field, field_validator
 from custom_messages.contracts.runtime_v1 import TRANSPORT_NATS
 from default_values import TRANSPORT_DEFAULTS
 
 logger = logging.getLogger(__name__)
-# Settings earlier versions read that no longer exist; an old configuration still loads.
-RETIRED_TRANSPORT_SETTINGS = {
-    "presence_max_age_seconds": "the presence stream it kept was removed (who is live comes from the "
-                                "team's signed agent records)",
-}
+
+# How long the presence stream kept agents' heartbeats. The stream was removed in message
+# contract step 7d (who is live comes from the team's signed agent records), so the setting
+# is gone: the configuration upgrade steps drop it (instance_config.yaml 12 -> 13,
+# config.yaml 10 -> 11), and the team transfer drops it from settings exported by versions
+# 5 to 8. This is the one name for that path.
+RETIRED_PRESENCE_SETTING: Final = ("transport", "presence_max_age_seconds")
+
+
+def drop_retired_presence_setting(config: dict[str, Any]) -> bool:
+    """Upgrade step: remove the presence stream's retention from a configuration being upgraded.
+
+    Removed whatever its value: nothing reads it any more. Callers pass a shallow copy of the
+    file's mapping, so the ``transport`` section is copied before it is changed. Returns
+    whether the setting was there.
+    """
+
+    section, key = RETIRED_PRESENCE_SETTING
+    transport = config.get(section)
+    if not isinstance(transport, dict) or key not in transport:
+        return False
+    config[section] = {name: value for name, value in transport.items() if name != key}
+    logger.info("Removed a setting this version no longer has from the configuration being upgraded. "
+                "event=config_retired_setting_removed setting=%s", ".".join(RETIRED_PRESENCE_SETTING))
+    return True
+
+
+def refuse_retired_presence_setting(config: Any) -> None:
+    """Refuse a current-version configuration that names the retired setting.
+
+    The upgrade step removes it from older files, so a current file holding it was edited
+    by hand; it is refused by name, like other removed settings, rather than ignored.
+    """
+
+    section, key = RETIRED_PRESENCE_SETTING
+    transport = config.get(section) if isinstance(config, dict) else None
+    if isinstance(transport, dict) and key in transport:
+        raise ValueError(
+            f"{'.'.join(RETIRED_PRESENCE_SETTING)} has been removed: the presence stream it sized is gone. "
+            "Remove the setting from the file."
+        )
 
 
 class TransportSettings(BaseModel):
@@ -39,19 +75,6 @@ class TransportSettings(BaseModel):
     nats_user: Optional[str] = TRANSPORT_DEFAULTS.nats_user.value
     nats_password: Optional[str] = TRANSPORT_DEFAULTS.nats_password.value
     credentials_file: Optional[str] = TRANSPORT_DEFAULTS.credentials_file.value
-
-    @model_validator(mode="before")
-    @classmethod
-    def _set_aside_retired_settings(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        retired = sorted(key for key in RETIRED_TRANSPORT_SETTINGS if key in value)
-        if not retired:
-            return value
-        for key in retired:
-            logger.warning("Ignoring transport.%s: %s. Remove it from the configuration to stop this warning. "
-                           "event=retired_transport_setting_ignored", key, RETIRED_TRANSPORT_SETTINGS[key])
-        return {key: item for key, item in value.items() if key not in RETIRED_TRANSPORT_SETTINGS}
 
     @field_validator("type")
     @classmethod
