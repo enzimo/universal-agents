@@ -76,7 +76,9 @@ class ControlInstruction(BaseModel):
 
     Attributes:
         type (ControlType): The type of control message being sent, such as a control command or a status request.
-        instruction (Instruction): The instruction to execute, if any. This could include commands like 'exit', 'pause', or 'resume'.
+        instruction (Instruction): The instruction to execute. Agents act only on 'stop', for the task it targets;
+            an agent is paused, resumed or stopped only by the team lead's signed agent.pause, agent.resume and
+            agent.exit (custom_agents.live_controls), and any other instruction is dropped and logged.
     """
 
     instruction_id: str = Field(

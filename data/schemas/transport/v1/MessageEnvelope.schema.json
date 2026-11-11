@@ -971,7 +971,7 @@
       "type": "object"
     },
     "ControlInstruction": {
-      "description": "A message type for controlling the behavior of agents or teams.\n\nAttributes:\n    type (ControlType): The type of control message being sent, such as a control command or a status request.\n    instruction (Instruction): The instruction to execute, if any. This could include commands like 'exit', 'pause', or 'resume'.",
+      "description": "A message type for controlling the behavior of agents or teams.\n\nAttributes:\n    type (ControlType): The type of control message being sent, such as a control command or a status request.\n    instruction (Instruction): The instruction to execute. Agents act only on 'stop', for the task it targets;\n        an agent is paused, resumed or stopped only by the team lead's signed agent.pause, agent.resume and\n        agent.exit (custom_agents.live_controls), and any other instruction is dropped and logged.",
       "properties": {
         "cascade_to_subtasks": {
           "default": true,

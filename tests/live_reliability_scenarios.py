@@ -31,7 +31,7 @@ from custom_agents.conversation_compaction import (
 )
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.context_engine.thread_renderer import BudgetedThreadContextRenderer
-from custom_messages.contracts.control_v1 import AgentStatus, ControlInstruction, Instruction
+from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.delivery_v1 import DeliveryReceipt
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
@@ -64,7 +64,6 @@ ADVANCED_TESTS = {
     11: "Scheduled Message Flow",
     12: "Multiple Specialist Queue Routing",
     13: "Direct Agent Targeting",
-    14: "Specialist Pause/Resume Deferral",
     15: "No Response Requested",
     16: "Tool Failure Containment",
     17: "Operational Discovery Freshness",
@@ -1255,20 +1254,6 @@ class ReliabilitySession:
             envelope.msg_header.response_routing_key = None
         return envelope, corr
 
-    def build_control_envelope(self, target_agent_id: str, instruction: str, *, from_agent_id: str = "user_client") -> MessageEnvelope:
-        return MessageEnvelope(
-            msg_content=ControlInstruction(
-                type=ControlType.CONTROL_MSG,
-                instruction=Instruction(instruction=instruction),
-            ),
-            msg_meta=MessageMeta(from_agent_name="user_client"),
-            msg_header=MessageHeader(
-                from_agent_id=from_agent_id,
-                to_routing_path=target_agent_id,
-                agent_signature="",
-            ),
-        )
-
     def build_status_request_envelope(self, target_routing_path: str, *, correlation_id: Optional[str] = None) -> tuple[MessageEnvelope, str]:
         corr = correlation_id or new_id("corr_id")
         envelope = MessageEnvelope(
@@ -1456,13 +1441,20 @@ async def instantiate_new_agents(
     return new_rows[:count]
 
 
-async def send_exit_to_agents(session: ReliabilitySession, agent_ids: list[str]) -> None:
+def stop_agent_processes(session: ReliabilitySession, agent_ids: list[str]) -> None:
+    """Ask the harness's own agent processes to stop: SIGTERM, which strands_main turns into a graceful exit.
+
+    Agents obey an exit request only as the team lead's signed agent.exit (custom_agents.live_controls),
+    which this harness cannot send. Agents it did not start (the manager's own workers) end with the
+    manager's process when the session ends.
+    """
+
+    running = {proc.agent_id: proc for proc in session._managed_processes if proc.is_running}
+    unknown = [agent_id for agent_id in agent_ids if agent_id not in running]
+    if unknown:
+        raise AssertionError(f"Only agent processes this harness started can be stopped from outside: {unknown}")
     for agent_id in agent_ids:
-        await session.send_envelope(
-            session.build_control_envelope(agent_id, "exit"),
-            routing_key=agent_id,
-            label=f"exit:{agent_id}",
-        )
+        running[agent_id].process.terminate()
 
 
 async def wait_for_agent_row(
@@ -1530,19 +1522,9 @@ async def send_gateway_style_task(
 
 
 async def stop_managed_agents(session: ReliabilitySession, processes: list[ManagedAgentProcess]) -> list[dict]:
-    running = [proc for proc in processes if proc.is_running]
-    if running:
-        await send_exit_to_agents(session, [proc.agent_id for proc in running])
-
     outcomes = []
     for proc in processes:
-        try:
-            if proc.process is not None and proc.process.returncode is None:
-                returncode = await proc.wait_for_exit(timeout=20)
-            else:
-                returncode = None if proc.process is None else proc.process.returncode
-        except asyncio.TimeoutError:
-            returncode = await proc.stop(timeout=5)
+        returncode = await proc.stop(timeout=20)  # SIGTERM: a graceful exit, then a kill after 20 s
         outcomes.append(
             {
                 **proc.snapshot(),
@@ -1804,7 +1786,7 @@ async def scenario_12(session: ReliabilitySession) -> tuple[str, dict]:
         expected_count=4,
         timeout=max(session.timeout, 90),
     )
-    await send_exit_to_agents(session, new_agent_ids)
+    stop_agent_processes(session, new_agent_ids)
     if len(events) != 4:
         raise AssertionError(f"Expected 4 specialist replies, received {len(events)}")
 
@@ -1853,7 +1835,7 @@ async def scenario_13(session: ReliabilitySession) -> tuple[str, dict]:
         expected_count=1,
         timeout=session.timeout,
     )
-    await send_exit_to_agents(session, [target["agent_id"], other["agent_id"]])
+    stop_agent_processes(session, [target["agent_id"], other["agent_id"]])
     if len(events) != 1:
         raise AssertionError("Did not receive the direct-target response.")
     response = events[0].envelope
@@ -1871,75 +1853,6 @@ async def scenario_13(session: ReliabilitySession) -> tuple[str, dict]:
             "non_target_agent_id": other["agent_id"],
             "response_agent_id": response.msg_header.from_agent_id,
             "output_file": str(target_file),
-        },
-    )
-
-
-async def scenario_14(session: ReliabilitySession) -> tuple[str, dict]:
-    baseline_ids = {row["agent_id"] for row in get_agent_rows(session.db_path, session.team_id, "CodeWritingAgent")}
-    new_agents = await instantiate_new_agents(
-        session,
-        "CodeWritingAgent",
-        1,
-        baseline_ids,
-        storage_target=session.db_path,
-    )
-    target = new_agents[0]
-    paused_file = session.result_dir / "paused_specialist_probe.txt"
-
-    await session.send_envelope(
-        session.build_control_envelope(target["agent_id"], "pause"),
-        routing_key=target["agent_id"],
-        label="pause-specialist",
-    )
-    await wait_for_condition(
-        f"agent {target['agent_id']} paused",
-        lambda: any(
-            row["agent_id"] == target["agent_id"] and row["is_paused"]
-            for row in get_agent_rows(session.db_path, session.team_id, "CodeWritingAgent")
-        ),
-        timeout=20,
-    )
-
-    prompt = f"Create the file `{paused_file}` with the exact text `processed after resume`."
-    envelope, corr = session.build_task_envelope(
-        prompt,
-        routing_key=target["agent_id"],
-        to_agent_name=target["agent_name"],
-        response_routing_key=session.user_queue_name,
-    )
-    await session.send_envelope(envelope, routing_key=target["agent_id"], label="paused-specialist-task")
-    no_early_response = await session.expect_no_matching(
-        predicate=lambda env: env.msg_meta and env.msg_meta.msg_correlation_id == corr,
-        timeout=4,
-    )
-    if not no_early_response:
-        raise AssertionError("Paused specialist replied before it was resumed.")
-    if paused_file.exists():
-        raise AssertionError("Paused specialist processed the direct task before resume.")
-
-    await session.send_envelope(
-        session.build_control_envelope(target["agent_id"], "resume"),
-        routing_key=target["agent_id"],
-        label="resume-specialist",
-    )
-    events = await session.receive_matching(
-        predicate=lambda env: env.msg_meta and env.msg_meta.msg_correlation_id == corr and isinstance(env.msg_content, Task),
-        expected_count=1,
-        timeout=max(session.timeout, 120),
-    )
-    await send_exit_to_agents(session, [target["agent_id"]])
-    if len(events) != 1:
-        raise AssertionError("Did not receive the specialist response after resume.")
-    if not paused_file.exists():
-        raise AssertionError("Paused specialist did not process the deferred task after resume.")
-
-    return (
-        "A specialist was paused, direct work stayed deferred while paused, then the queued work completed after resume.",
-        {
-            "specialist_agent_id": target["agent_id"],
-            "specialist_agent_name": target["agent_name"],
-            "output_file": str(paused_file),
         },
     )
 
@@ -2053,11 +1966,7 @@ async def scenario_17(session: ReliabilitySession) -> tuple[str, dict]:
             storage_target=session.db_path,
         )
     )[0]
-    await session.send_envelope(
-        session.build_control_envelope(first_agent["agent_id"], "exit"),
-        routing_key=first_agent["agent_id"],
-        label="exit-first-agent",
-    )
+    stop_agent_processes(session, [first_agent["agent_id"]])
     await wait_for_condition(
         f"agent {first_agent['agent_id']} exiting status",
         lambda: any(
@@ -2081,7 +1990,7 @@ async def scenario_17(session: ReliabilitySession) -> tuple[str, dict]:
         predicate=lambda env: env.msg_meta and env.msg_meta.msg_correlation_id == corr and isinstance(env.msg_content, AgentStatus),
         duration=8,
     )
-    await send_exit_to_agents(session, [second_agent["agent_id"]])
+    stop_agent_processes(session, [second_agent["agent_id"]])
     responders = [event.envelope.msg_content.self_id for event in events]
     if second_agent["agent_id"] not in responders:
         raise AssertionError("Freshly started specialist did not respond to the operational status request.")
@@ -3275,13 +3184,7 @@ async def scenario_30(session: ReliabilitySession) -> tuple[str, dict]:
             },
         )
     finally:
-        active_mismatch_rows = [
-            row
-            for row in get_agent_rows(session.db_path, mismatched_team_id, "WebResearchAgent")
-            if row["agent_id"] == crashed_worker.agent_id and not row["is_exiting"]
-        ]
-        if active_mismatch_rows:
-            await send_exit_to_agents(session, [crashed_worker.agent_id])
+        # Its process, if it runs again, is stopped with SIGTERM like every harness process.
         cleanup = await stop_managed_agents(session, [crashed_worker])
         live_nats_client.write_json_file(session.result_dir / "scenario_30_cleanup.json", cleanup)
 
@@ -3349,15 +3252,8 @@ async def scenario_31(session: ReliabilitySession) -> tuple[str, dict]:
         raise AssertionError(f"Expected exactly one new {spawned_agent_type}, found {[row['agent_id'] for row in new_rows]}")
 
     spawned_agent_id = new_rows[0]["agent_id"]
-    await send_exit_to_agents(session, [spawned_agent_id])
-    await wait_for_condition(
-        "spawned InternalImprovementAgent exit acknowledgement",
-        lambda: any(
-            row["agent_id"] == spawned_agent_id and row["is_exiting"]
-            for row in get_agent_rows(session.db_path, session.team_id, spawned_agent_type)
-        ),
-        timeout=30,
-    )
+    # The manager started it in its own process: it ends with the manager when the session ends. Since
+    # step 7b nothing outside the team can stop it (agents obey exit only as the team lead's agent.exit).
 
     return (
         "An isolated TeamArchitect used its startup-generated agent-instantiation-skill to create an InternalImprovementAgent "
@@ -3466,15 +3362,7 @@ async def scenario_32(session: ReliabilitySession) -> tuple[str, dict]:
         rows = [row for row in get_agent_rows(session.db_path, session.team_id, agent_type) if not row["is_exiting"]]
         spawned_agent_ids.extend(row["agent_id"] for row in rows)
 
-    await send_exit_to_agents(session, spawned_agent_ids)
-    for agent_type in required_types:
-        await wait_for_condition(
-            f"{agent_type} exit acknowledgement after team template scenario",
-            lambda agent_type=agent_type: all(
-                row["is_exiting"] for row in get_agent_rows(session.db_path, session.team_id, agent_type)
-            ),
-            timeout=30,
-        )
+    # The manager started them in its own process: they end with the manager when the session ends.
 
     return (
         "An isolated TeamArchitect loaded the workspace `balanced_delivery_team` team template, instantiated the expected analysis, coding, and verification specialists, and a second template-instantiation call did not create duplicates because missing-only behavior held.",
@@ -4175,7 +4063,6 @@ SCENARIO_MAP = {
     11: scenario_11,
     12: scenario_12,
     13: scenario_13,
-    14: scenario_14,
     15: scenario_15,
     16: scenario_16,
     17: scenario_17,
