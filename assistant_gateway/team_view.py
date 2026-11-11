@@ -44,8 +44,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Protocol
 
 from custom_agents.agent_host import (
     LEAD_HOST_RUNTIME,
@@ -67,6 +68,11 @@ DETAILS_TIMEOUT_SECONDS = 5.0
 # How long a view task that failed, or ended before the gateway stopped, waits before it starts again: the
 # first wait, doubling up to the second (``_supervised``). A task that ran this long starts from the first again.
 RESTART_SECONDS = (5.0, 300.0)
+# How long the gateway's start waits for a team lead in the records before it decides (``TeamLeadFollower.start``):
+# the old discovery's wait.
+LEAD_START_SECONDS = 15.0
+# How often the lead follower checks the route against the records when nothing changed (``TeamLeadFollower.run``).
+LEAD_CHECK_SECONDS = 5.0
 SOURCE = "agent_records"
 _LOGGER = logging.getLogger(__name__)
 
@@ -213,6 +219,15 @@ async def _either(first: asyncio.Event, second: asyncio.Event) -> None:
         await asyncio.gather(*waits, return_exceptions=True)
 
 
+@dataclass(frozen=True)
+class JoinRefusal:
+    """The installation's final answer to the gateway's join (``assistant_gateway.message_host``): its outcome and
+    what a person's command says about it."""
+
+    outcome: str
+    text: str
+
+
 StatusObserver = Callable[[AgentStatus, Optional[datetime], str], None]
 LeadObserver = Callable[[AgentStatus], Awaitable[None]]
 
@@ -258,6 +273,11 @@ class GatewayTeamView:
         self._before: Mapping[str, TeamAgent] = {}
         self._leads: asyncio.Queue[AgentStatus] = asyncio.Queue()
         self.ready = asyncio.Event()
+        # Set on every member change, when the records are read or stop being read, and on a refused join; only
+        # the lead follower clears it (``TeamLeadFollower``).
+        self.changed = asyncio.Event()
+        # Why the gateway cannot join, while that lasts (``refuse``).
+        self.refusal: Optional[JoinRefusal] = None
 
     @property
     def agents(self) -> Optional[TeamAgents]:
@@ -296,10 +316,13 @@ class GatewayTeamView:
         try:
             await asyncio.wait({reading, caught_up}, return_when=asyncio.FIRST_COMPLETED)
             if self._agents.ready.is_set():
+                self.refusal = None  # it joined, so a refusal from before no longer holds
                 self.ready.set()
+                self.changed.set()
             await reading
         finally:
             self.ready.clear()
+            self.changed.set()
             for task in (reading, caught_up):
                 task.cancel()
             await asyncio.gather(reading, caught_up, return_exceptions=True)
@@ -320,6 +343,27 @@ class GatewayTeamView:
     def live_ids(self) -> frozenset[str]:
         return frozenset(self._agents.live()) if self._agents is not None else frozenset()
 
+    def live(self) -> Mapping[str, TeamAgent]:
+        """Every live member, on any contract, as of the reader's last change or check; none until the records
+        are read."""
+
+        return self._agents.live() if self._agents is not None and self.ready.is_set() else {}
+
+    def departure_reason(self, agent_id: str) -> Optional[str]:
+        return self._agents.departure_reason(agent_id) if self._agents is not None else None
+
+    def refuse(self, outcome: str, text: str) -> None:
+        """The installation refused the gateway's join for good: nobody can see the team (review F4)."""
+
+        self.refusal = JoinRefusal(outcome, text)
+        self.changed.set()
+
+    def joining(self) -> None:
+        """The gateway's host joins again (``GatewayMessageHost.start``): an earlier refusal no longer holds."""
+
+        self.refusal = None
+        self.changed.set()
+
     def host_findings(self) -> list[StatusFindingV1]:
         """The Status page's findings from the team's host records, as of now (``host_findings``)."""
 
@@ -332,6 +376,10 @@ class GatewayTeamView:
 
     def _changed(self, changed: frozenset[str]) -> None:
         assert self._agents is not None
+        if not self._agents.ready.is_set():
+            # The reader stopped: it clears its readiness, then publishes an empty view. Nobody may read that
+            # view as "no lead" in between (``_read`` clears the view's readiness only once it resumes).
+            self.ready.clear()
         before, after = self._before, self._agents.live()
         self._before = after
         for agent_id in sorted(changed):
@@ -356,6 +404,7 @@ class GatewayTeamView:
                                                      exiting=True))
             elif (now is not None and now.is_lead) or (now is None and earlier is not None and earlier.is_lead):
                 self._leads.put_nowait(status)
+        self.changed.set()
 
     async def _apply_leads(self, stop: asyncio.Event) -> None:
         """The lead's changes, in order, to the manager client (module docstring)."""
@@ -409,3 +458,177 @@ class GatewayTeamView:
                                  "agent=%s error_type=%s error=%s", agent_id, type(error).__name__, error)
             return None
         return body if body.get("outcome") == "ok" else None
+
+
+class LeadRoute(Protocol):
+    """The manager client's side of the route to the team lead (``GatewayManagerClient``)."""
+
+    @property
+    def manager_id(self) -> Optional[str]: ...
+
+    @property
+    def pending_response_ids(self) -> tuple[str, ...]: ...
+
+    async def set_lead(self, lead_id: str, *, source: str) -> None: ...
+
+    async def mark_manager_unavailable(self, *, expected_manager_id: Optional[str] = None, reason: str,
+                                       source: str = ..., keep_waiting: bool = False) -> None: ...
+
+
+class WaitingReplies(Protocol):
+    """Failing people's waiting replies on their own (``GatewayManagerTransitionApplication.fail_waiting``)."""
+
+    async def fail_waiting(self, correlation_ids: Iterable[str]) -> None: ...
+
+
+class TeamLeadFollower:
+    """The one path that sets the gateway's route to the team lead from the team's records.
+
+    It compares the route with the records instead of following events, so a change it did
+    not hear, a records view that is read late, a clock that steps back or a failed attempt
+    cannot leave a dead or wrong route: the next check repairs it (review F3, F12). It is the
+    route's only writer while the gateway runs.
+
+    - **Which lead.** Among the live leads whose process runs this gateway's contract, the
+      current route while it is one of them (a second lead-role session never takes the
+      chats over, F14); otherwise the one whose record changed last (a crashed run's lead
+      has not changed since the crash), by id on a tie (F13). Several leads are logged once
+      per set (``event=gateway_multiple_leads``).
+    - **At start** (``start``) it waits up to ``LEAD_START_SECONDS`` for a lead to follow, or
+      a refused join, and then decides once. A lead is set directly, also in place of a saved
+      route from the previous run: nothing was sent to that one yet. No lead in records that
+      were read clears the route with one unavailable transition. Records not read yet keep
+      the saved route. Waiting for a lead, and not only for the records, keeps a normal
+      team start, where the gateway reads the records before the lead has written its own,
+      from marking the lead unavailable and available again (F5).
+    - **Afterwards** (``run``) it checks on every change and every ``LEAD_CHECK_SECONDS``. A
+      route that differs from the records goes through the usual transitions: the current
+      lead unavailable (with ``expected_manager_id``), then the chosen one available, so
+      replies waiting on a dead route are failed. While the records are not read it keeps
+      the route: it cannot judge.
+    - **A refused join**, whenever it comes, means nobody can see a lead: the route is cleared
+      (F4). It no longer holds once the host joins again.
+    - **A lead whose process runs another contract** takes no new chats, but finishes the
+      tasks it holds: the route is cleared with ``keep_waiting`` (F16). The replies people
+      were waiting for then are remembered, and those still waiting when that lead leaves
+      the records are failed then, with no second notice (critique C01).
+    """
+
+    def __init__(self, view: GatewayTeamView, route: LeadRoute, waiting: WaitingReplies, *,
+                 logger: Optional[logging.Logger] = None, check_seconds: float = LEAD_CHECK_SECONDS) -> None:
+        self._view = view
+        self._route = route
+        self._waiting = waiting
+        self._logger = logger or _LOGGER
+        self._check_seconds = check_seconds
+        # The lead on another contract whose people's waiting replies were kept, and those replies.
+        self._kept: Optional[tuple[str, frozenset[str]]] = None
+        self._leads_logged: frozenset[str] = frozenset()
+
+    async def start(self, limit: float = LEAD_START_SECONDS) -> None:
+        """Wait up to ``limit`` for a lead to follow or a refused join, then decide once (class docstring)."""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + limit
+        while not self._start_settled():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._view.changed.wait(), timeout=remaining)
+            self._view.changed.clear()
+        if not self._view.ready.is_set() and self._view.refusal is None:
+            self._logger.warning("The team's agent records were not read in time; the gateway keeps its saved route to "
+                                 "the team lead and checks it against the records as soon as they are read. "
+                                 "event=gateway_team_view_not_ready manager_id=%s", self._route.manager_id)
+        await self._check(at_start=True)
+
+    async def run(self, stop: asyncio.Event) -> None:
+        """Check the route against the records on every change and every ``check_seconds`` until ``stop``."""
+
+        while not stop.is_set():
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._view.changed.wait(), timeout=self._check_seconds)
+            self._view.changed.clear()
+            if not stop.is_set():
+                await self._check(at_start=False)
+
+    def _start_settled(self) -> bool:
+        if self._view.refusal is not None:
+            return True
+        return self._view.ready.is_set() and self._choose(self._route.manager_id, self._view.live()) is not None
+
+    async def _check(self, *, at_start: bool) -> None:
+        """One comparison of the route with the records; a failure is logged and the next check repairs it."""
+
+        try:
+            await self._end_kept_waits()
+            await self._follow(at_start=at_start)
+        except Exception:
+            self._logger.exception("The route to the team lead could not be checked against the records; it is "
+                                   "checked again. event=gateway_lead_follow_failed manager_id=%s",
+                                   self._route.manager_id)
+
+    async def _follow(self, *, at_start: bool) -> None:
+        current = self._route.manager_id
+        refusal = self._view.refusal
+        if refusal is not None:
+            if current is not None:
+                await self._route.mark_manager_unavailable(
+                    expected_manager_id=current, source=SOURCE,
+                    reason=f"the installation refused the gateway's join ({refusal.outcome}), so no lead can be seen")
+            return
+        if not self._view.ready.is_set():
+            return
+        live = self._view.live()
+        chosen = self._choose(current, live)
+        if chosen == current:
+            return
+        if current is not None and (chosen is None or not at_start):
+            await self._leave(current, live.get(current))
+        if chosen is not None:
+            await self._route.set_lead(chosen, source=SOURCE)
+
+    async def _leave(self, current: str, record: Optional[TeamAgent]) -> None:
+        """Mark the current lead unavailable: gone from the records, or live on another contract."""
+
+        if record is not None and record.other_contract is not None:
+            self._kept = (current, frozenset(self._route.pending_response_ids))
+            await self._route.mark_manager_unavailable(
+                expected_manager_id=current, source=SOURCE, keep_waiting=True,
+                reason="the team lead's process runs another message contract; it finishes the tasks it holds "
+                       "but takes no new chats")
+            return
+        why = self._view.departure_reason(current) if record is None else "it is no longer the team lead"
+        await self._route.mark_manager_unavailable(
+            expected_manager_id=current, source=SOURCE,
+            reason=f"the team lead is not live in the team's records ({why or 'not seen since the gateway started'})")
+
+    async def _end_kept_waits(self) -> None:
+        """Fail the kept waiting replies once their lead left the records (critique C01)."""
+
+        if self._kept is None or not self._view.ready.is_set():
+            return
+        lead, kept = self._kept
+        if lead in self._view.live():
+            return
+        self._kept = None
+        waiting = set(self._route.pending_response_ids)
+        ended = sorted(kept & waiting)
+        self._logger.info("A team lead that ran another contract left; the replies still waiting for it are failed. "
+                          "event=gateway_kept_waits_ended manager_id=%s waiting=%d", lead, len(ended))
+        await self._waiting.fail_waiting(ended)
+
+    def _choose(self, current: Optional[str], live: Mapping[str, TeamAgent]) -> Optional[str]:
+        """The lead to route chats to (class docstring, "Which lead"), or None."""
+
+        leads = sorted((item for item in live.values() if item.is_lead and item.other_contract is None),
+                       key=lambda item: (item.since, item.agent))
+        ids = frozenset(item.agent for item in leads)
+        chosen = current if current in ids else (leads[-1].agent if leads else None)
+        if len(leads) > 1 and ids != self._leads_logged:
+            self._logger.warning("Several agents hold the team lead's role; the gateway keeps routing chats to one of "
+                                 "them. event=gateway_multiple_leads leads=%s kept=%s", ",".join(sorted(ids)), chosen)
+        self._leads_logged = ids if len(leads) > 1 else frozenset()
+        return chosen
+

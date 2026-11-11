@@ -16,7 +16,8 @@ from typing import Any, Callable, Mapping, Optional
 import pytest
 
 from assistant_gateway import team_view
-from assistant_gateway.team_view import GatewayTeamView
+from assistant_gateway.application.manager_client import GatewayManagerClient, GatewayManagerClientSettings
+from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.live import ServiceUnavailable
@@ -26,11 +27,11 @@ TEAM = "team_test"
 
 
 def member(agent_id: str, *, lead: bool = False, state: str = "idle", name: Optional[str] = None,
-           other_contract: Optional[str] = None) -> TeamAgent:
+           other_contract: Optional[str] = None, minute: int = 0) -> TeamAgent:
     return TeamAgent(agent=agent_id, agent_type="TeamArchitect" if lead else "Researcher",
                      display_name=name if name is not None else agent_id, state=state, accepting_work=True,
-                     since=datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc), host="lead", session=f"s-{agent_id}",
-                     is_lead=lead, other_contract=other_contract)
+                     since=datetime(2026, 11, 11, 9, minute, tzinfo=timezone.utc), host="lead",
+                     session=f"s-{agent_id}", is_lead=lead, other_contract=other_contract)
 
 
 class Reader:
@@ -39,6 +40,8 @@ class Reader:
     def __init__(self) -> None:
         self.ready = asyncio.Event()
         self.catches_up = True
+        # The members a run finds when it catches up (a restarted reader reads the buckets again).
+        self.found: tuple[TeamAgent, ...] = ()
         self.fail_runs = 0
         self.runs = 0
         self.crash = asyncio.Event()
@@ -92,6 +95,8 @@ class Reader:
             raise RuntimeError("the reader failed")
         try:
             if self.catches_up:
+                if self.found:
+                    self.publish(*self.found)
                 self.ready.set()
             crash = asyncio.create_task(self.crash.wait())
             stopping = asyncio.create_task(stop.wait())
@@ -242,3 +247,223 @@ async def test_a_reader_that_stops_and_starts_again_is_no_departure(monkeypatch)
         reader.publish(member("lead_1", lead=True), member("worker_1"))
         await until(lambda: len(running.leads) == 2)
         assert not any(status.is_exiting for status in running.statuses + running.leads)
+
+
+# -- the lead follower (TeamLeadFollower) ---------------------------------------------------------------
+
+
+class Waiting:
+    """Stands in for the transitions' fail_waiting: the replies it was asked to fail."""
+
+    def __init__(self) -> None:
+        self.failed: list[list[str]] = []
+
+    async def fail_waiting(self, correlation_ids) -> None:
+        self.failed.append(list(correlation_ids))
+
+
+class Following:
+    """A running view, the real manager client holding the route, and the follower between them."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, reader: Reader, *, saved: Optional[str] = None) -> None:
+        self.running = Running(monkeypatch, reader, Host(), details_seconds=30)
+        self.reader, self.view = reader, self.running.view
+        self.writes: list[Optional[str]] = []
+        self.available: list = []
+        self.unavailable: list = []
+        self.now = [datetime(2026, 11, 11, 10, 0, tzinfo=timezone.utc)]
+        self.client = GatewayManagerClient(
+            settings=GatewayManagerClientSettings(instance_name="test", user_display_name="Test", team_id=TEAM,
+                                                  manager_named_agent_type="TeamArchitect",
+                                                  response_route="test_gateway_response", initial_manager_id=saved),
+            clock=SimpleNamespace(now_utc=lambda: self.now[0]), id_generator=SimpleNamespace(),
+            logger=logging.getLogger("test.gateway.lead_follower"), write_manager_route=self.writes.append,
+            on_manager_available=self.available.append, on_manager_unavailable=self.unavailable.append)
+        self.waiting = Waiting()
+        self.follower = TeamLeadFollower(self.view, self.client, self.waiting, check_seconds=0.02)
+        self.stop = asyncio.Event()
+        self.task: Optional[asyncio.Task] = None
+
+    async def __aenter__(self) -> "Following":
+        await self.running.__aenter__()
+        return self
+
+    def follow(self) -> None:
+        """After ``start``: the gateway's background check (UserGateway.connect)."""
+
+        self.task = asyncio.create_task(self.follower.run(self.stop))
+
+    async def __aexit__(self, *_: Any) -> None:
+        self.stop.set()
+        if self.task is not None:
+            await asyncio.wait_for(self.task, timeout=2)
+        await self.running.__aexit__()
+
+    def transitions(self) -> list[tuple[str, str, bool]]:
+        return ([("unavailable", item.manager_id, item.keep_waiting) for item in self.unavailable]
+                + [("available", item.manager_id, item.became_available) for item in self.available])
+
+
+@pytest.mark.asyncio
+async def test_a_lead_that_writes_its_record_during_the_start_wait_is_followed_quietly(monkeypatch) -> None:
+    """Review F5: at a normal team start the gateway reads the records before the lead has written its own. The start
+    waits for the lead instead of marking the saved route unavailable and the lead available again."""
+
+    reader = Reader()
+    async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
+        starting = asyncio.create_task(following.follower.start(limit=5))
+        await until(lambda: following.view.ready.is_set())
+        await asyncio.sleep(0.05)
+        assert not starting.done()
+        reader.publish(member("lead_1", lead=True))
+        await asyncio.wait_for(starting, timeout=1)
+        assert following.client.manager_id == "lead_1" and following.writes == ["lead_1"]
+        assert following.unavailable == [] and [item.became_available for item in following.available] == [False]
+
+
+@pytest.mark.asyncio
+async def test_records_without_a_lead_at_the_start_limit_clear_the_saved_route_once(monkeypatch) -> None:
+    reader = Reader()
+    async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
+        await following.follower.start(limit=0.1)
+        assert following.writes == [None] and following.transitions() == [("unavailable", "lead_from_last_run", False)]
+        following.follow()
+        reader.publish(member("lead_1", lead=True))
+        await until(lambda: following.client.manager_id == "lead_1")
+        assert following.transitions()[-1] == ("available", "lead_1", True)  # it was missing: the recovery notice
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lead", [None, "lead_new"])
+async def test_records_read_after_the_start_limit_still_correct_a_dead_route(monkeypatch, caplog, lead) -> None:
+    """Review F3: the records are read only after the start's wait; the saved route of the previous run is dead."""
+
+    reader = Reader()
+    reader.catches_up = False
+    async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
+        await following.follower.start(limit=0.05)
+        assert following.writes == [] and "event=gateway_team_view_not_ready" in caplog.text
+        assert "follows them" not in caplog.text
+        following.follow()
+        if lead is not None:
+            reader.publish(member(lead, lead=True))
+        reader.ready.set()  # the reader catches up late
+        expected = [("unavailable", "lead_from_last_run", False)] + ([("available", lead, True)] if lead else [])
+        await until(lambda: following.transitions() == expected)
+        await asyncio.sleep(0.1)
+        assert following.transitions() == expected and following.client.manager_id == lead
+
+
+@pytest.mark.asyncio
+async def test_a_clock_that_steps_back_cannot_hold_a_lead_back(monkeypatch) -> None:
+    """Review F12: the route follows the records' state, never wall-clock stamps."""
+
+    reader = Reader()
+    async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
+        await following.follower.start(limit=0.05)
+        following.follow()
+        assert following.client.manager_id is None
+        following.now[0] -= __import__("datetime").timedelta(hours=1)  # NTP steps the clock back
+        reader.publish(member("lead_1", lead=True))
+        await until(lambda: following.client.manager_id == "lead_1")
+
+
+@pytest.mark.asyncio
+async def test_two_leads_at_the_first_reading_never_leave_the_route_cleared(monkeypatch, caplog) -> None:
+    """Review F13: a crashed run's lead record beside the new one. The new one (its record changed last) is followed."""
+
+    reader = Reader()
+    reader.publish(member("lead_old_run", lead=True, minute=1), member("lead_new", lead=True, minute=7))
+    async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
+        await following.follower.start(limit=1)
+        assert following.writes == ["lead_new"] and following.unavailable == []
+    assert caplog.text.count("event=gateway_multiple_leads leads=lead_new,lead_old_run kept=lead_new") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_second_lead_never_takes_the_chats_over(monkeypatch, caplog) -> None:
+    """Review F14: a second lead-role session; the route stays on the current lead while it is live."""
+
+    reader = Reader()
+    reader.publish(member("lead_1", lead=True))
+    async with Following(monkeypatch, reader) as following:
+        await following.follower.start(limit=1)
+        following.follow()
+        for minute, state in enumerate(("idle", "busy", "idle", "busy"), start=10):
+            reader.publish(member("lead_1", lead=True, state=state),
+                           member("lead_2", lead=True, state=state, minute=minute))
+            await asyncio.sleep(0.05)
+        assert following.client.manager_id == "lead_1" and following.writes == ["lead_1"]
+    assert caplog.text.count("event=gateway_multiple_leads leads=lead_1,lead_2 kept=lead_1") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lead_on_another_contract_keeps_the_waiting_replies_until_it_leaves(monkeypatch) -> None:
+    """Review F16 and critique C01: no new chats, but people's waiting replies stay while it finishes its tasks; a
+    reply that arrives is delivered, and those still waiting when it leaves are failed then."""
+
+    reader = Reader()
+    reader.publish(member("lead_1", lead=True))
+    async with Following(monkeypatch, reader) as following:
+        await following.follower.start(limit=1)
+        following.follow()
+        answered = following.client.register_response_channel("corr_answered")
+        following.client.register_response_channel("corr_waiting")
+
+        reader.publish(member("lead_1", lead=True, other_contract="2" * 64))
+        await until(lambda: following.unavailable != [])
+        assert following.transitions() == [("unavailable", "lead_1", True), ("available", "lead_1", True)]
+        assert following.client.manager_id is None
+        await asyncio.sleep(0.1)
+        assert following.waiting.failed == []
+
+        reply = SimpleNamespace(msg_content=None)
+        assert await following.client.queue_response("corr_answered", reply)
+        following.client.unregister_response_channel("corr_answered")  # the person got the lead's answer
+        assert answered.get_nowait() is reply
+
+        reader.publish(reasons={"lead_1": "exiting"})
+        await until(lambda: following.waiting.failed != [])
+        assert following.waiting.failed == [["corr_waiting"]]
+        assert len(following.unavailable) == 1  # no second notice
+
+
+@pytest.mark.asyncio
+async def test_a_refused_join_clears_the_route_whenever_it_comes_until_the_host_joins_again(monkeypatch) -> None:
+    """Review F4 and critique C02: a final refusal after the start limit still stops chats to a lead nobody sees."""
+
+    reader = Reader()
+    reader.catches_up = False
+    async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
+        await following.follower.start(limit=0.05)
+        following.follow()
+        assert following.client.manager_id == "lead_from_last_run"
+        following.view.refuse("protocol_mismatch", "This gateway runs another message contract than the installation.")
+        await until(lambda: following.client.manager_id is None)
+        assert following.transitions() == [("unavailable", "lead_from_last_run", False)]
+
+        following.view.joining()
+        reader.publish(member("lead_1", lead=True))
+        reader.ready.set()
+        await until(lambda: following.client.manager_id == "lead_1")
+        assert following.view.refusal is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lead_stays", [False, True])
+async def test_a_lead_that_leaves_while_the_reader_starts_again_is_seen_gone(monkeypatch, lead_stays) -> None:
+    """Critique C07: the restarted reader's view no longer has the lead and nothing names its departure; the check
+    against the records still marks it unavailable, once. A restart that finds the lead again changes nothing."""
+
+    reader = Reader()
+    reader.publish(member("lead_1", lead=True))
+    async with Following(monkeypatch, reader) as following:
+        await following.follower.start(limit=1)
+        following.follow()
+        reader.found = (member("lead_1", lead=True),) if lead_stays else ()
+        reader.crash.set()
+        await until(lambda: reader.runs == 2 and following.view.ready.is_set())
+        await asyncio.sleep(0.1)
+        expected = [("available", "lead_1", True)] + ([] if lead_stays else [("unavailable", "lead_1", False)])
+        assert sorted(following.transitions()) == sorted(expected)
+
