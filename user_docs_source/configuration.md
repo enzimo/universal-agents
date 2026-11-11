@@ -458,7 +458,11 @@ removes `transport.presence_max_age_seconds`. It set how long the presence
 stream kept agents' status messages; that stream no longer exists, because
 agents now announce themselves through the team's signed agent records. The
 container and the desktop app upgrade `instance_config.yaml` at their first
-start and keep the old file as `instance_config.yaml.bak.v12`. A
+start and keep the old file as `instance_config.yaml.bak.v12`. Services you
+start yourself (`assistant_cli.py run-gateway` and the other `run-*`
+commands) ask to upgrade the file when run in a terminal; without one they
+stop and name `assistant_cli.py migrate-config --config <instance_config.yaml>`,
+which upgrades it and keeps the same backup. A
 `config.yaml` you run with `strands_main.py --config` is upgraded when you
 confirm the prompt, or, without a terminal, when you run
 `strands_main.py --config <config.yaml> --migrate-config --yes`. A file of

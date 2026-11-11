@@ -24,11 +24,7 @@ from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from custom_agents.strands_agent import UniversalAgent
-from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, MessageMetaType, RoutingType
-from custom_transport.base import SubscriptionDelivery
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id
@@ -111,21 +107,6 @@ async def _answered_over_nats(tmp_path, caplog, fixture, name: str, chat: tuple[
     )
     world = SimpleNamespace(config=config, lead=lead)
 
-    async def lead_status(delivery) -> None:
-        envelope = delivery.envelope
-        if isinstance(envelope.msg_content, AgentStatus) and envelope.msg_content.status_type == MessageMetaType.REQUEST:
-            reply = MessageEnvelope(
-                msg_content=AgentStatus(
-                    self_id=lead_id, team_id=team_id, named_agent_type="TeamArchitect", name=lead.name,
-                    agent_role="manager", is_paused=False, is_executing=False, has_execution_capacity=True,
-                    is_busy=False, status_type=MessageMetaType.RESPONSE, info_type=ControlType.STATUS_REQUEST_BASIC,
-                ),
-                msg_header=MessageHeader(from_agent_id=lead_id, to_routing_path=envelope.msg_header.response_routing_key),
-                msg_meta=MessageMeta(msg_correlation_id=envelope.msg_meta.msg_correlation_id),
-            )
-            await lead_client.publish(RoutingType.ALL_AGENTS_ROUTE.value, reply, operational=True, durable=False)
-        await delivery.ack()
-
     async def lead_control(delivery) -> None:
         # What the lead's mailbox does with a delivery it read (UniversalAgent.on_nats_delivery).
         envelope = delivery.envelope
@@ -142,11 +123,6 @@ async def _answered_over_nats(tmp_path, caplog, fixture, name: str, chat: tuple[
         try:
             # Queued by the 0.9 gateway before the upgrade; nobody reads it yet.
             await lead_adapter._js.publish(control_subject, _queued_0_9_command(world, fixture=fixture))
-            await lead_client.adapter.subscribe_subject(
-                name="live-retired-lead-status", subject=lead_client.mapper.operational_subject(),
-                handler=lead_status, delivery=SubscriptionDelivery.CORE,
-                logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-            )
             await gateway.connect(start_services=False)
             with caplog.at_level(logging.INFO):
                 # The 0.10 lead starts and reads its control queue.
@@ -169,7 +145,7 @@ async def _answered_over_nats(tmp_path, caplog, fixture, name: str, chat: tuple[
         finally:
             await gateway.close()
             await lead_adapter.close()
-            for stream in (mapper.work_stream_name(), mapper.presence_stream_name(), mapper.dead_letter_stream_name()):
+            for stream in (mapper.work_stream_name(), mapper.dead_letter_stream_name()):
                 try:
                     await lead_client.adapter._js.delete_stream(stream)
                 except Exception:

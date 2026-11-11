@@ -4985,9 +4985,15 @@ agent refreshes its own `agent_states` row and checks its skill catalog every 20
 the row is the heartbeat the liveness rules read, and the check picks up a missed
 `skills.changed`. The presence stream, the broadcast subject, `TeamComms.broadcast_message`,
 the publish options for them and the JetStream push listener that only presence used are
-removed, so nothing on JetStream is pushed. The topology owner deletes an existing
-`<PREFIX>_PRESENCE` stream at start (`event=nats_retired_stream_deleted`), which also removes
-the gateway's old durable consumer on it. `transport.presence_max_age_seconds` is retired
+removed, so nothing on JetStream is pushed. The topology owner looks for an existing
+`<PREFIX>_PRESENCE` stream at start and deletes it (`event=nats_retired_stream_deleted`),
+which also removes the gateway's old durable consumer on it; a fresh install sends no delete
+(`NatsStreamTopology._delete_retired_streams`). Deleting is a one-time clean-up, not a
+condition for starting: a NATS login without the right to delete streams (an external
+server's login may only create and update them) logs `event=nats_retired_stream_not_deleted`
+with the stream and the manual step, and the start goes on. When per-host permissions apply
+(phase 3) the topology owner needs INFO and DELETE on retired stream names, or the clean-up
+goes. `transport.presence_max_age_seconds` is retired
 through versioned upgrade steps, so the running code reads only the current format: the
 instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
 (`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
