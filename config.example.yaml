@@ -95,7 +95,7 @@ transport:
   nats_url: "nats://127.0.0.1:4222"             # Single-server URL.
   nats_servers: ["nats://127.0.0.1:4222"]       # NATS server URLs.
   nats_name: null                               # Optional NATS connection name.
-  jetstream_enabled: true                       # Use JetStream for durable work/reply/presence messages.
+  jetstream_enabled: true                       # Use JetStream for durable work and reply messages.
   subject_prefix: ""                            # Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.
   storage: "file"                               # JetStream storage: "file" or "memory". "memory" loses queued work when the NATS server restarts or the machine loses power (a warning is logged); for tests only.
   replicas: 1                                   # JetStream stream replica count.

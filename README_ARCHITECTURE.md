@@ -1643,7 +1643,7 @@ worker that cannot start never skips them, and once per occurrence, because
 the scheduler retries such an occurrence every 30 seconds. The manager keeps a
 record of each saved-output run (`state/output_retention.json`: time, last
 success, per kind items, files, bytes and failures), started at manager start;
-from it the manager's status heartbeat reports a Status page warning
+from it the manager's answer to `agent.status` reports a Status page warning
 (`output_retention_overdue`) when no run succeeded for two days. Filesystem
 permission errors and depth limits make a run incomplete and preserve its
 previous success time; expected skips such as links and busy builds do not.

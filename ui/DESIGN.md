@@ -422,7 +422,8 @@ Ex HUDs, "subtle and indicative of motion or being alive", never jarring
   Hovering one names the agent's class (e.g. WebResearchAgent), not its id;
   the canvas describes which agent classes are working for
   screen readers. It shows the whole team's work, as the Team tab does
-  (owner's decision). Agents broadcast their state when work starts and ends.
+  (owner's decision). Each agent's record in the team's agent records changes
+  when its work starts and ends.
   The mesh, Settings → Team and the Tasks view show one copy of the team's
   status, which arrives with each live update (about every two seconds,
   `team_activity.mjs`); none of them reads it on a timer of its own (owner's

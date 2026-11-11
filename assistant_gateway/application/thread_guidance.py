@@ -24,9 +24,9 @@ settles the held copy:
   long;
 - the lead does not hold the request's task yet (it waits behind other work),
   or no answer came in time, or no lead is reachable: the copy stays held and
-  is sent again when the lead reports its state (it does when a turn starts
-  or ends and on every presence heartbeat), when a lead becomes available,
-  and at least every ``retry_seconds``;
+  is sent again when the lead's record in the team's agent records changes
+  (it does when a turn starts or ends), when a lead becomes available, and at
+  least every ``retry_seconds``;
 - the request ended first, or the lead refused it: the person is told, and
   the message is not used. Guidance never becomes a new request: the person
   starts new work themselves (New Chat, ``/new``, or a message after the
@@ -243,8 +243,8 @@ class GatewayThreadGuidance:
     async def _attempt(self, held: HeldGuidanceRecord) -> _Attempt:
         if held.correlation_id in self._in_flight:
             return _Attempt(GuidanceDelivery.UNCONFIRMED)
-        # Reserve before the first await. Direct sends, retries and presence
-        # wakeups must not register the same reply wait concurrently.
+        # Reserve before the first await. Direct sends, retries and wakeups from
+        # the lead's record must not register the same reply wait concurrently.
         self._in_flight.add(held.correlation_id)
         try:
             # The durable held copies decide order across gateway processes
@@ -514,7 +514,7 @@ class GatewayThreadGuidance:
         reported_at: datetime | None,
         source: str,
     ) -> None:
-        """Presence observer: the lead's report may mean it now holds a waiting request."""
+        """Team view observer: a change to the lead's record may mean it now holds a waiting request."""
 
         del reported_at, source
         if status.self_id and status.self_id == self._manager.manager_id:

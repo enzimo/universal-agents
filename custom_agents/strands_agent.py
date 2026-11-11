@@ -2497,8 +2497,12 @@ class UniversalAgent(BaseModel):
                 self.get_self_status(is_exiting=effective_is_exiting),
             )
         except Exception as exc:
+            # The liveness rules read this row's time; the next refresh, at most
+            # SELF_REFRESH_SECONDS later, writes it again.
             self._logger.warning(
-                f"[{self.id}] Failed to refresh self AgentState row: {exc}"
+                "[%s] Could not refresh the agent's own status row; the next refresh tries again. "
+                "event=agent_state_row_refresh_failed agent_id=%s error_type=%s error=%s",
+                self.id, self.id, type(exc).__name__, exc,
             )
 
     async def _resume_parent_task_if_ready(self, parent_task_id: str, *args, **kwargs):
@@ -5300,7 +5304,7 @@ class UniversalAgent(BaseModel):
         try:
             # Admission must be exclusive before its first storage await. An
             # empty probe must not publish busy/idle transitions that did not
-            # happen: they go out as presence and as the agent's record.
+            # happen: they change the agent's record and its status row.
             async with self._execution_lanes.hold(MAIN_LANE):
                 started = await task_message_runtime._check_and_process_next_task(
                     self, MAIN_LANE

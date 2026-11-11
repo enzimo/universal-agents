@@ -211,7 +211,7 @@ class AgentInstantiationService:
                 idle_ttl_seconds=ttl,
                 lease_expires_at_utc=now + timedelta(seconds=limits.lease_seconds),
             )
-            # NATS presence can describe remote workers. Only this process's
+            # The team's agent records list remote workers too. Only this process's
             # registered workers consume capacity for the local launch policy.
             external = tuple(
                 (status.self_id, status.named_agent_type)

@@ -15,7 +15,7 @@ Sources, each producing ``StatusFindingV1`` items:
 - the broker's model key status (rejections; configured endpoints with no
   key from anywhere), plus the configured endpoints
   (``assistant_gateway.model_key_endpoints``);
-- the agents' own findings in their status heartbeat
+- the agents' own findings in their answers to ``agent.status``
   (``custom_agents.status_findings``), and whether TeamLead is reporting;
 - the hosts' records: agents that cannot run their work because the team services gave
   them no session (``assistant_gateway.team_view.host_findings``);

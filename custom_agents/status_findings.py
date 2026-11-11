@@ -1,10 +1,11 @@
 """What an agent reports about itself on administrators' Status page.
 
-Each agent adds these findings to the status heartbeat it already publishes
-every 20 seconds (``AgentStatus.status_findings``); the gateway keeps the
-latest heartbeat per agent and drops agents that stopped reporting, so a
-fixed problem disappears with the next heartbeat. Before this, the same facts
-were only in logs or in the agent's own diagnostics.
+Each agent adds these findings to its answer to ``agent.status``
+(``AgentStatus.status_findings``), which the gateway asks of every live agent
+every 20 seconds (``assistant_gateway.team_view``); the gateway keeps the
+latest answer per agent and drops agents that are no longer live, so a fixed
+problem disappears with the next answer. Before this, the same facts were only
+in logs or in the agent's own diagnostics.
 """
 
 from __future__ import annotations

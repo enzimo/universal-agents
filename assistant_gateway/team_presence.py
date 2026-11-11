@@ -1,11 +1,12 @@
 """Live team presence for Settings → Team and the Tasks view.
 
-Agents report their status on the manager's presence and response routes; the
-gateway keeps the latest report per agent of its own team in memory (nothing
-is stored) and shows a redacted view: name, type, whether it leads the team,
-a status label, the skills it can activate, and when it was last seen. Older
-reports never replace newer ones, and agents that stop reporting drop out
-after twice the stale time.
+The gateway's team view (``assistant_gateway.team_view``) passes on each live
+agent's state from the team's signed agent records, with what each agent
+answers to ``agent.status`` merged in; the gateway keeps the latest state per
+agent of its own team in memory (nothing is stored) and shows a redacted view:
+name, type, whether it leads the team, a status label, the skills it can
+activate, and when it was last seen. Older states never replace newer ones,
+and agents that stop being reported drop out after twice the stale time.
 
 The Team view also lists the agent classes defined for the team (from the
 agent catalog, without prompts), so people can see who could be started.
