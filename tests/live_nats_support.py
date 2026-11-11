@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import uuid
 from collections.abc import Iterable, Iterator
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     # Only for the annotation: the protocol 1 contract test uses this module
     # without loading the transport adapter.
     from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+
+logger = logging.getLogger(__name__)
 
 
 async def flush_fully(nc: Client) -> None:
@@ -58,6 +61,17 @@ async def flush_adapter_fully(adapter: NatsTransportAdapter) -> None:
 def _server_address(url: str) -> tuple[str, int]:
     parts = urlsplit(url if "://" in url else f"nats://{url}")
     return (parts.hostname or "").lower(), parts.port or 4222
+
+
+def _server_names(servers: Iterable[str]) -> str:
+    """``servers`` as ``host:port`` for messages: a NATS URL may carry a user and password."""
+
+    return ", ".join(f"{host}:{port}" for host, port in map(_server_address, servers))
+
+
+def _describe(error: BaseException) -> str:
+    text = str(error)
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
 
 
 #: Stream metadata key holding the token of the test that created the stream.
@@ -264,13 +278,17 @@ class OwnedStreams:
         return deleted
 
 
+class _StoppedByTimeLimit(Exception):
+    """``CLEANUP_TIMEOUT_SECONDS`` passed before the cleanup finished."""
+
+
 def delete_owned_streams(ownership: OwnedStreams, config: NatsTransportConfig) -> list[str]:
     """Delete the streams ``ownership`` owns on the server ``config`` names; returns their names.
 
     Runs on its own thread and event loop, so it works from a fixture's teardown whether or
     not the test used an event loop. It logs in as the live transport does, and gives up after
-    ``CLEANUP_TIMEOUT_SECONDS`` with an error naming the server and the streams: a server that
-    is down or does not answer fails the teardown instead of holding it.
+    ``CLEANUP_TIMEOUT_SECONDS`` with an error naming the server (host and port only) and the
+    streams: a server that is down or does not answer fails the teardown instead of holding it.
     """
 
     import nats
@@ -279,6 +297,7 @@ def delete_owned_streams(ownership: OwnedStreams, config: NatsTransportConfig) -
 
     if not ownership.tried:
         return []
+    servers = _server_names(config.servers)
     # One attempt and one retry half a second later. Otherwise nats-py retries a refused first
     # connection about 60 times, 2 s apart, whatever allow_reconnect says; 0 means no limit.
     options = {
@@ -290,33 +309,62 @@ def delete_owned_streams(ownership: OwnedStreams, config: NatsTransportConfig) -
     }
 
     async def delete() -> list[str]:
-        connection = await nats.connect(**options)
+        reported: list[Exception] = []
+
+        async def note_error(error: Exception) -> None:
+            reported.append(error)
+            logger.warning(
+                "NATS reported an error to the live test stream cleanup. event=live_nats_cleanup_nats_error "
+                "servers=%s error=%s", servers, _describe(error),
+            )
+
+        try:
+            connection = await nats.connect(**options, error_cb=note_error)
+        except Exception as error:
+            if not reported:
+                raise
+            # When every try failed, nats-py raises a generic NoServersError and hands the cause
+            # (a refused connection, a timeout, a rejected login) only to error_cb.
+            raise reported[-1] from error
         try:
             return await ownership.delete_owned(connection.jetstream())
         finally:
             await connection.close()
+
+    async def delete_within_limit() -> list[str]:
+        limit = asyncio.timeout(CLEANUP_TIMEOUT_SECONDS)
+        try:
+            async with limit:
+                return await delete()
+        except TimeoutError as error:
+            if limit.expired():  # not a timeout of one request or connection try
+                raise _StoppedByTimeLimit from error
+            raise
 
     results: list[list[str]] = []
     failures: list[BaseException] = []
 
     def run() -> None:
         try:
-            results.append(asyncio.run(asyncio.wait_for(delete(), CLEANUP_TIMEOUT_SECONDS)))
+            results.append(asyncio.run(delete_within_limit()))
         except BaseException as error:  # raised again on the caller's thread
             failures.append(error)
 
     # A daemon thread, joined with a bound of its own: a connection whose close hangs after the
-    # timeout can neither hold the teardown nor keep the test process from ending.
+    # time limit can neither hold the teardown nor keep the test process from ending.
     thread = threading.Thread(target=run, name="delete-test-streams", daemon=True)
     thread.start()
     thread.join(CLEANUP_TIMEOUT_SECONDS + 5)
-    if failures or thread.is_alive():
-        error = failures[0] if failures else TimeoutError("the deletion did not end")
-        raise RuntimeError(
-            f"Could not delete the test's NATS streams among {list(ownership.tried)} on "
-            f"{list(config.servers)} within {CLEANUP_TIMEOUT_SECONDS:g} s: {type(error).__name__}: {error}"
-        ) from error
-    return results[0]
+    if not failures and not thread.is_alive():
+        return results[0]
+    error = failures[0] if failures else None
+    if error is None or isinstance(error, _StoppedByTimeLimit):
+        reason = f"not finished within {CLEANUP_TIMEOUT_SECONDS:g} s"
+    else:
+        reason = _describe(error)
+    raise RuntimeError(
+        f"Could not delete the test's NATS streams among {list(ownership.tried)} on {servers}: {reason}"
+    ) from error
 
 
 @contextmanager

@@ -5,9 +5,10 @@ lead's host, ``custom_agents.agent_host``) run on the shared live NATS server; a
 test starts afterwards attach to the host on their own, as under the launcher
 (``strands_main.py --host-runtime``). Use it as ``async with protocol1_team(...) as host``.
 
-When it ends, also after a failure, it removes what the test's installation and team left on
-the shared server, by their exact ids: the team's streams, its keys in the protocol 1 buckets
-and its dead-letter stream (``_remove_what_the_team_left``).
+When it ends, also after a failure, it deletes the test's installation and team keys in the
+protocol 1 buckets every run on the server shares (``_remove_what_the_team_left``). The streams
+and buckets this process created for the team go at the end of the test, through the ``nats``
+marker (``tests.live_nats_support``), so every caller must be marked ``nats``.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from custom_transport.protocol1.host_keys import load_authority_keys, load_host_
 from custom_transport.protocol1.host_runtime import MessageHost
 from docker import message_hosts
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
-from live_nats_client import delete_team_streams, nats_connect_options, nats_transport_config_from_env
+from live_nats_client import nats_connect_options, nats_transport_config_from_env
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
 
@@ -42,12 +43,12 @@ async def _connect(stack: AsyncExitStack, runtime: str):
 
 
 async def _remove_what_the_team_left(nc, installation: str, team: str) -> None:
-    """Remove what this test's installation and team wrote on the shared live server, by exact keys and names.
+    """Delete this test's installation and team keys in the ``UA1_*`` buckets every run on the server shares.
 
-    The ``UA1_*`` buckets are shared by every run on the server, so they stay; only the keys under this
-    test's own installation and team ids go, and the team's private buckets and streams.
-    Host records (``UA1_HOSTS``, keyed by host id alone, which other runs share) expire on their own
-    within a minute.
+    The buckets stay, and only the keys under this test's own installation and team ids go: no
+    stream deletion can do that. The team's own buckets and streams are deleted by the ``nats``
+    marker, which knows which of them this process created. Host records (``UA1_HOSTS``, keyed by
+    host id alone, which other runs share) expire on their own within a minute.
     """
 
     jetstream = nc.jetstream()
@@ -62,10 +63,6 @@ async def _remove_what_the_team_left(nc, installation: str, team: str) -> None:
             for key in await bucket.keys():
                 if any(key.startswith(prefix) if prefix.endswith(".") else key == prefix for prefix in filters):
                     await bucket.delete(key)
-    for stream in (f"KV_UA1_TEAM_VIEW_{team}", f"KV_UA1_BLOCK_LIST_{team}", f"UA1_DLQ_{team}"):
-        with contextlib.suppress(NotFoundError):
-            await jetstream.delete_stream(stream)
-    await delete_team_streams(team)
 
 
 @asynccontextmanager

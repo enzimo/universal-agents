@@ -331,16 +331,20 @@ def _left_behind(url: str) -> OwnedStreams:
     return ownership
 
 
-async def test_the_cleanup_fails_at_once_naming_the_server_and_the_streams_when_the_server_refuses() -> None:
+async def test_the_cleanup_fails_at_once_naming_the_server_the_streams_and_the_refusal_when_the_server_refuses() -> None:
     with socket.socket() as refusing:  # bound, never listening: every connection is refused
         refusing.bind(("127.0.0.1", 0))
-        url = f"nats://127.0.0.1:{refusing.getsockname()[1]}"
+        address = f"127.0.0.1:{refusing.getsockname()[1]}"
+        url = f"nats://alice:example-password@{address}"  # a login in the URL, as NATS_URL may carry
         started = time.monotonic()
         with pytest.raises(RuntimeError, match="LEFT_BEHIND") as raised:
             delete_owned_streams(_left_behind(url), NatsTransportConfig(servers=[url]))
 
     assert time.monotonic() - started < 5  # not the two minutes of nats-py's default retries
-    assert url in str(raised.value)
+    message = str(raised.value)
+    assert f"on {address}: ConnectionRefusedError" in message  # the cause, not nats-py's NoServersError
+    assert "example-password" not in message and "alice" not in message
+    assert "within" not in message  # the time limit did not stop it
 
 
 async def test_the_cleanup_gives_up_on_a_server_that_never_answers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -350,7 +354,7 @@ async def test_the_cleanup_gives_up_on_a_server_that_never_answers(monkeypatch: 
         silent.listen()
         url = f"nats://127.0.0.1:{silent.getsockname()[1]}"
         started = time.monotonic()
-        with pytest.raises(RuntimeError, match="LEFT_BEHIND.* within 1 s: TimeoutError"):
+        with pytest.raises(RuntimeError, match=r"LEFT_BEHIND.* on 127\.0\.0\.1:\d+: not finished within 1 s$"):
             delete_owned_streams(_left_behind(url), NatsTransportConfig(servers=[url]))
 
     assert time.monotonic() - started < 3
