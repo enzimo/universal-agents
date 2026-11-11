@@ -131,6 +131,141 @@ def _saved_config(source: ExportSource) -> Any:
     return GatewayInstanceConfig.load_saved(source.layout.instance_config_path)
 
 
+# Where the notices below say the decision came from.
+_INSTANCE_SETTINGS = "this instance's own settings (instance_config.yaml and team.env)"
+
+
+def _command_nats_notice(
+    source: ExportSource,
+    config: Any,
+    environment: Mapping[str, str],
+    values: Mapping[str, str],
+) -> list[str]:
+    """One line for the operator when this command's NATS variables would have decided otherwise.
+
+    Only with ``env_file`` secrets, where the export reads the instance's
+    ``team.env`` and not this command's environment. The launcher lays the
+    container's environment over ``team.env`` name by name
+    (``docker/launch_headless.build_process_env``), so an export run with
+    ``docker exec`` in a container that sets NATS_URL itself, or from a shell
+    with a stray NATS_URL, would otherwise decide without saying so. The
+    command's side is the instance's environment with the command's values for
+    ``NATS_DECISION_ENV_NAMES`` laid over it the same way (an empty value
+    replaces too, as in the launcher). The line names only the variables whose
+    value differs from the instance's; never a value, because an address may
+    hold a user and password.
+
+    ``values`` are what the export carries; the line says whether NATS_USER and
+    NATS_PASSWORD are among them. A command value the rule cannot read (for
+    example a malformed address) is reported and not used; it does not stop
+    the export, because the instance never used it.
+    """
+
+    from assistant_gateway.instance_secrets import (
+        NATS_DECISION_ENV_NAMES,
+        should_generate_internal_nats_credentials,
+    )
+
+    if source.config.launch.secrets_from_environment:
+        return []
+    command = {
+        name: os.environ[name]
+        for name in NATS_DECISION_ENV_NAMES
+        if name in os.environ and os.environ[name] != environment.get(name, "")
+    }
+    if not command:
+        return []
+    names = _join_names(list(command))
+    instance_generates = should_generate_internal_nats_credentials(config, environment)
+    login = _nats_login_outcome(instance_generates, values)
+    unused = "it was" if len(command) == 1 else "they were"
+    try:
+        command_generates = should_generate_internal_nats_credentials(
+            config, {**environment, **command}
+        )
+    except ValueError:
+        _log_nats_notice(
+            "team_transfer_nats_environment_unreadable", source, command, instance_generates, values
+        )
+        return [f"{login}. This command's own {names} could not be read; {unused} not used."]
+    if command_generates == instance_generates:
+        return []
+    _log_nats_notice(
+        "team_transfer_nats_environment_differs", source, command, instance_generates, values
+    )
+    if not instance_generates:
+        return [
+            f"{login}. This command's own {names} would mean a local server; {unused} not used. "
+            "The new instance keeps the login only if it names the same server; the import says how."
+        ]
+    one = len(command) == 1
+    return [
+        f"{login}. This command's own {names} would mean an external server; {unused} not used. "
+        f"If this instance really runs with {'that value' if one else 'those values'} (for example from "
+        f"its Docker container's environment), add {'it' if one else 'them'} to the instance's team.env "
+        "and export again, or set the server's address, NATS_USER, NATS_PASSWORD and "
+        "TEAM_LOCAL_NATS_ENABLED=false on the new instance yourself. If "
+        f"{'it is' if one else 'they are'} left over from another setup, nothing was lost."
+    ]
+
+
+def _log_nats_notice(
+    event: str,
+    source: ExportSource,
+    command: Mapping[str, str],
+    instance_generates: bool,
+    values: Mapping[str, str],
+) -> None:
+    """Names only: the command's variables, which side the instance is on and what was carried."""
+
+    logger.warning(
+        "This command's NATS variables were not used; the instance's own settings decided. "
+        "event=%s team_id=%s instance_name=%s decided_by=instance_settings command_names=%s "
+        "instance_nats=%s carried_names=%s",
+        event,
+        source.team_id,
+        source.instance_name,
+        ",".join(command),
+        "local" if instance_generates else "external",
+        ",".join(_carried_nats_names(values)) or "none",
+    )
+
+
+def _nats_login_outcome(instance_generates: bool, values: Mapping[str, str]) -> str:
+    """Whether the NATS login travels, and why, in one sentence without its full stop."""
+
+    if instance_generates:
+        return (
+            f"NATS_USER and NATS_PASSWORD were left out: {_INSTANCE_SETTINGS} say it uses a local "
+            "NATS server, and the new instance makes its own login for that"
+        )
+    carried = _carried_nats_names(values)
+    if not carried:
+        return (
+            f"No NATS_USER or NATS_PASSWORD was carried: {_INSTANCE_SETTINGS} say it uses an external "
+            "NATS server, but they hold no such login"
+        )
+    verb = "was" if len(carried) == 1 else "were"
+    return (
+        f"{_join_names(carried)} {verb} carried: {_INSTANCE_SETTINGS} say it uses an "
+        "external NATS server"
+    )
+
+
+def _carried_nats_names(values: Mapping[str, str]) -> list[str]:
+    from assistant_gateway.instance_secrets import NATS_CREDENTIAL_ENV_NAMES
+
+    return [name for name in NATS_CREDENTIAL_ENV_NAMES if name in values]
+
+
+def _join_names(names: list[str]) -> str:
+    """``A``, ``A and B``, ``A, B and C``."""
+
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def _operator_values(
     environment: Mapping[str, str], config: Any = None
 ) -> dict[str, str]:
@@ -183,6 +318,8 @@ class OperatorSecretsSection:
         from team_transfer.settings import _relative_to_root
 
         environment = _environment(source)
+        config = _saved_config(source)
+        values = _operator_values(environment, config)
         secrets = [
             OperatorSecretV1(
                 kind=SecretKind.ENVIRONMENT,
@@ -193,9 +330,7 @@ class OperatorSecretsSection:
                     else value
                 ),
             )
-            for name, value in sorted(
-                _operator_values(environment, _saved_config(source)).items()
-            )
+            for name, value in sorted(values.items())
         ]
         for path in _auth_files(source.layout):
             if path.is_file() and not path.is_symlink():
@@ -212,6 +347,7 @@ class OperatorSecretsSection:
             ciphertext=encrypt_section(
                 self.name, self.schema_version, records, files.keys
             ),
+            notices=_command_nats_notice(source, config, environment, values),
         )
 
     def plan(

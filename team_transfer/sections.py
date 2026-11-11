@@ -128,12 +128,16 @@ class SectionExport:
     """A section's records and, for encrypted sections, its ciphertext.
 
     ``record_count`` is for sections whose records this process never sees
-    (the broker encrypts its credentials itself).
+    (the broker encrypts its credentials itself). ``notices`` are lines for
+    the operator who runs the export, for something the export decided that
+    they should know about (names only, never secret values); the command
+    prints them with its summary.
     """
 
     records: SectionRecords = field(default_factory=list)
     ciphertext: bytes | None = None
     record_count: int | None = None
+    notices: list[str] = field(default_factory=list)
 
 
 @dataclass
