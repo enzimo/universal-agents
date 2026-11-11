@@ -322,7 +322,8 @@ async def test_the_gateway_itself_follows_its_lead_from_the_records(
 
     from assistant_gateway import team_view
 
-    monkeypatch.setattr(team_view, "LEAD_START_SECONDS", 2.0)
+    # Long enough for the join and the first catch-up (under 1 s here) on a busy runner (critique C10).
+    monkeypatch.setattr(team_view, "LEAD_START_SECONDS", 5.0)
     config = _gateway_config(tmp_path, broker, saved="lead_from_last_run")
     lead_profile = lead_host_profile(TEAM, ("TeamArchitect", "Researcher"), 2)  # the lead and one worker
     transitions: list = []
