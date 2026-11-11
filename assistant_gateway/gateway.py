@@ -407,7 +407,13 @@ def _compose_transcript_runtime(
     id_generator: GatewayIdGenerator,
     event_output: GatewayEventOutput,
 ) -> tuple[TranscriptRepository, GatewayTranscriptService, GatewayEventOutput]:
-    """Build the language-neutral transcript seam outside the legacy facade."""
+    """Build the transcript repository, the transcript service and the event output.
+
+    ``UserGateway.__init__`` calls this once. The returned event output saves
+    each Web Chat event to the transcript first, then passes every event on to
+    ``event_output`` for delivery. A Web Chat event that cannot be saved is not
+    delivered.
+    """
 
     repository = state_store.transcript_repository
     service = GatewayTranscriptService(
