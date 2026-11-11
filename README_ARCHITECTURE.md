@@ -4917,21 +4917,37 @@ already left the view (a reader that reconnects sees only the record's deletion,
 bucket keeps one value per key; the placement's deletion can be read before the exiting
 record), so the reader keeps a departed agent's last entry for ten minutes and tells its
 listeners once more, once, when the evidence comes. Only the team services' signed session
-or the agent's own last host count, so another host cannot fake an exit. Then every agent
-that delegated work to it by name (not only the lead) fails, at once, each subtask that still
-waits in the departed agent's own mailbox and that nobody took: the requester's
+or the agent's own last host count, so another host cannot fake an exit. One run of an agent
+can hold several sessions (a refused renewal, a missing placement or a lost open reply opens
+another, and the earlier one runs out seven days later), so only the agent's newest known
+session counts, and, for an agent the reader did not see leave, only while no placement of
+the agent is held and its held record does not name a session the reader lacks. Then every
+agent that delegated work to it by name (not only the lead) fails, at once, each subtask that
+still waits in the departed agent's own mailbox and that nobody took: the requester's
 delegated-task record shows no worker took it, and its message can still be withdrawn from
-the work stream. A subtask a worker took is left alone: a restarted agent takes it over from
+the work stream. Only that subtask fails, as with the watchdog's timeout, a handback or a
+worker loss: the parent task and its other subtasks go on, and the parent's turn resumes to
+decide again. Subtasks of different requests are failed side by side, those of one request one
+after another. A subtask a worker took is left alone: a restarted agent takes it over from
 saved state and reports it again, and a handed-back one goes to another worker. An agent
 whose host only stopped reporting is not given up for; the subtask watchdog handles work that
 never comes back.
 
 A fresh reader also recognises agents that exited while its process was down, using the
-retained signed closed sessions without needing the old agent record or placement. A
-requester attached after catch-up receives the retained exits once too. Beyond the session
-retention period the watchdog still decides overdue work. A handback records its worker in
-the delegated task's holder history even if the worker's claim never arrived: its new
-message belongs to the type queue and must never be withdrawn as an abandoned by-name task.
+retained signed closed sessions without needing the old agent record or placement. It records
+those it finds at its first reading without telling anyone and logs one count
+(`event=team_agents_unseen_exits`): a process start can find weeks of them, and its agents
+have not restored their saved work yet. Instead each agent, once it has restored its saved
+work at the end of its start (`agent_host.report_restored_work`), waits until its process has
+read the view, reads its waiting subtasks once and fails those sent by name to an agent that
+is not live and left for good, the same way (`team_directory.check_departed_targets`). So a
+restarted requester fails what its departed workers never took, whichever comes first, and a
+start costs one read per restored agent. Exits found later, also after the reader's run
+restarts, are told as usual. The reader drops what it kept about a departure once the
+agent's last session record is deleted (about 37 days after a closed session ended). Beyond
+that the watchdog still decides overdue work. A handback records its worker in the delegated
+task's holder history even if the worker's claim never arrived: its new message belongs to
+the type queue and must never be withdrawn as an abandoned by-name task.
 
 Agents ask each other on `ctl.agent.<agent>`, signed with the asking agent's session, through
 `custom_agents.agent_requests` (`ask_agent`, `ask_each`, `announce`, `team_view`, which hold
@@ -4943,8 +4959,12 @@ several agents at once under one deadline and keeps each answer or error apart.
 - Delegation by type reads the directory and sends nothing. By name, the requester waits up
   to ten seconds for a just-started worker to take work in the view (a started worker took
   3.6 s in the live tests), and the team lead also asks it for its basic status: one that
-  does not answer, is exiting or takes no work is refused at once. Other agents skip that
-  ask; the contract lets only the lead's host, the team services and the gateway send it.
+  does not answer, is exiting or takes no work is refused at once. When it is the lead that
+  cannot ask yet (its own session is not open after a restart, or its process drains), it
+  waits within the same ten seconds while that clears by itself; otherwise the delegation is
+  refused with the lead's own reason (`requester_cannot_ask`), and the worker is not judged.
+  Other agents skip that ask; the contract lets only the lead's host, the team services and
+  the gateway send it.
   The maintenance worker check accepts a started launch: the occurrence waits in the type's
   queue.
 - The team lead's pause, resume and exit tool sends `agent.pause`, `agent.resume` and
@@ -4952,6 +4972,12 @@ several agents at once under one deadline and keeps each answer or error apart.
   services for pause and resume, and never from its own session: stopping the lead's agent
   would end the manager process without the approval a restart needs. Anything else is
   answered `not_allowed` and logged. The tool refuses to send them to the agent using it.
+  The old unsigned `ControlInstruction` exit, pause and resume are no longer obeyed: their
+  sender is whatever the message says, and any process with the team's NATS login can
+  publish one. An agent acts only on its `stop` for a task and drops any other, logged with
+  the sender it claims (`event=agent_control_instruction_dropped`). Nor can the lead start
+  another TeamArchitect (`manager_launch_forbidden`, for every kind of start): on the lead's
+  host its session would carry the lead role, and it could pause or stop the real lead.
   It waits the request's whole lifetime (30 s), says nothing changed only when nothing can
   have run, and says the outcome is unknown after a lost reply, `handler_failed` or an
   unreadable answer.

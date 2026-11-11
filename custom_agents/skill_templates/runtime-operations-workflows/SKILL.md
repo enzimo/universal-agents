@@ -155,14 +155,17 @@ give them `/stop task <task_id>`; do not resend or recreate the request.
 
 When an agent leaves the team for good (it stopped, or its process restarted
 after a crash), a subtask you sent to it by name that it never took fails at once
-("... left before taking it"): decide again, for example delegate it to the type
-or to another named worker. A subtask it had already taken is not failed: its
-restarted run takes it over, or it was handed back and another worker takes it.
-An agent that only stopped answering is not given up on; the subtask watchdog
-checks it again and times the subtask out if it never comes back. A by-name
-delegation waits a few seconds for a worker you just started; one that is listed
-but does not answer, is exiting or takes no work is refused at once, so pick
-another worker instead of retrying it.
+("... left before taking it"), also when you were restarted meanwhile; only that
+subtask fails, and your task resumes so you can decide again, for example
+delegate it to the type or to another named worker. A subtask it had already
+taken is not failed: its restarted run takes it over, or it was handed back and
+another worker takes it. An agent that only stopped answering is not given up
+on; the subtask watchdog checks it again and times the subtask out if it never
+comes back. A by-name delegation waits a few seconds for a worker you just
+started; one that is listed but does not answer, is exiting or takes no work is
+refused at once, so pick another worker instead of retrying it. A refusal that
+says "This agent cannot send requests" is about you, not the worker: retry
+shortly when it says so, otherwise delegate by type or tell the person.
 
 `send_control_instruction` pauses, resumes or stops another agent, never
 yourself (to restart the manager, plan a restart). Agents obey it only from the

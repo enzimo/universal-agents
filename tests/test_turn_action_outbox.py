@@ -906,6 +906,21 @@ def test_delegation_outbox_does_not_register_or_publish_to_unavailable_worker(
     )
 
 
+@pytest.mark.parametrize(("clears", "then"), [
+    (True, "Try again shortly."),
+    (False, "That will not change while this process runs: delegate by type, do it another way, or tell the person."),
+])
+def test_the_requesters_reason_says_whether_trying_again_can_help(clears, then) -> None:
+    """C11: a draining process or one without a message host stays so; a session that is opening does not."""
+
+    from custom_agents.agent_requests import AgentUnreachable
+    from custom_agents.delegation_runtime import requester_cannot_ask_detail
+
+    detail = requester_cannot_ask_detail(AgentUnreachable("the reason", clears=clears))
+
+    assert "(the reason); the named worker was not checked." in detail and detail.endswith(then)
+
+
 def test_a_delegation_by_name_the_lead_cannot_ask_for_yet_is_refused_with_the_leads_reason(tmp_path) -> None:
     """F10: when the lead's own session is not open, the worker was not checked and is not called gone."""
 

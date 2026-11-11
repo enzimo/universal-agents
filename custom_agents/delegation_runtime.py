@@ -46,10 +46,18 @@ REQUESTER_CANNOT_ASK = "requester_cannot_ask"
 
 
 def requester_cannot_ask_detail(error: Exception) -> str:
-    """What the requester is told when it cannot ask a named worker yet: its own reason, not the worker's."""
+    """What the requester is told when it cannot ask a named worker: its own reason, not the worker's.
 
-    return (f"This agent cannot send requests yet ({error}); the named worker was not checked. "
-            "Try again shortly.")
+    Whether trying again can help depends on whether the reason clears by itself
+    (``AgentUnreachable.clears``): a session still opening does; a process that drains or
+    runs without a message host does not.
+    """
+
+    if getattr(error, "clears", True):
+        return (f"This agent cannot send requests yet ({error}); the named worker was not checked. "
+                "Try again shortly.")
+    return (f"This agent cannot send requests ({error}); the named worker was not checked. That will not change "
+            "while this process runs: delegate by type, do it another way, or tell the person.")
 
 
 async def _record_delegation_subtask_abort(
