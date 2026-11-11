@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 import pytest
 from nats.aio.client import Client
+from nats.errors import NoServersError
 from nats.js.api import StreamConfig, StreamInfo
 from nats.js.errors import APIError, NotFoundError
 
@@ -86,6 +87,20 @@ CLEANUP_TIMEOUT_SECONDS = 30.0
 # marked by a recorder opened inside another, and keeps that mark; any other token was left
 # in a configuration object reused from an earlier test, and is replaced.
 _active_tokens: set[str] = set()
+
+
+def require_stream_recorder(helper: str) -> None:
+    """Fail at once unless a stream recorder is active, for a helper whose streams only it deletes.
+
+    A shared helper that leaves stream deletion to the ``nats`` marker would otherwise leak its
+    streams onto the shared server, silently, in any test module that forgets the marker.
+    """
+
+    if not _active_tokens:
+        raise RuntimeError(
+            f"{helper} creates streams on the shared live NATS server that only the nats marker "
+            "deletes: mark the test nats"
+        )
 
 
 def shared_stream_names(config: NatsTransportConfig) -> frozenset[str]:
@@ -320,11 +335,13 @@ def delete_owned_streams(ownership: OwnedStreams, config: NatsTransportConfig) -
 
         try:
             connection = await nats.connect(**options, error_cb=note_error)
-        except Exception as error:
+        except NoServersError as error:
+            # nats-py retries a failed TCP connect (a refused connection, a connect timeout),
+            # reports each failure only to error_cb, and then raises this generic error. A
+            # failure after the TCP connect (a rejected login, no INFO in time) is raised as
+            # itself, since allow_reconnect is False, and needs no swap.
             if not reported:
                 raise
-            # When every try failed, nats-py raises a generic NoServersError and hands the cause
-            # (a refused connection, a timeout, a rejected login) only to error_cb.
             raise reported[-1] from error
         try:
             return await ownership.delete_owned(connection.jetstream())

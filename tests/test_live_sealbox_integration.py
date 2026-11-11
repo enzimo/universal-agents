@@ -11,6 +11,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -91,52 +92,67 @@ def _free_port() -> int:
     return port
 
 
+#: sealbox-server's log filter for a test's server: tower_http's debug line for each request
+#: carries the request's ``x-request-id``.
+SEALBOX_TEST_LOG_FILTER = "info,tower_http=debug"
+
+
 def _start_own_sealbox(
     server: Path, server_env: dict[str, str], port: int, token_file: Path
 ) -> subprocess.Popen[str] | None:
     """Start sealbox-server on ``port``; None when another program already listens there.
 
-    The port is picked free and closed before the server binds it, so another test's
-    server can take it in between. sealbox-server logs its address before it binds, so
-    neither that line nor a connection to the port shows that this server listens. A
-    request only this test's root token is allowed to make does: another server refuses
-    the token or does not know the path, while this one stops with "Failed to bind".
+    The port is picked free and closed before the server binds it, so another program can
+    take it in between. sealbox-server logs its address before it binds, so neither that
+    line nor a connection to the port shows that this server listens, and neither does a
+    200 answer alone: any HTTP server may answer one. The start is done when a request
+    carrying a random ``x-request-id`` gets a 200 and this server's own log holds that id,
+    so this process served it. Another program on the port fails that check, and this
+    server then stops with "Failed to bind address".
+
+    The server's output goes to a log file of its own beside ``token_file``, named in the
+    errors: a pipe nobody reads would stall a server that logs every request once it filled.
     A server this start began is stopped however the wait ends (an error, Ctrl-C, the
     deadline), since no caller holds it yet.
     """
 
     import httpx
 
-    process = subprocess.Popen(
-        [str(server)],
-        env={**server_env, "LISTEN_ADDR": f"127.0.0.1:{port}"},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    log_file = token_file.parent / f"sealbox-server-{port}-{uuid.uuid4().hex[:8]}.log"
+    with log_file.open("w") as log:
+        process = subprocess.Popen(
+            [str(server)],
+            env={**server_env, "LISTEN_ADDR": f"127.0.0.1:{port}", "RUST_LOG": SEALBOX_TEST_LOG_FILTER},
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
     try:
-        headers = {"Authorization": f"Bearer {token_file.read_text().strip()}"}
+        token = token_file.read_text().strip()
         deadline = time.time() + 8
         while time.time() < deadline:
             if process.poll() is not None:
-                output = "".join(process.communicate())
-                if "Failed to bind address" in output:
+                if "Failed to bind address" in log_file.read_text(errors="replace"):
                     return None
                 raise RuntimeError(
-                    f"sealbox-server exited early with code {process.returncode}"
+                    f"sealbox-server exited early with code {process.returncode}; its output is in {log_file}"
                 )
+            request_id = uuid.uuid4().hex
             try:
                 answer = httpx.get(
-                    f"http://127.0.0.1:{port}/v2/admin/tenants", headers=headers, timeout=0.5
+                    f"http://127.0.0.1:{port}/v2/admin/tenants",
+                    headers={"Authorization": f"Bearer {token}", "x-request-id": request_id},
+                    timeout=0.5,
                 )
             except httpx.HTTPError:
                 time.sleep(0.1)
                 continue
-            if answer.status_code == 200:
+            # The server logs the request before it answers, so the id is in its log by now.
+            if answer.status_code == 200 and request_id in log_file.read_text(errors="replace"):
                 return process
-            # Another server answers: this one stops once it fails to bind.
+            # Another program answered: this server stops once it fails to bind.
             time.sleep(0.1)
-        raise RuntimeError("sealbox-server did not become reachable")
+        raise RuntimeError(f"sealbox-server did not become reachable; its output is in {log_file}")
     except BaseException:
         stop_owned_process(process, name=f"sealbox-server on port {port}", timeout=3)
         raise
@@ -1228,6 +1244,38 @@ def test_a_sealbox_start_does_not_take_another_tests_server_on_its_port_for_its_
         # The other test's server answers on the port but refuses this test's token.
         assert _start_own_sealbox(server, own_env, port, tmp_path / "own" / "root_token") is None
         assert other.poll() is None
+
+
+def test_a_sealbox_start_does_not_take_a_server_that_answers_every_request_for_its_own(tmp_path: Path) -> None:
+    server = _find_binary("SEALBOX_SERVER_PATH", ("sealbox-server",))
+    if server is None:
+        pytest.skip("sealbox-server is required for live Sealbox tests")
+    token_file = tmp_path / "root_token"
+    token_file.write_text(f"own-root-token-{os.getpid()}\n")
+    answered: list[str] = []
+
+    class AnswerEverything(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            answered.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    catch_all = ThreadingHTTPServer(("127.0.0.1", 0), AnswerEverything)
+    threading.Thread(target=catch_all.serve_forever, daemon=True).start()
+    try:
+        env = {**os.environ, "STORE_PATH": str(tmp_path / "sealbox.db"), "AUTH_TOKEN_FILE": str(token_file)}
+        with record_started_processes() as started:
+            assert _start_own_sealbox(server, env, catch_all.server_address[1], token_file) is None
+            [own] = started
+            assert own.poll() is not None  # it stopped on its own, failing to bind
+    finally:
+        catch_all.shutdown()
+        catch_all.server_close()
+    assert answered  # the program on the port did answer the check with 200
 
 
 def test_a_sealbox_server_the_start_began_is_stopped_when_the_wait_for_it_fails(

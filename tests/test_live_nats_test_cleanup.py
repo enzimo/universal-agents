@@ -360,7 +360,7 @@ async def test_the_cleanup_gives_up_on_a_server_that_never_answers(monkeypatch: 
     assert time.monotonic() - started < 3
 
 
-async def test_the_cleanup_logs_in_as_the_live_transport_does(tmp_path: Path) -> None:
+async def test_the_cleanup_logs_in_as_the_live_transport_does_and_names_a_refused_login(tmp_path: Path) -> None:
     with own_nats_server(nats_server(), tmp_path, "--user", "team", "--pass", "team-pass") as url:
         config = NatsTransportConfig(servers=[url], user="team", password="team-pass")
         connection = await nats.connect(**nats_connect_options(config), allow_reconnect=False)
@@ -370,6 +370,17 @@ async def test_the_cleanup_logs_in_as_the_live_transport_does(tmp_path: Path) ->
             assert await _stream_names(connection) == set()
         finally:
             await connection.close()
+
+        # A refusal after the TCP connect: nats-py raises it as itself, not as NoServersError.
+        refused = NatsTransportConfig(servers=[url], user="team", password="wrong-password")
+        with pytest.raises(RuntimeError, match="LEFT_BEHIND") as raised:
+            delete_owned_streams(_left_behind(url), refused)
+
+    message = str(raised.value)
+    assert "Authorization Violation" in message
+    assert "wrong-password" not in message
+    cause = raised.value.__cause__
+    assert cause is not None and cause.__cause__ is not cause  # not chained to itself
 
 
 async def test_the_connect_options_carry_the_credentials_file() -> None:
@@ -381,6 +392,19 @@ async def test_the_connect_options_carry_the_credentials_file() -> None:
         "servers": ["nats://a:4222", "nats://b:4222"],
         "user_credentials": "/run/secrets/team.creds",
     }
+
+
+async def test_protocol1_team_refuses_to_start_in_a_test_not_marked_nats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its streams are deleted only by the marker, so without it they would stay on the shared server."""
+
+    from tests.protocol1_team_support import protocol1_team
+
+    monkeypatch.setattr(live_nats_support, "_active_tokens", set())  # no recorder, as without the marker
+    with pytest.raises(RuntimeError, match="mark the test nats"):
+        async with protocol1_team(tmp_path, "team_unmarked", ("TeamArchitect",)):
+            pass
 
 
 async def test_every_test_marked_nats_runs_inside_a_recorder_for_the_live_server(

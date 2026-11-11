@@ -8,7 +8,8 @@ test starts afterwards attach to the host on their own, as under the launcher
 When it ends, also after a failure, it deletes the test's installation and team keys in the
 protocol 1 buckets every run on the server shares (``_remove_what_the_team_left``). The streams
 and buckets this process created for the team go at the end of the test, through the ``nats``
-marker (``tests.live_nats_support``), so every caller must be marked ``nats``.
+marker (``tests.live_nats_support``), so every caller must be marked ``nats``;
+``protocol1_team`` fails at once without it.
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthor
 from live_nats_client import nats_connect_options, nats_transport_config_from_env
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
+
+# Through the tests package, as tests/conftest.py imports it: the recorder state lives in that
+# module object, and a path-based import would load a second copy with none.
+from tests.live_nats_support import require_stream_recorder
 
 
 async def _connect(stack: AsyncExitStack, runtime: str):
@@ -68,6 +73,7 @@ async def _remove_what_the_team_left(nc, installation: str, team: str) -> None:
 @asynccontextmanager
 async def protocol1_team(tmp_path: Path, team_id: str, agent_types: Iterable[str], *,
                          session_limit: int = 8) -> AsyncIterator[AgentProcessHost]:
+    require_stream_recorder("protocol1_team")
     layout = InstanceLayout.at(tmp_path / "protocol1")
     lead_profile = lead_host_profile(team_id, agent_types, session_limit)
     services_profile = team_services_profile(team_id)
