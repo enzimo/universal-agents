@@ -531,7 +531,9 @@ def test_production_host_factory_uses_the_launchers_limit_and_the_current_catalo
     write_expected_hosts(layout.trust_expected_hosts_path, {"lead": expected_host(layout, profile, agent_types_from_catalog=True)})
     lead = process_host_for("lead", layout, TEAM, is_lead=True, agent_type="TeamArchitect", worker_pools={})
     assert lead.profile.session_limit == 7 and set(lead.profile.agent_types) == catalog
-    assert {"tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump"} == lead.handlers.keys()
+    assert {"tasks.list", "tasks.list_finished", "tasks.remove", "tasks.purge", "debug.dump", "agent.status",
+            "agent.pause", "agent.resume", "agent.exit", "task.probe"} == lead.handlers.keys()
+    assert {"skills.changed"} == lead.event_handlers.keys()
     catalog.add("Analyst")
     assert set(lead._catalog_types()) == catalog
     worker = process_host_for("agent-test", layout, TEAM, is_lead=False, agent_type="Researcher", worker_pools={})

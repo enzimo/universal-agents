@@ -32,6 +32,7 @@ from custom_agents import access_runtime
 from custom_agents import strands_team as _strands_team  # noqa: F401  (installs the agent type source)
 from custom_agents.agent_catalog import load_agent_type_map
 from custom_agents.agent_instantiation_service import (
+    MANAGER_LAUNCH_FORBIDDEN,
     AgentInstantiationService,
     current_worker_limits,
     effective_worker_rules,
@@ -209,6 +210,34 @@ def test_a_new_specialist_is_listed_without_a_restart(tmp_path, monkeypatch):
 
     assert BOA in json.loads(get_available_agent_types._tool_func())
     AgentInstantiationService(lead).validate_type(BOA, automatic=False)
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_no_second_team_architect_is_started_manually_or_automatically(tmp_path, monkeypatch, caplog, automatic):
+    """F8: on the lead's host another TeamArchitect would get the lead role and could pause or stop the lead."""
+
+    import logging
+
+    config, running = _instance(tmp_path, "operator_file")
+    lead = _start_manager(config, running, monkeypatch)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(PermissionError, match=MANAGER_LAUNCH_FORBIDDEN):
+        AgentInstantiationService(lead).validate_type("TeamArchitect", automatic=automatic)
+    assert "event=manager_launch_refused" in caplog.text
+
+
+def test_instantiate_agent_refuses_a_team_architect_without_starting_it(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    config, running = _instance(tmp_path, "operator_file")
+    lead = _start_manager(config, running, monkeypatch)
+    lead._local_team_runtime.spawn_agent = Mock()
+
+    result = AgentInstantiationService(lead).launch(agent_type="TeamArchitect", owner_id="person_1",
+                                                    request_id="request_1", source="manual")
+
+    assert (result.status, result.reason) == ("denied", MANAGER_LAUNCH_FORBIDDEN)
+    lead._local_team_runtime.spawn_agent.assert_not_called()
 
 
 @pytest.mark.parametrize("started_from", STARTED_FROM)

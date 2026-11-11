@@ -43,6 +43,17 @@ Why it is shaped this way:
 - **The agent's own loop does the work.** A request for a thread worker arrives on the
   host's loop and runs on the worker's loop (``run_coroutine_threadsafe``), where its task
   manager lives.
+- **The team as each agent sees it.** After joining, the host reads the team's live agents
+  from their records (``custom_transport.protocol1.team_agents``), once for the whole
+  process, as one of its supervised steps that stops with the host, and keeps every
+  attached agent's directory in step with it on the agent's own loop
+  (``custom_agents.team_directory``). An agent that leaves for good while the process
+  runs is handed to every other attached agent, once; exits from before the process started
+  are not, and each agent checks its own waiting work against them once it has restored it
+  (``report_restored_work``, which waits for the view: ``view_read``). It also receives the team's events
+  (``skills.changed``) once and hands each to every agent it runs. Agents ask each other
+  through it (``custom_agents.agent_requests``: ``ask_agent``, ``announce``): requests are
+  signed with the asking agent's session.
 - **Agent records.** State changes are coalesced within two seconds; an unchanged record
   is refreshed every minute and expires within three. Each agent has its own supervised
   refresh and exit jobs. A refused session repair cannot starve another agent's refresh.
@@ -74,7 +85,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable, Coroutine, Iterable, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Iterable, Mapping, Optional
 
 import rfc8785
 
@@ -86,6 +97,8 @@ from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
+from custom_agents.agent_requests import AgentUnreachable, AskBlocked, SessionlessAgent, process_host
+from custom_transport.protocol1.team_agents import TeamAgents
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
@@ -94,6 +107,8 @@ LEAD_HOST_RUNTIME = "lead"
 LEAD_HOST_ROLES = ("lead_host", "worker_host")
 STARTUP_AGENT_HOST_ROLES = ("worker_host",)
 AGENT_ADDRESS = "ctl.agent.{agent}"
+# The team's events, received once per process and handed to every agent it runs.
+SKILLS_EVENT_ADDRESS = "evt.skills_changed"
 # How long a retry waits while the authority or the team services are not answering yet.
 RETRY_SECONDS = (0.5, 1.0, 2.0, 5.0, 10.0)
 # How long a refused session waits before it is asked for again: the first, doubling up to the last.
@@ -109,6 +124,17 @@ TYPE_NOT_GRANTED_CODE = "session_type_not_granted"
 TYPE_NOT_CERTIFIABLE_CODE = "agent_type_not_certifiable"
 # More agents without a session than a host record lists: the last component stands for the rest.
 MORE_AGENTS_COMPONENT, MORE_AGENTS_CODE = "more-agents", "sessions_refused"
+# Each code above in words, for people who see an agent without a session (a restart's review).
+WITHOUT_SESSION_REASONS = {
+    REFUSAL_CODES["not_allowed"]: "its type is not allowed on its host",
+    REFUSAL_CODES["already_placed"]: "it is placed on another host",
+    REFUSAL_CODES["limit_reached"]: "its host already runs as many agents as it may",
+    REFUSAL_CODES["runtime_error"]: "the team services could not open its session",
+    SESSION_REFUSED_CODE: "its session was refused",
+    TYPE_NOT_GRANTED_CODE: "its host was not granted its type",
+    TYPE_NOT_CERTIFIABLE_CODE: "its type's name cannot have a session",
+    MORE_AGENTS_CODE: "more agents without a session than its host lists by name",
+}
 _NOT_IN_TOKEN = re.compile(r"[^A-Za-z0-9_-]")
 # Renew each agent's session daily; sessions last 7 days (team_services.sessions).
 SESSION_RENEW_SECONDS = 24 * 3600.0
@@ -124,6 +150,8 @@ AGENT_RECORD_CLEANUP_SECONDS = 10.0
 DRAIN_POLL_SECONDS = 5.0
 SESSION_CLEANUP_SECONDS = 10.0
 _LOGGER = logging.getLogger(__name__)
+# The running checks of restored agents' delegated work (``report_restored_work``).
+_DEPARTURE_CHECKS: set[asyncio.Task[None]] = set()
 
 # What an agent answers on its address: the operation's kind, and the handler that runs on
 # the agent's own loop with the agent and the verified request.
@@ -273,6 +301,9 @@ class AgentProcessHost:
     _background: set[asyncio.Task[Any]] = field(default_factory=set)
     _pending_closes: dict[str, tuple[str, str]] = field(default_factory=dict)
     _cleanup_needed: bool = True
+    # The team's live agents (module docstring).
+    team_agents: Optional[TeamAgents] = None
+    event_handlers: dict[str, AgentHandler] = field(default_factory=dict)
 
     # -- the agent's side (called on the agent's own loop) --------------------------------
 
@@ -365,6 +396,12 @@ class AgentProcessHost:
             return
         await self._close_earlier_sessions()
         await self._remove_earlier_records()
+        # The team's view and its events run as supervised steps and stop with the host (module docstring).
+        team_agents = self.team_agents = TeamAgents(self.host, self.team, logger=self.logger)
+        team_agents.listen(self._team_changed)
+        stop = self._stop
+        self._spawn(lambda: team_agents.run(stop), "team_view")
+        self._spawn(self._serve_events, "team_events")
         self._joined.set()
         self.logger.info("This process joined as a protocol 1 host. event=agent_host_joined runtime=%s",
                          self.profile.runtime)
@@ -408,6 +445,196 @@ class AgentProcessHost:
                 except asyncio.TimeoutError:
                     pass
         return False
+
+    async def _serve_events(self) -> None:
+        assert self.host is not None and self.host.live is not None
+        if not self.event_handlers:
+            return
+        receiver = Receiver(self.host.identity.installation, self.team, "team", self.team, self.profile.runtime)
+        await self.host.live.serve(SKILLS_EVENT_ADDRESS, receiver, self._event)
+
+    async def _event(self, verified: VerifiedFrame) -> dict[str, Any]:
+        """A team event: every agent this process runs gets it, on its own loop."""
+
+        handler = self.event_handlers.get(verified.frame.kind)
+        if handler is None:
+            raise Unsupported(verified.frame.kind)
+        for hosted in list(self.agents.values()):
+            self._on_agent_loop(hosted, lambda agent=hosted.agent: handler(agent, verified), what=verified.frame.kind)
+        return {}
+
+    def _team_changed(self, changed: frozenset[str]) -> None:
+        """On the host's loop: every attached agent's directory takes the view, and hears who left for good.
+
+        Each agent gets the whole view as a plain callback on its own loop, in the order the
+        views were read, so a later view always wins (``custom_agents.team_directory``). An
+        agent in ``changed`` that is not live and left for good (``TeamAgents.left_for_good``,
+        heard once, possibly after it left) is handed to each other agent as a task of its
+        own, which never touches the directory. The reader tells each exit once, so nothing
+        here remembers which were handed on; exits from before the process started are not
+        told, and each agent checks its own waiting work against them (``report_restored_work``).
+        """
+
+        from custom_agents.team_directory import agent_exited, sync_directory
+
+        team_agents = self.team_agents
+        assert team_agents is not None
+        view = team_agents.live()
+        left = [(departed, team_agents.departure_reason(agent_id) or "")
+                for agent_id in sorted(changed)
+                if agent_id not in view and team_agents.left_for_good(agent_id)
+                and (departed := team_agents.departed_agent(agent_id)) is not None]
+        for hosted in list(self.agents.values()):
+            self._call_on_agent_loop(hosted, lambda agent=hosted.agent: sync_directory(agent, view),
+                                     what="team_directory")
+            for departed, reason in left:
+                if departed.agent != str(hosted.agent.id):
+                    self._on_agent_loop(hosted, lambda agent=hosted.agent, departed=departed, reason=reason:
+                                        agent_exited(agent, departed, reason), what="team_exit")
+
+    def _sync_directory(self, hosted: _HostedAgent) -> None:
+        """A newly attached agent gets the whole current view."""
+
+        from custom_agents.team_directory import sync_directory
+
+        if self.team_agents is None or not self.team_agents.ready.is_set():
+            return  # the view's first reading tells every attached agent
+        live = self.team_agents.live()
+        self._call_on_agent_loop(hosted, lambda: sync_directory(hosted.agent, live), what="team_directory")
+
+    async def view_read(self) -> Optional[TeamAgents]:
+        """The team's view once this process has read it; None when the host stops first or never joins.
+
+        Callable from any agent's loop: it waits on the host's loop. Cancelling the caller
+        cancels the wait there too (``run_coroutine_threadsafe`` passes it on).
+        """
+
+        if self.loop is None or self.loop.is_closed():
+            return None
+
+        async def wait() -> Optional[TeamAgents]:
+            assert self._joined is not None and self._stop is not None
+            await _first_of(self._joined, self._drain_started, self._stop)
+            team_agents = self.team_agents
+            if not self._joined.is_set() or self._stop.is_set() or team_agents is None:
+                return None  # a process on another contract that never joined, or the host stopped
+            await _first_of(team_agents.ready, self._stop)
+            return None if self._stop.is_set() else team_agents
+
+        return await self._on_host_loop(wait())
+
+    def _call_on_agent_loop(self, hosted: _HostedAgent, function: Callable[[], Any], *, what: str) -> None:
+        """Run ``function`` on the agent's own loop as a plain callback: callbacks run in the order they are handed."""
+
+        agent_loop = getattr(hosted.agent, "_runtime_loop", None)
+
+        def call() -> None:
+            try:
+                function()
+            except Exception:
+                self.logger.exception("An agent could not take a team update. event=agent_host_agent_update_failed "
+                                      "runtime=%s agent=%s what=%s", self.profile.runtime, hosted.agent.id, what)
+
+        if agent_loop is None or agent_loop is asyncio.get_running_loop():
+            call()
+        elif not agent_loop.is_closed():
+            try:
+                agent_loop.call_soon_threadsafe(call)
+            except RuntimeError:  # its loop closed meanwhile: the agent has gone
+                pass
+
+    def _on_agent_loop(self, hosted: _HostedAgent, work: Callable[[], Awaitable[Any]], *, what: str) -> None:
+        agent_loop = getattr(hosted.agent, "_runtime_loop", None)
+
+        def done(future: Any) -> None:
+            if not future.cancelled() and future.exception() is not None:
+                self.logger.error("An agent could not take a team update. event=agent_host_agent_update_failed "
+                                  "runtime=%s agent=%s what=%s", self.profile.runtime, hosted.agent.id, what,
+                                  exc_info=future.exception())
+
+        if agent_loop is None or agent_loop is asyncio.get_running_loop():
+            task = asyncio.get_running_loop().create_task(work())
+            task.add_done_callback(done)
+        elif not agent_loop.is_closed():
+            asyncio.run_coroutine_threadsafe(work(), agent_loop).add_done_callback(done)
+
+    # -- asking other agents (from an agent's own loop) ---------------------------------
+
+    def _agent_audience(self, agent_id: str) -> dict[str, str]:
+        assert self.host is not None
+        return {"installation": self.host.identity.installation, "team": self.team, "target": "agent", "id": agent_id}
+
+    async def _on_host_loop(self, coroutine: Awaitable[Any]) -> Any:
+        assert self.loop is not None
+        if asyncio.get_running_loop() is self.loop:
+            return await coroutine
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, self.loop))  # type: ignore[arg-type]
+
+    def cannot_ask(self, sender_agent: str) -> Optional[AskBlocked]:
+        """Why this process cannot sign a request for ``sender_agent`` now, or None (``agent_requests.cannot_ask``).
+
+        Read from any thread: it only reads the host's state. Waiting for the join or for the
+        agent's session clears by itself; a process on another contract never joins or opens
+        a session again, and a type no certificate can carry never gets one (module docstring).
+        """
+
+        if self._draining is not None or (self.host is not None and self.host.installation_contract is not None):
+            return AskBlocked("this process runs another message contract than its installation and is draining",
+                              clears=False)
+        if self.host is None or self.host.live is None or self._joined is None or not self._joined.is_set():
+            return AskBlocked("this process has not joined the team's messaging yet", clears=True)
+        sender = self.agents.get(sender_agent)
+        if sender is None:
+            return AskBlocked(f"agent {sender_agent} is not attached to this process's host yet", clears=True)
+        if sender.session is None:
+            if sender.refusal is not None and sender.refusal.code == TYPE_NOT_CERTIFIABLE_CODE:
+                return AskBlocked(f"agent {sender_agent} cannot have a session: {sender.refusal.message}",
+                                  clears=False)
+            return AskBlocked(f"agent {sender_agent} has no session yet", clears=True)
+        return None
+
+    async def agents_without_session(self) -> list[SessionlessAgent]:
+        """The agents the team's live hosts list as running without a session (their records' components).
+
+        Read on the host's loop, where the team's view is kept (``TeamAgents.host_components``);
+        callable from any loop. Empty before the view is read.
+        """
+
+        async def read() -> list[SessionlessAgent]:
+            if self.team_agents is None:
+                return []
+            return [SessionlessAgent(item.host, item.component, str(item.code), WITHOUT_SESSION_REASONS[str(item.code)])
+                    for item in self.team_agents.host_components() if item.code in WITHOUT_SESSION_REASONS]
+
+        return await self._on_host_loop(read())
+
+    def _sender_session(self, sender_agent: str) -> None:
+        blocked = self.cannot_ask(sender_agent)
+        if blocked is not None:
+            raise AgentUnreachable(blocked.reason, clears=blocked.clears)
+
+    async def ask(self, kind: str, body: Mapping[str, Any], target_agent: str, *, sender_agent: str,
+                  timeout: Optional[float] = None) -> dict[str, Any]:
+        """A request to another agent, signed as ``sender_agent``; the reply's body.
+
+        Raises ``AgentUnreachable`` when this process cannot send yet, and the live host's
+        ``ServiceUnavailable`` (nobody answered) or ``RequestRefused``.
+        """
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        reply = await self._on_host_loop(self.host.live.request(kind, body, self._agent_audience(target_agent),
+                                                                team=self.team, agent=sender_agent, timeout=timeout))
+        return dict(reply.raw["body"])
+
+    async def announce(self, kind: str, body: Mapping[str, Any], *, sender_agent: str) -> None:
+        """A team event, signed as ``sender_agent``."""
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        audience = {"installation": self.host.identity.installation, "team": self.team, "target": "team",
+                    "id": self.team}
+        await self._on_host_loop(self.host.live.publish(kind, body, audience, team=self.team, agent=sender_agent))
 
     def _audience(self) -> dict[str, str]:
         assert self.host is not None
@@ -515,6 +742,7 @@ class AgentProcessHost:
             # The process runs another contract: no new agent gets a session here (module docstring).
             await self._drain_one(hosted)
             return
+        self._sync_directory(hosted)
         await self._hold_session(hosted)
 
     async def _hold_session(self, hosted: _HostedAgent) -> None:
@@ -1093,20 +1321,6 @@ class AgentProcessHost:
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(work(), agent_loop))
 
 
-_PROCESS_HOST: Optional[AgentProcessHost] = None
-
-
-def configure_process_host(host: Optional[AgentProcessHost]) -> None:
-    """Set this process's host (``strands_main.py``); ``None`` when the launcher gave it no host id."""
-
-    global _PROCESS_HOST
-    _PROCESS_HOST = host
-
-
-def process_host() -> Optional[AgentProcessHost]:
-    return _PROCESS_HOST
-
-
 def agent_record_state(agent: Any) -> tuple[str, bool]:
     """The agent's state for its record: paused, busy or idle, and whether it accepts work.
 
@@ -1139,6 +1353,50 @@ def report_agent_state(agent: Any) -> None:
     except Exception:
         host.logger.warning("An agent's state could not be reported to its host. event=agent_state_report_failed "
                             "agent=%s", getattr(agent, "id", None), exc_info=True)
+
+
+def report_restored_work(agent: Any) -> Optional[asyncio.Task[None]]:
+    """After the agent restored its saved work (``UniversalAgent._connect_nats``): check what it delegated by name.
+
+    Starts one task on the agent's own loop and returns it at once: the task waits until
+    this process has read the team's view (``AgentProcessHost.view_read``), then fails each
+    of the agent's waiting by-name subtasks whose target left for good while it was down
+    (``custom_agents.team_directory.check_departed_targets``). Started by the agent, it
+    covers both orders: restored before the view is read, or after. Nothing without a host.
+    """
+
+    host = process_host()
+    if host is None:
+        return None
+    from custom_agents.team_directory import check_departed_targets
+
+    async def check() -> None:
+        team_agents = await host.view_read()
+        if team_agents is not None:
+            await check_departed_targets(agent, team_agents)
+
+    def done(task: asyncio.Task[None]) -> None:
+        _DEPARTURE_CHECKS.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            host.logger.error("An agent could not check its delegated work against agents that left while it was "
+                              "down; that work is left to the subtask watchdog. event=team_exit_recovery_failed "
+                              "agent=%s", getattr(agent, "id", None), exc_info=task.exception())
+
+    task = asyncio.get_running_loop().create_task(check(), name=f"departed_targets_{getattr(agent, 'id', '')}")
+    _DEPARTURE_CHECKS.add(task)  # held until it ends: a loop keeps only weak references to its tasks
+    task.add_done_callback(done)
+    return task
+
+
+async def _first_of(*events: asyncio.Event) -> None:
+    """Wait until any of ``events`` is set."""
+
+    waits = [asyncio.ensure_future(event.wait()) for event in events]
+    try:
+        await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for wait in waits:
+            wait.cancel()
 
 
 def agent_definition_sha256(agent: Any) -> str:
@@ -1199,6 +1457,7 @@ def process_host_for(runtime: str, layout: InstanceLayout, team: str, *, is_lead
     """
 
     from custom_agents.agent_catalog import load_agent_catalog
+    from custom_agents.live_controls import EVENT_HANDLERS, LIVE_CONTROL_HANDLERS
     from custom_agents.relayed_task_controls import RELAYED_HANDLERS
     from custom_transport.protocol1.joining import certificate_agent_types
     from installation_authority.expected_hosts import read_expected_hosts
@@ -1219,7 +1478,8 @@ def process_host_for(runtime: str, layout: InstanceLayout, team: str, *, is_lead
         profile = startup_agent_host_profile(team, runtime, agent_type)
     if profile.runtime != runtime:
         raise ValueError(f"the launcher named this host {runtime!r}, but its profile is {profile.runtime!r}")
-    return AgentProcessHost(layout, profile, team, handlers=dict(RELAYED_HANDLERS), catalog_types=catalog_types)
+    return AgentProcessHost(layout, profile, team, handlers={**RELAYED_HANDLERS, **LIVE_CONTROL_HANDLERS},
+                            event_handlers=dict(EVENT_HANDLERS), catalog_types=catalog_types)
 
 
 def lead_session_limit(pools: Any) -> int:

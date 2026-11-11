@@ -154,7 +154,6 @@ async def test_startup_finishes_manager_data_cleanups_after_recovery_before_read
     agent = startup_probe(tmp_path)
     agent.is_team_lead = is_team_lead
     agent.named_agent_type = "TeamArchitect" if is_team_lead else "Worker"
-    agent.process_broadcasts = False
     agent.user_name_postfix = "user"
     agent.user_queue_postfix = "user"
     agent._worker_ready = False
@@ -200,6 +199,54 @@ async def test_startup_finishes_manager_data_cleanups_after_recovery_before_read
     monkeypatch.setattr(agent_instantiation_service, "update_runtime_launch", mark_ready)
     with pytest.raises(SubscriptionProbeComplete):
         await agent._connect_nats()
+    agent._cleanup_nats_runtime_on_exit.assert_awaited_once()
+    await agent._presence_task
+
+
+@pytest.mark.asyncio
+async def test_startup_checks_work_delegated_by_name_only_after_restoring_it(tmp_path, monkeypatch):
+    """F2: the check against agents that left while this one was down starts after its saved work is restored."""
+
+    from custom_agents import agent_instantiation_service, agent_team_runtime, delegated_work_runtime
+    from custom_agents import orphaned_subtasks, strands_agent
+
+    agent = startup_probe(tmp_path)
+    agent.is_team_lead = False
+    agent.named_agent_type = "Worker"
+    agent.user_name_postfix = "user"
+    agent.user_queue_postfix = "user"
+    agent._worker_ready = False
+    agent._publish_presence_status = AsyncMock()
+    agent._presence_heartbeat_loop = AsyncMock()
+    agent._subscribe_type_queue = AsyncMock()
+    agent._scheduler_loop = AsyncMock()
+    events = []
+
+    async def recover():
+        events.append("recovered")
+
+    def restored(_agent):
+        assert _agent is agent and agent._worker_ready and events == ["recovered", "held_reported"]
+        raise SubscriptionProbeComplete()
+
+    agent._recover_runtime_after_restart = recover
+    agent._ensure_nats_transport_adapter = lambda: SimpleNamespace(
+        connect=AsyncMock(), subscribe_route=AsyncMock(), subscribe_subject=AsyncMock()
+    )
+    monkeypatch.setattr(strands_agent, "_subscribe_manager_control_route", AsyncMock())
+    monkeypatch.setattr(strands_agent, "install_custody_listeners", Mock())
+    monkeypatch.setattr(strands_agent, "schedule_pending_work", Mock())
+    monkeypatch.setattr(strands_agent, "report_agent_state", Mock())
+    monkeypatch.setattr(strands_agent, "report_restored_work", restored)
+    monkeypatch.setattr(orphaned_subtasks, "register_parent_end_stops", Mock())
+    monkeypatch.setattr(delegated_work_runtime, "register_delegated_task_endings", Mock())
+    monkeypatch.setattr(delegated_work_runtime, "report_held_delegated_tasks",
+                        AsyncMock(side_effect=lambda _agent: events.append("held_reported")))
+    monkeypatch.setattr(agent_instantiation_service, "update_runtime_launch", Mock())
+    monkeypatch.setattr(agent_team_runtime, "register_local_worker", Mock())
+    with pytest.raises(SubscriptionProbeComplete):
+        # Bounded: without the check, startup goes on to wait for the agent's exit.
+        await asyncio.wait_for(agent._connect_nats(), 10)
     agent._cleanup_nats_runtime_on_exit.assert_awaited_once()
     await agent._presence_task
 

@@ -21,7 +21,9 @@ from typing import AsyncIterator, Iterable
 import nats
 from nats.js.errors import NoKeysError, NotFoundError
 
-from custom_agents.agent_host import AgentProcessHost, configure_process_host, lead_host_profile
+from custom_agents.agent_host import AgentProcessHost, lead_host_profile
+from custom_agents.agent_requests import configure_process_host
+from custom_agents.live_controls import EVENT_HANDLERS, LIVE_CONTROL_HANDLERS
 from custom_agents.relayed_task_controls import RELAYED_HANDLERS
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
 from custom_transport.protocol1.host_runtime import MessageHost
@@ -83,7 +85,8 @@ async def protocol1_team(tmp_path: Path, team_id: str, agent_types: Iterable[str
         await authority.start(authority_nc, teams=[team_id])
         services = MessageHost(layout, services_profile, await _connect(stack, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services, team_id, stop))
-        host = AgentProcessHost(layout, lead_profile, team_id, handlers=dict(RELAYED_HANDLERS))
+        host = AgentProcessHost(layout, lead_profile, team_id, handlers={**RELAYED_HANDLERS, **LIVE_CONTROL_HANDLERS},
+                                event_handlers=dict(EVENT_HANDLERS))
         configure_process_host(host)
         try:
             yield host

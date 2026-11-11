@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_agents import agent_host
+from custom_agents import agent_host, agent_requests
 from tests.test_agent_host_sessions import _Answers, _hosted, _process
 
 
@@ -194,7 +194,7 @@ async def test_the_real_universal_agent_refresh_reports_its_state(monkeypatch):
 
     reports = []
     host = SimpleNamespace(report=lambda *args: reports.append(args))
-    monkeypatch.setattr(agent_host, "_PROCESS_HOST", host)
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", host)
     agent = UniversalAgent.model_construct(id="a1", named_agent_type="Researcher", name="Researcher", paused=True)
     agent._worker_ready = True
     agent._agent_state_store = None

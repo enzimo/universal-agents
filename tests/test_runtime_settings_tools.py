@@ -244,7 +244,7 @@ def test_lead_cannot_allow_automatic_manager_or_exceed_worker_ceiling(tmp_path):
             path="agent.schedule_workers.eligible_agent_types", value=["TeamArchitect"], target_scope="team"
         ))
         assert "change_id" not in denied
-        assert "automatic_manager_launch_forbidden" in denied["error"]
+        assert "manager_launch_forbidden" in denied["error"]
         plan = json.loads(plan_runtime_setting_change._tool_func(
             path="agent.schedule_worker_rules.claim_wait_seconds", value=60,
             target_scope="agent_type", target_agent_type="WebResearchAgent"
@@ -260,7 +260,7 @@ def test_lead_cannot_allow_automatic_manager_or_exceed_worker_ceiling(tmp_path):
 @pytest.mark.parametrize("invalid_type,reason", [
     ("UnknownWorker", "agent_definition_unavailable"),
     ("BlockedWorker", "agent_type_disallowed"),
-    ("TeamArchitect", "automatic_manager_launch_forbidden"),
+    ("TeamArchitect", "manager_launch_forbidden"),
 ])
 def test_worker_eligibility_rejects_invalid_additions(tmp_path, invalid_type, reason):
     path = _write_config(tmp_path)

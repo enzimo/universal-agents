@@ -10,6 +10,7 @@ from the queue's real state.
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import logging
 import tempfile
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_agents.delegated_work_runtime import delegated_tasks
+from custom_agents.team_directory import NAMED_AGENT_START_SECONDS, live_agent_status
 from custom_agents.structured_llm_messages import (
     DelegateTaskAction,
     StructuredAgentTurnDecision,
@@ -34,6 +36,7 @@ from custom_transport.base import TransportPublishOptions
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id
+from tests.protocol1_team_support import protocol1_team
 from live_nats_client import nats_transport_config_from_env
 from runtime_settings.schedule_workers import ScheduleWorkersConfig
 from runtime_settings.worker_pools import WorkerPoolsConfig
@@ -508,12 +511,27 @@ async def test_live_a_named_worker_gets_the_task_while_another_worker_is_free() 
             decision.actions[0].target_agent_name = workers[1].name
             agent_tasks = []
             connection = await _connect_nats(team_id)
+            # As under the launcher: the lead learns who is live from the team's agent records.
+            protocol1 = AsyncExitStack()
+            await protocol1.enter_async_context(protocol1_team(tmp_path, team_id, ("TeamArchitect", WORKER_TYPE)))
             try:
                 channel = await connection.channel()
                 user_queue = await channel.declare_queue(new_id("usr_direct"), durable=False, auto_delete=True)
+                started = asyncio.get_running_loop().time()
                 for worker in workers:
                     agent_tasks.append((worker, await _start_agent(worker)))
                 agent_tasks.append((manager, await _start_agent(manager)))
+                deadline = asyncio.get_running_loop().time() + 30
+                # What a by-name delegation waits for (custom_agents.team_directory.live_named_agent): the
+                # worker's record says it takes work, after its start and recovery, not only that it is there.
+                while live_agent_status(manager, WORKER_TYPE, workers[1].name) is None:
+                    assert asyncio.get_running_loop().time() < deadline, "the named worker never took work"
+                    await asyncio.sleep(0.1)
+                # It waits this long at most: here the process host also joins first, the slowest case.
+                appeared_after = asyncio.get_running_loop().time() - started
+                logging.getLogger(__name__).warning("A started worker took work in the lead's view after %.2f s. "
+                                                    "event=live_named_worker_appeared", appeared_after)
+                assert appeared_after < NAMED_AGENT_START_SECONDS
                 await _publish_envelope(channel, manager.id, _user_request(root_task_id, manager.id, user_queue.name))
 
                 answer = None
@@ -538,4 +556,5 @@ async def test_live_a_named_worker_gets_the_task_while_another_worker_is_free() 
                 assert idle_llm.invocations == []
             finally:
                 await _stop_agents(agent_tasks)
+                await protocol1.aclose()
                 await connection.close()

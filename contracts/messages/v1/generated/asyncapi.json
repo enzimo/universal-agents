@@ -1094,7 +1094,7 @@
             }
           ]
         },
-        "summary": "Stop an agent after its current step."
+        "summary": "Stop an agent after its current step. Only the team lead's session may ask, and never for its own agent; anyone else is answered not_allowed."
       },
       "agent_exit_reply": {
         "name": "agent.exit.reply",
@@ -1137,7 +1137,7 @@
             }
           ]
         },
-        "summary": "Pause one agent at its next safe point; it keeps its queued work."
+        "summary": "Pause one agent at its next safe point; it keeps its queued work. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed."
       },
       "agent_pause_reply": {
         "name": "agent.pause.reply",
@@ -1180,7 +1180,7 @@
             }
           ]
         },
-        "summary": "Resume a paused agent."
+        "summary": "Resume a paused agent. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed."
       },
       "agent_resume_reply": {
         "name": "agent.resume.reply",
@@ -5208,7 +5208,7 @@
             }
           ]
         },
-        "summary": "Whether the holder still has a task, asked by the watchdog."
+        "summary": "Whether the holder still has a task, asked by the watchdog of the agent that delegated it (any agent may delegate, so worker hosts send it too)."
       },
       "task_probe_reply": {
         "name": "task.probe.reply",

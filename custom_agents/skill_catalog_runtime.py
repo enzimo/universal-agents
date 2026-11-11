@@ -17,10 +17,7 @@ from custom_agents.sdk.strands.skills import (
     is_agent_skills_plugin,
     list_agent_skill_names,
 )
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-from custom_messages.enums import RoutingType
 from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 
 
@@ -282,60 +279,40 @@ async def publish_managed_skill_catalog_notification(
     *,
     operation: Literal["install", "uninstall"],
 ) -> ManagedSkillCatalogChangedV1:
-    """Publish a live all-agent reload hint after the receipt is durable."""
+    """Tell every agent of the team, after the receipt is durable (the ``skills.changed`` event).
+
+    Every agent process receives it once and hands it to each agent it runs
+    (``custom_agents.agent_host``); an agent that missed it picks the change up when it
+    is next asked for its status or at its next own catalog check.
+    """
+
+    from custom_agents.agent_requests import announce
 
     notification = build_managed_skill_catalog_notification(
         agent,
         result,
         operation=operation,
     )
-    envelope = MessageEnvelope(
-        msg_content=notification,
-        msg_header=MessageHeader(
-            from_agent_id=str(agent.id),
-            to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-            agent_signature="",
-            idempotency_key=notification.notification_id,
-        ),
-        msg_meta=MessageMeta(from_agent_name=str(agent.name)),
-    )
-    await agent._send_operational_message(envelope)
+    await announce(agent, "skills.changed", {
+        "operation": notification.operation,
+        "change_id": notification.change_id,
+        "skill_name": notification.skill_name,
+        "installed_tree_sha256": notification.installed_tree_sha256,
+    })
     return notification
 
 
-async def handle_managed_skill_catalog_notification(
+async def apply_managed_skill_catalog_change(
     agent: Any,
-    *,
     notification: ManagedSkillCatalogChangedV1,
-    msg_header: MessageHeader,
-    msg_meta: MessageMeta,
 ) -> bool:
-    """Verify and apply one authority-free team catalog reload hint."""
+    """Verify and apply one team catalog reload hint (the ``skills.changed`` event, ``custom_agents.live_controls``).
 
-    _ = msg_meta
+    The event's sender was checked to be the team lead's session; the hint carries no
+    authority, so the receipt it names is verified from this instance's storage first.
+    """
+
     agent_logger = getattr(agent, "_logger", logger)
-    if msg_header.from_agent_id != notification.source_agent_id:
-        agent_logger.warning(
-            "Rejected managed skill catalog notification with mismatched sender. "
-            "event=managed_skill_catalog_sender_rejected agent_id=%s source_agent_id=%s "
-            "header_from_agent_id=%s change_id=%s",
-            getattr(agent, "id", "unknown"),
-            notification.source_agent_id,
-            msg_header.from_agent_id,
-            notification.change_id,
-        )
-        return False
-    if notification.source_named_agent_type != TEAM_ARCHITECT_AGENT_TYPE:
-        agent_logger.warning(
-            "Rejected managed skill catalog notification from a non-manager type. "
-            "event=managed_skill_catalog_sender_type_rejected agent_id=%s "
-            "source_named_agent_type=%s change_id=%s",
-            getattr(agent, "id", "unknown"),
-            notification.source_named_agent_type,
-            notification.change_id,
-        )
-        return False
-
     mutation_key = _mutation_key(notification)
     seen = _seen_mutations(agent)
     if mutation_key in seen:
@@ -417,7 +394,7 @@ __all__ = [
     "SkillCatalogRefreshResult",
     "SkillCatalogRuntimeState",
     "build_managed_skill_catalog_notification",
-    "handle_managed_skill_catalog_notification",
+    "apply_managed_skill_catalog_change",
     "publish_managed_skill_catalog_notification",
     "refresh_agent_skill_catalog",
     "repair_agent_skill_catalog",

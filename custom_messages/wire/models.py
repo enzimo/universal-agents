@@ -1235,6 +1235,11 @@ class AgentExitReplyOk(WireModel):
     state: Literal['exiting', 'already_exiting']
 
 
+class AgentExitReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class AgentPauseBody(WireModel):
     request_id: RecordId
     reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
@@ -1247,6 +1252,11 @@ class AgentPauseReplyOk(WireModel):
 
 class AgentPauseReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class AgentPauseReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1264,6 +1274,11 @@ class AgentResumeReplyOk(WireModel):
 
 class AgentResumeReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class AgentResumeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -8959,11 +8974,11 @@ AccessReviewBodyAdapter = TypeAdapter(AccessReviewBody)
 AccessWithdrawBodyAdapter = TypeAdapter(AccessWithdrawBody)
 AccessWithdrawReplyAdapter = TypeAdapter(Annotated[Union[AccessWithdrawReplyOk, AccessWithdrawReplyNotFound, AccessWithdrawReplyNotOwnRequest], Field(discriminator='outcome')])
 AgentExitBodyAdapter = TypeAdapter(AgentExitBody)
-AgentExitReplyAdapter = TypeAdapter(Annotated[Union[AgentExitReplyOk], Field(discriminator='outcome')])
+AgentExitReplyAdapter = TypeAdapter(Annotated[Union[AgentExitReplyOk, AgentExitReplyNotAllowed], Field(discriminator='outcome')])
 AgentPauseBodyAdapter = TypeAdapter(AgentPauseBody)
-AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyAgentExiting], Field(discriminator='outcome')])
+AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyAgentExiting, AgentPauseReplyNotAllowed], Field(discriminator='outcome')])
 AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
-AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting], Field(discriminator='outcome')])
+AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting, AgentResumeReplyNotAllowed], Field(discriminator='outcome')])
 AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)

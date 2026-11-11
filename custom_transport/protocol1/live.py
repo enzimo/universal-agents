@@ -20,8 +20,9 @@ runs, and logged (``protocol1_reply_subject_refused``).
 
 Every frame is checked before a handler sees it; a handler receives only a
 ``VerifiedFrame``. Each request is checked and recorded as it arrives, then handled in
-a task of its own, so one slow handler does not hold the address (``serve``). Events
-and queued work are not sent here.
+a task of its own, so one slow handler does not hold the address (``serve``). An event
+(``publish``) is signed like a request and sent without a reply subject; whoever serves
+its address receives it and answers nothing. Queued work is not sent here.
 """
 
 from __future__ import annotations
@@ -323,6 +324,15 @@ class LiveHost:
             raise RuntimeError(f"The NATS connection's reply inbox {inbox.rsplit('.', 1)[0]} is not this host's own "
                                f"({expected[:-1]}); connect with NatsTransportConfig.reply_inbox_runtime.")
         self._inbox_checked = True
+
+    async def publish(self, kind: str, body: Mapping[str, Any], audience: Mapping[str, Any], *, team: str,
+                      agent: Optional[str] = None) -> None:
+        """Send an event (no reply); whoever serves its address receives it (``serve`` with no reply subject)."""
+
+        frame = self.sign(kind, body, audience, team=team, agent=agent)
+        data, headers = self.encode(frame)
+        await before_send()
+        await self.nc.publish(frame["subject"], data, headers=headers)
 
     # -- serving --------------------------------------------------------------------------------
 

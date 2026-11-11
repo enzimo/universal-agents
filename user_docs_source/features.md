@@ -491,6 +491,24 @@ decision stays up until it gets one; an access decision made while the agent
 restarted still reaches the task; and when a request ends, any work it handed to
 other agents stops too.
 
+When an agent leaves the team for good (it stops, or its process restarts after a
+crash), work that was sent to it by name and that it never started fails at once
+with a message saying so, so the agent that asked for it can decide what to do
+next: only that piece fails, and the rest of your request goes on. This also
+happens when the asking agent was itself restarted meanwhile: once it is back, it
+checks what it was waiting for. Work it had already started is not failed: a
+restarted agent picks it up from where it was saved, and work it handed back goes
+to another agent of the same kind. An agent that only stopped answering for a
+while is not given up on; its work is checked again later and times out as usual
+if it never comes back.
+
+The team lead can pause, resume or stop other agents. Only the team lead does
+this, never another agent, and never for itself: stopping the team lead would
+end its process without the approval a restart needs. The team has one lead: the
+team lead cannot start another TeamArchitect. When an agent's answer is
+lost, the team lead says it cannot tell whether the change happened, and checks
+the agent's state before asking again.
+
 A request that involves several agents is reported once, as your request.
 Administrators' notices name the kind of agent and what to check, never the
 text of your request. Stuck schedules are reported the same way (see
@@ -950,7 +968,10 @@ Restarting a supervised process is high risk because active work can be
 interrupted. Team Architect must stage an exact `manager`, `gateway`, or `all`
 plan first. The plan reports affected processes, the current task, tracked,
 runnable, and waiting counts, top-level task ids/states and delegated subtasks,
-plus team-visible active work for an `all` restart. Gateway session count is
+plus, for an `all` restart, what each other agent is running: Team Architect
+asks each one and waits a few seconds at most. If Team Architect cannot ask
+yet, for example just after it restarted, an `all` restart is refused with that
+reason; try again a minute later. Gateway session count is
 not visible to the agent, so the prompt states that connected sessions may
 need to reconnect rather than pretending the count is known.
 
@@ -960,13 +981,20 @@ chat). The request lists the tasks the restart may interrupt or delay: every
 task Team Architect holds, whether running, queued or waiting, and for an `all`
 restart also the work other agents are running. Work an agent does on a task
 Team Architect handed it counts as that task.
-The next plan step or a recovery task for that request is covered too.
+The next plan step or a recovery task for that request is covered too. An agent
+that did not answer is listed separately as not answering: what it is doing is
+unknown, and approving the restart means interrupting whatever that is. An agent
+that runs without a message session (the Status page explains why) cannot be
+asked at all; it is listed on a line of its own with the reason, and its work is
+unknown too.
 
 Your approval covers those tasks. Applying re-reads the running state first.
 If some listed tasks finished or changed state in the meantime, the restart
 still goes ahead. If a new task arrived that the restart would interrupt, such
 as another message or a scheduled run, the restart is refused and Team
-Architect must ask you again with a fresh plan that lists it. Approving a
+Architect must ask you again with a fresh plan that lists it. The same happens
+when an agent that answered no longer answers, or when an agent that did not
+answer turns out to be running a task that was not listed. Approving a
 settings change or a skill never approves a restart.
 
 The supervisor acts only on restart requests that record their approval: your

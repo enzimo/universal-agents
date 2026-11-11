@@ -63,8 +63,15 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
         await gateway.ready(timeout=20)
         reader = TeamAgents(gateway.host, TEAM, recheck_seconds=0.2)
-        changes: list[frozenset[str]] = []
-        reader.listen(changes.append)
+        changes: list[tuple[frozenset[str], frozenset[str]]] = []
+
+        def heard(changed: frozenset[str]) -> None:
+            # Which of them left saying so, read in the callback as listeners do.
+            exited = frozenset(agent for agent in changed
+                               if reader.agent(agent) is None and reader.departure_reason(agent) == "exiting")
+            changes.append((changed, exited))
+
+        reader.listen(heard)
         reading = asyncio.create_task(reader.run(stop))
         await asyncio.wait_for(reader.ready.wait(), timeout=10)
         assert reader.live() == {}
@@ -118,7 +125,8 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         await asyncio.wrap_future(leaving)
         assert written[-1] == "exiting"
         assert await records.read_report("agent", f"{TEAM}.researcher_1", now=agent_host.host.clock()) is None
-        assert any("researcher_1" in changed for changed in changes)
+        # It said it was leaving, so readers know it exited rather than went quiet.
+        assert any("researcher_1" in exited for _, exited in changes)
 
         # A host whose run stopped without closing: its next start removes the old agent's record.
         agent_host.attach(_agent("researcher_2", "Researcher-2"), agent_type="Researcher", definition=DEFINITION,
@@ -139,6 +147,8 @@ async def test_readers_see_an_agents_state_name_and_leaving_and_writes_are_space
         reader_clock = gateway.host.clock
         monkeypatch.setattr(gateway.host, "clock", lambda: reader_clock() + LIVENESS_LIFETIME + timedelta(seconds=1))
         await _until(lambda: reader.agent("researcher_3") is None, timeout=5)
+        # Gone quiet is not exited: nothing it was asked is given up for it.
+        assert not any("researcher_3" in exited for _, exited in changes)
         monkeypatch.setattr(gateway.host, "clock", reader_clock)
         await _until(lambda: reader.agent("researcher_3") is not None, timeout=5)
 

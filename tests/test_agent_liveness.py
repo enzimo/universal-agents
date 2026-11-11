@@ -32,10 +32,8 @@ from custom_agents.agent_liveness import (
     gone_owner_ids,
     own_process_identity,
     owner_liveness,
-    parse_utc,
     prune_departed_agent_rows,
     prune_departed_agent_rows_when_due,
-    received_status_time,
 )
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.orphaned_work_takeover import _orphaned_owners, take_over_orphaned_work
@@ -279,27 +277,12 @@ async def test_signal_exit_marks_own_row_exiting(team, monkeypatch):
     assert team._agent_state_store.get_by_id("agent_worker").is_exiting is True
 
 
-def new_lead(team):
-    """The parts of a lead that store received presence."""
-    team.known_agents = AgentStatusMap()
-    team._agent_id_by_name = {}
-    team._resolve_pending_agent_status_probes = lambda *args: None
-    return team
-
-
-async def receive(team, received: AgentStatus):
-    await UniversalAgent.handle_agent_status_message(
-        team, agent_status=received.model_copy(), msg_header=MessageHeader(from_agent_id=received.self_id), msg_meta=MessageMeta()
-    )
-
-
 @pytest.mark.asyncio
 async def test_new_lead_sees_startup_worker_alive_after_manager_restart(team, live_process, monkeypatch):
     held_work(team, owner=STARTUP, signed=True)
     startup = report(team, STARTUP, seen_ago=timedelta(seconds=15), identity=identity_of(live_process.pid))
     await run_exit_cleanup(exiting_agent(team, "old_lead", is_lead=True), monkeypatch)
-    # The new lead's presence subscription replays the startup agent's last status.
-    await receive(new_lead(team), startup)
+    # The startup agent's own row says it is alive; nobody else writes it (custom_agents.team_directory).
     assert team._agent_state_store.get_by_id(STARTUP).last_seen_at == startup.last_seen_at
     assert await take_over_orphaned_work(team, clock=1.0) == 0
     # A pool worker of the same type starting now leaves the work where it is.
@@ -364,30 +347,6 @@ async def test_the_lead_prunes_on_its_own_timer(team):
     assert await prune_departed_agent_rows_when_due(team, clock=161.0) == 1
 
 
-@pytest.mark.asyncio
-async def test_lead_stores_sender_last_seen(team, caplog):
-    sent = status(STARTUP, seen_ago=timedelta(seconds=45))
-    await receive(new_lead(team), sent)
-    stored = team._agent_state_store.get_by_id(STARTUP).last_seen_at
-    assert parse_utc(stored) == parse_utc(sent.last_seen_at)
-    # A status without its time is stored with the arrival time, and that is logged.
-    with caplog.at_level(logging.WARNING):
-        await receive(team, status("agent_untimed", seen_ago=None))
-    assert team._agent_state_store.get_by_id("agent_untimed").last_seen_at is not None
-    assert "event=agent_status_without_sent_time" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_replayed_snapshot_cannot_revive_dead_agent(team):
-    held_work(team, owner="crashed_startup", signed=True)
-    held_work(team, owner="crashed_worker", signed=True, task_id="work-2")
-    lead = new_lead(team)
-    await receive(lead, status("crashed_startup", identity=exited_identity()))
-    await receive(lead, status("crashed_worker", seen_ago=GONE_AFTER + timedelta(seconds=5)))
-    assert owner_liveness(team, "crashed_startup", purpose=TEST).evidence is OwnerEvidence.PROCESS_GONE
-    assert owner_liveness(team, "crashed_worker", purpose=TEST).evidence is OwnerEvidence.HEARTBEAT_STALE
-
-
 # -- startup takeover that loses a race ---------------------------------------------
 
 
@@ -428,36 +387,6 @@ async def test_startup_takeover_that_loses_a_race_reads_again_and_continues(team
     assert [info.task.task_id for info in rival.list_task_infos()] == ["work-1"]
 
 
-# -- the lead bounds and orders the times it stores ------------------------------
-
-
-@pytest.mark.asyncio
-async def test_a_sender_clock_ahead_is_capped_and_logged_when_it_starts_and_ends(team, caplog):
-    """A sender two days ahead stayed fresh and unpruned for two days."""
-    lead = new_lead(team)
-    with caplog.at_level(logging.INFO):
-        await receive(lead, status("skewed_worker", seen_ago=-timedelta(days=2)))
-        await receive(lead, status("skewed_worker", seen_ago=-timedelta(days=2)))
-        stored = parse_utc(team._agent_state_store.get_by_id("skewed_worker").last_seen_at)
-        await receive(lead, status("skewed_worker"))
-    assert stored <= datetime.now(timezone.utc)
-    assert caplog.text.count("event=agent_status_clock_ahead ") == 1
-    assert caplog.text.count("event=agent_status_clock_ahead_cleared") == 1
-    # The stored time is the arrival, so the agent ages out on the lead's clock.
-    arrived = datetime.now(timezone.utc) - GONE_AFTER * 2
-    capped = received_status_time(lead, status("skewed_worker", seen_ago=-timedelta(days=2)), now=arrived)
-    assert parse_utc(capped) == arrived
-
-
-@pytest.mark.asyncio
-async def test_a_delayed_older_status_cannot_overwrite_a_newer_row(team):
-    report(team, STARTUP, seen_ago=timedelta(seconds=5), exiting=True)  # the agent's own last write
-    await receive(new_lead(team), status(STARTUP, seen_ago=timedelta(seconds=25)))  # presence sent earlier
-    row = team._agent_state_store.get_by_id(STARTUP)
-    assert row.is_exiting is True
-    assert datetime.now(timezone.utc) - parse_utc(row.last_seen_at) < timedelta(seconds=20)
-
-
 @pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def status_repository(request, tmp_path):
     if request.param == "postgres":
@@ -468,25 +397,6 @@ def status_repository(request, tmp_path):
     else:
         config = {"backend": "sqlite", "sqlite": {"path": str(tmp_path / "status.db")}}
     return create_agent_state_repository(resolve_storage_settings(config))
-
-
-def test_a_received_status_is_written_only_when_newer(status_repository):
-    """One statement on both databases, whatever form the stored time text takes."""
-    agent_id = f"agent_{uuid4().hex}"
-
-    def at(text, *, exiting=False):
-        return status(agent_id, seen_ago=None, exiting=exiting).model_copy(update={"last_seen_at": text})
-
-    try:
-        assert status_repository.upsert_if_newer(at("2026-10-17T12:00:05+00:00")) is True
-        status_repository.upsert(at("2026-10-17T12:00:10.000001+00:00", exiting=True))
-        assert status_repository.upsert_if_newer(at("2026-10-17T12:00:09.999999+00:00")) is False
-        assert status_repository.get_by_id(agent_id).is_exiting is True
-        assert status_repository.upsert_if_newer(at("2026-10-17T12:00:11Z")) is True
-        row = status_repository.get_by_id(agent_id)
-        assert parse_utc(row.last_seen_at) == datetime(2026, 10, 17, 12, 0, 11, tzinfo=timezone.utc)
-    finally:
-        status_repository.remove(agent_id)
 
 
 # -- process identity stays between agents ----------------------------------------

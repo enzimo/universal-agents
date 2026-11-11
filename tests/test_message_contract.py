@@ -1087,6 +1087,28 @@ def test_edges_follow_the_kind_and_the_senders_role(kind: str, role: str, edge: 
     assert topology.edge_allowed(kind, "hub_and_spoke", role, edge, given_by_person=given_by_person) is allowed
 
 
+@pytest.mark.parametrize("name", sorted(topology.TOPOLOGIES))
+def test_a_tasks_requester_may_probe_its_holder_whatever_its_role(name: str) -> None:
+    """GEN-6, decision 70: worker hosts send task.probe, and every topology lets a worker's watchdog do so."""
+
+    assert "worker_host" in kinds.KINDS["task.probe"].senders
+    for role in ("lead", "worker"):
+        assert topology.edge_allowed("task.probe", name, role, "down") is True
+    # Only the requester's kinds: a worker still gives no other work down in hub and spoke.
+    if name == "hub_and_spoke":
+        assert topology.edge_allowed("agent.pause", name, "worker", "down") is False
+        assert topology.edge_allowed("task.answer", name, "worker", "down") is False
+    assert topology.edge_allowed("task.probe", name, "worker", "sideways") is False
+
+
+@pytest.mark.parametrize("kinds", [["task.no_such_kind"], ["task.result"]])
+def test_requester_kinds_name_kinds_that_are_sent_down(kinds: list[str]) -> None:
+    topologies = copy.deepcopy(EXPORT.load_yaml("team-topologies.yaml"))
+    topologies["requester_kinds"] = kinds
+    with pytest.raises(EXPORT.ContractError, match="requester_kinds names"):
+        EXPORT.check_registry(EXPORT.load_yaml("registry.yaml"), TRANSPORT, topologies, EXPORT.load_schemas())
+
+
 @pytest.mark.parametrize("kind", ["agent.resume", "agent.exit", "agent.status", "task.probe"])
 def test_a_kind_agent_hosts_send_to_an_agent_names_its_edges(kind: str) -> None:
     """The lead sends these to an agent's address, like agent.pause; none would skip the receiver's edge check."""

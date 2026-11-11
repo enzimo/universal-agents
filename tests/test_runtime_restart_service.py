@@ -4,7 +4,7 @@ The manager is a real ``TaskManager`` on SQLite and, with
 ``LIVE_TEST_POSTGRES_DSN``, PostgreSQL; the access store shares its database. It
 holds the request that asks for the restart (running), another person's
 request (waiting) and work the first one delegated to a specialist, who
-reports it in their status.
+reports it when the team lead asks for its status (``restart_team_support``).
 
 Covers: a restart pauses until a person approves the exact plan, then the
 supervisor accepts the request it writes, and its receipt tells the task that
@@ -12,7 +12,9 @@ asked for it what happened (with the approver's note); a denial returns the
 note; the approval covers the tasks the restart interrupts, so other state
 changes and tasks finishing keep it valid, while a new task the restart would
 interrupt is refused, writes nothing, returns the note, and a person is asked
-again; the supervisor refuses agent restart requests that record no approval.
+again, as is a specialist that stops answering; a specialist that does not
+answer is shown to the person as not answering; the supervisor refuses agent
+restart requests that record no approval.
 """
 
 from __future__ import annotations
@@ -33,9 +35,11 @@ from strands.interrupt import Interrupt, InterruptException
 
 from access_control.entities import PersonPrincipal
 from assistant_gateway.config import GatewayInstanceConfig
-from custom_agents import access_runtime
+from custom_agents import access_runtime, runtime_restart_service
+from custom_agents.agent_requests import configure_process_host
 from custom_agents.runtime_restart_service import (
     RuntimeRestartService,
+    TeamUnseen,
     resolve_runtime_restart_paths,
     restart_resume_directive,
     restarts_dispatched_for_task,
@@ -53,6 +57,7 @@ from docker.launch_headless import pop_runtime_restart_request
 from storage.config import StorageSettings
 from tests.broker_access_support import context_signer, context_verify_keys
 from tests.knowledge_support import BACKENDS, knowledge_storage
+from tests.restart_team_support import FakeTeam
 
 ROOT = Path(__file__).resolve().parents[1]
 CEDAR_BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -99,7 +104,7 @@ def _set_state(agent, task_id: str, state: ProgressState) -> None:
 
 
 def _specialist_status(*, current_task_id: str | None, deferred: int = 1) -> AgentStatus:
-    """The specialist's presence report, as the manager keeps it (``known_agents``)."""
+    """The specialist's own status, which it answers when the team lead asks."""
 
     return AgentStatus(
         status_type=MessageMetaType.RESPONSE,
@@ -115,12 +120,13 @@ def _specialist_status(*, current_task_id: str | None, deferred: int = 1) -> Age
         top_level_queue_depth=0,
         waiting_top_level_task_count=0,
         deferred_message_count=deferred,
-        last_seen_at=_now(),
     )
 
 
 def _report(agent, status: AgentStatus) -> None:
-    agent.known_agents.agent_map[SPECIALIST_ID] = status
+    """What the specialist answers the team lead from now on."""
+
+    agent.test_team.answer(SPECIALIST_ID, status)
 
 
 class _Call:
@@ -145,6 +151,8 @@ def _make_agent(
 
     monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
     access_runtime._runtime_access.cache_clear()
+    # The specialist's process answers within this; one that does not answer costs no longer.
+    monkeypatch.setattr(runtime_restart_service, "TEAM_STATUS_TIMEOUT_SECONDS", 0.5)
     root = tmp_path / "instance"
     config = GatewayInstanceConfig.create(
         instance_name="runtime-restart-test", instance_root=str(root), team_id=TEAM, timezone="UTC"
@@ -170,8 +178,12 @@ def _make_agent(
         bootstrap_config={"instance_root": str(root)},
         workspace_dir=str(config.workspace_path),
         task_manager=manager,
-        known_agents=SimpleNamespace(agent_map={}),
     )
+    # The team's live agents: the lead and the specialist, which answers the lead's status requests.
+    lead.test_team = FakeTeam()
+    lead.test_team.join(LEAD_ID, "TeamArchitect", "TeamArchitect", is_lead=True)
+    lead.test_team.join(SPECIALIST_ID, "Ada")
+    configure_process_host(lead.test_team)
     # The task that asks for the restart runs; another request waits for its
     # person; the first delegated part of its work to the specialist.
     _admit(lead, "task_restart")
@@ -187,6 +199,7 @@ def _make_agent(
     set_agent_ref(lead)
     yield lead
     set_agent_ref(None)
+    configure_process_host(None)
     access_runtime._runtime_access.cache_clear()
 
 
@@ -476,6 +489,53 @@ def test_the_person_sees_which_tasks_the_restart_interrupts(agent) -> None:
     )
 
 
+def test_the_person_sees_a_specialist_that_did_not_answer(agent) -> None:
+    agent.test_team.silence(SPECIALIST_ID)
+    plan = RuntimeRestartService(agent).stage(scope="all", reason="Load the new model settings")
+
+    proposal = RuntimeRestartService(agent).describe(plan["change_id"])
+
+    [specialist] = plan["impact_snapshot"]["known_team_agents"]
+    assert specialist["answered"] is False and specialist["is_executing"] is None
+    effect = "\n".join(proposal.effect)
+    assert "Tasks it may interrupt or delay (2), with their state when planned: task_restart (in_progress), " \
+        "task_waiting (waiting)." in effect
+    assert "Agents that did not answer when asked what they are running (1): Ada (agent_specialist). " \
+        "Their work is unknown" in effect
+    assert "If an agent that answered stops answering" in effect
+    assert proposal.summary.endswith("2 tasks may be interrupted or delayed; 1 agent did not answer or cannot be "
+                                     "asked, so its work is unknown.")
+    assert "Ada (agent_specialist)" in plan["user_impact_summary"]
+
+
+def test_a_specialist_that_stops_answering_needs_a_new_approval(agent) -> None:
+    plan = RuntimeRestartService(agent).stage(scope="all", reason="Reload")
+    call = _ask(agent, plan["change_id"])
+    _approve(agent, call)
+    agent.test_team.silence(SPECIALIST_ID)
+
+    result = _resume(agent, plan["change_id"], call)
+
+    assert result["status"] == "refused", result
+    assert "These agents do not answer now" in result["reason"] and "Ada" in result["reason"]
+    assert _published(agent) == []
+
+
+def test_an_all_restart_waits_while_the_team_cannot_be_seen(agent) -> None:
+    service = RuntimeRestartService(agent)
+    plan = service.stage(scope="all", reason="Reload")
+    configure_process_host(None)
+
+    status = service.status(plan["change_id"])
+
+    assert status["status"] == "pending" and status["still_applies"] is False
+    assert "cannot ask the team's other agents" in status["refusal_reason"]
+    with pytest.raises(TeamUnseen):
+        service.describe(plan["change_id"])
+    with pytest.raises(TeamUnseen):
+        service.stage(scope="all", reason="Reload")
+
+
 def test_a_long_task_list_stays_within_one_review_line(agent) -> None:
     """A busy manager (the example configuration allows 50 tasks) can still be restarted."""
 
@@ -696,3 +756,39 @@ with pytest.MonkeyPatch.context() as patch:
         assert service.status(plans["second"])["status"] == "dispatched"
         assert any(item.approval_note == "Reload the gateway too"
                    for item in restarts_dispatched_for_task(holder, "task_restart"))
+
+
+def _rewrite_as_schema_3(agent, change_id: str) -> None:
+    """The plan as 0.9 wrote it: schema 3, other agents without ``answered`` and with ``last_seen_at``."""
+
+    import os
+
+    path = resolve_runtime_restart_paths(agent).plans / f"{change_id}.json"
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    plan["schema_version"] = 3
+    for item in plan["impact_snapshot"]["known_team_agents"]:
+        item.pop("answered", None)
+        item["last_seen_at"] = None
+    os.chmod(path, 0o600)
+    path.write_text(json.dumps(plan), encoding="utf-8")
+
+
+def test_a_plan_staged_by_an_earlier_version_is_refused_in_plain_words(agent) -> None:
+    from custom_agents.runtime_restart_service import PLAN_FROM_OTHER_RELEASE, RestartPlanFromOtherRelease
+
+    service = RuntimeRestartService(agent)
+    plan = service.stage(scope="all", reason="Reload")
+    call = _ask(agent, plan["change_id"])
+    _rewrite_as_schema_3(agent, plan["change_id"])  # waiting in the Inbox at the upgrade
+    _approve(agent, call, note="ok")
+
+    result = _resume(agent, plan["change_id"], call)
+
+    assert result["status"] == "refused" and PLAN_FROM_OTHER_RELEASE in result["reason"]
+    for leak in ("validation error", "errors.pydantic.dev", "schema_version", "known_team_agents", "[type="):
+        assert leak not in result["reason"]
+    assert _published(agent) == []
+    for read in (service.status, service.describe, service.load_plan):
+        with pytest.raises(RestartPlanFromOtherRelease) as refused:
+            read(plan["change_id"])
+        assert str(refused.value) == PLAN_FROM_OTHER_RELEASE

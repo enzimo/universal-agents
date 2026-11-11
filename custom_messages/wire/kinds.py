@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '5e9f8436678f842d2b3667fed1f6e0d999996d8a1b40552e692a7fc73954dccd'
+CONTRACT_SHA256 = 'b33da5f60e92d4721ef7c0c1cce2ac6fa3d00d8e092baea80136ce2541dc8c40'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -35,6 +35,7 @@ COVERED_RECORD_KINDS = ('memory_fact', 'knowledge_page', 'schedule', 'objective'
 RETRY_OUTCOMES = frozenset(['not_started', 'record_busy', 'runtime_error', 'waiting'])
 HOST_ROLES = ('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler')
 TOPOLOGIES = {'hub_and_spoke': {'lead': ('down', 'person', 'out'), 'worker': ('up',)}, 'same_type_peers': {'lead': ('down', 'person', 'out'), 'worker': ('up', 'sideways')}, 'all_peers': {'lead': ('down', 'person', 'out', 'sideways'), 'worker': ('up', 'sideways')}, 'nested': {'lead': ('down', 'person', 'out'), 'worker': ('up', 'down')}}
+REQUESTER_KINDS = frozenset(['task.probe'])
 FRAME_SHAPE = {'properties': {'protocol': None, 'kind': None, 'message_id': None, 'idempotency_key': None, 'issuer': {'properties': {'installation': None, 'team': None, 'runtime': None, 'agent': None, 'session': None, 'membership_epoch': None, 'revocation_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None, 'target': None, 'id': None, 'runtime': None}}, 'subject': None, 'causation_id': None, 'issued_at': None, 'not_before': None, 'expires_at': None, 'authority': {'properties': {'token_id': None, 'issuer': {'properties': {'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}, 'audience': {'properties': {'installation': None, 'team': None}}, 'person': None, 'bound_to': {'properties': {'type': None, 'id': None}}, 'schedule_id': None, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'signature': None}}, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
 STATE_SHAPE = {'properties': {'record': None, 'protocol': None, 'key': None, 'writer': {'one_of': 'type', 'variants': {'authority': {'properties': {'type': None, 'installation': None, 'key_id': None}}, 'host': {'properties': {'type': None, 'installation': None, 'runtime': None, 'membership_epoch': None, 'key_id': None}}}}, 'sequence': None, 'issued_at': None, 'expires_at': None, 'algorithm': None, 'body_digest': None, 'body': None, 'signature': None}}
 
@@ -192,7 +193,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentExitBodyAdapter,
         reply_model=models.AgentExitReplyAdapter,
-        reply_errors=(),
+        reply_errors=('not_allowed',),
         senders=('lead_host',),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -210,7 +211,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.pause': KindSpec(
@@ -221,7 +222,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentPauseBodyAdapter,
         reply_model=models.AgentPauseReplyAdapter,
-        reply_errors=('agent_exiting',),
+        reply_errors=('agent_exiting', 'not_allowed'),
         senders=('lead_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -239,7 +240,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.resume': KindSpec(
@@ -250,7 +251,7 @@ KINDS: dict[str, KindSpec] = {
         idempotency=('/audience/id', '/body/request_id'),
         body_model=models.AgentResumeBodyAdapter,
         reply_model=models.AgentResumeReplyAdapter,
-        reply_errors=('agent_exiting',),
+        reply_errors=('agent_exiting', 'not_allowed'),
         senders=('lead_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
@@ -268,7 +269,7 @@ KINDS: dict[str, KindSpec] = {
         wakes_model='never',
         rendering='none',
         body_shape={'properties': {'request_id': None, 'reason': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None}}, 'agent_exiting': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'agent.status': KindSpec(
@@ -3180,7 +3181,7 @@ KINDS: dict[str, KindSpec] = {
         body_model=models.TaskProbeBodyAdapter,
         reply_model=models.TaskProbeReplyAdapter,
         reply_errors=(),
-        senders=('lead_host', 'team_services'),
+        senders=('lead_host', 'worker_host', 'team_services'),
         senders_by_target={},
         receivers=('lead_host', 'worker_host'),
         expiry_seconds=30,

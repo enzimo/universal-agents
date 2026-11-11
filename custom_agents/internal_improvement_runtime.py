@@ -657,7 +657,14 @@ async def check_schedules_for_maintenance(agent: Any, schedule_id: str) -> str:
 
 
 async def ensure_maintenance_worker(agent: Any, schedule: ScheduledMessage, occurrence_key: str) -> bool:
-    """Use the timer's trusted owner when the manager has no current chat task."""
+    """Whether a maintenance worker runs, or was started now: the occurrence may then be sent.
+
+    A live worker of the type in the team's records is enough. Otherwise the lead starts one,
+    as the timer's trusted owner when the manager has no current chat task, and a launch
+    that is ready, starting or waiting counts: the occurrence goes to the type's shared queue,
+    which holds it until the new worker takes it (ADR-019). Nothing waits for the worker's
+    record here; before step 7b a status probe right after the launch usually missed it.
+    """
     from custom_agents.agent_instantiation_service import AgentInstantiationService
     from custom_agents.schedule_store import owner_canonical_user_id_for_schedule
 
@@ -683,4 +690,9 @@ async def ensure_maintenance_worker(agent: Any, schedule: ScheduledMessage, occu
             schedule.schedule_id, result.reason,
         )
         return False
-    return await agent._probe_live_named_agent_type(INTERNAL_IMPROVEMENT_AGENT_TYPE) is not None
+    agent._logger.info(
+        "A maintenance worker was started; the occurrence waits in its type's queue for it. "
+        "event=internal_improvement_worker_started schedule_id=%s launch_status=%s",
+        schedule.schedule_id, result.status,
+    )
+    return True

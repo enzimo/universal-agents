@@ -12,7 +12,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from assistant_gateway.message_host import GATEWAY_RUNTIME, GatewayMessageHost, gateway_profile
-from custom_agents.agent_host import AgentProcessHost, configure_process_host, startup_agent_host_profile
+from custom_agents.agent_host import AgentProcessHost, startup_agent_host_profile
+from custom_agents.agent_requests import configure_process_host
 from custom_agents.relayed_task_controls import RELAYED_HANDLERS
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1

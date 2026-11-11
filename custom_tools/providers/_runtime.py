@@ -15,10 +15,6 @@ from custom_agents.task_manager_objectives import ObjectiveSaveFailed
 from custom_agents.schedule_store import (
     ScheduleStore,
 )
-from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, RoutingType
 from id_generation import (
     new_id,
 )
@@ -31,33 +27,89 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# The control kinds; the tool waits a little longer than their request, so the request's own deadline ends first.
+CONTROL_KINDS = {"pause": "agent.pause", "resume": "agent.resume", "exit": "agent.exit"}
+CONTROL_WAIT_MARGIN_SECONDS = 5.0
+
+
+def control_reply_seconds() -> float:
+    """How long a control request may take: its kind's lifetime in the contract.
+
+    Read when needed: the contract's generated models cost command-line processes that
+    import the tools half a second (``tests/test_gateway_message_host.py``).
+    """
+
+    from custom_messages.wire.kinds import KINDS
+
+    return float(max(KINDS[kind].expiry_seconds for kind in CONTROL_KINDS.values()))
+_CHECK_AGAIN = "Check its state with query_agent_state(live=true) before asking again."
+
+
+def _is_self(agent: "UniversalAgent", target_agent: str, target_id: str) -> bool:
+    own = {str(agent.id), str(getattr(agent, "name", "") or "")} - {""}
+    return target_id == str(agent.id) or target_agent in own
+
+
 async def _send_control_instruction_payload(
     agent: "UniversalAgent", target_agent: str, instruction: str
 ) -> str:
-    routing_key = agent._agent_id_by_name.get(target_agent, target_agent)
-    target_is_known_name = target_agent in agent._agent_id_by_name
-    envelope = MessageEnvelope(
-        msg_content=ControlInstruction(
-            type=ControlType.CONTROL_MSG,
-            instruction=Instruction(instruction=instruction),
-        ),
-        msg_meta=MessageMeta(
-            from_agent_name=agent.name,
-            to_agent_name=target_agent if target_is_known_name else None,
-        ),
-        msg_header=MessageHeader(
-            from_agent_id=agent.id,
-            to_routing_path=RoutingType.ALL_AGENTS_ROUTE
-            if target_is_known_name
-            else routing_key,
-            agent_signature="",
-        ),
-    )
-    if hasattr(agent, "_send_operational_message"):
-        await agent._send_operational_message(envelope)
-    else:
-        await agent.team_comms.send_message(message=envelope, routing_key=routing_key)
-    return routing_key
+    """Pause, resume or stop another agent (``agent.pause``, ``.resume``, ``.exit`` to its address).
+
+    ``target_agent`` is the agent's name or id; names come from the team's agent records
+    (``custom_agents.team_directory``). Returns what happened, in words, and says when the
+    outcome is unknown: no answer within the request's lifetime, or a refusal after the
+    handler started (``handler_failed``), may still be followed by the change. The calling
+    agent itself is refused without sending: no agent pauses, resumes or stops itself
+    this way (the team lead's own stop would end the manager without the approval a
+    restart needs).
+    """
+
+    from custom_agents.agent_requests import AgentUnreachable, ask_agent
+    from custom_messages.wire.refusals import HANDLER_FAILED
+    from custom_transport.protocol1.live import NO_RESPONDERS, RequestRefused, ServiceUnavailable
+    from id_generation import new_id
+
+    target_id = agent._agent_id_by_name.get(target_agent, target_agent)
+    if _is_self(agent, target_agent, target_id):
+        logger.warning("An agent asked to control itself; nothing was sent. event=agent_control_self_refused "
+                       "agent_id=%s instruction=%s", agent.id, instruction)
+        restart = (" To restart the manager, plan a restart with plan_runtime_restart."
+                   if instruction == "exit" else "")
+        return f"{target_agent} is you: an agent does not {instruction} itself with this tool. Nothing was sent.{restart}"
+    kind = CONTROL_KINDS[instruction]
+    reply_seconds = control_reply_seconds()
+
+    def unknown(why: str, error: BaseException) -> str:
+        logger.warning("An agent control's outcome is unknown. event=agent_control_outcome_unknown agent_id=%s "
+                       "target=%s instruction=%s error_type=%s error=%s", agent.id, target_id, instruction,
+                       type(error).__name__, error)
+        return f"{target_agent} {why}, so whether it will {instruction} is unknown. {_CHECK_AGAIN}"
+
+    def unchanged(why: str, error: BaseException) -> str:
+        logger.warning("An agent control was not carried out. event=agent_control_unanswered agent_id=%s target=%s "
+                       "instruction=%s error_type=%s error=%s", agent.id, target_id, instruction,
+                       type(error).__name__, error)
+        return f"{target_agent} {why}; nothing was changed there."
+
+    try:
+        reply = await ask_agent(agent, kind, {"request_id": new_id("agent_control")}, target_id,
+                                timeout=reply_seconds)
+    except AgentUnreachable as error:
+        return unchanged(f"could not be asked ({error})", error)
+    except ServiceUnavailable as error:
+        if error.reason == NO_RESPONDERS:
+            return unchanged("is not reachable (nothing serves its address)", error)
+        return unknown(f"did not answer within {reply_seconds:g} seconds", error)
+    except RequestRefused as error:
+        if error.code == HANDLER_FAILED:
+            return unknown("started handling the request but failed", error)
+        return unchanged(f"refused the request ({error.code})", error)
+    except Exception as error:  # noqa: BLE001 - such as a reply that fails verification: it may have been handled
+        return unknown("gave an answer that could not be read", error)
+    outcome = reply.get("outcome")
+    if outcome != "ok":
+        return f"{target_agent} did not {instruction}: {reply.get('message') or outcome}. Nothing was changed there."
+    return f"{target_agent}: {str(reply.get('state', 'done')).replace('_', ' ')}."
 
 
 def _on_event_loop_thread() -> bool:
@@ -88,7 +140,7 @@ def _refuse_tool_send(agent: "UniversalAgent", coroutine: Any, reason: str) -> N
 
 def _run_agent_coroutine(
     agent: "UniversalAgent", coroutine: Any, *, timeout: float = 15.0
-) -> None:
+) -> Any:
     """Run an agent coroutine from a sync tool's worker thread and wait for it.
 
     Strands runs sync tools in a worker thread, so a send has finished, or
@@ -113,7 +165,7 @@ def _run_agent_coroutine(
     # The tool shows these errors' text to the model, so each says why plainly
     # (a bare TimeoutError or CancelledError prints as an empty string).
     try:
-        future.result(timeout=timeout)
+        return future.result(timeout=timeout)
     except TimeoutError:
         future.cancel()
         logger.warning(
