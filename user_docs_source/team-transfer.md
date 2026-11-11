@@ -250,8 +250,8 @@ Before importing, set these on the new instance:
 
 1. `TEAM_LOCAL_NATS_ENABLED=false`, in its `team.env` or its environment (for
    Docker, the container's). Without it, the new instance starts its own NATS
-   server and stops using the external server. The import does not warn about
-   this; only the export does.
+   server and stops using the external server. The import names this setting
+   only when it refuses the user and password; otherwise only the export does.
 2. If the old instance set the server's address or credentials file in
    `team.env` or its environment, the same `NATS_URL`, `NATS_SERVERS` or
    `NATS_CREDENTIALS_FILE` in the new `team.env`. Put the file
