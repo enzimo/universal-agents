@@ -4294,7 +4294,16 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   `team.env` travel encrypted in the file. The broker's stored credentials are
   encrypted and stored again by the broker itself, through two routes only the
   `operator` caller (`access_control.caller_tokens`) may use; the command never
-  holds those values.
+  holds those values. Generated secrets stay behind, except an external NATS
+  server's user and password: they travel when the instance's own settings
+  (saved `instance_config.yaml` plus `team.env`, or the environment with
+  environment secrets) name an external server. The export command's shell
+  does not decide, because it may hold variables the instance never used. The
+  server's address from `team.env` or the environment and the image's
+  `TEAM_LOCAL_NATS_ENABLED` switch do not travel yet, so the export names what
+  the new instance needs and the import refuses the login, with the steps,
+  while the new instance's settings name a local server. One shared decision of
+  local or external NATS that travels with the transfer is a proposed follow-up.
 
 Transfer confidence relies primarily on integration tests with real repositories
 and HTTP routes, plus a process-level CLI/broker round trip. Parser tests and

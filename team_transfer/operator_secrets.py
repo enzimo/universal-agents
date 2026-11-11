@@ -6,8 +6,26 @@ What travels (owner's decision 2026-10-05: credentials move with the team):
   supplied, from ``team.env`` or the environment (chat channel tokens, model
   key overrides, password-manager and cloud settings). Internally generated
   values (``internal_credentials.INTERNAL_ENV_KEYS``: signing keys, the broker
-  token, NATS and database credentials, collector tokens) are not carried: the
-  new instance generates its own, and its database is a new one;
+  token, a local NATS server's login, database credentials, collector tokens)
+  are not carried: the new instance generates its own, and its database is a
+  new one;
+- the NATS user and password (``NATS_USER``, ``NATS_PASSWORD``) only when the
+  instance's own settings say its NATS server is external: they name only
+  non-local servers or set ``NATS_CREDENTIALS_FILE``
+  (``should_generate_internal_nats_credentials``). Its own settings are the
+  saved ``instance_config.yaml`` plus ``team.env``, or the environment with
+  ``environment`` secrets (``_saved_config``, ``_environment``); with
+  ``env_file`` secrets the export command's own environment does not decide.
+  An external server's login is the operator's, so it
+  travels; a local server's is made anew. The server's address travels only
+  when ``instance_config.yaml`` names it (with the settings section).
+  ``NATS_URL``, ``NATS_SERVERS`` or ``NATS_CREDENTIALS_FILE`` from ``team.env``
+  or the environment do not travel, nor does the image's local-server switch
+  ``TEAM_LOCAL_NATS_ENABLED`` (a proposed follow-up: one shared decision of
+  local or external NATS that travels). So the export prints what the new
+  instance needs whenever it carries the login (``_keep_server_sentence``),
+  and the import refuses the login, with the steps, while the new instance's
+  settings name a local server (``_generated_reason``);
 - the model-provider sign-in files ``auth/openai_codex_auth.json`` and
   ``auth/xai_oauth_auth.json``. Their refresh tokens rotate, so the old
   instance must stop right after the export (the export says so).
