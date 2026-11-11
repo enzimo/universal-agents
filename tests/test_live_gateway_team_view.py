@@ -59,10 +59,6 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
     lead_profile = lead_host_profile(TEAM, ("TeamArchitect", "Researcher"), 2)
     worker_profile = startup_agent_host_profile(TEAM, WORKER_RUNTIME, "Researcher")
     statuses: list[AgentStatus] = []
-    leads: list[AgentStatus] = []
-
-    async def on_lead(status: AgentStatus) -> None:
-        leads.append(status)
 
     def latest(agent_id: str) -> AgentStatus | None:
         return next((status for status in reversed(statuses) if status.self_id == agent_id), None)
@@ -75,10 +71,10 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
         gateway = GatewayMessageHost(layout, TEAM)
         view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: statuses.append(status),
-                               on_lead=on_lead, details_seconds=0.3)
+                               details_seconds=0.3)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
-        assert await view.wait_ready(20)
+        await _until(view.ready.is_set)
 
         lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True)
         worker = stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False)
@@ -93,23 +89,23 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
                            nc=await connect(stack, broker, WORKER_RUNTIME), state=("idle", True))
 
-        # The lead's record reaches the manager client's path; both members reach the Team page's records.
-        await _until(lambda: any(status.self_id == "lead_1" and not status.is_exiting for status in leads))
-        assert leads[-1].is_team_lead and leads[-1].named_agent_type == "TeamArchitect"
+        # The lead's record reaches the view the lead follower reads; both members reach the Team page's records.
+        await _until(lambda: "lead_1" in view.live())
+        assert view.live()["lead_1"].is_lead and view.live()["lead_1"].agent_type == "TeamArchitect"
         await _until(lambda: latest("worker_1") is not None)
         assert (latest("worker_1").name, latest("worker_1").is_team_lead) == ("Researcher-1", False)
         # What only the agent can say (its skills) arrives once the gateway asks it.
         await _until(lambda: latest("worker_1").available_skills == ["grill-me"], timeout=10)
-        assert view.lead().agent == "lead_1" and view.live_ids() == {"lead_1", "worker_1"}
+        assert view.live_ids() == {"lead_1", "worker_1"}
 
         # A worker becoming busy is shown as it happens.
         worker_host.report("worker_1", "busy", True)
         await _until(lambda: latest("worker_1").is_executing, timeout=5)
 
-        # The lead leaves: the manager client hears it, so the gateway marks it unavailable.
+        # The lead leaves: it is gone from the view, and the Team page shows it leaving.
         await lead_host.stop()
-        await _until(lambda: leads[-1].self_id == "lead_1" and leads[-1].is_exiting)
-        assert view.lead() is None
+        await _until(lambda: "lead_1" not in view.live())
+        assert latest("lead_1").is_exiting and view.departure_reason("lead_1") == "exiting"
 
         await worker_host.stop()
         await gateway.close()
@@ -134,11 +130,10 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
         gateway = GatewayMessageHost(layout, TEAM)
-        view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: None, on_lead=AsyncMock(),
-                               details_seconds=30)
+        view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: None, details_seconds=30)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
-        assert await view.wait_ready(20)
+        await _until(view.ready.is_set)
 
         async def no_keys() -> dict:
             return {"endpoints": []}
@@ -209,17 +204,12 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
         gateway = GatewayMessageHost(layout, TEAM)
-        leads: list[AgentStatus] = []
         shown: list[AgentStatus] = []
-
-        async def on_lead(status: AgentStatus) -> None:
-            leads.append(status)
-
         view = GatewayTeamView(TEAM, on_status=lambda status, reported_at, source: shown.append(status),
-                               on_lead=on_lead, details_seconds=30)
+                               details_seconds=30)
         gateway.observe_team(view)
         gateway.start(await connect(stack, broker, GATEWAY_RUNTIME))
-        assert await view.wait_ready(20)
+        await _until(view.ready.is_set)
 
         async def no_keys() -> dict:
             return {"endpoints": []}
@@ -237,13 +227,14 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
                                      drain_agent=keeps, holds_work=holds)
         lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
                          definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
-        await _until(lambda: view.lead() is not None and leads and not leads[-1].is_exiting)
+        await _until(lambda: "lead_1" in view.live())
 
         assert lead_host.host is not None
         run_on_another_contract(lead_host.host)
         await lead_host.host.report_now()
-        await _until(lambda: leads[-1].is_exiting)  # for the manager client: unavailable, no chats
-        assert view.lead() is None and view.live_ids() == {"lead_1"}
+        # The lead follower then marks it unavailable (no chats); it stays live, so its tasks' commands reach it.
+        await _until(lambda: view.live()["lead_1"].other_contract == OTHER_CONTRACT)
+        assert view.live_ids() == {"lead_1"}
         assert shown[-1].self_id == "lead_1" and shown[-1].accepting_work is False and not shown[-1].is_exiting
         found = [finding for finding in (await page.report()).findings
                  if finding.finding_id == f"host_other_contract:{LEAD_HOST_RUNTIME}"]

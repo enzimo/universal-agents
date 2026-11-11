@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -143,14 +144,9 @@ class Running:
         monkeypatch.setattr(team_view, "TeamAgents", reader)
         self.reader, self.host = reader, host
         self.statuses: list[AgentStatus] = []
-        self.leads: list[AgentStatus] = []
-
-        async def on_lead(status: AgentStatus) -> None:
-            self.leads.append(status)
-
         options.setdefault("restart_seconds", (0.01, 0.05))
         self.view = GatewayTeamView(TEAM, on_status=lambda status, at, source: self.statuses.append(status),
-                                    on_lead=on_lead, **options)
+                                    **options)
         self.stop = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
 
@@ -235,18 +231,17 @@ async def test_a_departure_is_logged_with_its_reason(monkeypatch, caplog) -> Non
 
 @pytest.mark.asyncio
 async def test_a_reader_that_stops_and_starts_again_is_no_departure(monkeypatch) -> None:
-    """Nobody left when only the reader stopped: no member is shown leaving and the lead's route is not touched."""
+    """Nobody left when only the reader stopped: no member is shown leaving (the lead's route: the follower tests)."""
 
     reader = Reader()
     async with Running(monkeypatch, reader, Host(), details_seconds=30) as running:
         await until(lambda: running.view.ready.is_set())
         reader.publish(member("lead_1", lead=True), member("worker_1"))
-        await until(lambda: len(running.leads) == 1)
+        reader.found = (member("lead_1", lead=True), member("worker_1"))
         reader.crash.set()
         await until(lambda: reader.runs == 2 and running.view.ready.is_set())
-        reader.publish(member("lead_1", lead=True), member("worker_1"))
-        await until(lambda: len(running.leads) == 2)
-        assert not any(status.is_exiting for status in running.statuses + running.leads)
+        assert [status.self_id for status in running.statuses] == ["lead_1", "worker_1"] * 2
+        assert not any(status.is_exiting for status in running.statuses)
 
 
 # -- the lead follower (TeamLeadFollower) ---------------------------------------------------------------
@@ -271,12 +266,11 @@ class Following:
         self.writes: list[Optional[str]] = []
         self.available: list = []
         self.unavailable: list = []
-        self.now = [datetime(2026, 11, 11, 10, 0, tzinfo=timezone.utc)]
         self.client = GatewayManagerClient(
             settings=GatewayManagerClientSettings(instance_name="test", user_display_name="Test", team_id=TEAM,
                                                   manager_named_agent_type="TeamArchitect",
                                                   response_route="test_gateway_response", initial_manager_id=saved),
-            clock=SimpleNamespace(now_utc=lambda: self.now[0]), id_generator=SimpleNamespace(),
+            id_generator=SimpleNamespace(),
             logger=logging.getLogger("test.gateway.lead_follower"), write_manager_route=self.writes.append,
             on_manager_available=self.available.append, on_manager_unavailable=self.unavailable.append)
         self.waiting = Waiting()
@@ -355,16 +349,18 @@ async def test_records_read_after_the_start_limit_still_correct_a_dead_route(mon
 
 
 @pytest.mark.asyncio
-async def test_a_clock_that_steps_back_cannot_hold_a_lead_back(monkeypatch) -> None:
-    """Review F12: the route follows the records' state, never wall-clock stamps."""
+async def test_a_lead_whose_record_is_older_than_the_unavailable_mark_is_still_followed(monkeypatch) -> None:
+    """Review F12: after the wall clock stepped back, a lead's arrival carried an older time than the unavailable
+    mark and was dropped as stale. The lead path compares no times now (the manager client keeps no clock); a
+    record dated an hour before the mark is followed."""
 
     reader = Reader()
     async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
         await following.follower.start(limit=0.05)
         following.follow()
         assert following.client.manager_id is None
-        following.now[0] -= __import__("datetime").timedelta(hours=1)  # NTP steps the clock back
-        reader.publish(member("lead_1", lead=True))
+        older = member("lead_1", lead=True)
+        reader.publish(TeamAgent(**{**older.__dict__, "since": older.since - timedelta(hours=1)}))
         await until(lambda: following.client.manager_id == "lead_1")
 
 
@@ -467,3 +463,199 @@ async def test_a_lead_that_leaves_while_the_reader_starts_again_is_seen_gone(mon
         expected = [("available", "lead_1", True)] + ([] if lead_stays else [("unavailable", "lead_1", False)])
         assert sorted(following.transitions()) == sorted(expected)
 
+
+
+# -- the gateway's own start-up and wiring (UserGateway) ------------------------------------------------
+
+
+class GatewayHost:
+    """Stands in for GatewayMessageHost: once 'joined' it runs the gateway's team view on a stand-in host, or it
+    reports a refused join to the view as the real one does."""
+
+    def __init__(self, refusal: Optional[tuple[str, str]] = None) -> None:
+        self.team_view: Optional[GatewayTeamView] = None
+        self.refusal = refusal
+        self.stop = asyncio.Event()
+        self.task: Optional[asyncio.Task] = None
+
+    def observe_team(self, view: GatewayTeamView) -> None:
+        self.team_view = view
+
+    def start(self) -> None:
+        assert self.team_view is not None
+        self.team_view.joining()
+        if self.refusal is not None:
+            self.team_view.refuse(*self.refusal)
+            return
+        self.stop = asyncio.Event()
+        self.task = asyncio.create_task(self.team_view.run(Host(), self.stop))
+
+    async def close(self) -> None:
+        self.stop.set()
+        if self.task is not None:
+            await asyncio.wait_for(self.task, timeout=2)
+
+
+def _gateway(tmp_path, monkeypatch, reader: Reader, *, saved: Optional[str] = "manager_1234",
+             refusal: Optional[tuple[str, str]] = None, start_limit: float = 5.0):
+    """A UserGateway whose runtime has a message host, as the gateway service's has
+    (``NatsGatewayManagerRuntime.for_gateway_service``); its transitions are recorded as the manager client
+    hands them on."""
+
+    from assistant_gateway.gateway import UserGateway
+    from assistant_gateway.store import GatewayStateStore
+    from tests.test_gateway_phase1 import _build_test_config, _FakeGatewayManagerRuntime
+
+    class HostedRuntime(_FakeGatewayManagerRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connected = False
+            self.message_host = GatewayHost(refusal)
+
+        async def connect(self, **_kwargs: Any) -> None:
+            self.connected = True
+            self.message_host.start()
+
+        async def close(self) -> None:
+            await self.message_host.close()
+            self.connected = False
+
+    monkeypatch.setattr(team_view, "TeamAgents", reader)
+    monkeypatch.setattr(team_view, "LEAD_START_SECONDS", start_limit)
+    config = _build_test_config(tmp_path)
+    config.manager.manager_agent_id = saved
+    delivered: list = []
+    gateway = UserGateway(config, output_sink=None, event_sink=delivered.append,
+                          state_store=GatewayStateStore(str(tmp_path / "state.db")), manager_runtime=HostedRuntime())
+    seen: list[tuple] = []
+    hooks: list[str] = []
+
+    async def available(transition) -> None:
+        seen.append(("available", transition.manager_id, transition.became_available))
+        await gateway.manager_transitions.handle_available(transition)
+
+    async def unavailable(transition) -> None:
+        seen.append(("unavailable", transition.manager_id))
+        await gateway.manager_transitions.handle_unavailable(transition)
+
+    gateway._manager_client.bind_inbound_handlers(on_unsolicited=gateway.inbound_messages.handle,
+                                                  on_manager_available=available,
+                                                  on_manager_unavailable=unavailable)
+    gateway.manager_transitions.set_hooks(on_manager_unavailable=lambda: hooks.append("pause"),
+                                          on_manager_available=lambda: hooks.append("resume"))
+    gateway._maintenance_schedules.ensure_all = AsyncMock()
+    return gateway, SimpleNamespace(seen=seen, hooks=hooks, delivered=delivered)
+
+
+async def _publish_when_read(reader: Reader, *members: TeamAgent) -> None:
+    """The lead writes its record a moment after the gateway has read the team's records (a normal start)."""
+
+    await until(reader.ready.is_set)
+    await asyncio.sleep(0.05)
+    reader.publish(*members)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved", ["lead_from_last_run", None])
+async def test_a_normal_team_start_routes_to_the_lead_with_no_unavailable_notice_or_pause(tmp_path, monkeypatch,
+                                                                                          saved) -> None:
+    """Review F5 through the gateway's own start: the hooks and notices are already set, and still nothing fires
+    (the follower decides before the transitions start); the route is the lead's when connect returns, which is
+    what assistant_cli reads to decide whether to pause Telegram polling."""
+
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, saved=saved)
+    gateway.manager_transitions.enable_notices()
+    arriving = asyncio.create_task(_publish_when_read(reader, member("lead_1", lead=True)))
+    await gateway.connect(start_services=False)
+    try:
+        await arriving
+        assert gateway.config.manager.manager_agent_id == "lead_1"
+        assert recorded.seen == [("available", "lead_1", saved is None)]
+        assert recorded.hooks == [] and recorded.delivered == []
+        assert "gateway_team_lead" in {task.get_name() for task in gateway._background_tasks}
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_start_with_no_lead_in_the_records_clears_the_saved_route_once(tmp_path, monkeypatch) -> None:
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, start_limit=0.1)
+    await gateway.connect(start_services=False)
+    try:
+        assert gateway.config.manager.manager_agent_id is None
+        assert recorded.seen == [("unavailable", "manager_1234")]
+        reply = await gateway.application.send_user_message("Are you there?")
+        assert reply.message_type == "system_status"
+
+        # assistant_cli turns notices on after connect; the lead's later arrival is a real recovery.
+        gateway.manager_transitions.enable_notices()
+        reader.publish(member("lead_1", lead=True))
+        await until(lambda: gateway.config.manager.manager_agent_id == "lead_1")
+        assert recorded.seen[-1] == ("available", "lead_1", True) and "resume" in recorded.hooks
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_records_read_after_the_start_limit_correct_the_saved_route(tmp_path, monkeypatch, caplog) -> None:
+    """Review F3 through the gateway: the view is ready after the start's wait, with no lead."""
+
+    reader = Reader()
+    reader.catches_up = False
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader, start_limit=0.1)
+    with caplog.at_level(logging.WARNING, logger="assistant_gateway.gateway"):
+        await gateway.connect(start_services=False)
+    try:
+        assert gateway.config.manager.manager_agent_id == "manager_1234" and recorded.seen == []
+        assert "event=gateway_team_view_not_ready" in caplog.text
+        reader.ready.set()
+        await until(lambda: gateway.config.manager.manager_agent_id is None)
+        assert recorded.seen == [("unavailable", "manager_1234")]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_join_stops_chats_to_a_lead_nobody_can_see(tmp_path, monkeypatch) -> None:
+    """Review F4: the installation refused the gateway's join for good."""
+
+    reader = Reader()
+    gateway, recorded = _gateway(tmp_path, monkeypatch, reader,
+                                 refusal=("denied", "The installation does not take this gateway as it runs."))
+    await asyncio.wait_for(gateway.connect(start_services=False), timeout=2)
+    try:
+        assert gateway.config.manager.manager_agent_id is None
+        assert recorded.seen == [("unavailable", "manager_1234")]
+        reply = await gateway.application.send_user_message("Are you there?")
+        assert reply.message_type == "system_status"
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_change_to_the_leads_record_wakes_held_guidance(tmp_path, monkeypatch) -> None:
+    """Held guidance is sent again when the lead's record changes, as the lead's heartbeat used to wake it."""
+
+    class Wake(asyncio.Event):
+        def __init__(self) -> None:
+            super().__init__()
+            self.times = 0
+
+        def set(self) -> None:
+            self.times += 1
+            super().set()
+
+    reader = Reader()
+    reader.publish(member("lead_1", lead=True))
+    gateway, _ = _gateway(tmp_path, monkeypatch, reader, saved="lead_1")
+    gateway._thread_guidance._wake = wake = Wake()
+    await gateway.connect(start_services=False)
+    try:
+        before = wake.times
+        reader.publish(member("lead_1", lead=True, state="busy"))
+        reader.publish(member("lead_1", lead=True, state="busy"), member("worker_1"))  # not the lead: no wake
+        assert wake.times == before + 1
+    finally:
+        await gateway.close()

@@ -6,13 +6,13 @@ its heartbeat's age every 5 seconds. Now the gateway's own host reads the team's
 agents (``custom_transport.protocol1.team_agents``), and this module turns that view into
 what the gateway already acts on:
 
-- **The team lead.** Each change to the lead's record, its arrival, or its leaving reaches
-  the manager client's ``apply_manager_status`` in order, through one queue, so the
-  existing "available" and "unavailable" transitions run as before. The lead saying it
-  leaves makes it unavailable at once. A lead whose host stopped reporting (a crash) is
-  unavailable at most 35 seconds after the host's last liveness write: the record's 30
-  seconds plus the reader's 5-second check, about the 30 seconds after which the presence
-  heartbeat counted the lead gone.
+- **The team lead.** ``TeamLeadFollower`` compares the gateway's route to the lead with
+  the records, at start and on every change, and runs the manager client's existing
+  "available" and "unavailable" transitions when they differ (its docstring says how).
+  The lead saying it leaves makes it unavailable at once. A lead whose host stopped
+  reporting (a crash) is unavailable at most 35 seconds after the host's last liveness
+  write: the record's 30 seconds plus the reader's 5-second check, about the 30 seconds
+  after which the presence heartbeat counted the lead gone.
 - **The team's members.** Each live agent's state goes to the Team page and the Status
   page's records (``GatewayTeamPresence``) as it changes. What the records do not carry
   (skills, Status page findings, whether a busy agent could start more) is asked with
@@ -32,8 +32,8 @@ what the gateway already acts on:
   contract counts as unavailable, so chats are not sent to it. ``host_findings`` adds a
   Status page problem for each such host, naming both digests and what to do.
 
-Everything here runs on the gateway's own loop. Each part of the view (the reader, the lead's
-changes, the details) runs supervised: one that fails, or ends before the gateway stops, is
+Everything here runs on the gateway's own loop. Each part of the view (the reader, the
+details) runs supervised, as does the gateway's lead follower: one that fails, or ends before the gateway stops, is
 logged and started again, so it never stops the others silently. Nothing waits for the
 records to be read without also stopping when the gateway stops. A member whose departure
 is only the reader stopping (``READER_STOPPED``) has not left, so nothing is said about it.
@@ -229,7 +229,6 @@ class JoinRefusal:
 
 
 StatusObserver = Callable[[AgentStatus, Optional[datetime], str], None]
-LeadObserver = Callable[[AgentStatus], Awaitable[None]]
 
 
 def record_status(item: TeamAgent, team_id: str, *, details: Optional[Mapping[str, Any]] = None,
@@ -258,12 +257,11 @@ def record_status(item: TeamAgent, team_id: str, *, details: Optional[Mapping[st
 class GatewayTeamView:
     """The gateway's view of its team (module docstring)."""
 
-    def __init__(self, team_id: str, *, on_status: StatusObserver, on_lead: LeadObserver,
-                 logger: Optional[logging.Logger] = None, details_seconds: float = DETAILS_POLL_SECONDS,
+    def __init__(self, team_id: str, *, on_status: StatusObserver, logger: Optional[logging.Logger] = None,
+                 details_seconds: float = DETAILS_POLL_SECONDS,
                  restart_seconds: tuple[float, float] = RESTART_SECONDS) -> None:
         self.team_id = team_id
         self._on_status = on_status
-        self._on_lead = on_lead
         self._logger = logger or _LOGGER
         self._details_seconds = details_seconds
         self._restart_seconds = restart_seconds
@@ -271,7 +269,6 @@ class GatewayTeamView:
         self._host: Any = None
         self._details: dict[str, dict[str, Any]] = {}
         self._before: Mapping[str, TeamAgent] = {}
-        self._leads: asyncio.Queue[AgentStatus] = asyncio.Queue()
         self.ready = asyncio.Event()
         # Set on every member change, when the records are read or stop being read, and on a refused join; only
         # the lead follower clears it (``TeamLeadFollower``).
@@ -286,7 +283,7 @@ class GatewayTeamView:
     async def run(self, host: Any, stop: asyncio.Event) -> None:
         """Read the team through the gateway's joined host until ``stop``; returns as soon as ``stop`` is set.
 
-        The reader, the lead's changes and the details each run supervised (``_supervised``).
+        The reader and the details each run supervised (``_supervised``).
         """
 
         self._host = host
@@ -294,7 +291,6 @@ class GatewayTeamView:
         self._agents.listen(self._changed)
         parts: dict[str, Callable[[], Awaitable[None]]] = {
             "gateway_team_agents": lambda: self._read(stop),
-            "gateway_team_leads": lambda: self._apply_leads(stop),
             "gateway_team_details": lambda: self._ask_details(stop),
         }
         tasks = [asyncio.create_task(_supervised(name, start, stop, self._logger, self._restart_seconds), name=name)
@@ -326,19 +322,6 @@ class GatewayTeamView:
             for task in (reading, caught_up):
                 task.cancel()
             await asyncio.gather(reading, caught_up, return_exceptions=True)
-
-    async def wait_ready(self, timeout: float) -> bool:
-        try:
-            await asyncio.wait_for(self.ready.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return False
-        return True
-
-    def lead(self) -> Optional[TeamAgent]:
-        """The live team lead whose host runs this gateway's contract; one on another contract takes no chats."""
-
-        lead = self._agents.lead() if self._agents is not None and self.ready.is_set() else None
-        return lead if lead is not None and lead.other_contract is None else None
 
     def live_ids(self) -> frozenset[str]:
         return frozenset(self._agents.live()) if self._agents is not None else frozenset()
@@ -398,24 +381,7 @@ class GatewayTeamView:
             else:
                 continue
             self._on_status(status, None, SOURCE)
-            if now is not None and now.is_lead and now.other_contract is not None:
-                # It takes no chats: for the manager client it is leaving (module docstring).
-                self._leads.put_nowait(record_status(now, self.team_id, details=self._details.get(agent_id),
-                                                     exiting=True))
-            elif (now is not None and now.is_lead) or (now is None and earlier is not None and earlier.is_lead):
-                self._leads.put_nowait(status)
         self.changed.set()
-
-    async def _apply_leads(self, stop: asyncio.Event) -> None:
-        """The lead's changes, in order, to the manager client (module docstring)."""
-
-        while not stop.is_set():
-            status = await self._leads.get()
-            try:
-                await self._on_lead(status)
-            except Exception:
-                self._logger.exception("The team lead's change could not be applied. event=gateway_lead_apply_failed "
-                                       "agent=%s", status.self_id)
 
     async def _ask_details(self, stop: asyncio.Event) -> None:
         """Each live agent's skills, findings and capacity, every ``details_seconds`` (module docstring)."""
@@ -525,11 +491,16 @@ class TeamLeadFollower:
         self._kept: Optional[tuple[str, frozenset[str]]] = None
         self._leads_logged: frozenset[str] = frozenset()
 
-    async def start(self, limit: float = LEAD_START_SECONDS) -> None:
-        """Wait up to ``limit`` for a lead to follow or a refused join, then decide once (class docstring)."""
+    @property
+    def view(self) -> GatewayTeamView:
+        return self._view
+
+    async def start(self, limit: Optional[float] = None) -> None:
+        """Wait up to ``limit`` (``LEAD_START_SECONDS``) for a lead to follow or a refused join, then decide once
+        (class docstring)."""
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + limit
+        deadline = loop.time() + (LEAD_START_SECONDS if limit is None else limit)
         while not self._start_settled():
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -544,8 +515,12 @@ class TeamLeadFollower:
         await self._check(at_start=True)
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Check the route against the records on every change and every ``check_seconds`` until ``stop``."""
+        """Check the route against the records on every change and every ``check_seconds`` until ``stop``,
+        supervised like the view's own parts."""
 
+        await _supervised("gateway_team_lead", lambda: self._follow_changes(stop), stop, self._logger, RESTART_SECONDS)
+
+    async def _follow_changes(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._view.changed.wait(), timeout=self._check_seconds)

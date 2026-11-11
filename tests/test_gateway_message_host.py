@@ -194,7 +194,7 @@ async def test_closing_a_joined_host_whose_team_records_were_never_read_returns(
     reader.catches_up = False
     monkeypatch.setattr(team_view, "TeamAgents", reader)
     gateway = _gateway(tmp_path)
-    gateway.observe_team(GatewayTeamView("team_one", on_status=lambda *args: None, on_lead=lambda status: None))
+    gateway.observe_team(GatewayTeamView("team_one", on_status=lambda *args: None))
     gateway.start(nc="connection")
     await gateway.ready(timeout=1)
     await asyncio.sleep(0.05)
@@ -258,6 +258,29 @@ async def test_a_refusal_that_cannot_change_is_asked_once_and_a_command_says_why
     assert gateway._task is not None and gateway._task.done()
     assert caplog.text.count("event=gateway_host_join_refused") == 1
     assert "event=gateway_host_join_failed" not in caplog.text
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_that_cannot_change_tells_the_team_view_until_the_host_starts_again(stand_in,
+                                                                                         tmp_path: Path) -> None:
+    """Review F4: the team view hears that nobody can see the team, so the lead follower stops chats to a lead
+    nobody sees; a new start forgets it (critique C02)."""
+
+    from assistant_gateway.team_view import GatewayTeamView
+
+    stand_in.joins = [JoinRefused("protocol_mismatch", "refused for this test")]
+    gateway = _gateway(tmp_path)
+    view = GatewayTeamView("team_one", on_status=lambda *args: None)
+    gateway.observe_team(view)
+    gateway.start(nc="connection")
+    with pytest.raises(GatewayHostUnavailable):
+        await gateway.ready(timeout=1)
+    assert view.refusal is not None and view.refusal.outcome == "protocol_mismatch"
+    assert "another message contract" in view.refusal.text and view.changed.is_set()
+    await gateway.close()
+    gateway.start(nc="connection")
+    assert view.refusal is None
     await gateway.close()
 
 

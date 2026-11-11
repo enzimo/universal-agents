@@ -7,11 +7,9 @@ import inspect
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable
 
 from assistant_gateway.application.ports import (
-    GatewayClock,
     GatewayIdGenerator,
     GatewayManagerRuntime,
     GatewayManagerTransport,
@@ -25,7 +23,7 @@ from custom_messages.contracts.credentials_v1 import (
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import GATEWAY_MANAGER_CONTROL_TYPES, MessageEnvelope
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
-from custom_messages.enums import MessageMetaType, RoutingType
+from custom_messages.enums import RoutingType
 
 
 EnvelopeHandler = Callable[[MessageEnvelope], Awaitable[None]]
@@ -67,17 +65,17 @@ class GatewayManagerTransition:
 class GatewayManagerClient:
     """Own manager transport lifecycle, correlation, and the team lead's route.
 
-    Which agent leads, and whether it is live, comes from the team's agent records
-    (``assistant_gateway.team_view`` calls ``apply_manager_status``); before message
-    contract step 7c this client discovered the lead on the operational subject and
-    polled its liveness.
+    Which agent leads, and whether it is live, comes from the team's agent records: the
+    team view's lead follower (``assistant_gateway.team_view.TeamLeadFollower``) is the
+    only caller of ``set_lead`` and ``mark_manager_unavailable`` while the gateway runs.
+    Before message contract step 7c this client discovered the lead on the operational
+    subject, ordered presence reports by their timestamps and polled the lead's liveness.
     """
 
     def __init__(
         self,
         *,
         settings: GatewayManagerClientSettings,
-        clock: GatewayClock,
         id_generator: GatewayIdGenerator,
         logger: logging.Logger,
         runtime: GatewayManagerRuntime | None = None,
@@ -89,7 +87,6 @@ class GatewayManagerClient:
         trace_enabled: TraceEnabled | None = None,
     ) -> None:
         self.settings = settings
-        self._clock = clock
         self._id_generator = id_generator
         self._logger = logger
         self._runtime = runtime
@@ -102,7 +99,6 @@ class GatewayManagerClient:
         self._trace_enabled = trace_enabled or (lambda: False)
         self._manager_id = settings.initial_manager_id
         self._lifecycle_connected = False
-        self._manager_status_updated_at: datetime | None = None
         self._manager_status_lock = asyncio.Lock()
         # A schedule action keeps its originating request's correlation.
         # Distinct scheduled tasks can therefore wait for replies at once.
@@ -114,16 +110,6 @@ class GatewayManagerClient:
         """Return the current live manager route, if one is known."""
 
         return self._manager_id
-
-    @property
-    def manager_status_updated_at(self) -> datetime | None:
-        """Return the timestamp of the last accepted manager-status transition."""
-
-        return self._manager_status_updated_at
-
-    @manager_status_updated_at.setter
-    def manager_status_updated_at(self, value: datetime | None) -> None:
-        self._manager_status_updated_at = value
 
     @property
     def connected(self) -> bool:
@@ -500,127 +486,6 @@ class GatewayManagerClient:
             headers=headers,
         )
 
-    def _parse_status_timestamp(
-        self,
-        status: AgentStatus,
-        *,
-        fallback_timestamp: str | None = None,
-    ) -> datetime | None:
-        raw_timestamp = status.last_seen_at or fallback_timestamp
-        if not raw_timestamp:
-            return None
-        try:
-            parsed = datetime.fromisoformat(raw_timestamp)
-        except ValueError:
-            self._logger.warning(
-                "Gateway could not parse manager status timestamp %r.",
-                raw_timestamp,
-            )
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
-
-    async def apply_manager_status(
-        self,
-        status: AgentStatus,
-        *,
-        fallback_timestamp: str | None = None,
-        source: str,
-    ) -> None:
-        """Apply one validated manager status update."""
-
-        if (
-            status.status_type != MessageMetaType.RESPONSE
-            or status.named_agent_type != self.settings.manager_named_agent_type
-            or status.team_id != self.settings.team_id
-        ):
-            return
-        if not status.self_id:
-            self._logger.warning(
-                "Gateway ignored manager status from %s without self_id.",
-                source,
-            )
-            return
-
-        status_timestamp = self._parse_status_timestamp(
-            status,
-            fallback_timestamp=fallback_timestamp,
-        )
-        should_mark_unavailable = False
-        transition: GatewayManagerTransition | None = None
-        async with self._manager_status_lock:
-            if (
-                status_timestamp is not None
-                and self._manager_status_updated_at is not None
-                and status_timestamp < self._manager_status_updated_at
-            ):
-                self._logger.info(
-                    "Gateway ignored stale manager status from %s for %s at %s; "
-                    "newer status at %s is already applied.",
-                    source,
-                    status.self_id,
-                    status_timestamp.isoformat(),
-                    self._manager_status_updated_at.isoformat(),
-                )
-                return
-
-            current_manager_id = self._manager_id
-            if status.is_exiting:
-                if current_manager_id and status.self_id != current_manager_id:
-                    self._logger.info(
-                        "Gateway ignored shutdown status from non-current manager "
-                        "%s; current manager is %s.",
-                        status.self_id,
-                        current_manager_id,
-                    )
-                    return
-                if status_timestamp is not None:
-                    self._manager_status_updated_at = status_timestamp
-                should_mark_unavailable = True
-            else:
-                changed = current_manager_id != status.self_id
-                became_available = current_manager_id is None
-                if changed:
-                    await self._set_manager_id_locked(status.self_id)
-                    transition = GatewayManagerTransition(
-                        manager_id=status.self_id,
-                        available=True,
-                        source=source,
-                        reason="live manager status",
-                        became_available=became_available,
-                    )
-                    if current_manager_id:
-                        self._logger.warning(
-                            "Gateway manager routing refreshed from %s to %s via %s.",
-                            current_manager_id,
-                            status.self_id,
-                            source,
-                        )
-                    else:
-                        self._logger.info(
-                            "Gateway discovered live manager %s via %s.",
-                            status.self_id,
-                            source,
-                        )
-                if status_timestamp is not None:
-                    self._manager_status_updated_at = status_timestamp
-                elif changed:
-                    self._manager_status_updated_at = self._clock.now_utc()
-
-        if transition is not None:
-            await self._run_transition_handler(
-                self._on_manager_available,
-                transition,
-            )
-        if should_mark_unavailable:
-            await self.mark_manager_unavailable(
-                expected_manager_id=status.self_id,
-                status_timestamp=status_timestamp,
-                reason=f"shutdown status from {source}",
-                source=source,
-            )
-
     async def set_lead(self, lead_id: str, *, source: str) -> None:
         """Route people's chats to ``lead_id``, the team lead the team's records name, and emit one available
         transition (``became_available`` when there was no route). The team view's lead follower is its caller
@@ -631,21 +496,16 @@ class GatewayManagerClient:
             if previous == lead_id:
                 return
             await self._set_manager_id_locked(lead_id)
-        if previous is not None:
-            self._logger.warning(
-                "The gateway's route to the team lead moved to another agent. event=gateway_team_lead_followed "
-                "manager_id=%s previous_manager_id=%s source=%s",
-                lead_id,
-                previous,
-                source,
-            )
-        else:
-            self._logger.info(
-                "The gateway routes chats to the team lead. event=gateway_team_lead_followed manager_id=%s "
-                "source=%s",
-                lead_id,
-                source,
-            )
+        # Info, not a warning: after the start the follower marks a lead unavailable before it sets another,
+        # so a previous route here is the one saved by the previous run, replaced at every normal team start
+        # (agent ids are new at each start; critique C08).
+        self._logger.info(
+            "The gateway routes chats to the team lead. event=gateway_team_lead_followed manager_id=%s "
+            "previous_manager_id=%s source=%s",
+            lead_id,
+            previous,
+            source,
+        )
         await self._run_transition_handler(
             self._on_manager_available,
             GatewayManagerTransition(
@@ -661,7 +521,6 @@ class GatewayManagerClient:
         self,
         *,
         expected_manager_id: str | None = None,
-        status_timestamp: datetime | None = None,
         reason: str,
         source: str = "liveness",
         keep_waiting: bool = False,
@@ -689,7 +548,6 @@ class GatewayManagerClient:
             if current_manager_id is None:
                 return
             await self._set_manager_id_locked(None)
-            self._manager_status_updated_at = status_timestamp or self._clock.now_utc()
 
         self._logger.warning(
             "The gateway marked the team lead unavailable. event=gateway_manager_unavailable manager_id=%s "
