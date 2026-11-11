@@ -18,8 +18,10 @@ settles the held copy:
 - pending: the lead saved it but could not yet pass it on to every worker
   holding one of the request's delegated tasks; the copy stays held and is
   sent again like an unanswered one, and the lead passes it on again. The
-  lead accepts it after a few attempts (``GUIDANCE_PASS_ON_ATTEMPTS``), so
-  later messages of the thread are not held back for long;
+  lead accepts it on the fourth send (``GUIDANCE_PASS_ON_ATTEMPTS``): at most
+  about a minute on the retry timer, sooner when the person writes again or
+  the sender is woken, so later messages of the thread are not held back for
+  long;
 - the lead does not hold the request's task yet (it waits behind other work),
   or no answer came in time, or no lead is reachable: the copy stays held and
   is sent again when the lead reports its state (it does when a turn starts

@@ -424,13 +424,14 @@ async def _record_guidance_history(
     return entry is not None
 
 
-# How many times the lead answers "pending" for guidance it saved but could not pass on to
-# every worker holding a delegated subtask. The gateway keeps a thread's later messages behind
-# a held one and sends the held one again every 15 seconds (assistant_gateway.application.
-# thread_guidance), so a forward that keeps failing must not hold them back for the rest of the
-# request: after this many attempts (about a minute) the lead answers accepted, names the
-# subtasks it could not reach and logs event=task_steering_forward_abandoned. Its own task
-# applies the guidance either way.
+# How many times the lead tries to pass on guidance it saved but could not pass on to every
+# worker holding a delegated subtask. The gateway keeps a thread's later messages behind a held
+# one (assistant_gateway.application.thread_guidance), so a forward that keeps failing must not
+# hold them back for the rest of the request. An attempt is each time the gateway sends the held
+# guidance again: on its 15-second retry timer, so at most about a minute, and sooner when the
+# person writes again in the thread or the gateway is woken (a request ended, the lead's record
+# changed). On the last attempt the lead answers accepted, names the subtasks it could not reach
+# and logs event=task_steering_forward_abandoned. Its own task applies the guidance either way.
 GUIDANCE_PASS_ON_ATTEMPTS = 4
 
 

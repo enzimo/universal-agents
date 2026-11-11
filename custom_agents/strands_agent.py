@@ -147,7 +147,6 @@ from custom_agents.message_routing import (
     build_outgoing_meta,
     construct_header,
     resolve_outgoing_routing,
-    resolve_requester_routing_key,
 )
 from custom_agents.request_prompt_context import (
     build_request_conversation_context,
@@ -3911,9 +3910,7 @@ class UniversalAgent(BaseModel):
                 msg_content, msg_header=msg_header, msg_meta=msg_meta
             )
         elif isinstance(msg_content, AgentStatus):
-            await self.handle_info_req_message(
-                info_request=msg_content, msg_header=msg_header, msg_meta=msg_meta
-            )
+            self._ignore_agent_status(msg_content, msg_header, msg_meta)
         elif isinstance(msg_content, TaskStatus):
             await self._handle_task_status_message(
                 task_status=msg_content, msg_header=msg_header, msg_meta=msg_meta
@@ -4072,56 +4069,39 @@ class UniversalAgent(BaseModel):
         msg_header: MessageHeader,
         msg_meta: MessageMeta,
     ) -> bool:
-        target_agent_id = (
-            getattr(msg_content, "target_agent_id", None) or msg_header.to_routing_path
-        )
-        if target_agent_id in {
-            None,
-            "",
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            RoutingType.ALL_AGENTS_ROUTE,
-        }:
-            target_agent_id = None
-        target_agent_name = getattr(msg_content, "target_agent_name", None) or getattr(
-            msg_meta, "to_agent_name", None
-        )
-        target_named_agent_type = getattr(
-            msg_content, "target_named_agent_type", None
-        ) or getattr(msg_meta, "to_named_agent_type", None)
+        """Whether a command on the operational subject names this agent (plan decision 68).
 
+        Every agent receives the subject, so an agent acts only on a command that names it by
+        id (``target_agent_id``, else the address) or by name; a named type, when given, must
+        match too. The gateway names the team lead in each of its three commands (task
+        progress, the parent-task probe and thread guidance). A command naming no agent is
+        ignored with a warning: until message contract step 7d it fanned out to every agent and
+        the one holding the task (or a task with the same correlation id) picked it out.
+        """
+
+        target_agent_id = getattr(msg_content, "target_agent_id", None) or msg_header.to_routing_path
+        if target_agent_id in {None, "", RoutingType.ALL_AGENTS_ROUTE.value, RoutingType.ALL_AGENTS_ROUTE}:
+            target_agent_id = None
+        target_agent_name = getattr(msg_content, "target_agent_name", None) or getattr(msg_meta, "to_agent_name", None)
+        target_named_agent_type = getattr(msg_content, "target_named_agent_type", None) or getattr(
+            msg_meta, "to_named_agent_type", None
+        )
+        if not target_agent_id and not target_agent_name:
+            self._logger.warning(
+                "[%s] Ignored a command on the operational subject that names no agent. "
+                "event=operational_command_unaddressed agent_id=%s content_type=%s from_agent_id=%s "
+                "correlation_id=%s",
+                self.id, self.id, type(msg_content).__name__, msg_header.from_agent_id,
+                getattr(msg_meta, "msg_correlation_id", None),
+            )
+            return False
         if target_agent_id and str(target_agent_id) != self.id:
             return False
         if target_agent_name and str(target_agent_name) != self.name:
             return False
-        if target_named_agent_type and str(target_named_agent_type) != str(
-            self.named_agent_type or ""
-        ):
+        if target_named_agent_type and str(target_named_agent_type) != str(self.named_agent_type or ""):
             return False
-
-        if isinstance(msg_content, TaskStatus):
-            return bool(
-                target_agent_id or target_named_agent_type or target_agent_name
-            ) or (self.task_manager.get_task_info(msg_content.task_id) is not None)
-        if isinstance(msg_content, TaskSteering):
-            target_task_id = getattr(msg_content, "target_task_id", None)
-            target_correlation_id = getattr(msg_content, "target_correlation_id", None)
-            if target_task_id:
-                # A directly addressed receiver must answer STALE when the
-                # task ended. Unaddressed fanout still belongs only to the
-                # worker holding the exact task, never a correlation sibling.
-                return bool(target_agent_id or target_agent_name) or (
-                    self.task_manager.get_task_info(target_task_id) is not None
-                )
-            if (
-                target_correlation_id
-                and self.task_manager.find_task_info_by_correlation_id(
-                    target_correlation_id
-                )
-                is not None
-            ):
-                return True
-            return bool(target_agent_id or target_named_agent_type or target_agent_name)
-        return bool(target_agent_id or target_agent_name or target_named_agent_type)
+        return True
 
     async def _send_operational_message(self, message: MessageEnvelope) -> None:
         if not self.team_id:
@@ -5113,20 +5093,22 @@ class UniversalAgent(BaseModel):
             await delivery.ack()
             return
         if not self._is_operational_content(msg_content):
+            # Agent status, pause, resume, exit and the other commands that moved to agents' own
+            # addresses in step 7 (custom_agents.live_controls) are not read here any more.
             self._logger.warning(
-                "[%s] Ignoring non-operational NATS message on operational subject: %s.",
-                self.id,
-                type(msg_content).__name__,
+                "[%s] Ignored a message type the operational subject no longer carries. "
+                "event=operational_message_ignored agent_id=%s content_type=%s from_agent_id=%s correlation_id=%s",
+                self.id, self.id, type(msg_content).__name__, msg_header.from_agent_id,
+                getattr(msg_meta, "msg_correlation_id", None),
             )
             await delivery.ack()
             return
 
         if (
-            isinstance(msg_content, (TaskStatus, AgentStatus))
+            isinstance(msg_content, (TaskStatus, TaskProgressStatus))
             and msg_content.status_type == MessageMetaType.RESPONSE
         ):
-            # Answers to the gateway's questions; agents learn about each other from the team's
-            # records and ask with agent.status and task.probe (custom_agents.team_directory).
+            # Answers to the gateway's questions, for the gateway only.
             await delivery.ack()
             return
 
@@ -5344,80 +5326,31 @@ class UniversalAgent(BaseModel):
     async def _handle_task_response(self, *args, **kwargs):
         return await task_message_runtime._handle_task_response(self, *args, **kwargs)
 
-    async def handle_info_req_message(
+    def _ignore_agent_status(
         self,
-        info_request: AgentStatus,
+        status: AgentStatus,
         msg_header: MessageHeader,
         msg_meta: MessageMeta,
-    ):
-        """
-        Handles incoming AgentStatus messages by determining whether it is a request or a reply.
+    ) -> None:
+        """A status message in a mailbox: logged, never answered (message contract step 7d).
 
-        Args:
-            info_request (AgentStatus): The parsed AgentStatus payload.
-            msg_header (MessageHeader): The MessageHeader of the incoming message.
-            msg_meta (MessageMeta): The MessageMeta of the incoming message.
+        Agents ask each other with ``agent.status`` on their own addresses
+        (``custom_agents.live_controls``) and learn who is live from the team's signed records
+        (``custom_agents.team_directory``); nothing sends a status request any more, but a 0.9
+        sender may have left one queued. Answering it would publish a status on the
+        operational subject, which no longer carries them.
         """
-        if info_request.status_type == MessageMetaType.REQUEST:
-            await repair_agent_skill_catalog(
-                self,
-                reason="agent_status_request",
+
+        if status.status_type == MessageMetaType.REQUEST:
+            self._logger.warning(
+                "[%s] Ignored an agent status request; agents ask each other with agent.status now. "
+                "event=agent_status_request_ignored agent_id=%s from_agent_id=%s correlation_id=%s",
+                self.id, self.id, getattr(msg_header, "from_agent_id", None),
+                getattr(msg_meta, "msg_correlation_id", None),
             )
-            response_key = await resolve_requester_routing_key(
-                incoming_header=msg_header,
-                incoming_meta=msg_meta,
-                agent_id_by_name=self._agent_id_by_name,
-                named_agent_type_queue_map=self.named_agent_type_queue_map,
-                team_id=self.team_id,
-                logger=self._logger,
-                agent_id=self.id,
-                repair_recorder=self._record_runtime_repair_anomaly,
-            )
-            message_env = MessageEnvelope(
-                msg_content=self.get_self_status(info_type=info_request.info_type),
-                msg_header=MessageHeader(
-                    from_agent_id=self.id,
-                    to_routing_path=response_key,
-                ),
-                msg_meta=MessageMeta(
-                    msg_correlation_id=msg_meta.msg_correlation_id,
-                    conversation_id=getattr(msg_meta, "conversation_id", None),
-                ),
-            )
-            if response_key:
-                self._logger.debug(
-                    "[%s] event=agent_status_response_send correlation_id=%s requester_from_agent_id=%s "
-                    "response_key=%s local_agent_id=%s local_team_id=%s local_named_agent_type=%s "
-                    "info_type=%s",
-                    self.id,
-                    getattr(msg_meta, "msg_correlation_id", None),
-                    getattr(msg_header, "from_agent_id", None),
-                    response_key,
-                    self.id,
-                    self.team_id,
-                    self.named_agent_type,
-                    info_request.info_type,
-                )
-                await self._send_operational_message(message_env)
-            else:
-                self._logger.error(
-                    "[%s] Received AgentStatus request with no response routing key. "
-                    "event=agent_status_response_missing_route correlation_id=%s "
-                    "incoming_from_agent_id=%s incoming_response_routing_key=%s "
-                    "incoming_from_agent_name=%s incoming_to_agent_name=%s "
-                    "incoming_to_named_agent_type=%s",
-                    self.id,
-                    getattr(msg_meta, "msg_correlation_id", None),
-                    getattr(msg_header, "from_agent_id", None),
-                    getattr(msg_header, "response_routing_key", None),
-                    getattr(msg_meta, "from_agent_name", None),
-                    getattr(msg_meta, "to_agent_name", None),
-                    getattr(msg_meta, "to_named_agent_type", None),
-                )
-        else:
-            # The team's directory comes from its agents' records (custom_agents.team_directory).
-            self._logger.debug("[%s] Ignored an agent status reply. event=agent_status_reply_ignored from_agent_id=%s",
-                               self.id, getattr(msg_header, "from_agent_id", None))
+            return
+        self._logger.debug("[%s] Ignored an agent status reply. event=agent_status_reply_ignored from_agent_id=%s",
+                           self.id, getattr(msg_header, "from_agent_id", None))
 
     async def handle_control_message(
         self,

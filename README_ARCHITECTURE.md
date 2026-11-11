@@ -5004,7 +5004,12 @@ through the upgrade steps (`read_upgraded_instance_config`), so an export taken 
 code upgrade but before the launcher rewrote the file carries only what this version reads.
 The operational subject now carries only
 the gateway's task progress, parent-task probe and thread guidance, with their replies
-(plan decision 68); a lead's guidance for a delegated task goes to the worker holding it
+(plan decision 68). Every agent receives it, so an agent acts only on a command that names
+it by id or name (`UniversalAgent._operational_target_matches`; the gateway names the team
+lead in all three) and ignores one naming no agent with `event=operational_command_unaddressed`;
+other message types on it are dropped with `event=operational_message_ignored`. No agent
+publishes a status there: a status request left in a mailbox by a 0.9 sender is logged
+(`event=agent_status_request_ignored`) and not answered. A lead's guidance for a delegated task goes to the worker holding it
 through its control mailbox (`agent.<id>.control`, durable, read while it works; plan
 decision 59), and a subtask no worker has taken yet gets none. The holder of each subtask
 comes from team-wide task custody first, then the parent's delegated-task records looked up
@@ -5019,8 +5024,10 @@ or a subtask whose holder could not be read, is logged with its ids
 stopping the others, and the lead answers `pending` instead of `accepted`; the gateway keeps
 the guidance and sends it again, and the lead, finding the key already saved, passes it on
 again rather than answering "duplicate". Because the gateway keeps a thread's later messages
-behind a held one, the lead gives up after `GUIDANCE_PASS_ON_ATTEMPTS` (4, about a minute),
-answers `accepted` naming the subtasks it could not reach and logs
+behind a held one, the lead gives up after `GUIDANCE_PASS_ON_ATTEMPTS` (4) sends of the held
+guidance (at most about a minute on the gateway's 15-second retry timer, sooner when the person
+writes again in the thread or the gateway is woken), answers `accepted` naming the subtasks it
+could not reach and logs
 `event=task_steering_forward_abandoned`; its own task applies the guidance either way. The
 skill hint is no longer a message type.
 

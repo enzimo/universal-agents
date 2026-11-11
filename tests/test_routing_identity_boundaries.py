@@ -301,7 +301,8 @@ async def test_explicit_steering_target_does_not_select_sibling_by_correlation()
         find_task_info_by_correlation_id=lambda _id: sibling,
     )
     agent = SimpleNamespace(
-        task_manager=manager, id="worker", name="Worker", named_agent_type="Worker"
+        task_manager=manager, id="worker", name="Worker", named_agent_type="Worker",
+        _logger=logging.getLogger(__name__),
     )
     steering = TaskSteering(
         steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
@@ -403,3 +404,139 @@ async def test_explicit_wrong_query_linkage_still_records_repair():
     assert [
         call.args[0] for call in agent._record_runtime_repair_anomaly.await_args_list
     ] == ["task_query_parent_task_id_corrected", "task_query_response_id_corrected"]
+
+
+# -- the operational subject after message contract step 7d (plan decision 68) -------------------
+
+
+def _operational_agent(*, holds: str | None = None, dispatched: list | None = None, sent: AsyncMock | None = None):
+    """An agent's operational receive path with a task store that holds ``holds``."""
+
+    held = SimpleNamespace(task=SimpleNamespace(task_id=holds)) if holds else None
+    agent = SimpleNamespace(
+        id="worker_1", name="Worker 1", team_id="team", named_agent_type="Worker",
+        task_manager=SimpleNamespace(
+            operations_runtime=TaskOperationRuntime(),
+            get_task_info=lambda task_id: held if task_id == holds else None,
+            find_task_info_by_correlation_id=lambda _id: held,
+        ),
+        _message_targets_other_team=lambda _envelope: False,
+        _is_operational_content=UniversalAgent._is_operational_content,
+        team_comms=SimpleNamespace(send_message=sent or AsyncMock()),
+        _logger=logging.getLogger("test.operational"),
+    )
+    agent._operational_target_matches = MethodType(UniversalAgent._operational_target_matches, agent)
+
+    async def dispatch(*, msg_content, msg_header, msg_meta):
+        (dispatched if dispatched is not None else []).append(msg_content)
+
+    agent._dispatch_message = dispatch
+    return agent
+
+
+def _delivery(content, *, to: str = RoutingType.ALL_AGENTS_ROUTE.value) -> SimpleNamespace:
+    return SimpleNamespace(
+        envelope=MessageEnvelope(
+            msg_content=content,
+            msg_header=MessageHeader(from_agent_id="gateway", to_routing_path=to, response_routing_key="gateway"),
+            msg_meta=MessageMeta(msg_correlation_id="corr_operational", is_response_requested=True),
+        ),
+        ack=AsyncMock(),
+    )
+
+
+def _moved_messages():
+    from custom_messages.contracts.control_v1 import (
+        AgentStatus, ControlInstruction, Instruction, ManagerRuntimeWorkCommand,
+    )
+    from custom_messages.enums import ControlType
+
+    return {
+        "AgentStatus": AgentStatus(status_type=MessageMetaType.REQUEST, info_type=ControlType.STATUS_REQUEST_BASIC,
+                                   self_id="", team_id="team", name="", named_agent_type="", agent_role="",
+                                   is_paused=False),
+        "ControlInstruction": ControlInstruction(type=ControlType.CONTROL_MSG, instruction=Instruction(instruction="exit"),
+                                                 target_agent_id="worker_1"),
+        "ManagerRuntimeWorkCommand": ManagerRuntimeWorkCommand(command_id="cmd_1", command_type=MessageMetaType.REQUEST,
+                                                               action="cancel", scope="user"),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["AgentStatus", "ControlInstruction", "ManagerRuntimeWorkCommand"])
+async def test_messages_that_moved_off_the_operational_subject_are_dropped_and_logged(name, caplog):
+    """Status, pause, resume, exit and the lead's runtime commands moved to agents' own addresses in step 7."""
+
+    dispatched: list = []
+    agent = _operational_agent(dispatched=dispatched)
+    delivery = _delivery(_moved_messages()[name], to="worker_1")
+
+    with caplog.at_level(logging.INFO):
+        await UniversalAgent.on_nats_operational_delivery(agent, delivery)
+
+    assert dispatched == []
+    delivery.ack.assert_awaited_once()
+    assert (f"event=operational_message_ignored agent_id=worker_1 content_type={name} from_agent_id=gateway "
+            "correlation_id=corr_operational") in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_guidance_that_names_no_agent_is_ignored_even_by_the_worker_holding_the_task(caplog):
+    """It used to fan out to every agent, and the holder of the task (or of a sibling) picked it out."""
+
+    dispatched: list = []
+    agent = _operational_agent(holds="child", dispatched=dispatched)
+    guidance = TaskSteering(steering_type=TaskSteeringType.PROACTIVE_GUIDANCE, target_task_id="child",
+                            target_correlation_id="shared", target_named_agent_type="Worker",
+                            guidance_text="Use the staging account.")
+    delivery = _delivery(guidance)
+
+    with caplog.at_level(logging.INFO):
+        await UniversalAgent.on_nats_operational_delivery(agent, delivery)
+
+    assert dispatched == []
+    delivery.ack.assert_awaited_once()
+    assert ("event=operational_command_unaddressed agent_id=worker_1 content_type=TaskSteering "
+            "from_agent_id=gateway correlation_id=corr_operational") in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("addressed", ["by id", "by name"])
+async def test_guidance_naming_the_agent_is_applied(addressed):
+    dispatched: list = []
+    agent = _operational_agent(holds="child", dispatched=dispatched)
+    named = {"target_agent_id": "worker_1"} if addressed == "by id" else {}
+    guidance = TaskSteering(steering_type=TaskSteeringType.PROACTIVE_GUIDANCE, target_task_id="child",
+                            guidance_text="Use the staging account.", **named)
+    delivery = _delivery(guidance)
+    if addressed == "by name":
+        delivery.envelope.msg_meta.to_agent_name = "Worker 1"
+
+    await UniversalAgent.on_nats_operational_delivery(agent, delivery)
+
+    assert dispatched == [guidance]
+    # Named for another agent: not this one's to apply.
+    other = _delivery(guidance.model_copy(update={"target_agent_id": "worker_2"}))
+    await UniversalAgent.on_nats_operational_delivery(agent, other)
+    assert dispatched == [guidance]
+
+
+@pytest.mark.asyncio
+async def test_a_leftover_status_request_in_a_mailbox_is_logged_and_not_answered(caplog):
+    """A 0.9 sender may have queued one; answering would publish a status on the operational subject."""
+
+    agent = SimpleNamespace(id="worker_1", _logger=logging.getLogger("test.operational"),
+                            _send_operational_message=AsyncMock(), team_comms=SimpleNamespace(send_message=AsyncMock()))
+    agent._ignore_agent_status = MethodType(UniversalAgent._ignore_agent_status, agent)
+    status = _moved_messages()["AgentStatus"]
+
+    with caplog.at_level(logging.INFO):
+        await UniversalAgent._dispatch_message(
+            agent, MessageHeader(from_agent_id="old_gateway", response_routing_key="old_gateway"), status,
+            MessageMeta(msg_correlation_id="corr_status"),
+        )
+
+    agent._send_operational_message.assert_not_awaited()
+    agent.team_comms.send_message.assert_not_awaited()
+    assert ("event=agent_status_request_ignored agent_id=worker_1 from_agent_id=old_gateway "
+            "correlation_id=corr_status") in caplog.text
