@@ -4305,10 +4305,45 @@ invalidation, selection changes and the validate/import sequence.
 
 ## Message hosts and their trust
 
-The message contract (`contracts/messages/v1`) has every process that sends its
-messages sign them as a host, with a key of its own, and every receiver check who
+The message contract (`contracts/messages/v1`, protocol 1) has every process that sends
+its messages sign them as a host, with a key of its own, and every receiver check who
 signed against records that chain to the installation's authority keys.
-`custom_transport.protocol1` is what a running host needs for that:
+
+**Where each kind of traffic runs (end of message contract phase 2).** Phase 2 moved to
+protocol 1 what the team services answer from shared stores, what an agent answers about
+itself, and who is live. Everything else, the work itself included, stays until phase 3 in
+the 0.9 message format: `MessageEnvelope` messages on the team's work stream
+(`<PREFIX>_WORK`) and on plain NATS subjects under the team's prefix. They name their
+sender without proving it (`agent_signature` is empty), so any process with the team's
+NATS login can send one in another's name. A person's request, a scheduled run and the
+gateway's durable commands to the lead (decision 67) still carry a signed task context,
+which proves whom the work is for (`access_control.task_identity`). The lead acts on those
+commands only with a context the gateway signed
+(`manager_control_runtime.verified_command_person`). A signed context is not tied to one
+message, so a process that holds one, such as an agent working for that person, could
+reuse it until it expires.
+
+| On protocol 1 (signed messages and records) | In the 0.9 message format until phase 3 |
+| --- | --- |
+| Joining, certificates, revocations (the installation authority) | Work on the work stream: people's requests, delegated tasks and what is sent about them (claims, handbacks, questions, stops, results), and notices to people and agents |
+| Agent sessions and placement (`sessions.*`) | Creating schedules, and scheduled runs and their signing (decision 66) |
+| People's memory, knowledge, topics and schedule lists and controls (`svc.team`) | The gateway's task cancel and inventory, Objectives and a person's standing, as durable commands to the lead's control mailbox (decision 67) |
+| The Tasks page's lists and removals and the context dump setting, relayed to the agent | The other three commands of decision 67, the gateway's task progress, parent-task probe and thread guidance, on `.operational` (decision 68) |
+| Asking an agent (`agent.status`, `.pause`, `.resume`, `.exit`, `task.probe`): other agents, and the gateway for `agent.status` | A lead's guidance for delegated work, through the holder's control mailbox (decision 59) |
+| The `skills.changed` team event | Dead letters: today's stream and notices (decision 71) |
+| Agent and host records: who is live, who leads, busy or idle | |
+
+The presence stream, the heartbeat broadcast, the broadcast subject and the gateway's
+discovery of the lead are gone ("The end of presence and fan-out" below). Upgrading in
+place from 0.9: the launcher creates the trust folder and keys, and the installation
+authority creates the `UA1_*` key-value buckets, which NATS lists as streams named
+`KV_UA1_*` (the authority's list below). The contract's work and dead-letter streams come
+in phase 3. The first start also deletes the team's old presence stream when the NATS
+login may delete streams (step 7d). What an external NATS server needs is in the user
+docs: the server version and settings in the configuration guide's "Surviving a power
+loss", and what the NATS login needs in the Docker guide's "Message host trust".
+
+`custom_transport.protocol1` is what a running host needs to sign and check messages:
 
 - **Keys** (`host_keys`): each host's Ed25519 application key and NATS user key, and
   the installation authority's key, in the instance's `trust/` folder
@@ -4353,7 +4388,8 @@ signed against records that chain to the installation's authority keys.
   whole (a temporary file, flushed, then published and the folder flushed), 0600, in
   folders that are 0700 at every level.
 
-Protocol 1 requests, replies, refusals and key-value writes await
+Protocol 1 joins, requests, replies, refusals, events and key-value writes and
+deletions await
 `custom_transport.send_barrier.before_send()` before sending. They use the same
 flush barrier as the NATS adapter, so a power loss cannot undo an agent's local
 records after another process has acted on its message. A failed flush prevents
@@ -4437,9 +4473,9 @@ The authority:
 
 Hosts join with `custom_transport.protocol1.joining`, which waits for an authority that
 is still starting and checks the returned certificate against the bundle's authority
-keys. The hosts still share one NATS login, so a join returns no NATS credential. An
-external NATS server's login must therefore be allowed to create streams and key-value
-buckets (user docs, "Docker", external NATS).
+keys. The hosts still share one NATS login, so a join returns no NATS credential. That
+login therefore needs every right a host uses; for an external NATS server, the Docker
+guide's "Message host trust" says how to set it up.
 
 **Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
 reads the authority's newest revocations record at start and every half hour, renews its
