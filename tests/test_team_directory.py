@@ -152,6 +152,39 @@ async def test_a_subtask_nobody_took_from_the_departed_agents_mailbox_is_failed(
     call = owner._fail_subtask_and_reconcile_parent.await_args_list[0]
     assert call.kwargs["parent_task_id"] == "parent_of_sub_1"
     assert "Researcher-1 left before taking it" in call.kwargs["error_message"]
+    # Only the subtask fails: the parent's turn resumes to decide again (F6).
+    assert call.kwargs["resume_parent"] is True and "Researcher-1 left the team" in call.kwargs["synthetic_context"]
+
+
+@pytest.mark.asyncio
+async def test_one_subtask_that_cannot_be_failed_does_not_keep_the_others_waiting(caplog) -> None:
+    owner = directory_owner(pending=[subtask("sub_1", "worker_1"), subtask("sub_2", "worker_1")])
+    owner._fail_subtask_and_reconcile_parent.side_effect = [OSError("database is locked"), None]
+
+    with caplog.at_level(logging.INFO):
+        await agent_exited(owner, member("worker_1", "Researcher-1"), "exiting")
+
+    assert [call.kwargs["subtask_info"].task.task_id
+            for call in owner._fail_subtask_and_reconcile_parent.await_args_list] == ["sub_1", "sub_2"]
+    assert "event=team_agent_left_subtask_fail_error" in caplog.text and "subtask_id=sub_1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_exit_is_logged_only_by_a_requester_that_sent_work_there_and_never_as_a_warning(caplog) -> None:
+    """F3: every agent of a process hears every exit; only one that sent work to the agent says so."""
+
+    bystander = directory_owner(agent_id="worker_5", pending=[subtask("sub_9", "worker_2")])
+    requester = directory_owner(pending=[subtask("sub_1", "worker_1")],
+                                records=_Records({"sub_1": taken("worker_1", ("worker_1",))}))
+
+    with caplog.at_level(logging.INFO):
+        await agent_exited(bystander, member("worker_1", "Researcher-1"), "exiting")
+        assert "event=team_agent_left_for_good" not in caplog.text
+        await agent_exited(requester, member("worker_1", "Researcher-1"), "exiting")
+
+    [left] = [record for record in caplog.records if "event=team_agent_left_for_good" in record.getMessage()]
+    assert left.levelno == logging.INFO and "subtasks=1" in left.getMessage()
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
 
 
 @pytest.mark.asyncio
@@ -404,6 +437,39 @@ async def test_a_subtask_still_waiting_in_the_departed_workers_mailbox_is_failed
 
     [call] = requester._fail_subtask_and_reconcile_parent.await_args_list
     assert (call.kwargs["parent_task_id"], call.kwargs["subtask_info"].task.task_id) == ("task_parent", "task_sub")
+
+
+@pytest.mark.asyncio
+async def test_a_departure_fails_only_the_untaken_subtask_and_resumes_the_parent(requester) -> None:
+    """F6 with the real failure step: the parent and a sibling subtask another worker holds go on."""
+
+    from functools import partial
+
+    from custom_agents import subtask_watchdog_runtime
+    from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ProgressState
+
+    manager = requester.task_manager
+    sibling = Task(task_id="task_sibling", parent_task_id="task_parent", task_type=MessageMetaType.REQUEST,
+                   problem_statement="other part")
+    assert manager.add_subtask("task_parent", sibling,
+                               MessageHeader(from_agent_id="lead_1", to_routing_path="team_one_Researcher"),
+                               MessageMeta(from_agent_name="TeamLead", to_named_agent_type="Researcher"))
+    requester.name = "TeamLead"
+    requester._runtime_coordinator = lambda: SimpleNamespace(defer_subtask_failure_if_blocked=lambda **_: False)
+    requester._resume_parent_task_if_ready = AsyncMock()
+    requester._send_task_error_response = AsyncMock()
+    requester._fail_subtask_and_reconcile_parent = partial(
+        subtask_watchdog_runtime._fail_subtask_and_reconcile_parent, requester)
+
+    await agent_exited(requester, WORKER_B, "exiting")
+
+    assert manager.get_task_info("task_sub").state == ProgressState.FAILED
+    assert not manager.is_terminal_state(manager.get_task_info("task_sibling").state)
+    assert not manager.is_terminal_state(manager.get_task_info("task_parent").state)
+    requester._resume_parent_task_if_ready.assert_awaited_once_with("task_parent")
+    requester._send_task_error_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio

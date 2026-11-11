@@ -53,8 +53,10 @@ How it reads:
   placement of the agent is held and its held record, if any, names a session this reader
   holds (``_run_may_go_on``). A placement means a newer session or a handover; a record
   naming an unknown session may name a newer one. When an agent's last session record is
-  deleted (the team services keep them about 30 days past their end), what this reader kept
-  about its departure is dropped.
+  deleted, what this reader kept about its departure is dropped. The team services delete a
+  session record ``kept_for("agent_session")`` after it was last signed: its 7-day lifetime
+  plus 30 days' retention, so a closed session (re-signed when it closed) stays about 37
+  days past its end.
 - Failed watches reopen, and a refusal that can pass later is verified again at each check:
   the writer's certificate or session is not readable yet while hosts join
   (``unknown_key``), revocations are not current yet, or a record is dated just ahead of
@@ -572,7 +574,9 @@ class TeamAgents:
         """Drop what this reader keeps about a departure once the agent's last session record is deleted.
 
         Agent ids are never used again, so nothing can bring it back or announce it again; this
-        keeps the departures bounded by how long the team services keep session records.
+        keeps the departures bounded by how long the team services keep session records. While
+        another session of the agent is still held, the departure stays: dropping it would let
+        ``_unseen_exits`` announce the same exit again from that session.
         """
 
         if agent_id in self._view or any(session.agent == agent_id for session in self._sessions.values()):

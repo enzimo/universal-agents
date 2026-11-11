@@ -606,14 +606,23 @@ async def test_an_agent_that_left_the_view_under_an_earlier_session_has_not_left
 
 @pytest.mark.asyncio
 async def test_deleting_an_agents_last_session_record_forgets_its_departure():
-    """F3: what the reader keeps about departures is bounded by how long session records are kept."""
+    """F3: what the reader keeps about departures is bounded by how long session records are kept.
 
-    async with _reading(closed_before_start=True) as (reader, records, host):
+    The team services delete records in the order they were last signed, so the run's earlier
+    session goes first; while the closed newest one is held, the exit is kept and not heard again.
+    """
+
+    superseded, closed = _superseded_lead_session(), _closed_lead_session()
+    async with _reading(preload={"agent_session": dict([superseded, closed])}) as (reader, records, host):
         assert reader.left_for_good("lead")
-        key, _ = _closed_lead_session()
+        changes = []
+        _heard(reader, changes)
 
-        await records.feed("agent_session", key, None)
+        await records.feed("agent_session", superseded[0], None)
+        await asyncio.sleep(0.1)  # several more checks
+        assert reader.left_for_good("lead") and changes == []
 
+        await records.feed("agent_session", closed[0], None)
         assert reader.departure_reason("lead") is None and reader.departed_agent("lead") is None
         assert not reader.left_for_good("lead")
 

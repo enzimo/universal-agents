@@ -38,9 +38,11 @@ own loop, here. Nothing else writes these two maps.
   custody recovery and the subtask watchdog handle those, as they do a subtask whose record
   cannot be read or was never published. One narrow window stays: a worker that saved the
   task but crashed before removing it from the stream. A subtask delegated before records
-  existed has no record and is failed as before. An agent whose host only stopped
-  reporting has not left for good: the host may be unreachable for a while, and the
-  watchdog handles work that never comes back.
+  existed has no record and is failed as before. Only the subtask fails, as with the
+  watchdog's timeout, a handback or a worker loss: the parent task and its other subtasks
+  go on, and the parent's turn resumes to decide again (``_fail_untaken``). An agent whose
+  host only stopped reporting has not left for good: the host may be unreachable for a
+  while, and the watchdog handles work that never comes back.
 - **Finding a named agent to give work to** (``live_named_agent``). A by-name delegation goes
   to the agent's own mailbox, so the agent must be there to take it. The lookup waits up to
   ``NAMED_AGENT_START_SECONDS`` for the name to appear in the view, so an agent started just
@@ -151,38 +153,68 @@ def _note_ambiguous_names(agent: Any, ambiguous: dict[str, tuple[str, ...]]) -> 
 
 
 async def agent_exited(agent: Any, departed: TeamAgent, reason: str) -> None:
-    """``departed`` left for good: fail what this agent sent to its mailbox that nobody took (module docstring)."""
+    """``departed`` left for good: fail what this agent sent to its mailbox that nobody took (module docstring).
 
-    agent._logger.warning("[%s] Agent '%s' (%s) left for good. event=team_agent_left_for_good agent_id=%s "
-                          "departed_agent_id=%s departed_agent_type=%s reason=%s", agent.id,
-                          departed.display_name or departed.agent, departed.agent, agent.id, departed.agent,
-                          departed.agent_type, reason)
+    Every agent of the process hears every exit, so the exit is logged only by an agent that
+    had sent work there; each failed subtask is logged as a warning (``_fail_untaken``).
+    """
+
     task_manager = agent.task_manager
     in_its_mailbox = [
         subtask_info
         for subtask_info in await task_manager.operations_runtime.run(task_manager.get_pending_subtasks)
         if getattr(getattr(subtask_info, "header", None), "to_routing_path", None) == departed.agent
     ]
-    for subtask_info in in_its_mailbox:
+    if not in_its_mailbox:
+        return
+    agent._logger.info("[%s] Agent '%s' (%s), which this agent asked for work by name, left for good. "
+                       "event=team_agent_left_for_good agent_id=%s departed_agent_id=%s departed_agent_type=%s "
+                       "reason=%s subtasks=%s", agent.id, departed.display_name or departed.agent, departed.agent,
+                       agent.id, departed.agent, departed.agent_type, reason, len(in_its_mailbox))
+    await _fail_untaken(agent, departed.agent, departed.display_name or departed.agent, reason, in_its_mailbox)
+
+
+async def _fail_untaken(agent: Any, departed_id: str, label: str, reason: str, subtasks: list[Any]) -> None:
+    """Fail each of ``subtasks`` that still waits untaken in ``departed_id``'s mailbox (module docstring).
+
+    Only the subtask fails, as when the subtask watchdog times one out, a worker hands one back
+    or a delegated task keeps losing its workers: the parent task and its other subtasks go on,
+    and the parent's turn resumes to decide again. One subtask's error does not stop the others;
+    that subtask is left to the watchdog.
+    """
+
+    task_manager = agent.task_manager
+    for subtask_info in subtasks:
         task_id = subtask_info.task.task_id
-        if not await _still_waiting(agent, task_id, departed):
-            continue
-        parent_task_id = await task_manager.operations_runtime.run(task_manager.get_parent_task_id, task_id)
-        if not parent_task_id:
-            continue
-        agent._logger.warning("[%s] A subtask waited in the mailbox of an agent that left for good; it is failed. "
-                              "event=team_agent_left_subtask_failed agent_id=%s task_id=%s subtask_id=%s "
-                              "departed_agent_id=%s reason=%s", agent.id, agent.id, parent_task_id, task_id,
-                              departed.agent, reason)
-        await agent._fail_subtask_and_reconcile_parent(
-            parent_task_id=parent_task_id,
-            subtask_info=subtask_info,
-            error_message=(f"Delegated subtask failed because agent {departed.display_name or departed.agent} "
-                           "left before taking it."),
-        )
+        try:
+            if not await _still_waiting(agent, task_id, departed_id):
+                continue
+            parent_task_id = await task_manager.operations_runtime.run(task_manager.get_parent_task_id, task_id)
+            if not parent_task_id:
+                continue
+            agent._logger.warning("[%s] A subtask waited in the mailbox of an agent that left for good; it is failed "
+                                  "and its parent task goes on. event=team_agent_left_subtask_failed agent_id=%s "
+                                  "task_id=%s subtask_id=%s departed_agent_id=%s reason=%s", agent.id, agent.id,
+                                  parent_task_id, task_id, departed_id, reason)
+            await agent._fail_subtask_and_reconcile_parent(
+                parent_task_id=parent_task_id,
+                subtask_info=subtask_info,
+                error_message=f"Delegated subtask failed because agent {label} left before taking it.",
+                resume_parent=True,
+                synthetic_context=(
+                    f"Agent {label} left the team before it took delegated subtask {task_id}, so that subtask is "
+                    "marked failed. Continue the parent task: delegate the work again, to the agent type or to "
+                    "another named worker, do it another way, or tell the person."
+                ),
+            )
+        except Exception:
+            agent._logger.exception("[%s] A subtask left in the mailbox of an agent that left for good could not be "
+                                    "failed; it is left to the subtask watchdog. "
+                                    "event=team_agent_left_subtask_fail_error agent_id=%s subtask_id=%s "
+                                    "departed_agent_id=%s", agent.id, agent.id, task_id, departed_id)
 
 
-async def _still_waiting(agent: Any, task_id: str, departed: TeamAgent) -> bool:
+async def _still_waiting(agent: Any, task_id: str, departed_id: str) -> bool:
     """Whether the subtask still waits in the departed agent's mailbox, untaken: then it may be failed.
 
     True only when its record says nobody took it and its message could be withdrawn from the
@@ -195,7 +227,7 @@ async def _still_waiting(agent: Any, task_id: str, departed: TeamAgent) -> bool:
     def kept(why: str, event: str, holder: Optional[str] = None) -> bool:
         agent._logger.info("[%s] A subtask sent to the departed agent's mailbox is not failed: %s. event=%s "
                            "agent_id=%s subtask_id=%s departed_agent_id=%s holder_agent_id=%s", agent.id, why, event,
-                           agent.id, task_id, departed.agent, holder)
+                           agent.id, task_id, departed_id, holder)
         return False
 
     try:
@@ -204,7 +236,7 @@ async def _still_waiting(agent: Any, task_id: str, departed: TeamAgent) -> bool:
     except Exception:
         agent._logger.exception("[%s] Whether a subtask was taken could not be read; it is left to the subtask "
                                 "watchdog. event=team_agent_left_subtask_unread agent_id=%s subtask_id=%s "
-                                "departed_agent_id=%s", agent.id, agent.id, task_id, departed.agent)
+                                "departed_agent_id=%s", agent.id, agent.id, task_id, departed_id)
         return False
     if record is None:
         return True
@@ -218,7 +250,7 @@ async def _still_waiting(agent: Any, task_id: str, departed: TeamAgent) -> bool:
     except Exception:
         agent._logger.exception("[%s] A subtask's message could not be withdrawn; it is left to the subtask watchdog. "
                                 "event=team_agent_left_subtask_withdraw_failed agent_id=%s subtask_id=%s "
-                                "departed_agent_id=%s sequence=%s", agent.id, agent.id, task_id, departed.agent,
+                                "departed_agent_id=%s sequence=%s", agent.id, agent.id, task_id, departed_id,
                                 record.publish_sequence)
         return False
     if not withdrawn:
