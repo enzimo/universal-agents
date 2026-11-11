@@ -280,6 +280,7 @@ def _gateway_config(tmp_path: Path, nats_url: str, saved: str):
     )
     config.transport.nats_url = nats_url
     config.transport.nats_servers = [nats_url]
+    config.save()  # a launched gateway's is saved: the route to the lead is written to it
     return config
 
 
