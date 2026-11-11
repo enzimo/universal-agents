@@ -5006,7 +5006,12 @@ The operational subject now carries only
 the gateway's task progress, parent-task probe and thread guidance, with their replies
 (plan decision 68); a lead's guidance for a delegated task goes to the worker holding it
 through its control mailbox (`agent.<id>.control`, durable, read while it works; plan
-decision 59), and a subtask no worker has taken yet gets none. The skill hint is no longer
+decision 59), and a subtask no worker has taken yet gets none. The holder of each subtask
+comes from team-wide task custody first, then the parent's delegated-task records looked up
+by team and parent, then, for a subtask asked of an agent by name, the team's directory
+(`delegated_work_runtime.current_holders`): custody names the worker before its claim reaches
+the lead and after a takeover whose claim is not recorded yet, and records looked up by parent
+are found after the lead restarted with a new id. The skill hint is no longer
 a message type.
 
 Agents now find each other only through the records, which only an agent holding a session

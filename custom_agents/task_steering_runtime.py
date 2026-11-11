@@ -423,22 +423,6 @@ async def _record_guidance_history(
     return entry is not None
 
 
-async def _delegated_task_holders(agent: Any) -> dict[str, str]:
-    """The worker holding each of this agent's open delegated tasks, by task id (empty if unreadable)."""
-
-    from custom_agents.delegated_work_runtime import delegated_tasks
-
-    try:
-        records = await agent.task_manager.operations_runtime.run(
-            delegated_tasks(agent).list_open, str(agent.team_id), str(agent.id)
-        )
-    except Exception:
-        agent._logger.exception("Could not read delegated-task records; guidance reaches subtasks asked by name only. "
-                                "event=delegated_task_records_unreadable agent_id=%s", agent.id)
-        return {}
-    return {record.task_id: record.holder_agent_id for record in records if getattr(record, "holder_agent_id", None)}
-
-
 async def _forward_proactive_guidance_to_pending_subtasks(
     agent: Any,
     task_id: str,
@@ -449,18 +433,18 @@ async def _forward_proactive_guidance_to_pending_subtasks(
 
     Each goes to the holder's own control mailbox (``agent.<id>.control``), durably, which the
     worker reads while it works (plan decision 59: the old queued mailbox until phase 3, where
-    it becomes ``task.steer``). The holder comes from the delegated-task record, or for a
-    subtask asked of an agent by name, from the team's directory. A subtask no worker has
-    taken yet gets none: nothing would read it until then. Until message contract step 7d
-    this went to every agent on the operational subject, and the holder picked it out.
+    it becomes ``task.steer``). The holder comes from team-wide task custody, then the
+    parent's delegated-task records (``delegated_work_runtime.current_holders``), and for a
+    subtask asked of an agent by name, last from the team's directory. A subtask no worker
+    has taken yet gets none: nothing would read it until then. Until message contract step
+    7d this went to every agent on the operational subject, and the holder picked it out.
     """
 
     get_pending_subtasks = getattr(agent.task_manager, "get_pending_subtasks", None)
     if not callable(get_pending_subtasks):
         return 0
 
-    holders = await _delegated_task_holders(agent)
-    forwarded_count = 0
+    pending = []
     for subtask_info in (
         await agent.task_manager.operations_runtime.run(get_pending_subtasks, task_id)
         or []
@@ -469,10 +453,28 @@ async def _forward_proactive_guidance_to_pending_subtasks(
         subtask_meta = getattr(subtask_info, "meta", None)
         if subtask is None or not getattr(subtask, "task_id", None):
             continue
+        if not getattr(subtask_meta, "to_named_agent_type", None) and not getattr(subtask_meta, "to_agent_name", None):
+            continue
+        pending.append((subtask, subtask_meta))
+    if not pending:
+        return 0
+
+    from custom_agents.delegated_work_runtime import current_holders
+
+    try:
+        # The task lane copies its arguments; the agent goes in through partial.
+        holders = await agent.task_manager.operations_runtime.run(
+            partial(current_holders, agent), task_id, [subtask.task_id for subtask, _meta in pending]
+        )
+    except Exception:
+        agent._logger.exception("Could not read who holds the delegated subtasks; guidance reaches subtasks asked "
+                                "by name only. event=delegated_task_records_unreadable agent_id=%s task_id=%s",
+                                agent.id, task_id)
+        holders = {}
+    forwarded_count = 0
+    for subtask, subtask_meta in pending:
         target_named_agent_type = getattr(subtask_meta, "to_named_agent_type", None)
         target_agent_name = getattr(subtask_meta, "to_agent_name", None)
-        if not target_named_agent_type and not target_agent_name:
-            continue
         holder_id = holders.get(subtask.task_id) or (
             agent._agent_id_by_name.get(target_agent_name) if target_agent_name else None
         )
