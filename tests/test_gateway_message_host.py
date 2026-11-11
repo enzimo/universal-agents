@@ -182,6 +182,27 @@ async def test_a_joined_host_writes_its_last_record_when_closed(stand_in, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_closing_a_joined_host_whose_team_records_were_never_read_returns(stand_in, tmp_path: Path,
+                                                                                 monkeypatch) -> None:
+    """Review F2: stop before the team view's first catch-up (a records watch that keeps failing) must not hang."""
+
+    from assistant_gateway import team_view
+    from assistant_gateway.team_view import GatewayTeamView
+    from tests.test_gateway_team_view import Reader
+
+    reader = Reader()
+    reader.catches_up = False
+    monkeypatch.setattr(team_view, "TeamAgents", reader)
+    gateway = _gateway(tmp_path)
+    gateway.observe_team(GatewayTeamView("team_one", on_status=lambda *args: None, on_lead=lambda status: None))
+    gateway.start(nc="connection")
+    await gateway.ready(timeout=1)
+    await asyncio.sleep(0.05)
+    await asyncio.wait_for(gateway.close(), timeout=2)
+    assert stand_in.started[0].records == ["accepting", "drained"]
+
+
+@pytest.mark.asyncio
 async def test_a_command_waiting_for_the_join_hears_at_once_that_the_host_stopped(stand_in, tmp_path: Path) -> None:
     stand_in.joins = ["hang"]
     gateway = _gateway(tmp_path)

@@ -32,12 +32,17 @@ what the gateway already acts on:
   contract counts as unavailable, so chats are not sent to it. ``host_findings`` adds a
   Status page problem for each such host, naming both digests and what to do.
 
-Everything here runs on the gateway's own loop.
+Everything here runs on the gateway's own loop. Each part of the view (the reader, the lead's
+changes, the details) runs supervised: one that fails, or ends before the gateway stops, is
+logged and started again, so it never stops the others silently. Nothing waits for the
+records to be read without also stopping when the gateway stops. A member whose departure
+is only the reader stopping (``READER_STOPPED``) has not left, so nothing is said about it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Optional
@@ -54,11 +59,14 @@ from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
 from custom_messages.enums import MessageMetaType
 from custom_messages.wire.kinds import CONTRACT_SHA256
 from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
-from custom_transport.protocol1.team_agents import HostComponent, TeamAgent, TeamAgents
+from custom_transport.protocol1.team_agents import READER_STOPPED, HostComponent, TeamAgent, TeamAgents
 
 # The old heartbeat's period: how often the gateway asks each live agent for its details.
 DETAILS_POLL_SECONDS = 20.0
 DETAILS_TIMEOUT_SECONDS = 5.0
+# How long a view task that failed, or ended before the gateway stopped, waits before it starts again: the
+# first wait, doubling up to the second (``_supervised``). A task that ran this long starts from the first again.
+RESTART_SECONDS = (5.0, 300.0)
 SOURCE = "agent_records"
 _LOGGER = logging.getLogger(__name__)
 
@@ -160,6 +168,51 @@ def _capitalized(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+async def _supervised(name: str, start: Callable[[], Awaitable[None]], stop: asyncio.Event,
+                      logger: logging.Logger, delays: tuple[float, float]) -> None:
+    """Run ``start()`` until ``stop``. A failure, or an end before ``stop``, is logged and it starts again after a
+    wait that doubles from ``delays[0]`` to ``delays[1]``, so one broken part of the view never stops the rest
+    silently and for good (review F1)."""
+
+    first, longest = delays
+    delay = first
+    loop = asyncio.get_running_loop()
+    while not stop.is_set():
+        began = loop.time()
+        error: Optional[Exception] = None
+        try:
+            await start()
+        except Exception as failure:
+            error = failure
+        else:
+            if stop.is_set():
+                return
+        if loop.time() - began >= longest:
+            delay = first
+        if error is not None:
+            logger.error("A part of the gateway's team view failed; it starts again in %s seconds. "
+                         "event=gateway_team_view_task_failed task=%s error_type=%s", delay, name,
+                         type(error).__name__, exc_info=error)
+        else:
+            logger.error("A part of the gateway's team view ended before the gateway stopped; it starts again in "
+                         "%s seconds. event=gateway_team_view_task_ended task=%s", delay, name)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+        delay = min(delay * 2, longest)
+
+
+async def _either(first: asyncio.Event, second: asyncio.Event) -> None:
+    """Wait until either event is set (a readiness wait must also end when the gateway stops, review F2)."""
+
+    waits = [asyncio.create_task(first.wait()), asyncio.create_task(second.wait())]
+    try:
+        await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for wait in waits:
+            wait.cancel()
+        await asyncio.gather(*waits, return_exceptions=True)
+
+
 StatusObserver = Callable[[AgentStatus, Optional[datetime], str], None]
 LeadObserver = Callable[[AgentStatus], Awaitable[None]]
 
@@ -191,12 +244,14 @@ class GatewayTeamView:
     """The gateway's view of its team (module docstring)."""
 
     def __init__(self, team_id: str, *, on_status: StatusObserver, on_lead: LeadObserver,
-                 logger: Optional[logging.Logger] = None, details_seconds: float = DETAILS_POLL_SECONDS) -> None:
+                 logger: Optional[logging.Logger] = None, details_seconds: float = DETAILS_POLL_SECONDS,
+                 restart_seconds: tuple[float, float] = RESTART_SECONDS) -> None:
         self.team_id = team_id
         self._on_status = on_status
         self._on_lead = on_lead
         self._logger = logger or _LOGGER
         self._details_seconds = details_seconds
+        self._restart_seconds = restart_seconds
         self._agents: Optional[TeamAgents] = None
         self._host: Any = None
         self._details: dict[str, dict[str, Any]] = {}
@@ -209,22 +264,45 @@ class GatewayTeamView:
         return self._agents
 
     async def run(self, host: Any, stop: asyncio.Event) -> None:
-        """Read the team through the gateway's joined host until ``stop``."""
+        """Read the team through the gateway's joined host until ``stop``; returns as soon as ``stop`` is set.
+
+        The reader, the lead's changes and the details each run supervised (``_supervised``).
+        """
 
         self._host = host
         self._agents = TeamAgents(host, self.team_id, logger=self._logger)
         self._agents.listen(self._changed)
-        tasks = [asyncio.create_task(self._agents.run(stop), name="gateway_team_agents"),
-                 asyncio.create_task(self._apply_leads(stop), name="gateway_team_leads"),
-                 asyncio.create_task(self._ask_details(stop), name="gateway_team_details")]
+        parts: dict[str, Callable[[], Awaitable[None]]] = {
+            "gateway_team_agents": lambda: self._read(stop),
+            "gateway_team_leads": lambda: self._apply_leads(stop),
+            "gateway_team_details": lambda: self._ask_details(stop),
+        }
+        tasks = [asyncio.create_task(_supervised(name, start, stop, self._logger, self._restart_seconds), name=name)
+                 for name, start in parts.items()]
         try:
-            await self._agents.ready.wait()
-            self.ready.set()
             await stop.wait()
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _read(self, stop: asyncio.Event) -> None:
+        """Run the reader; the view is ready while the reader has caught up. Never waits for the catch-up alone:
+        a reader that stops before it (a watch that keeps failing, a quick stop) ends this too (review F2)."""
+
+        assert self._agents is not None
+        reading = asyncio.create_task(self._agents.run(stop), name="gateway_team_agents_run")
+        caught_up = asyncio.create_task(self._agents.ready.wait())
+        try:
+            await asyncio.wait({reading, caught_up}, return_when=asyncio.FIRST_COMPLETED)
+            if self._agents.ready.is_set():
+                self.ready.set()
+            await reading
+        finally:
+            self.ready.clear()
+            for task in (reading, caught_up):
+                task.cancel()
+            await asyncio.gather(reading, caught_up, return_exceptions=True)
 
     async def wait_ready(self, timeout: float) -> bool:
         try:
@@ -261,6 +339,12 @@ class GatewayTeamView:
             if now is not None:
                 status = record_status(now, self.team_id, details=self._details.get(agent_id))
             elif earlier is not None:
+                reason = self._agents.departure_reason(agent_id)
+                if reason == READER_STOPPED:
+                    # Nobody left: the reader stopped (the gateway stops, or the reader starts again).
+                    continue
+                self._logger.info("A team member left the team's records. event=gateway_team_member_left agent=%s "
+                                  "lead=%s reason=%s", agent_id, earlier.is_lead, reason)
                 self._details.pop(agent_id, None)
                 status = record_status(earlier, self.team_id, exiting=True)
             else:
@@ -287,12 +371,14 @@ class GatewayTeamView:
     async def _ask_details(self, stop: asyncio.Event) -> None:
         """Each live agent's skills, findings and capacity, every ``details_seconds`` (module docstring)."""
 
-        await self.ready.wait()
         while not stop.is_set():
+            if not self.ready.is_set():
+                await _either(self.ready, stop)
+                continue
             assert self._agents is not None
-            live = dict(self._agents.live())
-            answers = await asyncio.gather(*(self._ask(agent_id) for agent_id in sorted(live)))
-            for agent_id, answer in zip(sorted(live), answers):
+            live = sorted(self._agents.live())
+            answers = await asyncio.gather(*(self._ask(agent_id) for agent_id in live))
+            for agent_id, answer in zip(live, answers):
                 current = self._agents.agent(agent_id)
                 if answer is None or current is None:
                     continue
@@ -304,15 +390,22 @@ class GatewayTeamView:
                 pass
 
     async def _ask(self, agent_id: str) -> Optional[dict[str, Any]]:
+        """One agent's ``agent.status`` answer, or None. Any failure stays with this agent (review F1): a reply that
+        fails verification, a connection error or a malformed body is logged, and the other agents' answers count."""
+
         host = self._host
         audience = {"installation": host.identity.installation, "team": self.team_id, "target": "agent",
                     "id": agent_id}
         try:
             reply = await host.live.request("agent.status", {"level": "basic"}, audience, team=self.team_id,
                                             timeout=DETAILS_TIMEOUT_SECONDS)
+            body = dict(reply.raw["body"])
         except (ServiceUnavailable, RequestRefused) as error:
             self._logger.info("An agent did not give its status. event=gateway_agent_status_unanswered agent=%s "
                               "reason=%s", agent_id, error)
             return None
-        body = dict(reply.raw["body"])
+        except Exception as error:
+            self._logger.warning("An agent's status answer could not be used. event=gateway_agent_status_failed "
+                                 "agent=%s error_type=%s error=%s", agent_id, type(error).__name__, error)
+            return None
         return body if body.get("outcome") == "ok" else None
