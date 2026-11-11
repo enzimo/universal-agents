@@ -2,6 +2,12 @@
 """
 Convenience launcher for starting one configured agent type for manual testing.
 
+The agent runs without the launcher's protocol 1 host (no ``--host-runtime``), so it holds
+no session: it works through its own queues, but other agents, the gateway's Team and
+Status pages and restart approvals do not see it, and it cannot ask other agents anything.
+Use it to try one agent on its own; a run with several agents needs the launcher
+(``docker/launch_headless.py``).
+
 Examples:
     python scripts/launch_agent_type.py TeamArchitect --team-id team_303 --env debug.env
     python scripts/launch_agent_type.py CodeWritingAgent --team-id team_303 --env debug.env
@@ -37,7 +43,11 @@ def _parse_bool_like(value: str) -> bool:
 
 def _build_launcher_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Quick launcher for a single configured agent type",
+        description=(
+            "Quick launcher for a single configured agent type. It runs without a protocol 1 host, so other "
+            "agents and the gateway do not see it; a run with several agents needs the launcher "
+            "(docker/launch_headless.py)."
+        ),
     )
     parser.add_argument(
         "agent_type",

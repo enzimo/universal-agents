@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-import re
+from topic_tags import TopicTagInputError, normalize_topic_tag, normalize_topic_tags
+
+import logging
 import shlex
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from assistant_gateway.application.identity_service import GatewayIdentityService
 from assistant_gateway.application.interactive_submission import (
@@ -15,10 +16,6 @@ from assistant_gateway.application.interactive_submission import (
 )
 from assistant_gateway.application.person_lifecycle import GatewayPersonLifecycle
 from assistant_gateway.application.person_setup import PersonSetupChoices
-from assistant_gateway.application.manager_commands import (
-    GatewayManagerCommandRequest,
-    GatewayManagerCommandService,
-)
 from assistant_gateway.application.ports import GatewayPrivateResourceAuthorizer
 from assistant_gateway.application.private_resources import (
     PRIVATE_ACTION_CREATE,
@@ -40,21 +37,48 @@ from assistant_gateway.application.session_service import (
     with_parallel_mark_notice,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from assistant_gateway.application.route_context import GatewayRouteContextV1
+from assistant_gateway.application.team_commands import (
+    GatewayTeamCommandService,
+    TeamCommandRefused,
+    TeamServicesUnavailable,
+)
 from custom_messages.contracts.control_v1 import (
-    ManagerKnowledgeCommand,
-    ManagerMemoryCommand,
-    ManagerTopicCommand,
     PinnedMemoryCommandPayload,
     PinnedMemoryCommandResultPayload,
 )
 from time_presentation import format_user_timestamp
 
 
-class GatewayPinnedMemoryCommandParser(Protocol):
-    """Parse a pinned-memory command without coupling the application to its SDK."""
+class GatewayPinnedMemoryCodec(Protocol):
+    """The memory command grammar, the contract's bodies and the chat rendering, kept out of the application.
+
+    ``assistant_gateway.pinned_memory_commands.RuntimePinnedMemoryCodec``.
+    """
 
     def parse(self, command: str, *, bank: str) -> PinnedMemoryCommandPayload: ...
+
+    def wire_command(
+        self, command: PinnedMemoryCommandPayload, *, timezone_name: str | None
+    ) -> tuple[str, dict[str, Any]]: ...
+
+    def result(
+        self, command: PinnedMemoryCommandPayload, reply: dict[str, Any], *, team_id: str, person_id: str
+    ) -> PinnedMemoryCommandResultPayload: ...
+
+    def render(self, result: PinnedMemoryCommandResultPayload, *, timezone_name: str | None) -> str: ...
+
+
+# Refusals that name something wrong with what the person asked for.
+_MEMORY_INPUT_OUTCOMES = frozenset({"not_found", "invalid_request", "capacity_reached"})
+
+
+class GatewayMemoryRefused(Exception):
+    """The team services answered a memory command with a refusal outcome and its message."""
+
+    def __init__(self, outcome: str, message: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -68,7 +92,7 @@ class GatewayCommandOperationsSettings:
 
 @dataclass(frozen=True)
 class GatewayPinnedMemoryOperationResult:
-    """Typed manager result plus gateway-authorized browser actions."""
+    """The team services' typed result plus gateway-authorized browser actions."""
 
     result: PinnedMemoryCommandResultPayload
     available_actions: tuple[Literal["edit", "delete"], ...]
@@ -76,7 +100,7 @@ class GatewayPinnedMemoryOperationResult:
 
 
 class GatewayPinnedMemoryConflictError(ValueError):
-    """The manager rejected a mutation bound to an outdated memory revision."""
+    """The team services refused a change based on an outdated memory version (``changed_since_read``)."""
 
 
 class GatewayCommandOperationsApplication:
@@ -89,9 +113,9 @@ class GatewayCommandOperationsApplication:
         identity: GatewayIdentityService,
         request_context: GatewayRequestContextService,
         sessions: GatewaySessionService,
-        manager_commands: GatewayManagerCommandService,
         submission: GatewayInteractiveSubmissionService,
-        pinned_memory_parser: GatewayPinnedMemoryCommandParser,
+        team_commands: GatewayTeamCommandService,
+        pinned_memory: GatewayPinnedMemoryCodec,
         private_authorizer: GatewayPrivateResourceAuthorizer,
         person_lifecycle: GatewayPersonLifecycle,
     ) -> None:
@@ -102,10 +126,12 @@ class GatewayCommandOperationsApplication:
         self._person_lifecycle = person_lifecycle
         self._request_context = request_context
         self._sessions = sessions
-        self._manager_commands = manager_commands
         self._submission = submission
-        self._pinned_memory_parser = pinned_memory_parser
+        # People's memory commands go to the team services (team_commands).
+        self._team_commands = team_commands
+        self._pinned_memory = pinned_memory
         self._private_authorizer = private_authorizer
+        self._logger = logging.getLogger(__name__)
 
     def canonical_user_id_for_context(
         self,
@@ -589,60 +615,6 @@ class GatewayCommandOperationsApplication:
             )
         )
 
-    async def _manager_request(
-        self,
-        command: ManagerMemoryCommand | ManagerTopicCommand,
-        *,
-        session: SessionRecord,
-        route: GatewayRequestRoute,
-        person: GatewayCommandPerson,
-    ) -> ManagerMemoryCommand | ManagerTopicCommand:
-        result = await self._manager_commands.request(
-            GatewayManagerCommandRequest(
-                command=command,
-                session=session,
-                person=person,
-                route=route,
-            )
-        )
-        if not isinstance(result, (ManagerMemoryCommand, ManagerTopicCommand)):
-            raise TypeError("Manager returned the wrong command result type.")
-        return result
-
-    async def execute_knowledge_command(
-        self, command: ManagerKnowledgeCommand, *, context: GatewayRouteContextV1
-    ) -> ManagerKnowledgeCommand:
-        """Send one Knowledge page request to the manager for the route's signed-in person.
-
-        Resolving the session and the person reads the gateway's records, so
-        it runs in a worker thread (website_handlers.off_loop).
-        """
-
-        route = GatewayRequestRoute(
-            channel_name=context.channel_name,
-            user_id=context.user_id,
-            chat_id=context.chat_id,
-            canonical_user_id=context.canonical_user_id,
-        )
-
-        def session_and_person() -> tuple[SessionRecord, GatewayCommandPerson]:
-            session = self.resolve_session(
-                session_key=context.session_key,
-                channel_name=route.channel_name,
-                user_id=route.user_id,
-                chat_id=route.chat_id,
-                canonical_user_id=route.canonical_user_id,
-            )
-            return session, self._principal(session, route)
-
-        session, person = await asyncio.to_thread(session_and_person)
-        response = await self._manager_commands.request(
-            GatewayManagerCommandRequest(command=command, session=session, person=person, route=route)
-        )
-        if not isinstance(response, ManagerKnowledgeCommand):
-            raise TypeError("Manager returned the wrong knowledge result type.")
-        return response
-
     async def execute_pinned_memory_command(
         self,
         *,
@@ -654,6 +626,8 @@ class GatewayCommandOperationsApplication:
         thread_id: str | None,
         session_key: str | None = None,
     ) -> str:
+        """Run a chat's /coremem or /usermem command at the team services and render the reply."""
+
         route = GatewayRequestRoute(
             channel_name=channel_name,
             user_id=user_id,
@@ -668,21 +642,26 @@ class GatewayCommandOperationsApplication:
                 chat_id=chat_id,
                 thread_id=thread_id,
             )
-            response = await self._manager_request(
-                ManagerMemoryCommand(
-                    command=self._pinned_memory_parser.parse(command, bank=bank),
-                ),
-                session=session,
-                route=route,
-                person=self._principal(session, route),
-            )
-            if not isinstance(response, ManagerMemoryCommand):
-                raise TypeError("Manager returned the wrong memory result type.")
-            return response.rendered_result
+            principal = self._principal(session, route)
+            parsed = self._pinned_memory.parse(command, bank=bank)
+            timezone_name = self._person_timezone(session, route, principal)
+            result = await self._memory_operation(parsed, principal=principal, timezone_name=timezone_name)
+            return self._pinned_memory.render(result, timezone_name=timezone_name)
+        except GatewayMemoryRefused as refused:
+            return refused.message
         except PermissionError:
             return "Use /user first to register this channel before managing pinned memory."
-        except Exception as exc:
-            return f"Pinned memory command failed: {exc}"
+        except (TeamServicesUnavailable, TeamCommandRefused, ValueError) as exc:
+            # Written for the person: the team services' state, or what was wrong with the command.
+            return str(exc)
+        except Exception:
+            self._logger.exception(
+                "A memory command failed in the gateway. event=gateway_memory_command_failed bank=%s", bank
+            )
+            return (
+                "The memory command failed because of an error in the gateway. An administrator can find it "
+                "in the gateway log."
+            )
 
     async def execute_pinned_memory_operation(
         self,
@@ -695,7 +674,7 @@ class GatewayCommandOperationsApplication:
         thread_id: str | None,
         canonical_user_id: str,
     ) -> GatewayPinnedMemoryOperationResult:
-        """Execute one typed Settings operation through the manager owner."""
+        """Execute one typed Settings operation at the team services."""
 
         route = GatewayRequestRoute(
             channel_name=channel_name,
@@ -713,26 +692,20 @@ class GatewayCommandOperationsApplication:
             canonical_user_id=canonical_user_id,
         )
         principal = self._principal(session, route)
-        response = await self._manager_request(
-            ManagerMemoryCommand(command=command),
-            session=session,
-            route=route,
-            person=principal,
-        )
-        if not isinstance(response, ManagerMemoryCommand):
-            raise TypeError("Manager returned the wrong memory result type.")
-        if response.error_code == "conflict":
-            raise GatewayPinnedMemoryConflictError(response.rendered_result)
-        if response.error_code == "invalid_request":
-            raise ValueError(response.rendered_result)
-        if response.error_code == "runtime_error":
-            raise RuntimeError(response.rendered_result)
-        if response.success is not True or response.result is None:
-            raise PermissionError(
-                response.rendered_result or "Pinned memory operation was denied."
+        try:
+            result = await self._memory_operation(
+                command, principal=principal, timezone_name=self._person_timezone(session, route, principal)
             )
+        except GatewayMemoryRefused as refused:
+            if refused.outcome == "changed_since_read":
+                raise GatewayPinnedMemoryConflictError(refused.message) from refused
+            if refused.outcome == "not_allowed":
+                raise PermissionError(refused.message) from refused
+            if refused.outcome in _MEMORY_INPUT_OUTCOMES:
+                raise ValueError(refused.message) from refused
+            raise RuntimeError(refused.message) from refused
         return GatewayPinnedMemoryOperationResult(
-            result=response.result,
+            result=result,
             can_create=self._private_authorizer.can_access(
                 actor_canonical_user_id=principal.canonical_user_id,
                 owner_canonical_user_id=None
@@ -752,6 +725,39 @@ class GatewayCommandOperationsApplication:
                 principal=principal,
             ),
         )
+
+    async def _memory_operation(
+        self,
+        command: PinnedMemoryCommandPayload,
+        *,
+        principal: GatewayCommandPerson,
+        timezone_name: str | None,
+    ) -> PinnedMemoryCommandResultPayload:
+        """Send one memory command for the signed-in person; the team services decide and answer."""
+
+        kind, body = self._pinned_memory.wire_command(command, timezone_name=timezone_name)
+        reply = await self._team_commands.request(kind, body, person_id=principal.canonical_user_id)
+        if reply.get("outcome") != "ok":
+            raise GatewayMemoryRefused(str(reply.get("outcome")), str(reply.get("message") or "Refused."))
+        return self._pinned_memory.result(
+            command, reply, team_id=principal.team_id, person_id=principal.canonical_user_id
+        )
+
+    def _person_timezone(
+        self, session: SessionRecord, route: GatewayRequestRoute, principal: GatewayCommandPerson
+    ) -> str | None:
+        """The person's time zone, for times they write and times shown to them."""
+
+        return self._request_context.requester_presentation_for_session(
+            session,
+            GatewayRequestRoute(
+                channel_name=route.channel_name or session.channel_name,
+                user_id=route.user_id or session.user_id,
+                chat_id=route.chat_id or session.chat_id,
+                thread_id=route.thread_id or session.thread_id,
+                canonical_user_id=principal.canonical_user_id,
+            ),
+        ).timezone
 
     def _pinned_memory_available_actions(
         self,
@@ -796,6 +802,25 @@ class GatewayCommandOperationsApplication:
         session_key: str | None = None,
     ) -> tuple[str | None, str]:
         try:
+            return await self._execute_topic_command(
+                command=command, channel_name=channel_name, user_id=user_id, chat_id=chat_id,
+                thread_id=thread_id, session_key=session_key,
+            )
+        except TopicTagInputError as error:
+            self._logger.warning("Refused invalid topic tags. event=gateway_topic_invalid_input")
+            return session_key, f"Topic command failed: {error}"
+
+    async def _execute_topic_command(
+        self,
+        *,
+        command: str,
+        channel_name: str | None,
+        user_id: str | None,
+        chat_id: str | None,
+        thread_id: str | None,
+        session_key: str | None = None,
+    ) -> tuple[str | None, str]:
+        try:
             parts = shlex.split(command)
         except ValueError as exc:
             return session_key, f"Topic command failed: {exc}"
@@ -825,48 +850,49 @@ class GatewayCommandOperationsApplication:
             canonical_user_id=session.owner_canonical_user_id,
         )
 
-        async def request_topic(request: ManagerTopicCommand) -> ManagerTopicCommand:
-            response = await self._manager_request(
-                request,
-                session=session,
-                route=route, person=person,
-            )
-            if not isinstance(response, ManagerTopicCommand):
-                raise TypeError("Manager returned the wrong topic result type.")
-            return response
+        async def request_topic(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+            """The team services' reply; a refusal or an unreachable team services becomes a message."""
+
+            try:
+                return await self._team_commands.request(kind, body, person_id=person.canonical_user_id)
+            except TeamCommandRefused as exc:
+                if kind == "topics.tag_thread" and exc.code == "handler_failed":
+                    return {"outcome": "runtime_error", "message": "The result of the topic change is unknown. "
+                            "Check the thread's tags before sending it again."}
+                return {"outcome": "runtime_error", "message": str(exc)}
+            except TeamServicesUnavailable as exc:
+                return {"outcome": "runtime_error", "message": str(exc)}
+            except Exception:
+                self._logger.exception("A topic command failed in the gateway. "
+                                       "event=gateway_topic_command_failed kind=%s person=%s",
+                                       kind, person.canonical_user_id)
+                return {"outcome": "runtime_error", "message": "The topic command failed. Try again in a moment."}
 
         command_name = parts[0].lower()
         if command_name == "/topics":
             if len(parts) == 1:
-                response = await request_topic(
-                    ManagerTopicCommand(action="list_tags")
-                )
-                if not response.success:
+                response = await request_topic("topics.list_tags", {})
+                if response["outcome"] != "ok":
                     return (
                         session.session_key,
-                        f"Topic command failed: {response.message}",
+                        f"Topic command failed: {response.get('message', '')}",
                     )
-                if not response.known_tags:
+                if not response["tags"]:
                     return session.session_key, "No topic tags found."
                 return session.session_key, "\n".join(
                     ["Topic tags:"]
                     + [
                         f"- {item['tag']} ({item['thread_count']} thread(s))"
-                        for item in response.known_tags
+                        for item in response["tags"]
                     ]
                 )
-            tag = _normalize_topic_tag(" ".join(parts[1:]))
-            response = await request_topic(
-                ManagerTopicCommand(
-                    action="find_threads",
-                    tags=[tag],
-                )
-            )
-            if not response.success:
-                return session.session_key, f"Topic command failed: {response.message}"
+            tag = normalize_topic_tag(" ".join(parts[1:]))
+            response = await request_topic("topics.find_threads", {"tags": [tag]})
+            if response["outcome"] != "ok":
+                return session.session_key, f"Topic command failed: {response.get('message', '')}"
             return session.session_key, _render_topic_matches(
                 tag,
-                response.thread_matches,
+                response["matches"],
                 timezone_name=timezone_name,
             )
         if command_name == "/tag_thread":
@@ -876,52 +902,39 @@ class GatewayCommandOperationsApplication:
             ).strip()
             if not tag_text:
                 return session_key, "Usage: /tag_thread <tag[,tag]> [--private]"
-            tags = [
-                _normalize_topic_tag(tag)
-                for chunk in tag_text.split(",")
-                for tag in [chunk.strip()]
-                if tag
-            ]
+            tags = normalize_topic_tags([chunk.strip() for chunk in tag_text.split(",") if chunk.strip()])
             response = await request_topic(
-                ManagerTopicCommand(
-                    action="tag_thread",
-                    conversation_id=session.conversation_id,
-                    tags=tags,
-                    private=private,
-                )
+                "topics.tag_thread",
+                {"conversation_id": session.conversation_id, "tags": tags, "private": private},
             )
-            if not response.success:
-                return session.session_key, f"Topic tagging failed: {response.message}"
+            if response["outcome"] != "ok":
+                return session.session_key, f"Topic tagging failed: {response.get('message', '')}"
             return session.session_key, (
                 f"Tagged thread {session.conversation_id}: "
-                f"{', '.join(response.applied_tags)}"
+                f"{', '.join(response['applied_tags'])}"
             )
         if command_name == "/switch_topic":
             tag_text = " ".join(parts[1:]).strip()
             if not tag_text:
                 return session_key, "Usage: /switch_topic <tag>"
-            tag = _normalize_topic_tag(tag_text)
-            response = await request_topic(
-                ManagerTopicCommand(
-                    action="find_threads",
-                    tags=[tag],
-                )
-            )
-            if not response.success:
-                return session.session_key, f"Topic command failed: {response.message}"
-            if not response.thread_matches:
+            tag = normalize_topic_tag(tag_text)
+            response = await request_topic("topics.find_threads", {"tags": [tag]})
+            if response["outcome"] != "ok":
+                return session.session_key, f"Topic command failed: {response.get('message', '')}"
+            matches = response["matches"]
+            if not matches:
                 return session_key, f"No threads matched topic: {tag}"
-            if len(response.thread_matches) > 1:
+            if len(matches) > 1:
                 return session_key, (
                     f"Multiple threads matched topic {tag}; choose one explicitly "
                     "by continuing in the desired thread.\n"
                     + _render_topic_matches(
                         tag,
-                        response.thread_matches,
+                        matches,
                         timezone_name=timezone_name,
                     )
                 )
-            target = response.thread_matches[0]
+            target = matches[0]
             updated = self._sessions.switch_conversation(
                 session_key=session.session_key,
                 conversation_id=target["conversation_id"],
@@ -942,14 +955,6 @@ class GatewayCommandOperationsApplication:
 _TOPIC_USAGE = (
     "Usage: /topics [tag], /tag_thread <tag[,tag]> [--private], /switch_topic <tag>"
 )
-
-
-def _normalize_topic_tag(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
-    normalized = re.sub(r"-+", "-", normalized).strip("-_")
-    if not normalized:
-        raise ValueError("Topic tag must contain at least one letter or number.")
-    return normalized
 
 
 def _render_topic_matches(

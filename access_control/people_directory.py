@@ -16,6 +16,10 @@ a refresh. Now the scheduler reads the owner's current standing and roles at
 every run (``custom_agents.task_context_runtime``), and the manager reads who
 has left to end their work (``custom_agents.person_departure_runtime``).
 
+The team services read it too: a gateway command's authority token names its person
+only by their opaque reference (``TeamPersonV1.person_ref``), which ``person_by_ref``
+turns back into the person and their current standing and roles.
+
 Trust: the copy adds no authority. The manager already holds the key that
 signs scheduled work for any person, and agents' code runs in the sandbox,
 which cannot reach the access store.
@@ -31,6 +35,8 @@ from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 
 class PeopleStore(Protocol):
     def team_person(self, team_id: str, person_id: str) -> TeamPersonV1 | None: ...
+
+    def team_person_by_ref(self, team_id: str, person_ref: str) -> TeamPersonV1 | None: ...
 
     def team_people(self, team_id: str) -> list[TeamPersonV1]: ...
 
@@ -76,6 +82,20 @@ class PeopleDirectory:
         if record is None:
             return PersonNow(person_id, None, synced=self.synced())
         return PersonNow(person_id, record.standing, tuple(record.roles))
+
+    def person_by_ref(self, person_ref: str) -> PersonNow | None:
+        """The person a protocol 1 authority token names by reference (plan decision 64), or None if unknown."""
+
+        record = self.store.team_person_by_ref(self.team_id, person_ref)
+        if record is None:
+            return None
+        return PersonNow(record.person_id, record.standing, tuple(record.roles))
+
+    def person_ref(self, person_id: str) -> str | None:
+        """The person's opaque reference, for naming them in protocol 1 replies; None if never recorded."""
+
+        record = self.store.team_person(self.team_id, person_id)
+        return None if record is None else record.person_ref
 
     def people(self) -> dict[str, PersonNow]:
         """Everyone the gateway recorded in the team, by person id."""

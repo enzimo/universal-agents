@@ -16,7 +16,7 @@
  *   while the page is open; Settings' Knowledge link and the cog show the
  *   same count (settings_controls.mjs).
  *
- * The gateway and the manager decide everything (who may do what, conflicts,
+ * The gateway and the team services decide everything (who may do what, conflicts,
  * content never stored, content held for review); this module only shows
  * their answers. Saves carry the revision the person saw, so a page someone
  * else changed meanwhile is never overwritten: the person sees the latest

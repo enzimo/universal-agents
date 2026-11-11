@@ -110,12 +110,12 @@ from assistant_gateway.domain.transcript import (
 )
 from assistant_gateway.ports.repositories import DeliveryRepository, SessionRepository
 from custom_messages.contracts.runtime_v1 import DELIVERY_CHANNEL_WEBSITE
-from custom_messages.contracts.schedule_v1 import schedule_listing_digest
 from custom_messages.contracts.control_v1 import PINNED_MEMORY_SORT_NEWEST, ManagerRuntimeWorkCommand, PinnedMemoryCommandPayload, PinnedMemoryFactPayload
 from custom_messages.enums import ScheduleManagementClass
 from assistant_gateway.application.website_application import (
     WebTaskListRequestV1, WebTaskListV1, WebTaskControlRequestV1, WebTaskControlResultV1,
 )
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from assistant_gateway.application.website_tasks import list_tasks, control_tasks
 from runtime_settings.appearance import DarkMetalAppearanceSettings, retired_dark_keys
 
@@ -950,6 +950,7 @@ class WebsiteOperationsApplication:
         mcp: WebsiteMCPControls,
         event_output: GatewayEventOutput,
         operational_controls: GatewayOperationalControlApplication,
+        team_commands: GatewayTeamCommandService,
         schedules: GatewayScheduleApplication,
         memory_operations: WebsitePinnedMemoryOperations,
         workspace_browser: WebsiteWorkspaceBrowser,
@@ -958,6 +959,8 @@ class WebsiteOperationsApplication:
         self._mcp = mcp
         self._event_output = event_output
         self._operational_controls = operational_controls
+        # The Tasks page's lists and removals go to the team services (website_tasks).
+        self._team_commands = team_commands
         self._schedules = schedules
         self._memory_operations = memory_operations
         self._workspace_browser = workspace_browser
@@ -1236,11 +1239,11 @@ class WebsiteOperationsApplication:
 
     async def list_web_chat_tasks(self, request: WebTaskListRequestV1) -> WebTaskListV1:
         self._require_task_agent(request.agent_id)
-        return await list_tasks(self._operational_controls, request)
+        return await list_tasks(self._team_commands, request)
 
     async def control_web_chat_tasks(self, request: WebTaskControlRequestV1) -> WebTaskControlResultV1:
         self._require_task_agent(request.agent_id)
-        return await control_tasks(self._operational_controls, request)
+        return await control_tasks(self._team_commands, request)
 
     async def list_web_chat_objectives(
         self,
@@ -1309,29 +1312,32 @@ class WebsiteOperationsApplication:
         for schedule in response.schedules:
             actions: tuple[Literal["pause", "resume", "disable", "remove"], ...] = (
                 ("resume", "remove")
-                if not schedule.enabled or schedule.paused_until
+                if not schedule.enabled or schedule.paused_until or "paused_until" in schedule.invalid_time_fields
                 else ("pause", "disable", "remove")
             )
             if schedule.management_class == ScheduleManagementClass.SYSTEM and not may_change_system:
                 actions = ()
+            # The contract leaves out empty fields; the page names "no agent" as null.
+            worker = {"agent_type": None, "agent_id": None, **schedule.worker}
+            explanation = worker.get("not_running_explanation")
+            if isinstance(explanation, dict):
+                worker["not_running_explanation"] = explanation.get("text")
             projected.append(
                 WebScheduleV1(
                     schedule_id=schedule.schedule_id,
-                    record_digest=schedule_listing_digest(schedule),
+                    record_digest=schedule.seen_version,
                     schedule_name=schedule.schedule_name,
                     objective_id=schedule.objective_id,
                     management_class=schedule.management_class.value,
                     system_schedule_kind=(
-                        schedule.effective_system_schedule_kind.value
-                        if schedule.effective_system_schedule_kind is not None
+                        (schedule.system_schedule_kind or "unclassified")
+                        if schedule.management_class == ScheduleManagementClass.SYSTEM
                         else None
                     ),
                     enabled=schedule.enabled,
                     paused_until=schedule.paused_until,
                     next_fire_at=schedule.next_fire_at,
-                    worker_assignment=WebScheduleWorkerAssignmentV1.model_validate(
-                        response.worker_assignments[schedule.schedule_id].model_dump(mode="json")
-                    ),
+                    worker_assignment=WebScheduleWorkerAssignmentV1.model_validate(worker),
                     available_actions=actions,
                 )
             )

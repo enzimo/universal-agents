@@ -61,26 +61,98 @@ async def test_same_worker_can_announce_distinct_admissions_of_one_task():
     assert first.kwargs["message"].msg_header.idempotency_key != second.kwargs["message"].msg_header.idempotency_key
 
 
-def test_live_refresh_without_target_uses_matching_status_ids(monkeypatch):
+def test_live_refresh_without_target_asks_each_matching_agent(monkeypatch):
     status = AgentStatus(self_id="worker", team_id="team", name="Worker", agent_role="Researcher", named_agent_type="ResearchAgent", status_type=MessageMetaType.RESPONSE, is_paused=False, is_busy=False)
-    sent = []
+    asked = []
     agent = SimpleNamespace(
         id="lead", team_id="team", name="Lead", role="Manager", named_agent_type="TeamArchitect", paused=False, is_executing=False,
         task_manager=SimpleNamespace(current_task_id=None),
         _agent_state_store=SimpleNamespace(query=lambda filters: [status]),
         _agent_id_by_name={},
     )
-    async def send(envelope):
-        sent.append(envelope)
-    agent._send_operational_message = send
+
+    async def ask_agent(asker, kind, body, target, *, timeout=None):
+        asked.append((asker.id, kind, body, target))
+        return {"outcome": "ok", "agent_type": "ResearchAgent", "is_lead": False, "paused": False}
+
+    from custom_agents import agent_requests
+
+    monkeypatch.setattr(agent_requests, "ask_agent", ask_agent)
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", SimpleNamespace(cannot_ask=lambda agent_id: None))
     monkeypatch.setattr(agent_management, "get_agent_ref", lambda: agent)
-    def run(_agent, coroutine):
+
+    def run(_agent, coroutine, *, timeout=15.0):
         import asyncio
-        asyncio.run(coroutine)
+        return asyncio.run(coroutine)
+
     monkeypatch.setattr(agent_management, "_run_agent_coroutine", run)
+    result = json.loads(agent_management.query_agent_state(live="true", info_level="full"))
+    # The matching agent is asked itself (agent.status), and its answer is returned.
+    assert asked == [("lead", "agent.status", {"level": "full"}, "worker")]
+    assert result["live_status"]["worker"]["agent_type"] == "ResearchAgent"
+
+
+def test_live_status_asks_every_agent_at_once_and_keeps_each_answer_apart(monkeypatch):
+    """EVID-7: one deadline for all; one agent's failure, or silence, is reported for that agent only."""
+
+    import asyncio
+    import time
+
+    rows = [AgentStatus(self_id=agent_id, team_id="team", name=agent_id, agent_role="Researcher",
+                        named_agent_type="ResearchAgent", status_type=MessageMetaType.RESPONSE, is_paused=False,
+                        is_busy=False) for agent_id in ("answers", "breaks", "hangs")]
+    agent = SimpleNamespace(id="lead", team_id="team", _agent_id_by_name={},
+                            _agent_state_store=SimpleNamespace(query=lambda filters: rows))
+    waits = []
+
+    async def ask_agent(asker, kind, body, target, *, timeout=None):
+        if target == "breaks":
+            raise RuntimeError("the reply could not be decoded")
+        if target == "hangs":
+            await asyncio.sleep(30)
+        await asyncio.sleep(0.2)
+        return {"outcome": "ok", "agent_type": "ResearchAgent"}
+
+    def run(_agent, coroutine, *, timeout=15.0):
+        waits.append(timeout)
+        return asyncio.run(coroutine)
+
+    from custom_agents import agent_requests
+
+    monkeypatch.setattr(agent_requests, "ask_agent", ask_agent)
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", SimpleNamespace(cannot_ask=lambda agent_id: None))
+    monkeypatch.setattr(agent_management, "get_agent_ref", lambda: agent)
+    monkeypatch.setattr(agent_management, "_run_agent_coroutine", run)
+    monkeypatch.setattr(agent_management, "LIVE_STATUS_SECONDS", 0.5)
+
+    started = time.monotonic()
     result = json.loads(agent_management.query_agent_state(live="true"))
-    assert result["live_refresh_targets"] == ["worker"]
-    assert sent[0].msg_header.to_routing_path == "worker"
+    took = time.monotonic() - started
+
+    answers = result["live_status"]
+    assert answers["answers"]["agent_type"] == "ResearchAgent"
+    assert answers["breaks"] == {"outcome": "unavailable", "message": "RuntimeError: the reply could not be decoded"}
+    assert answers["hangs"]["outcome"] == "unavailable" and "no answer in time" in answers["hangs"]["message"]
+    assert took < 1.5, "asked at once, under one deadline"
+    assert waits == [0.5 + agent_management.CONTROL_WAIT_MARGIN_SECONDS]
+
+
+def test_live_status_says_why_when_this_process_cannot_ask(monkeypatch):
+    from custom_agents import agent_requests
+
+    rows = [AgentStatus(self_id="worker", team_id="team", name="worker", agent_role="Researcher",
+                        named_agent_type="ResearchAgent", status_type=MessageMetaType.RESPONSE, is_paused=False,
+                        is_busy=False)]
+    agent = SimpleNamespace(id="lead", team_id="team", _agent_id_by_name={},
+                            _agent_state_store=SimpleNamespace(query=lambda filters: rows))
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", None)
+    monkeypatch.setattr(agent_management, "get_agent_ref", lambda: agent)
+    monkeypatch.setattr(agent_management, "_run_agent_coroutine",
+                        lambda _agent, coroutine, *, timeout=15.0: __import__("asyncio").run(coroutine))
+
+    result = json.loads(agent_management.query_agent_state(live="true"))
+
+    assert result["live_status"]["worker"] == {"outcome": "unavailable", "message": agent_requests.NO_HOST.reason}
 
 
 def _steering_agent(manager):

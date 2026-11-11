@@ -154,6 +154,11 @@ async def _incoming_task_info(self: Any, incoming_content: ContentType) -> TaskI
 def _validate_manager_mediated_worker_delegation(self, action: TurnAction) -> None:
     if not isinstance(action, DelegateTaskAction):
         return
+    from custom_agents.contract_drain_state import is_contract_draining
+
+    if is_contract_draining(self):
+        raise RuntimeError("This process is finishing work on another message contract and cannot delegate new tasks. "
+                           "Finish locally or report that this work needs the restarted team.")
     if getattr(self, "named_agent_type", None) == TEAM_ARCHITECT_AGENT_TYPE:
         return
     if (
@@ -2116,9 +2121,13 @@ async def _current_exact_route(
     old mailbox would hold the task for nobody.
     """
 
-    from custom_agents.delegation_runtime import exact_delegation_route
+    from custom_agents.agent_requests import AgentUnreachable
+    from custom_agents.delegation_runtime import exact_delegation_route, requester_cannot_ask_detail
 
-    route = await exact_delegation_route(agent, named_agent_type, target_agent_name)
+    try:
+        route = await exact_delegation_route(agent, named_agent_type, target_agent_name)
+    except AgentUnreachable as error:  # this agent cannot ask yet; the worker was not checked
+        raise RuntimeError(f"Delegated task was not published. {requester_cannot_ask_detail(error)}") from error
     if route is None:
         raise RuntimeError(
             "Delegated task was not published because its exact target agent is not live."

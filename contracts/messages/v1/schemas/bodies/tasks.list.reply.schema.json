@@ -29,6 +29,10 @@
               "is_current": {
                 "type": "boolean"
               },
+              "is_parallel": {
+                "type": "boolean",
+                "description": "The person's request from a thread set to run concurrently (the Tasks page's Concurrent mark); absent means false."
+              },
               "queue_position": {
                 "$ref": "../common.schema.json#/$defs/count"
               },

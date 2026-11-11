@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -136,15 +136,68 @@ class GatewayManagerTransitionApplication:
         if not transition.became_available:
             return
         if self._notices_enabled:
-            await self._emit_notice(available=True)
-        await self._run_hook(self._available_hook, label="available")
+            await self._step("notice", transition, lambda: self._emit_notice(available=True))
+        await self._step("hook", transition, lambda: self._run_hook(self._available_hook, label="available"))
 
-    async def handle_unavailable(self, _transition: GatewayManagerTransition) -> None:
+    async def handle_unavailable(self, transition: GatewayManagerTransition) -> None:
+        """The notice, the hook (pausing Telegram polling) and failing people's waiting replies, each on its own:
+        one that fails does not skip the others. A lead that still finishes the tasks it holds
+        (``keep_waiting``) leaves the waiting replies to arrive."""
+
         if self._notices_enabled:
-            await self._emit_notice(available=False)
-        await self._run_hook(self._unavailable_hook, label="unavailable")
-        for correlation_id in self._manager.pending_response_ids:
-            await self._responses.queue_manager_unavailable(correlation_id)
+            await self._step("notice", transition, lambda: self._emit_notice(available=False))
+        await self._step("hook", transition, lambda: self._run_hook(self._unavailable_hook, label="unavailable"))
+        if transition.keep_waiting:
+            self._logger.info(
+                "The team lead takes no new chats but still finishes its tasks; waiting replies are kept. "
+                "event=gateway_manager_waits_kept manager_id=%s waiting=%d",
+                transition.manager_id,
+                len(self._manager.pending_response_ids),
+            )
+            return
+        await self.fail_waiting(self._manager.pending_response_ids, transition=transition)
+
+    async def fail_waiting(
+        self,
+        correlation_ids: Iterable[str],
+        *,
+        transition: GatewayManagerTransition | None = None,
+    ) -> None:
+        """Tell each person still waiting for one of these replies that the team lead is unavailable, with no
+        notice or hook of its own. Replies that arrived meanwhile are no longer waited for and are skipped
+        (``GatewayResponseCoordinator.queue_manager_unavailable``)."""
+
+        for correlation_id in tuple(correlation_ids):
+            await self._step(
+                "fail_waiting",
+                transition,
+                lambda: self._responses.queue_manager_unavailable(correlation_id),
+                correlation_id=correlation_id,
+            )
+
+    async def _step(
+        self,
+        step: str,
+        transition: GatewayManagerTransition | None,
+        run: Callable[[], Awaitable[None]],
+        *,
+        correlation_id: str | None = None,
+    ) -> None:
+        """One part of a transition; a failure is logged and the next part still runs (critique C03)."""
+
+        try:
+            await run()
+        except Exception as error:
+            self._logger.error(
+                "Part of the team lead's availability change failed; the rest still runs. "
+                "event=gateway_manager_transition_step_failed step=%s manager_id=%s correlation_id=%s "
+                "error_type=%s",
+                step,
+                transition.manager_id if transition is not None else None,
+                correlation_id,
+                type(error).__name__,
+                exc_info=error,
+            )
 
     async def _run_hook(
         self,

@@ -3,6 +3,7 @@
 from typing import Any
 
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.agent_instantiation_service import MANAGER_LAUNCH_FORBIDDEN
 from custom_agents.team_composition import validate_agent_type_name
 from runtime_settings.schedule_workers import ScheduleWorkersConfig
 
@@ -20,7 +21,7 @@ def validate_worker_eligibility_change(
     for agent_type in sorted(additions):
         validate_agent_type_name(agent_type)
         if agent_type == TEAM_ARCHITECT_AGENT_TYPE:
-            raise PermissionError("automatic_manager_launch_forbidden")
+            raise PermissionError(MANAGER_LAUNCH_FORBIDDEN)
         if agent_type in limits.denied_agent_types:
             raise PermissionError(f"agent_type_disallowed:{agent_type}")
         if runtime is None:

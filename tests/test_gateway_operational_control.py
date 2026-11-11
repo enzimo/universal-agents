@@ -219,6 +219,9 @@ def _application(
         manager_commands=manager_commands,  # type: ignore[arg-type]
         responses=responses,  # type: ignore[arg-type]
         id_generator=_FixedIds(),  # type: ignore[arg-type]
+        # The context dump setting goes to the team services (tests/test_gateway_phase1.py).
+        team_commands=None,  # type: ignore[arg-type]
+        local_responses=None,  # type: ignore[arg-type]
     )
     return application, sessions, requests, manager, responses
 

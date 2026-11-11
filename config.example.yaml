@@ -5,7 +5,7 @@
 # Do not store secrets in this file. API keys, passwords, and DSNs should live
 # in environment variables or Docker-style *_FILE secret variables.
 
-schema_version: 10                              # Generic config.yaml schema version. This is not the same version as gateway instance_config.yaml.
+schema_version: 11                              # Generic config.yaml schema version. This is not the same version as gateway instance_config.yaml.
 
 # Where an onboarded instance's secrets come from. Onboarding copies this into
 # instance_config.yaml (launch.secrets_source); later onboarding runs and
@@ -95,15 +95,14 @@ transport:
   nats_url: "nats://127.0.0.1:4222"             # Single-server URL.
   nats_servers: ["nats://127.0.0.1:4222"]       # NATS server URLs.
   nats_name: null                               # Optional NATS connection name.
-  jetstream_enabled: true                       # Use JetStream for durable work/reply/presence messages.
+  jetstream_enabled: true                       # Use JetStream for durable work and reply messages.
   subject_prefix: ""                            # Team subject prefix. Empty uses team_id, e.g. team_303. Use per-team values for external NATS ACLs.
-  storage: "file"                               # JetStream storage: "file" or "memory".
+  storage: "file"                               # JetStream storage: "file" or "memory". "memory" loses queued work when the NATS server restarts or the machine loses power (a warning is logged); for tests only.
   replicas: 1                                   # JetStream stream replica count.
   ack_wait_seconds: 3600.0                      # Delivery ack wait for long-running agent work.
   max_deliver: 5                                # Maximum redelivery attempts before termination.
   duplicate_window_seconds: 600.0               # JetStream duplicate message-id window.
   work_max_age_seconds: 604800.0                # Durable work/reply retention age.
-  presence_max_age_seconds: 600.0               # Replayable presence retention age.
   process_consumer_inactive_threshold_seconds: 300.0  # Delete unbound process-scoped JetStream consumers after this delay.
   nats_user: null                               # NATS username. For the managed local server, leave NATS_USER/NATS_PASSWORD unset to use generated credentials stored under the NATS service root; prefer NATS_USER or NATS_USER_FILE when setting your own.
   credentials_file: null                        # Optional NATS user credentials file.
@@ -588,7 +587,7 @@ agent:
       edit_war_freeze_minutes: 60               # How long a frozen page refuses agent edits (agents add notes instead).
       max_title_chars: 120
       max_summary_chars: 300
-      max_body_chars: 24000                     # Longer pages should be split into linked pages.
+      max_body_chars: 24000                     # Longer pages should be split into linked pages; Web Chat shows at most 32768 until long text travels as a file.
       max_note_chars: 2000
       max_tags: 10
     sensitive_content:
@@ -641,7 +640,7 @@ storage:
 
   # SQLite backend settings.
   sqlite:
-    path: "dbs/task_history.db"                 # Manager/task-history/schedule SQLite DB. Relative paths resolve under agent.instance_root; runtime connections use WAL, synchronous=NORMAL, busy_timeout=2500ms.
+    path: "dbs/task_history.db"                 # Manager/task-history/schedule SQLite DB. Relative paths resolve under agent.instance_root; connections use WAL, synchronous=FULL (an agent's own records flush before it sends), busy_timeout=2500ms.
     vector:
       enabled: true                             # Enable sqlite-vec indexes in the manager/task-history store for memory graph vector search.
       provider: "sqlite_vec"                    # SQLite vector provider; only the non-alpha sqlite-vec package is supported.

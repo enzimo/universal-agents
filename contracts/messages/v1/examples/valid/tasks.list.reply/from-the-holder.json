@@ -16,8 +16,8 @@
   "audience": {
     "installation": "install_example",
     "team": "team_example",
-    "target": "team_services",
-    "id": "team_example",
+    "target": "host",
+    "id": "team-services-1",
     "runtime": "team-services-1"
   },
   "subject": "_INBOX.team-services-1.01928f3a-7b2c-7b01-8000-000000000b01",
@@ -48,5 +48,5 @@
   },
   "causation_id": "01928f3a-7b2c-7b01-8000-000000000b01",
   "body_digest": "T2KGNssiNj6j7CxVhC_fagd-xfY4_oYtTy3dQBs516I",
-  "signature": "AStubDWSXmEMXt5xogE7oAxDvgtuFNewXKPMwOsxBmYtTUjFjlE0cfASNiKqkKnJkpCrvRK9g8tTfTmeDbRKAQ"
+  "signature": "QubIuRGjjqAK3GTOyVQwyLCEEcy_1XOOS8yRrX4PKL5_3iOTqxNsZySSCcA4ONI0p9hPx5lZ2cT4YmYumxA0AQ"
 }

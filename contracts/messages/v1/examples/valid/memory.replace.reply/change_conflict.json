@@ -14,8 +14,8 @@
   "audience": {
     "installation": "install_example",
     "team": "team_example",
-    "target": "edge",
-    "id": "web",
+    "target": "host",
+    "id": "gateway-1",
     "runtime": "gateway-1"
   },
   "subject": "_INBOX.gateway-1.01928f3a-7b2c-7452-8000-000000000452",
@@ -34,5 +34,5 @@
   },
   "causation_id": "01928f3a-7b2c-7452-8000-000000000452",
   "body_digest": "GvsCpfk8Xre0qOdDtqCJjbXklETtw4gmEAYaSwi8Ipk",
-  "signature": "Lelm_AOLforPV8QIqiXnejDIJLkVZUoJPkUaxIFo8M8rBIA79lSXYuCGWBXSPIbi5vdZaJPROJgHeABdY_XjDw"
+  "signature": "Qr4l9_U6v08OZgkEQ4u43ixh6Y3k2i5h4GtGOFzYcd_KktrSDz-TMByolSx363r66nTAGOOs0HbtaB7EuRRYCw"
 }

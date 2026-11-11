@@ -104,11 +104,11 @@ class Issuer(WireModel):
 
 
 class Audience(WireModel):
-    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id."
+    "Who the frame is for. Agents are named by id, never by the host that runs them. Broadcast events name their whole team (target team, id the team id); team services also use the team id. A reply to a request a host sent for no agent (sessions.*) names the host: target host, id and runtime its runtime id. No request is delivered to a host target."
 
     installation: InstallationId
     team: ScopeId
-    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service']
+    target: Literal['agent', 'pool', 'team_services', 'team', 'edge', 'installation_service', 'host']
     id: TokenId
     runtime: Union[RuntimeId, MISSING] = Field(default=MISSING)
 
@@ -725,7 +725,7 @@ class KnowledgeEditorAgent(WireModel):
 
 class KnowledgeEditorPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeEditorSystem(WireModel):
@@ -847,6 +847,7 @@ class AgentState(WireModel):
     team: TeamId
     agent: AgentId
     agent_type: AgentType
+    display_name: Union[Annotated[str, StringConstraints(min_length=1, max_length=80)], MISSING] = Field(default=MISSING)
     session: TokenId
     state: Literal['starting', 'idle', 'busy', 'paused', 'exiting', 'stopped']
     accepting_work: bool
@@ -965,7 +966,7 @@ class HostStateComponentsItem(WireModel):
 
 
 class HostState(WireModel):
-    "A runtime host's liveness and capacity, written by the host itself every 20 seconds and expiring within 60. Its roles, teams and agent types are the ones its certificate states; the record names that certificate."
+    "A runtime host's liveness and capacity, written by the host itself every 10 seconds and expiring within 30. Its roles, teams and agent types are the ones its certificate states; the record names that certificate."
 
     runtime: RuntimeId
     certificate: CertificateRef
@@ -997,6 +998,7 @@ class PlacementState(WireModel):
     placed_at: Timestamp
     reason: Literal['initial', 'host_lost', 'rebalanced', 'drained', 'operator']
     previous_host: Union[RuntimeId, MISSING] = Field(default=MISSING)
+    handed_over: Union[Annotated[Literal[True], BeforeValidator(exact_type(bool))], MISSING] = Field(default=MISSING)
 
 
 class RevocationsStateEntriesItem(WireModel):
@@ -1233,6 +1235,11 @@ class AgentExitReplyOk(WireModel):
     state: Literal['exiting', 'already_exiting']
 
 
+class AgentExitReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class AgentPauseBody(WireModel):
     request_id: RecordId
     reason: Union[Annotated[str, StringConstraints(min_length=1, max_length=500)], MISSING] = Field(default=MISSING)
@@ -1245,6 +1252,11 @@ class AgentPauseReplyOk(WireModel):
 
 class AgentPauseReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class AgentPauseReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1262,6 +1274,11 @@ class AgentResumeReplyOk(WireModel):
 
 class AgentResumeReplyAgentExiting(WireModel):
     outcome: Literal['agent_exiting']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class AgentResumeReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -1637,6 +1654,11 @@ class DebugDumpReplyOk(WireModel):
 
 class DebugDumpReplyNotAllowed(WireModel):
     outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class DebugDumpReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -2120,7 +2142,7 @@ class CertificateDocument(WireModel):
 class HostJoinReplyOk(WireModel):
     outcome: Literal['ok']
     certificate: CertificateDocument
-    connection: ConnectionCredential
+    connection: Union[ConnectionCredential, MISSING] = Field(default=MISSING)
 
 
 class HostJoinReplyPending(WireModel):
@@ -2173,7 +2195,7 @@ class HostRenewBody(WireModel):
 class HostRenewReplyOk(WireModel):
     outcome: Literal['ok']
     certificate: CertificateDocument
-    connection: ConnectionCredential
+    connection: Union[ConnectionCredential, MISSING] = Field(default=MISSING)
 
 
 class HostRenewReplyRevoked(WireModel):
@@ -2625,7 +2647,7 @@ class KnowledgeHistoryReplyOkRevisionsItemUpdatedByAgent(WireModel):
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedByPerson(WireModel):
     kind: Literal['person']
-    person: PersonRef
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
 
 
 class KnowledgeHistoryReplyOkRevisionsItemUpdatedBySystem(WireModel):
@@ -6763,6 +6785,7 @@ class SchedulesListReplyOkSchedulesItemUser(WireModel):
     worker: SchedulesListReplyOkSchedulesItemUserWorker
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
     run_notes: Union[SchedulesListReplyOkSchedulesItemUserRunNotes, MISSING] = Field(default=MISSING)
+    invalid_time_fields: Union[Annotated[list[Literal['next_fire_at', 'paused_until', 'expires_at_utc']], Field(min_length=1, max_length=3)], MISSING] = Field(default=MISSING)
 
 
 class SchedulesListReplyOkSchedulesItemSystemTimingInterval(WireModel):
@@ -6833,6 +6856,7 @@ class SchedulesListReplyOkSchedulesItemSystem(WireModel):
     worker: SchedulesListReplyOkSchedulesItemSystemWorker
     repeat_count: Union[Annotated[int, Field(ge=0, le=9007199254740991)], MISSING] = Field(default=MISSING)
     run_notes: Union[SchedulesListReplyOkSchedulesItemSystemRunNotes, MISSING] = Field(default=MISSING)
+    invalid_time_fields: Union[Annotated[list[Literal['next_fire_at', 'paused_until', 'expires_at_utc']], Field(min_length=1, max_length=3)], MISSING] = Field(default=MISSING)
 
 
 class SchedulesListReplyOk(WireModel):
@@ -7348,6 +7372,117 @@ class SchedulesUpdateReplyRuntimeError(WireModel):
 class SchedulesUpdateReplyInvalidRequest(WireModel):
     outcome: Literal['invalid_request']
     reason: Annotated[str, StringConstraints(min_length=0, max_length=4096)]
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsCloseBody(WireModel):
+    "A host reports that one of its agents' sessions ended."
+
+    request_id: RecordId
+    session: SessionId
+    reason: Literal['exited', 'failed', 'handed_over']
+
+
+class SessionsCloseReplyOk(WireModel):
+    outcome: Literal['ok']
+    ended_at: Timestamp
+
+
+class SessionsCloseReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsCloseReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenBody(WireModel):
+    "A host asks the team services to place an agent on it and sign the agent's session."
+
+    request_id: RecordId
+    agent: AgentId
+    agent_type: AgentType
+    definition_sha256: Sha256Digest
+
+
+class SessionDocumentWriter(WireModel):
+    "Only a team services host signs a session."
+
+    type: Literal['host']
+    installation: InstallationId
+    runtime: RuntimeId
+    membership_epoch: Epoch
+    key_id: KeyId
+
+
+class SessionDocument(WireModel):
+    "The signed state document returned by sessions.open and sessions.renew. Its record is agent_session, its writer the team services host that placed the agent, and its body an agent session. The host that asked verifies its signature with that host's certificate and checks that it places the agent it asked for on itself (README, \"Agent sessions\")."
+
+    record: Literal['agent_session']
+    protocol: ProtocolLabel
+    key: StateKey
+    writer: SessionDocumentWriter
+    sequence: StateSequence
+    issued_at: Timestamp
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+    algorithm: Literal['ed25519']
+    body_digest: Sha256Digest
+    body: AgentSessionState
+    signature: Ed25519Signature
+
+
+class SessionsOpenReplyOk(WireModel):
+    outcome: Literal['ok']
+    session: SessionDocument
+
+
+class SessionsOpenReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyAlreadyPlaced(WireModel):
+    outcome: Literal['already_placed']
+    host: RuntimeId
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyLimitReached(WireModel):
+    outcome: Literal['limit_reached']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsOpenReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewBody(WireModel):
+    "A host renews one of its agents' sessions while it is connected."
+
+    request_id: RecordId
+    session: SessionId
+
+
+class SessionsRenewReplyOk(WireModel):
+    outcome: Literal['ok']
+    session: SessionDocument
+
+
+class SessionsRenewReplyNotFound(WireModel):
+    outcome: Literal['not_found']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class SessionsRenewReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
@@ -8396,6 +8531,7 @@ class TasksListReplyOkTasksItem(WireModel):
     state: ProgressState
     problem_statement: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
     is_current: bool
+    is_parallel: Union[bool, MISSING] = Field(default=MISSING)
     queue_position: Union[Count, MISSING] = Field(default=MISSING)
     last_updated_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     blocker: Union[TextContent, MISSING] = Field(default=MISSING)
@@ -8838,11 +8974,11 @@ AccessReviewBodyAdapter = TypeAdapter(AccessReviewBody)
 AccessWithdrawBodyAdapter = TypeAdapter(AccessWithdrawBody)
 AccessWithdrawReplyAdapter = TypeAdapter(Annotated[Union[AccessWithdrawReplyOk, AccessWithdrawReplyNotFound, AccessWithdrawReplyNotOwnRequest], Field(discriminator='outcome')])
 AgentExitBodyAdapter = TypeAdapter(AgentExitBody)
-AgentExitReplyAdapter = TypeAdapter(Annotated[Union[AgentExitReplyOk], Field(discriminator='outcome')])
+AgentExitReplyAdapter = TypeAdapter(Annotated[Union[AgentExitReplyOk, AgentExitReplyNotAllowed], Field(discriminator='outcome')])
 AgentPauseBodyAdapter = TypeAdapter(AgentPauseBody)
-AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyAgentExiting], Field(discriminator='outcome')])
+AgentPauseReplyAdapter = TypeAdapter(Annotated[Union[AgentPauseReplyOk, AgentPauseReplyAgentExiting, AgentPauseReplyNotAllowed], Field(discriminator='outcome')])
 AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
-AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting], Field(discriminator='outcome')])
+AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting, AgentResumeReplyNotAllowed], Field(discriminator='outcome')])
 AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
@@ -8852,7 +8988,7 @@ CustodyDecideBodyAdapter = TypeAdapter(CustodyDecideBody)
 CustodyDecideReplyAdapter = TypeAdapter(Annotated[Union[CustodyDecideReplyOk, CustodyDecideReplyNotFound, CustodyDecideReplyStaleCustody, CustodyDecideReplyCustodyWindowOpen, CustodyDecideReplyLateWorkNotFound, CustodyDecideReplyRequestClosed, CustodyDecideReplyNotOwnRequest, CustodyDecideReplyNotAllowed], Field(discriminator='outcome')])
 CustodyMovedBodyAdapter = TypeAdapter(CustodyMovedBody)
 DebugDumpBodyAdapter = TypeAdapter(DebugDumpBody)
-DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed], Field(discriminator='outcome')])
+DebugDumpReplyAdapter = TypeAdapter(Annotated[Union[DebugDumpReplyOk, DebugDumpReplyNotAllowed, DebugDumpReplyRuntimeError], Field(discriminator='outcome')])
 DeliveryReceiptBodyAdapter = TypeAdapter(DeliveryReceiptBody)
 DeliveryRefusedBodyAdapter = TypeAdapter(DeliveryRefusedBody)
 DlqNoticeBodyAdapter = TypeAdapter(DlqNoticeBody)
@@ -8997,6 +9133,12 @@ SchedulesSetWorkerBodyAdapter = TypeAdapter(SchedulesSetWorkerBody)
 SchedulesSetWorkerReplyAdapter = TypeAdapter(Annotated[Union[SchedulesSetWorkerReplyOk, SchedulesSetWorkerReplyApprovalRequired, SchedulesSetWorkerReplyNotFound, SchedulesSetWorkerReplyNotAllowed, SchedulesSetWorkerReplyChangedSinceRead, SchedulesSetWorkerReplyChangeConflict, SchedulesSetWorkerReplyRequestClosed, SchedulesSetWorkerReplyNeedsPersonDecision, SchedulesSetWorkerReplyRecordBusy, SchedulesSetWorkerReplyRuntimeError, SchedulesSetWorkerReplyInvalidRequest, SchedulesSetWorkerReplyScheduleWorkerPolicyRevisionConflict], Field(discriminator='outcome')])
 SchedulesUpdateBodyAdapter = TypeAdapter(SchedulesUpdateBody)
 SchedulesUpdateReplyAdapter = TypeAdapter(Annotated[Union[SchedulesUpdateReplyOk, SchedulesUpdateReplyApprovalRequired, SchedulesUpdateReplyNotFound, SchedulesUpdateReplyNotAllowed, SchedulesUpdateReplyChangedSinceRead, SchedulesUpdateReplyChangeConflict, SchedulesUpdateReplyRequestClosed, SchedulesUpdateReplyNeedsPersonDecision, SchedulesUpdateReplyRecordBusy, SchedulesUpdateReplyRuntimeError, SchedulesUpdateReplyInvalidRequest], Field(discriminator='outcome')])
+SessionsCloseBodyAdapter = TypeAdapter(SessionsCloseBody)
+SessionsCloseReplyAdapter = TypeAdapter(Annotated[Union[SessionsCloseReplyOk, SessionsCloseReplyNotFound, SessionsCloseReplyRuntimeError], Field(discriminator='outcome')])
+SessionsOpenBodyAdapter = TypeAdapter(SessionsOpenBody)
+SessionsOpenReplyAdapter = TypeAdapter(Annotated[Union[SessionsOpenReplyOk, SessionsOpenReplyNotAllowed, SessionsOpenReplyAlreadyPlaced, SessionsOpenReplyLimitReached, SessionsOpenReplyRuntimeError], Field(discriminator='outcome')])
+SessionsRenewBodyAdapter = TypeAdapter(SessionsRenewBody)
+SessionsRenewReplyAdapter = TypeAdapter(Annotated[Union[SessionsRenewReplyOk, SessionsRenewReplyNotFound, SessionsRenewReplyNotAllowed, SessionsRenewReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkCheckBodyAdapter = TypeAdapter(SharedWorkCheckBody)
 SharedWorkCheckReplyAdapter = TypeAdapter(Annotated[Union[SharedWorkCheckReplyOk, SharedWorkCheckReplyNotAllowed, SharedWorkCheckReplyInvalidRequest, SharedWorkCheckReplyRuntimeError], Field(discriminator='outcome')])
 SharedWorkClaimBodyAdapter = TypeAdapter(SharedWorkClaimBody)

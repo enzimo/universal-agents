@@ -18,7 +18,12 @@ The same record drives:
 - automatic retry: a task taken over by another worker (its worker died or lost
   its launch lease) counts one move; after
   ``agent.worker_pools.max_retries_after_worker_loss`` moves the task fails as
-  ``worker_lost`` and its requester decides what to do;
+  ``worker_lost`` and its requester decides what to do. A worker whose process
+  runs another message contract hands its tasks back without any fault
+  (``custom_agents.contract_drain``): the lead saves each hand-back, with its
+  cause, in the team's database before it sends the task out again, so the
+  requester reads it when the next worker's claim arrives, records the move and
+  does not count it;
 - inspection, progress notes and the worker pool controller.
 
 All functions are trusted runtime code; none needs a model turn or the
@@ -31,7 +36,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from id_generation import new_id
 
@@ -144,6 +149,29 @@ def delegation_holder(agent: Any, subtask_id: str) -> Optional[str]:
 
     record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
     return record.holder_agent_id if record is not None else None
+
+
+def current_holders(agent: Any, parent_task_id: str, subtask_ids: Sequence[str]) -> dict[str, str]:
+    """The worker holding each of these delegated subtasks now, by subtask id. Task lane.
+
+    Team-wide task custody first: it names the agent whose saved work holds the
+    subtask, also before that worker's claim reached this requester and after a
+    takeover whose claim is not recorded yet. Then, for subtasks custody does not
+    name, the parent's delegated-task records looked up by team and parent, whoever
+    wrote them: a lead restarted with a new id still finds the records its earlier
+    self wrote (``requester_agent_id`` is that old id). A subtask no worker holds is
+    left out. Raises when either store cannot be read.
+    """
+
+    team_id = str(agent.team_id)
+    wanted = list(dict.fromkeys(subtask_ids))
+    custody = agent.task_manager.runtime_state_store.get_task_custody(team_id, wanted)
+    holders = {task_id: row.holder_agent_id for task_id, row in custody.items() if row.holder_agent_id}
+    if len(holders) < len(wanted):
+        for record in delegated_tasks(agent).list_for_parent(team_id, parent_task_id):
+            if record.task_id in wanted and record.task_id not in holders and record.holder_agent_id:
+                holders[record.task_id] = record.holder_agent_id
+    return holders
 
 
 class DelegatedTaskClaimPending(RuntimeError):
@@ -565,6 +593,7 @@ async def handle_delegated_task_claimed(
             agent.id, claim.task_id, claim.worker_agent_id, holder,
         )
         return
+    handed_over_by = await run(partial(_handed_over_without_fault, agent), claim.task_id)
     outcome = await run(
         partial(
             repository.record_claim,
@@ -573,6 +602,7 @@ async def handle_delegated_task_claimed(
             worker_agent_id=claim.worker_agent_id,
             worker_agent_name=claim.worker_agent_name,
             claimed_at=claim.claimed_at_utc,
+            handed_over_by=handed_over_by,
         )
     )
     if outcome.record is None:
@@ -606,16 +636,48 @@ async def handle_delegated_task_claimed(
     record = outcome.record
     if record is None:
         return
-    await _record_claim_history(agent, claim, record, moved=outcome.moved)
-    if outcome.moved and record.interruptions > max_retries_after_worker_loss(agent):
+    await _record_claim_history(agent, claim, record, moved=outcome.moved, handed_over=outcome.handed_over)
+    if outcome.moved and not outcome.handed_over and record.interruptions > max_retries_after_worker_loss(agent):
         await fail_after_worker_losses(agent, subtask_id=claim.task_id, record=record)
 
 
+def _handed_over_without_fault(agent: Any, task_id: str) -> frozenset[str]:
+    """The workers that handed this task back because their process runs another message contract.
+
+    The lead saves every hand-back with its cause before it sends the task out again
+    (``custom_agents.worker_handback_runtime``), in the team's database, which every agent
+    of the team uses; so a hand-back is saved before the next worker can claim the task.
+    """
+
+    from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_LEASE_LOST
+    from storage.worker_handback_repository import WorkerHandbackRepository
+
+    handbacks = WorkerHandbackRepository(agent.task_manager.storage_settings).list_for_task(str(agent.team_id), task_id)
+    return frozenset(item.worker_agent_id for item in handbacks if item.evidence.cause != WIND_DOWN_LEASE_LOST)
+
+
 async def _record_claim_history(
-    agent: Any, claim: DelegatedTaskClaimedV1, record: DelegatedTaskRecordV1, *, moved: bool
+    agent: Any, claim: DelegatedTaskClaimedV1, record: DelegatedTaskRecordV1, *, moved: bool,
+    handed_over: bool = False,
 ) -> None:
     worker = claim.worker_agent_name or claim.worker_agent_id
-    if moved:
+    if moved and handed_over:
+        summary = (
+            f"Delegated task {claim.task_id} moved to worker {worker} after its previous worker handed it "
+            "back: that worker's process runs another message contract than its installation, so it takes "
+            "no new work. This move does not count toward the retries after a lost worker."
+        )
+        agent._logger.info(
+            "A delegated task moved to another worker after its worker handed it back, as its process runs "
+            "another message contract. event=delegated_task_moved agent_id=%s task_id=%s worker_agent_id=%s "
+            "handed_over=True moves=%s limit=%s",
+            agent.id,
+            claim.task_id,
+            claim.worker_agent_id,
+            record.interruptions,
+            max_retries_after_worker_loss(agent),
+        )
+    elif moved:
         summary = (
             f"Delegated task {claim.task_id} moved to worker {worker} after its previous "
             f"worker was lost ({record.interruptions} time(s))."
@@ -645,6 +707,7 @@ async def _record_claim_history(
             "worker_agent_id": claim.worker_agent_id,
             "recovered": claim.recovered,
             "moves": record.interruptions,
+            "handed_over": handed_over,
         },
     )
 

@@ -103,7 +103,6 @@ def host(tmp_path, monkeypatch):
         test_task_id=None,
         _logger=logging.getLogger(__name__),
         _refresh_self_agent_state=AsyncMock(),
-        _publish_presence_status=AsyncMock(),
         _notify_context_after_turn=AsyncMock(),
         _send_task_error_response=AsyncMock(),
         _complete_task_and_schedule_aar_review=complete,
@@ -285,26 +284,22 @@ async def test_inline_nested_scope_retains_owner_and_child_task_waits():
 async def test_empty_queue_probe_does_not_publish_busy_idle_presence(host):
     assert await host._check_and_process_next_task() is False
     assert not host.is_executing
-    # Presence delivery itself drains pending work. Publishing here creates a
-    # feedback loop even though no task was admitted or run.
+    # Reporting the agent's state here would refresh it although no task was admitted or run.
     host._refresh_self_agent_state.assert_not_awaited()
-    host._publish_presence_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drained", [False, True], ids=["direct", "queued"])
-async def test_a_turn_broadcasts_busy_when_it_starts_and_idle_when_it_ends(host, drained):
-    """Web Chat's activity mesh hears of work as it starts and ends.
-
-    The heartbeat alone reports a change up to 20 seconds late.
-    """
+async def test_a_turn_reports_busy_when_it_starts_and_idle_when_it_ends(host, drained):
+    """Web Chat's activity mesh hears of work as it starts and ends: the agent's record follows
+    each change at once (custom_agents.agent_host), through its own state refresh."""
 
     seen = []
 
-    async def publish(*, is_exiting):
+    async def refresh(*, is_exiting=False):
         seen.append((host.is_executing, is_exiting))
 
-    host._publish_presence_status = publish
+    host._refresh_self_agent_state = refresh
     original = Task(task_id="original", task_type=MessageMetaType.REQUEST, problem_statement="original")
     host.provider.release.set()
     if drained:
@@ -312,18 +307,9 @@ async def test_a_turn_broadcasts_busy_when_it_starts_and_idle_when_it_ends(host,
         assert await asyncio.wait_for(host._check_and_process_next_task(), 3)
     else:
         await asyncio.wait_for(host.run_turn(original, MessageHeader(), MessageMeta()), 3)
-    assert seen == [(True, False), (False, False)]
-
-
-@pytest.mark.asyncio
-async def test_a_failed_presence_broadcast_never_affects_the_turn(host, caplog):
-    host._publish_presence_status = AsyncMock(side_effect=RuntimeError("transport down"))
-    original = Task(task_id="original", task_type=MessageMetaType.REQUEST, problem_statement="original")
-    host.provider.release.set()
-    with caplog.at_level(logging.WARNING):
-        await asyncio.wait_for(host.run_turn(original, MessageHeader(), MessageMeta()), 3)
-    assert host.preparations == ["original"]
-    assert "event=agent_execution_presence_failed" in caplog.text
+    # A repeated report of the same state writes nothing (the host writes on change).
+    changes = [state for index, state in enumerate(seen) if index == 0 or seen[index - 1] != state]
+    assert changes == [(True, False), (False, False)]
 
 
 @pytest.mark.asyncio

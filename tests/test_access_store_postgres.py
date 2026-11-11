@@ -38,6 +38,9 @@ from custom_messages.contracts.access_v2 import (
     SubjectRefV1,
     TargetKind,
     TargetRefV1,
+    PersonStanding,
+    TeamPersonV1,
+    new_person_ref,
 )
 from custom_messages.contracts.person_settings_v1 import PersonModelProfileV1, PersonSettingsV1
 from model_providers.endpoints import EndpointKind
@@ -427,6 +430,51 @@ def test_an_older_store_gets_the_approval_id_column_on_postgres(settings) -> Non
         assert conn.execute(
             "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'access_grants_approval'"
         ).fetchone()
+
+
+def test_an_older_store_gives_its_people_references_on_postgres(settings) -> None:
+    """The in-place upgrade step (plan decision 64) on PostgreSQL, whose rows are mappings, not tuples."""
+
+    import json
+
+    from storage.postgres_connection import connect_postgres
+
+    store = AccessRepository(settings)
+    store.replace_people(TEAM, [
+        TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person_id, standing=PersonStanding.ACTIVE,
+                     roles=roles, changed_at_utc=NOW)
+        for person_id, roles in (("owner_pg", ("owner", "admin")), (PERSON, ("member",)))
+    ], at=NOW)
+    with connect_postgres(settings.postgres_dsn) as conn:  # a store from before 0.10: no references anywhere
+        for row in conn.execute("SELECT person_id, payload_json FROM access_people").fetchall():
+            payload = json.loads(row[1])
+            del payload["person_ref"]
+            conn.execute("UPDATE access_people SET payload_json=%s WHERE person_id=%s", (json.dumps(payload), row[0]))
+        conn.execute("DROP INDEX access_people_person_ref")
+        conn.execute("ALTER TABLE access_people DROP COLUMN person_ref")
+        conn.commit()
+
+    upgraded = AccessRepository(settings)
+
+    references = {person.person_id: person.person_ref for person in upgraded.team_people(TEAM)}
+    assert set(references) == {"owner_pg", PERSON} and len(set(references.values())) == 2
+    assert all(upgraded.team_person_by_ref(TEAM, reference).person_id == person_id
+               for person_id, reference in references.items())
+    assert {person.person_id: person.person_ref for person in AccessRepository(settings).team_people(TEAM)} == references
+    with connect_postgres(settings.postgres_dsn) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'access_people_person_ref'"
+        ).fetchone()
+
+
+def test_a_copy_written_from_an_earlier_read_keeps_the_stored_reference_on_postgres(settings) -> None:
+    store = AccessRepository(settings)
+    first = store.record_person(TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=PERSON,
+                                             standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW))
+    stale = first.model_copy(update={"person_ref": new_person_ref()})
+    assert store.replace_people(TEAM, [stale], at=NOW)[0].person_ref == first.person_ref
+    assert store.record_person(stale).person_ref == first.person_ref
+    assert store.team_person(TEAM, PERSON).person_ref == first.person_ref
 
 
 def test_a_grant_plan_reads_through_the_transactions_own_connection_on_postgres(settings, monkeypatch) -> None:
