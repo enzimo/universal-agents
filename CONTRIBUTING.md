@@ -332,6 +332,46 @@ has the subscription, and the test fails now and then. One `flush()` is not
 enough in nats-py 2.16.0; the helper's docstring explains why. Durable consumers
 and messages sent on the subscribing connection itself need no wait.
 
+Live tests share one long-lived NATS server, and a stream left there stays
+until someone deletes it (a shared test server once ran out of storage after
+about 1,500). Mark every test that creates streams, key-value buckets or object
+stores on it `nats`: a fixture in `tests/conftest.py` then deletes, when the test
+ends, passed or failed, each stream the test's own process created there. The
+server decides which streams those are: each create carries the test's random
+token in the stream's metadata, so a stream of the same name that another run
+created stays (`tests.live_nats_support.OwnedStreams` explains how). Give every
+name a random part, such as a random team id. The fixture does not delete:
+
+- names every run on the server shares by design (`shared_stream_names`), such
+  as `KV_UA1_HOSTS` or a subject prefix's streams; delete the keys your test
+  wrote in them yourself;
+- streams a child process created, such as a launched runtime's; delete those
+  by their exact name.
+
+A shared helper whose streams only the fixture deletes calls
+`require_stream_recorder`, so a test that uses it without the marker fails at
+once instead of leaving streams behind. The deletion logs in with the live
+settings, `credentials_file` included. When the server is down or does not
+answer, it gives up after 30 seconds and reports an error at the test's
+teardown that names the server and the streams.
+
+A test that needs a NATS server of its own uses
+`tests.own_nats_server.own_nats_server`: the server picks its own port, and the
+test reads it from that server's log, so it never talks to another test's
+server. A test that starts nats-server, the broker or `sealbox-server` stops it
+with `tests.owned_processes.stopped_at_exit`, or `stop_owned_process` on an
+error path. These resume a paused process, kill and reap one that does not stop
+within its time limit, keep the test body's own error, and fail a test that
+passed but whose server had to be killed.
+
+Until issue #117 is fixed, a failure late in a `tests/test_live_agent_hosts.py`
+test can leave its agent hosts running when pytest closes the event loop, and
+the run then hangs before pytest prints the failure. Stop such a run with SIGINT
+(Ctrl-C, or `timeout -s INT <seconds>` for a run nobody watches), which still
+prints the failure; SIGTERM or SIGKILL loses it. Adding
+`-o faulthandler_timeout=60` prints the stacks of a test that runs longer than a
+minute.
+
 The knowledge base privacy scenarios call the configured model many times, so
 they require `RUN_LIVE_KNOWLEDGE_PRIVACY=1`. The external and full profiles
 collect `tests/test_live_knowledge_privacy_scenarios.py`, but it skips without
