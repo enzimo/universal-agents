@@ -18,7 +18,11 @@ to stop desktop alerts for this user in this browser.
 
 Reopening Settings returns to the tab you last used until you sign out or reload
 the page. **Team** lists running agents and all defined agent classes with their
-descriptions, including specialists that are not currently running.
+descriptions, including specialists that are not currently running. Each running agent
+shows whether it is Available, Busy, Paused, Not accepting work (for example while it
+starts, or when its process runs another release) or Exiting (for a minute after it
+stops). The skills column is filled when you open the tab or press **Refresh**: the
+gateway asks the agents for them then, not on a timer.
 
 **Access**, next to **Inbox**, is the access map: what each agent type can use
 and where that access came from, what each person has given, and every tool's
@@ -1228,8 +1232,9 @@ disappears once it is fixed:
 
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
-  is not answering, the secure tool broker does not answer, TeamLead
-  stopped reporting, an agent cannot run its work because the team gave it
+  is not answering, the secure tool broker does not answer, the team's records
+  show no running TeamLead, the gateway cannot see the team (the installation
+  refused its join, or it has not read the team's records), an agent cannot run its work because the team gave it
   no session (the finding says why, for example the worker limit is reached,
   and what to do), or a disk the instance uses is nearly full (95% by
   default).

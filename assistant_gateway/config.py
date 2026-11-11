@@ -403,7 +403,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "gateway": "Gateway routing, Web Chat, request waiting, and gateway-local state settings.",
     "gateway.team_id": "Team id used for routing and subject-prefix defaults.",
     "gateway.named_agent_type": "Manager agent type the gateway targets.",
-    "gateway.manager_agent_id": "Optional direct manager agent id. Blank uses live manager presence discovery.",
+    "gateway.manager_agent_id": "Team lead agent id to use until the team's signed agent records name the live lead. Blank waits for the records.",
     "gateway.request_timeout_seconds": "Seconds to wait for one terminal manager reply before timing out locally.",
     "gateway.response_queue_name": "Gateway response queue name for manager replies.",
     "gateway.startup_agents": "Specialist agent processes supervised at headless startup.",
