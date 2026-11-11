@@ -13,7 +13,6 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -37,6 +36,7 @@ from secure_tool_broker.sealbox_runtime import (
     ensure_managed_sealbox_material,
 )
 from secure_tool_broker.sealbox_tenants import sealbox_tenant_environment
+from id_generation import new_id, new_id_suffix
 from custom_messages.contracts.access_v2 import (
     CredentialInjectionV1,
     CredentialsFolderOutcome,
@@ -122,7 +122,7 @@ def _start_own_sealbox(
 
     import httpx
 
-    log_file = token_file.parent / f"sealbox-server-{port}-{uuid.uuid4().hex[:8]}.log"
+    log_file = token_file.parent / f"sealbox-server-{port}-{new_id_suffix()}.log"
     with log_file.open("w") as log:
         process = subprocess.Popen(
             [str(server)],
@@ -142,7 +142,7 @@ def _start_own_sealbox(
                 raise RuntimeError(
                     f"sealbox-server exited early with code {process.returncode}; its output is in {log_file}"
                 )
-            request_id = uuid.uuid4().hex
+            request_id = new_id("sealbox_check")
             try:
                 answer = httpx.get(
                     f"http://127.0.0.1:{port}/v2/admin/tenants",

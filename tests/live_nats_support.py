@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime
@@ -20,6 +19,8 @@ from nats.js.errors import APIError, NotFoundError
 
 # nats-py's own check of a stream name, which add_stream and stream_info run before sending.
 from nats.js.manager import JetStreamManager, _validate_stream_name
+
+from id_generation import new_id
 
 if TYPE_CHECKING:
     # Only for the annotation: the protocol 1 contract test uses this module
@@ -186,7 +187,7 @@ class OwnedStreams:
     """
 
     def __init__(self, servers: Iterable[str], shared_names: Iterable[str] = ()) -> None:
-        self.token = uuid.uuid4().hex
+        self.token = new_id("live_test")
         # Names whose create was sent, in order; noted before sending, so a create whose
         # outcome is unknown is still checked at the end.
         self.tried: dict[str, None] = {}
