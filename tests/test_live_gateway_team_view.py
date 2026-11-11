@@ -53,11 +53,13 @@ async def _serve(stack: AsyncExitStack, services_host: MessageHost, stop: asynci
     stack.push_async_callback(stop_serving)
 
 
-def _started(stack: AsyncExitStack, host: AgentProcessHost) -> AgentProcessHost:
-    """An agent host, stopped when the test ends; stopping it twice is harmless."""
+async def _started(stack: AsyncExitStack, url: str, runtime: str, host: AgentProcessHost):
+    """An agent host and its connection. The host is stopped when the test ends, before its connection closes (the
+    stack runs in reverse), so it can still write its last records; stopping it twice is harmless."""
 
+    nc = await connect(stack, url, runtime)
     stack.push_async_callback(host.stop)
-    return host
+    return host, nc
 
 
 async def _until(condition, timeout: float = 20.0) -> None:
@@ -103,13 +105,12 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
             self_id="worker_1", team_id=TEAM, name="Researcher-1", named_agent_type="Researcher",
             agent_role="worker", is_paused=False, is_executing=False, has_execution_capacity=True,
             accepting_work=True, status_type="response", available_skills=["grill-me"])
-        lead_host = _started(stack, AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS)))
-        worker_host = _started(stack, AgentProcessHost(layout, worker_profile, TEAM,
-                                                       handlers=dict(LIVE_CONTROL_HANDLERS)))
-        lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION,
-                         nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
-        worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
-                           nc=await connect(stack, broker, WORKER_RUNTIME), state=("idle", True))
+        lead_host, lead_nc = await _started(stack, broker, LEAD_HOST_RUNTIME, AgentProcessHost(
+            layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS)))
+        worker_host, worker_nc = await _started(stack, broker, WORKER_RUNTIME, AgentProcessHost(
+            layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS)))
+        lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_nc, state=("idle", True))
+        worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION, nc=worker_nc, state=("idle", True))
 
         # The lead's record reaches the view the lead follower reads; both members reach the Team page's records.
         await _until(lambda: "lead_1" in view.live())
@@ -168,10 +169,10 @@ async def test_the_status_page_shows_an_agent_without_a_session_until_its_sessio
             return [finding for finding in (await page.report()).findings
                     if finding.finding_id.startswith("agent_without_session:")]
 
-        lead_host = _started(stack, AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
-                                                     refused_retry_seconds=(0.3, 1.0)))
+        lead_host, lead_nc = await _started(stack, broker, LEAD_HOST_RUNTIME, AgentProcessHost(
+            layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS), refused_retry_seconds=(0.3, 1.0)))
         lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
-                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
+                         definition=DEFINITION, nc=lead_nc, state=("idle", True))
         lead_host.attach(stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False), agent_type="Researcher",
                          definition=DEFINITION, nc=None, state=("idle", True))
         await _until(lambda: view.live_ids() == {"lead_1", "worker_1"})
@@ -241,10 +242,10 @@ async def test_a_lead_whose_host_runs_another_contract_is_unavailable_and_shown_
         async def holds(agent):
             return True  # it still holds work: it drains, and keeps its agents meanwhile
 
-        lead_host = _started(stack, AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
-                                                     drain_agent=keeps, holds_work=holds))
+        lead_host, lead_nc = await _started(stack, broker, LEAD_HOST_RUNTIME, AgentProcessHost(
+            layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS), drain_agent=keeps, holds_work=holds))
         lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
-                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
+                         definition=DEFINITION, nc=lead_nc, state=("idle", True))
         await _until(lambda: "lead_1" in view.live())
 
         assert lead_host.host is not None
@@ -338,12 +339,10 @@ async def test_the_gateway_itself_follows_its_lead_from_the_records(
         assert config.manager.manager_agent_id is None
         assert transitions == [("unavailable", "lead_from_last_run")]
 
-        lead_host = _started(stack, AgentProcessHost(config.layout, lead_profile, TEAM,
-                                                     handlers=dict(LIVE_CONTROL_HANDLERS),
-                                                     refused_retry_seconds=(0.3, 1.0)))
+        lead_host, lead_nc = await _started(stack, broker, LEAD_HOST_RUNTIME, AgentProcessHost(
+            config.layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS), refused_retry_seconds=(0.3, 1.0)))
         lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
-                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME),
-                         state=("idle", True))
+                         definition=DEFINITION, nc=lead_nc, state=("idle", True))
         await _until(lambda: config.manager.manager_agent_id == "lead_1")
         assert transitions[-1] == ("available", "lead_1", True)
 
@@ -385,11 +384,10 @@ async def test_a_lead_running_when_the_gateway_starts_is_followed_without_any_tr
         services_host = MessageHost(config.layout, team_services_profile(TEAM),
                                     await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         await _serve(stack, services_host, stop)
-        lead_host = _started(stack, AgentProcessHost(config.layout, lead_profile, TEAM,
-                                                     handlers=dict(LIVE_CONTROL_HANDLERS)))
+        lead_host, lead_nc = await _started(stack, broker, LEAD_HOST_RUNTIME, AgentProcessHost(
+            config.layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS)))
         lead_host.attach(stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True), agent_type="TeamArchitect",
-                         definition=DEFINITION, nc=await connect(stack, broker, LEAD_HOST_RUNTIME),
-                         state=("idle", True))
+                         definition=DEFINITION, nc=lead_nc, state=("idle", True))
 
         await _running_gateway(stack, config, transitions)
         assert config.manager.manager_agent_id == "lead_1"
