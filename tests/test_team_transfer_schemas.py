@@ -37,6 +37,17 @@ def test_payload_contract_changes_require_a_new_section_version() -> None:
         )
 
 
+def test_the_ledger_holds_one_fingerprint_per_section_version() -> None:
+    # json.loads keeps the last of two equal keys without a word, so a merge that
+    # leaves both branches' fingerprints for one number would pass the test above.
+    def refuse_repeats(pairs: list[tuple[str, str]]) -> dict[str, str]:
+        keys = [key for key, _ in pairs]
+        assert len(keys) == len(set(keys)), f"repeated versions: {sorted({k for k in keys if keys.count(k) > 1})}"
+        return dict(pairs)
+
+    json.loads((DEFAULT_OUTPUT_DIR.parent / "section-contracts.json").read_text(), object_pairs_hook=refuse_repeats)
+
+
 def test_every_schema_is_valid_draft_2020_12_and_listed_in_the_manifest() -> None:
     rendered = render_all_files()
     manifest = json.loads(rendered["manifest.json"])
