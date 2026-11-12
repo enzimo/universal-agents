@@ -10,7 +10,8 @@ conversation stores and the gateway's own upload storage, for Ann's team lead
 - the media tool uses the upload's recorded type and file name, so a file
   whose name has no suffix still loads as an image, and names each document
   after its file and id, so two uploads with one name do not repeat a name;
-- a deleted upload gives ``upload_unavailable`` asking for the file again;
+- a deleted upload gives ``upload_unavailable`` asking for the file again,
+  also when it is deleted after it was found and before it is read;
 - an upload that cannot be opened safely is not read, and the error does not
   say where it is stored; a failed copy into the task's folder says why;
 - an id outside the task's scope gives ``unknown_attachment_id`` with the
@@ -46,7 +47,7 @@ from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserT
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, TaskSteeringType
-from custom_tools import file_access
+from custom_tools import file_access, task_uploads
 from custom_tools.local_media_context_tool import load_local_media_for_model_context
 from custom_tools.task_uploads import (
     RESULT_REFUSED,
@@ -253,6 +254,40 @@ async def test_a_deleted_upload_asks_for_the_file_again_from_both_tools(earlier,
         assert payload["attachment"]["attachment_id"] == photo.attachment_id
         _no_storage_details(result, earlier["layout"])
     assert f"event=attachment_upload_missing attachment_id={photo.attachment_id} task_id={FOLLOW_UP}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_upload_deleted_while_it_is_opened_asks_for_the_file_again_without_its_location(
+    earlier, monkeypatch, caplog
+) -> None:
+    csv: UserTaskAttachment = earlier["csv"]
+    photo: UserTaskAttachment = earlier["photo"]
+    earlier["lead"].supports_image_input = True
+    found = task_uploads.locate_upload
+
+    def found_then_deleted(attachment: UserTaskAttachment, *args: Any, **kwargs: Any) -> Any:
+        # Upload retention deletes the file after the tool found it and before it reads it.
+        located = found(attachment, *args, **kwargs)
+        Path(attachment.local_path()).unlink()
+        return located
+
+    monkeypatch.setattr(task_uploads, "locate_upload", found_then_deleted)
+
+    with caplog.at_level(logging.WARNING, logger=TOOLS_LOGGER):
+        results = {
+            "inspect": (_inspect(csv.attachment_id), csv),
+            "copy": (_inspect(earlier["pdf"].attachment_id, copy_to_workspace=True), earlier["pdf"]),
+            "load": (_load(photo.attachment_id), photo),
+        }
+
+    for name, (result, attachment) in results.items():
+        assert result["status"] == "error", (name, result)
+        payload = _payload(result)
+        assert (payload["result"], payload["reason"]) == (RESULT_UPLOAD_UNAVAILABLE, safe_open.REASON_NOT_FOUND), name
+        assert "send it again" in payload["error"], name
+        assert payload["attachment"]["attachment_id"] == attachment.attachment_id
+        _no_storage_details(result, earlier["layout"])
+    assert f"event=attachment_read_failed attachment_id={photo.attachment_id}" in caplog.text
 
 
 @pytest.mark.asyncio

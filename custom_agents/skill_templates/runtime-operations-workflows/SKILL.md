@@ -1332,13 +1332,24 @@ not recopy or re-encode the image first.
 
 ## User-Provided Attachments
 
-User-uploaded files arrive on `Task.attachments` or `TaskSteering.attachments`
-as structured metadata references. Use `inspect_user_attachment` for bounded
-local inspection. If you have located an image or supported document file
-in this task's folders and need the model itself to directly examine it, use
+User-uploaded files arrive on `Task.attachments`, on guidance
+(`TaskSteering.attachments`) and on answers to questions as structured
+metadata references, each with an `attachment_id`. The prompt's Conversation
+Attachments section lists the files the task may use, newest first (at most
+20): its own and, unless it is delegated work, those sent earlier in the same
+conversation. A delegated task may use only the files its delegation gave it.
+`get_conversation_context_slice` shows each earlier turn's files. Open a file
+by `attachment_id` with `inspect_user_attachment` for bounded inspection. If
+you need the model itself to directly examine an uploaded image or supported
+document (by `attachment_id`) or one in this task's folders (by path), use
 `load_local_media_for_model_context`; that tool inserts native content blocks
 into the next inner-loop LLM input and should be used only for direct
-model-visible inspection. Native image insertion requires
+model-visible inspection. A file that cannot be opened says why:
+`unknown_attachment_id` lists the files the task may use;
+`upload_unavailable` means it was deleted, so ask the person to send it
+again, as for a file the list says was sent before files were recorded.
+When delegating, `attachment_ids` chooses the files the new task gets: left
+out sends this task's own files, `[]` sends none, and ids send exactly those. Native image insertion requires
 `supports_image_input=true`; native document insertion requires
 `supports_file_input=true`. Text/Markdown files remain inspectable through file
 tools even when native file input is disabled. `supports_audio_input` records

@@ -33,11 +33,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from access_control.safe_open import UnsafePath
+from access_control.safe_open import REASON_NOT_FOUND, UnsafePath
 from custom_agents.conversation_attachments import (
     INVENTORY_LIMIT,
     UNRECORDED_TURNS_NOTE,
     UPLOAD_FILE_MISSING,
+    UPLOAD_GONE_MESSAGE,
     UPLOAD_OUTSIDE_FOLDERS,
     LocatedUpload,
     TaskAttachments,
@@ -76,10 +77,13 @@ def read_failed(attachment: UserTaskAttachment, exc: OSError) -> dict[str, Any]:
 
     Opening the upload itself fails with ``safe_open.UnsafePath`` (a link or
     a second hard link appeared, it grew past the limit, or it is gone),
-    whose text names where it is stored, so only its reason is shown. Any
-    other error comes from writing the copy into the task's own folder
-    (``file_access``), whose text names only that folder, and is shown as is.
-    Both are logged with the attachment id.
+    whose text names where it is stored, so only its reason is shown. A file
+    deleted after it was found (upload retention or a person's removal ran
+    meanwhile) gives ``upload_unavailable``, as one deleted before. Any other
+    error comes from writing the copy into the task's own folder
+    (``file_access``, which turns its own refusals into other errors), whose
+    text names only that folder, and is shown as is. All are logged with the
+    attachment id.
     """
 
     logger.warning(
@@ -87,6 +91,13 @@ def read_failed(attachment: UserTaskAttachment, exc: OSError) -> dict[str, Any]:
         attachment.attachment_id,
         exc,
     )
+    if isinstance(exc, UnsafePath) and exc.reason == REASON_NOT_FOUND:
+        return {
+            "error": UPLOAD_GONE_MESSAGE,
+            "result": RESULT_UPLOAD_UNAVAILABLE,
+            "reason": exc.reason,
+            "attachment": described(attachment),
+        }
     if isinstance(exc, UnsafePath):
         return {
             "error": "This file could not be opened safely, so it was not read.",

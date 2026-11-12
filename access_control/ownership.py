@@ -218,7 +218,7 @@ def sent_files_access(
     person_id: str | None,
     message_context_id: str,
 ) -> OwnershipDecision:
-    """Whether files on a message to a top-level task may become that task's and its conversation's.
+    """Whether the gateway vouches for the files on a message a person sent to one task.
 
     Uploads are the person's private records, and the agent side cannot read
     the gateway's upload records, so it keeps a message's files only when the
@@ -231,9 +231,14 @@ def sent_files_access(
     message as it arrived (``message_context_id``: ``request_context_id``,
     ``steering_context_id`` or ``answer_context_id``). The gateway signs
     ``root_task_id`` and ``conversation_id``, and an id derived the same way,
-    only on a new request's context and on the context of each guidance,
-    interrupt answer or question answer it sends to that request
-    (``assistant_gateway.application.request_context``).
+    only on a new request's context, on the context of each guidance or
+    interrupt answer it sends to that request, and on the context of each
+    answer to a question, which names the task that asked: the request, a
+    plan step or isolated recovery task of it, or the team lead's record of
+    a worker's escalation (``assistant_gateway.application.request_context``,
+    ``assistant_gateway.application.clarification``). This rule decides only
+    whether the gateway vouches for the files; which tasks then keep them is
+    the agent runtime's decision (``custom_agents.sent_files_runtime``).
 
     Why the id: other agent processes hold or see valid gateway contexts for
     the task. Delegation copies the request's admitted context into every

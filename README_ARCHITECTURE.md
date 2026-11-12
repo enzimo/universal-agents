@@ -3519,6 +3519,113 @@ A result counts as read only after Strands returns a successful model response
 that its hooks accept. Failed, cancelled or retried calls leave the attempted
 results unread, including a successful response discarded by a retry hook.
 
+### Files a person sent in a conversation
+
+A person can refer to a file sent in an earlier turn of the same chat, and the
+team opens it by its `attachment_id`. The gateway stores the bytes in
+`state/uploads` (or the adapter host's upload folder) and puts a
+`UserTaskAttachment` record on the message: a request's files on
+`Task.attachments`, files sent while it runs on its guidance and interrupt
+answers (`TaskSteering.attachments`), and files sent with an answer to a
+question on `TaskQuery.attachments`. Web Chat and chat apps send an answer's
+files with the answer.
+
+Which files are kept. The agent side cannot read the gateway's upload records,
+so the team lead keeps a message's files only when the message's own signed
+context vouches for them: it names the person the task works for, the task,
+its conversation, and an id derived from that message and its exact file
+records (`access_control.ownership.sent_files_access`, `request_context_id`,
+`steering_context_id`, `answer_context_id`). The id is needed because other
+agent processes hold copies of a request's signed context and could send one
+again with other files. Refused files are dropped from the message and logged
+one by one.
+
+Where the records live. Kept files are written in two trusted places: the
+task's own history (one files entry per accepted guidance or answer,
+`custom_agents.sent_files_runtime`) and the conversation turn the task belongs
+to (`conversation_task_links.attachments_json`, `storage.conversation_repository`
+and `storage.turn_attachments`). Admission writes a request's files with its
+turn; guidance and answers are merged into it in one write transaction that
+adds each id once, so concurrent merges lose nothing and a retry adds nothing
+twice. The list is a column on the turn row rather than a table because
+departure, archive and history clean-up move or delete whole turns, so a
+turn's file list goes with its turn. Records leave the runtime only as
+descriptions (id, name, type, size and turn,
+`storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS`), never with storage
+paths.
+
+What a task may use is decided in one place,
+`custom_agents.conversation_attachments.TaskAttachments`, which the prompt,
+both attachment tools and delegation ask:
+
+- its own files: `Task.attachments`, the files of every guidance and answer it
+  accepted and, for a worker, the files its escalations' results brought;
+- for a top-level task, the files earlier turns of its own conversation
+  received, while it works for that conversation's person
+  (`access_control.ownership.conversation_files_access`);
+- a plan step or isolated recovery task works on its request, found only
+  through the task manager's plan and recovery links (`linked_request`): it
+  uses the request's own files and its conversation. The request may also be
+  the team lead's record of an escalation from a worker's own run, such as a
+  scheduled job that asked for a specialist; a step of it uses the
+  escalation's own files and reads no conversation;
+- a delegated task, on a worker or on the lead, uses only the files it was
+  given and never reads conversation records.
+
+The prompt's `Conversation Attachments` section lists at most 20 of these
+files, newest first (`conversation_attachments.inventory_text`). It is built
+from the stored records, so it does not depend on how much of the
+conversation's text the prompt keeps or on earlier turns being summarized.
+`get_conversation_context_slice` shows each earlier turn's files, and the files
+of a guidance or an answer are named with their ids where the model reads that
+message.
+
+Opening a file. `inspect_user_attachment` and `load_local_media_for_model_context`
+take an `attachment_id`; a path still works for files in the task's folders.
+The id must be one the task may use, and the bytes are read only from the
+upload folders without following links (`custom_tools.task_uploads`,
+`access_control.safe_open`); a turn's direct image input reads its images the
+same way. A file that cannot be opened says why: `unknown_attachment_id`
+(with the files the task may use), `upload_unavailable` (deleted),
+`remote_copy_required` (stored on another host) or `refused` (a record that
+points outside the upload folders). No result includes a storage path.
+
+Choosing files for a specialist. Every model-facing delegation has an optional
+`attachment_ids`: left out, the new task gets the delegating task's own files
+(a plan step's include its request's); `[]` sends none; ids send exactly those
+files, from the files the delegating task may use
+(`conversation_attachments.delegated_files`). An unknown id fails the
+delegation before any task exists, and the model's recovery lists the ids it
+may use. A worker can therefore pass on only files it was given.
+
+Answers to a worker's question. A worker that needs the person escalates to
+the team lead, which asks in its record of the escalation. The answer's files
+are kept on that record, and on the request it works for when the lead holds
+that request for the same person. An escalation from a worker's scheduled run,
+which the lead never held, keeps them itself and is the request of the work
+the lead does for it. The lead's result for the escalation carries exactly
+those answer files (`answer_files`) back to the worker, which keeps the ones
+inside its upload folders as its task's own, and on the run's conversation
+turn for a scheduled run. An escalation linked to another person's request
+keeps none.
+
+Limits:
+
+- Turns saved before turns kept their files have no records. There is no
+  backfill: the gateway's records are not a trusted per-turn source on the
+  agent side, and a backfill would be a migration. The list says up to which
+  turn (`UNRECORDED_TURNS_NOTE`), and the model asks the person to send such a
+  file again.
+- A file list and the file's bytes are deleted separately. The list follows
+  its turn row; the bytes are deleted by upload retention
+  (`attachments.retention_days`, by age) and when a person is removed
+  (`assistant_gateway/person_departure.py`). A listed file whose bytes are
+  gone answers `upload_unavailable`, and a file deleted while it is being read
+  gives a short error without a path.
+- Only the same conversation and person: no task lists or opens another
+  conversation's or another person's files, and the team transfer carries no
+  conversations or their files.
+
 ### Model provider keys
 
 Model keys belong to an endpoint *address* (scheme, host and port,

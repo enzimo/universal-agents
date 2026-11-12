@@ -192,6 +192,13 @@ UPLOAD_NO_LOCAL_COPY = "no_local_copy"
 UPLOAD_NOT_ON_THIS_HOST = "not_on_this_host"
 UPLOAD_FILE_MISSING = "file_missing"
 UPLOAD_OUTSIDE_FOLDERS = "outside_upload_folders"
+# What the model is told about an upload whose file was deleted, whether before
+# it was found (``locate_upload``) or while it was being read
+# (``custom_tools.task_uploads.read_failed``).
+UPLOAD_GONE_MESSAGE = (
+    "This file is no longer stored: uploads are deleted after the team's upload retention period "
+    "or when their person leaves the team. Ask the person to send it again."
+)
 
 
 def task_files_details(
@@ -863,11 +870,7 @@ def locate_upload(
             task_id,
             conversation_id or "-",
         )
-        return UnavailableUpload(
-            UPLOAD_FILE_MISSING,
-            "This file is no longer stored: uploads are deleted after the team's upload retention period "
-            "or when their person leaves the team. Ask the person to send it again.",
-        )
+        return UnavailableUpload(UPLOAD_FILE_MISSING, UPLOAD_GONE_MESSAGE)
     return UnavailableUpload(UPLOAD_NOT_ON_THIS_HOST, "This file is stored on another host, not where this agent runs.")
 
 
@@ -1046,6 +1049,7 @@ __all__ = [
     "TASK_FILES_KEY",
     "TASK_NOT_FOUND_REASON",
     "UPLOAD_FILE_MISSING",
+    "UPLOAD_GONE_MESSAGE",
     "UPLOAD_NOT_ON_THIS_HOST",
     "UPLOAD_NO_LOCAL_COPY",
     "UPLOAD_OUTSIDE_FOLDERS",
