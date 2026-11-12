@@ -69,6 +69,11 @@ class _TaskManager:
         task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="")
         return TaskInfo(task, MessageHeader(), MessageMeta(), owner_person_id=None)
 
+    def resolve_root_task_id(self, task_id: str) -> str:
+        """Each task here is its own request: no plan-step, recovery or delegation links."""
+
+        return task_id
+
 
 class _ConversationCompactor:
     def compact_if_needed(self, **kwargs):

@@ -117,7 +117,9 @@ def open_task_upload(attachment_id: str) -> TaskUpload | dict[str, Any]:
 
     agent = get_agent_ref()
     wanted = str(attachment_id or "").strip()
-    scope = TaskAttachments.load(_task_info(agent), getattr(agent, "_conversation_store", None))
+    scope = TaskAttachments.for_task(
+        getattr(agent, "task_manager", None), _task_info(agent), getattr(agent, "_conversation_store", None)
+    )
     found, _unknown = scope.find([wanted])
     if not found:
         return _not_in_scope(scope, wanted)

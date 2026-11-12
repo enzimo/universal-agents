@@ -9,15 +9,24 @@ from __future__ import annotations
 
 from custom_tools.runtime_context import bound_task_id
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Optional
+from functools import partial
+from typing import Any, Optional
 
+from custom_agents.conversation_attachments import (
+    AttachmentSelectionError,
+    TaskAttachments,
+    delegated_files,
+    step_request,
+)
 from custom_agents.message_routing import construct_header
 from custom_agents.task_manager import TaskInfo
 from custom_agents.task_transport import (
     task_request_transport_copy,
     task_response_history_transport_copy,
 )
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.envelope_v1 import CommsMessage, MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -387,15 +396,25 @@ async def _verify_delegation_target(
 async def _create_subtask_request(
     self,
     llm_comms_message: CommsMessage,
+    *,
+    attachment_ids: Optional[Sequence[str]] = None,
 ) -> Optional[TaskInfo]:
     """
     Creates a new subtask based on LLM output (formatted as CommsMessage).
 
     Args:
         llm_comms_message (CommsMessage): CommsMessage from the LLM.
+        attachment_ids: The files the model chose for the subtask
+            (``DelegateTaskAction.attachment_ids``): None for the parent's own
+            files, empty for none (``_subtask_files``).
 
     Returns:
         Optional[TaskInfo]: The created TaskInfo object for the subtask, or None on failure.
+
+    Raises:
+        AttachmentSelectionError: an id is not a file the parent may use. The
+            abort is recorded first and no subtask exists; the outbox's model
+            recovery shows the message, which lists the ids it may use.
     """
     parent_task_id = bound_task_id()
     if not parent_task_id:
@@ -483,13 +502,20 @@ async def _create_subtask_request(
     sub_task_to_create.task_type = MessageMetaType.REQUEST
     sub_task_to_create.answer = None
     sub_task_to_create.errors = None
-    if not getattr(sub_task_to_create, "attachments", None):
-        sub_task_to_create.attachments = [
-            attachment.model_copy(deep=True)
-            for attachment in list(
-                getattr(parent_task_info.task, "attachments", None) or []
-            )
-        ]
+    try:
+        sub_task_to_create.attachments = await _subtask_files(
+            self, parent_task_info, attachment_ids, subtask_id=sub_task_to_create.task_id
+        )
+    except AttachmentSelectionError as exc:
+        await self._record_delegation_subtask_abort(
+            failure_phase="attachment_selection_failed",
+            parent_task_id=parent_task_id,
+            candidate_task_id=sub_task_to_create.task_id,
+            target_named_agent_type=getattr(llm_meta, "to_named_agent_type", None),
+            target_agent_name=getattr(llm_meta, "to_agent_name", None),
+            detail=str(exc),
+        )
+        raise
 
     # Determine target agent
     target_agent_name = None
@@ -601,6 +627,46 @@ async def _create_subtask_request(
             detail="TaskManager.add_subtask returned None.",
         )
         return None
+
+
+async def _subtask_files(
+    self: Any,
+    parent_task_info: TaskInfo,
+    attachment_ids: Optional[Sequence[str]],
+    *,
+    subtask_id: Optional[str],
+) -> list[UserTaskAttachment]:
+    """The files a new subtask of ``parent_task_info`` gets (``conversation_attachments.delegated_files``).
+
+    Left out or empty, only the parent's own records are read. Ids are looked
+    up among the files the parent may use: its own, then its conversation's,
+    or for a plan step or recovery task its request's (``step_request``, found
+    on the task manager's operation lane; the conversation store is read off
+    the event loop). Logs which case applied.
+    """
+
+    if attachment_ids:
+        task_manager = self.task_manager
+        # Bound into the operation: the lane copies an operation's arguments.
+        request_info = await task_manager.operations_runtime.run(partial(step_request, task_manager), parent_task_info)
+        scope = await asyncio.to_thread(
+            TaskAttachments.load,
+            parent_task_info,
+            getattr(self, "_conversation_store", None),
+            request_info=request_info,
+        )
+    else:
+        scope = TaskAttachments.load(parent_task_info, None)
+    files = delegated_files(scope, attachment_ids)
+    self._logger.info(
+        "A delegated task gets its files. event=delegated_task_files choice=%s parent_task_id=%s subtask_id=%s "
+        "attachment_ids=%s",
+        "parent_files" if attachment_ids is None else ("named" if attachment_ids else "none"),
+        parent_task_info.task.task_id,
+        subtask_id or "-",
+        ",".join(attachment.attachment_id for attachment in files) or "-",
+    )
+    return files
 
 
 @staticmethod

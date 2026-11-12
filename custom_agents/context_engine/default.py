@@ -296,6 +296,17 @@ class DefaultContextEngine:
                     pinned=True,
                     source="TaskManager.render_task_query_history_markdown",
                 )
+                # A focused turn works on its request's files too: the same
+                # bounded list, read through the request it runs for.
+                self._append_prompt_section(
+                    sections,
+                    prompt_parts,
+                    name=CONVERSATION_ATTACHMENTS_SECTION,
+                    text=self._conversation_attachments_context(request, degraded_sections),
+                    priority=55,
+                    pinned=True,
+                    source="conversation_attachments.inventory_text",
+                )
                 self._append_earlier_turn_work(sections, prompt_parts, earlier_turn_work)
             if not request.isolated_recovery_task and not request.plan_step_task:
                 if self.memory_plugin_manager is not None:
@@ -631,7 +642,9 @@ class DefaultContextEngine:
 
         Read for the task the runtime runs (``execution_task_id``), with the
         conversation and person recorded at its admission, so the list follows
-        the same rules as opening a file by id. Files the current request lists
+        the same rules as opening a file by id; a plan step or isolated
+        recovery task reads it through the request it runs for
+        (``TaskAttachments.for_task``). Files the current request lists
         itself are left out. Empty when overflow recovery drops the section
         (only when an operator names it in ``degrade_sections``).
         """
@@ -650,7 +663,7 @@ class DefaultContextEngine:
             return ""
         listed_now = list(getattr(request.incoming_content, "attachments", None) or [])
         return inventory_text(
-            TaskAttachments.load(task_info, self.conversation_store),
+            TaskAttachments.for_task(self.task_manager, task_info, self.conversation_store),
             exclude_ids=[attachment.attachment_id for attachment in listed_now[:CURRENT_REQUEST_ATTACHMENT_LIMIT]],
         )
 

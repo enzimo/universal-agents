@@ -30,6 +30,11 @@ from pydantic import ValidationError
 
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 
+# The most files the prompt lists, an error offers as choices, a conversation
+# slice shows per turn and a delegation may name (approved bound). Defined here,
+# beside the summaries, so model contracts (``structured_llm_messages``) can use
+# it without importing the runtime's resolver (``conversation_attachments``).
+INVENTORY_LIMIT = 20
 # The fields of a file record a model may see: no storage references, no checksum.
 TURN_ATTACHMENT_SUMMARY_FIELDS = (
     "attachment_id",

@@ -63,11 +63,26 @@ What a task may use (``TaskAttachments``):
 - for a top-level task only, the files earlier turns of its own conversation
   received, while it works for the conversation's person
   (``access_control.ownership.conversation_files_access``, with the person
-  recorded at admission from the signed task context). A delegated task
-  (a worker's) never reads conversation records: it uses only the files it
-  was given. Turns saved before turns kept their files have no records; the
-  prompt's list says up to which turn (``last_unrecorded_turn``), so the
-  person is asked to send such files again.
+  recorded at admission from the signed task context). A plan step or an
+  isolated recovery task is a task of its own, with a conversation id of its
+  own and no turn, working on its request: it uses its request's
+  conversation the same way (``step_request``), so its prompt lists and its
+  tools open the request's files and earlier turns' files. The request is
+  found only through the task manager's plan-step and recovery links
+  (``linked_request``), must be a top-level task held here, and must work
+  for the step's person; otherwise the step uses only its own files (logged).
+  A delegated task (a worker's, or the team lead's record of an escalation)
+  never reads conversation records: it uses only the files it was given.
+  Turns saved before turns kept their files have no records; the prompt's
+  list says up to which turn (``last_unrecorded_turn``), so the person is
+  asked to send such files again.
+
+Which files a delegation sends (``delegated_files``): the model chooses with
+``attachment_ids`` on its delegate_task action. Left out, the new task gets
+the delegating task's own files (above); an empty list sends none; ids send
+exactly those files, from what the delegating task may use, and an id that
+is not one fails the delegation with the list of ids it may use. A worker can
+therefore pass on only files it was given.
 
 Models name files by ``attachment_id`` only. Records hold where the bytes are
 stored, so they leave this module only as descriptive summaries
@@ -114,13 +129,10 @@ from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
 from custom_messages.enums import MessageMetaType, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
-from storage.turn_attachments import TurnAttachment, attachment_summary
+from storage.turn_attachments import INVENTORY_LIMIT, TurnAttachment, attachment_summary
 
 logger = logging.getLogger(__name__)
 
-# The most files the prompt lists, an error offers as choices and a conversation
-# slice shows per turn (approved bound).
-INVENTORY_LIMIT = 20
 # The prompt section listing earlier files (``inventory_text``); its name in
 # context accounting and in ``overflow_recovery.degrade_sections`` is
 # ``CONVERSATION_ATTACHMENTS_SECTION``.
@@ -243,31 +255,125 @@ class AttachmentSelectionError(ValueError):
 
 
 @dataclass(frozen=True)
+class RequestLink:
+    """The request a plan step, recovery task or delegated task runs for, as this agent holds it.
+
+    Found by ``linked_request`` only through the task manager's plan-step,
+    recovery and delegation links (``TaskManager.resolve_root_task_id``),
+    never from a message or a model. ``root_task_id`` is the task it runs for
+    (None when the task is its own request, or its parent is not held here);
+    ``info`` is that task when it may share the task's files: a top-level
+    task working for the same person (``owner_person_id``, recorded at
+    admission from verified identity). Otherwise ``reason`` says why not:
+    ``not_held``, ``delegated`` or ``other_person``.
+    """
+
+    root_task_id: Optional[str] = None
+    info: Optional[Any] = None
+    reason: Optional[str] = None
+
+    @property
+    def linked(self) -> bool:
+        """Whether the task runs for another task this agent holds, whether or not it may share its files."""
+
+        return self.root_task_id is not None
+
+
+def linked_request(task_manager: Any, task_info: Any) -> RequestLink:
+    """The request the task in ``task_info`` runs for, through the task manager's links (``RequestLink``).
+
+    Calls the task manager directly: run it on the task manager's operation
+    lane from async code.
+    """
+
+    task_id = task_info.task.task_id
+    root_id = task_manager.resolve_root_task_id(task_id)
+    if not root_id or root_id == task_id:
+        return RequestLink()
+    root_info = task_manager.get_task_info(root_id)
+    if root_info is None:
+        return RequestLink(root_id, reason="not_held")
+    if root_info.task.parent_task_id is not None:
+        return RequestLink(root_id, reason="delegated")
+    if root_info.owner_person_id != task_info.owner_person_id:
+        return RequestLink(root_id, reason="other_person")
+    return RequestLink(root_id, info=root_info)
+
+
+def step_request(task_manager: Any, task_info: Any) -> Optional[Any]:
+    """The request a plan step or isolated recovery task runs for, when it may use that request's files.
+
+    A step or recovery task is a task of its own, with a conversation id of
+    its own and no conversation turn; it works on its request, so it may use
+    the files of the request's conversation (``TaskAttachments.load``). A
+    delegated task never does: it uses only the files it was given. None
+    for a task that is its own request; a link to a task that may not share
+    its files (``RequestLink.reason``) is logged and gives None.
+    """
+
+    if task_info is None or task_manager is None or task_info.task.parent_task_id is not None:
+        return None
+    link = linked_request(task_manager, task_info)
+    if link.linked and link.info is None:
+        logger.warning(
+            "A step's request may not share its files with it, so the step uses only its own. "
+            "event=step_request_files_not_usable task_id=%s root_task_id=%s reason=%s",
+            task_info.task.task_id,
+            link.root_task_id,
+            link.reason,
+        )
+    return link.info
+
+
+@dataclass(frozen=True)
 class TaskAttachments:
     """The files one task may name: its own, and for a top-level task its conversation's.
 
-    Build it with ``load``. ``conversation_id`` is set only when the task may
-    use its conversation's files (module docstring).
+    Build it with ``for_task`` (or ``load`` when the request is known).
+    ``conversation_id`` is set only when the task may use that
+    conversation's files (module docstring): its own conversation, or for a
+    plan step or recovery task its request's. ``turn_task_id`` is the task
+    whose conversation turn holds the request's own files: the task itself,
+    or the step's request.
     """
 
     task_id: str
     own: tuple[UserTaskAttachment, ...] = ()
     conversation_id: Optional[str] = None
     store: Any = field(default=None, repr=False, compare=False)
+    turn_task_id: Optional[str] = None
 
     @classmethod
-    def load(cls, task_info: Any, conversation_store: Any) -> "TaskAttachments":
-        """The scope of the task in ``task_info`` (None gives an empty scope)."""
+    def for_task(cls, task_manager: Any, task_info: Any, conversation_store: Any) -> "TaskAttachments":
+        """The scope of the task in ``task_info``, a plan step's through its request (``step_request``).
+
+        Calls the task manager directly, as the prompt and the tools read
+        task records; async code finds the request on the operation lane
+        and calls ``load``.
+        """
+
+        return cls.load(task_info, conversation_store, request_info=step_request(task_manager, task_info))
+
+    @classmethod
+    def load(cls, task_info: Any, conversation_store: Any, *, request_info: Any = None) -> "TaskAttachments":
+        """The scope of the task in ``task_info`` (None gives an empty scope).
+
+        ``request_info`` is the request a plan step or recovery task runs for
+        (``step_request``): the step then uses that request's conversation,
+        under the same person check, beside its own files.
+        """
 
         task = getattr(task_info, "task", None)
         if task is None:
             return cls(task_id="")
-        conversation_id = _conversation_in_scope(task_info, conversation_store)
+        turn_info = request_info if request_info is not None else task_info
+        conversation_id = _conversation_in_scope(turn_info, conversation_store)
         return cls(
             task_id=task.task_id,
             own=_own_files(task),
             conversation_id=conversation_id,
             store=conversation_store if conversation_id else None,
+            turn_task_id=turn_info.task.task_id,
         )
 
     def find(self, attachment_ids: Iterable[str]) -> tuple[list[UserTaskAttachment], list[str]]:
@@ -363,9 +469,37 @@ class TaskAttachments:
         if not self.conversation_id:
             return None
         latest: Optional[int] = self.store.last_turn_without_file_records(
-            self.conversation_id, exclude_task_id=self.task_id
+            self.conversation_id, exclude_task_id=self.turn_task_id or self.task_id
         )
         return latest
+
+
+def delegated_files(scope: TaskAttachments, attachment_ids: Optional[Sequence[str]]) -> list[UserTaskAttachment]:
+    """The files a task delegated from the task of ``scope`` gets (copies of trusted records).
+
+    ``attachment_ids`` comes from the model's delegation (``DelegateTaskAction``):
+
+    - None (left out): the delegating task's own files (``scope.own``:
+      ``Task.attachments`` and the files of the guidance, answers and
+      escalation results it accepted), deduplicated in arrival order.
+    - An empty list: none.
+    - Ids: exactly those files, in the order named, each once, from the files
+      the task may use (its own, then its or its request's conversation's).
+      Any id that is not one raises ``AttachmentSelectionError``, which lists
+      the files it may use without storage paths.
+
+    A model only names ids; the records, and where the bytes are, come from
+    this runtime's own records. A delegated task's scope has no conversation,
+    so a worker can pass on only files it was given.
+    """
+
+    if attachment_ids is None:
+        chosen: Sequence[UserTaskAttachment] = scope.own
+    elif not attachment_ids:
+        chosen = []
+    else:
+        chosen = scope.require(attachment_ids)
+    return [attachment.model_copy(deep=True) for attachment in chosen]
 
 
 def inventory_text(scope: TaskAttachments, *, exclude_ids: Iterable[str] = ()) -> str:
@@ -850,19 +984,23 @@ __all__ = [
     "UPLOAD_OUTSIDE_FOLDERS",
     "AttachmentSelectionError",
     "LocatedUpload",
+    "RequestLink",
     "TaskAttachments",
     "UnavailableUpload",
     "UploadFolders",
     "answer_files",
     "answer_files_check",
+    "delegated_files",
     "describe_file",
     "inventory_text",
     "keep_upload_files",
+    "linked_request",
     "locate_upload",
     "log_refused_files",
     "request_files_kept",
     "sent_file_lines",
     "steering_files_check",
+    "step_request",
     "task_files_details",
     "without_incoming_files_entries",
 ]

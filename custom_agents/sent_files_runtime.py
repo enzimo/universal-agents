@@ -62,16 +62,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
+from functools import partial
 from typing import Any, Optional
 
 from access_control.ownership import OwnershipDecision
 from custom_agents.conversation_attachments import (
     DELEGATED_TASK_REASON,
     ESCALATION_RESULT_MESSAGE_TYPE,
+    RequestLink,
     UploadFolders,
     answer_files,
     keep_upload_files,
+    linked_request,
     log_refused_files,
     task_files_details,
 )
@@ -172,54 +174,32 @@ async def _files_entry(agent: Any, task_id: str, summary: str, details: dict[str
     )
 
 
-@dataclass(frozen=True)
-class _RequestLink:
-    """The request a step or delegated task runs for, as this agent holds it (``_request_root``).
-
-    ``info`` is that request when files sent to the task are also its own.
-    ``linked`` says the task runs for another task this agent holds, whether
-    or not that one can take the files; False for a task that is its own
-    request and for a delegated task whose parent this agent does not hold.
-    """
-
-    info: Optional[Any] = None
-    linked: bool = False
-
-
-async def _request_root(agent: Any, task_info: Any) -> _RequestLink:
+async def _request_root(agent: Any, task_info: Any) -> RequestLink:
     """The request a step or delegated task runs for, and whether files sent to it are also the request's.
 
-    The root is found only through the task manager's plan-step, recovery
-    and delegation links, never from the message. It must be a top-level
-    task this agent holds, working for the same person as the task
-    (``owner_person_id``, recorded at admission from verified identity);
-    otherwise a warning names both tasks, and the files stay with a step or
-    are refused for a delegated task (``keep_sent_files``).
+    Found by ``conversation_attachments.linked_request`` on the task
+    manager's operation lane, only through its plan-step, recovery and
+    delegation links, never from the message. When the task runs for a task
+    here that may not share its files, a warning names both tasks and the
+    reason, and the files stay with a step or are refused for a delegated
+    task (``keep_sent_files``).
     """
 
     task_manager = agent.task_manager
-    task_id = task_info.task.task_id
-    root_id = await task_manager.operations_runtime.run(task_manager.resolve_root_task_id, task_id)
-    if not root_id or root_id == task_id:
-        return _RequestLink()
-    root_info = await task_manager.operations_runtime.run(task_manager.get_task_info, root_id)
-    if (
-        root_info is not None
-        and root_info.task.parent_task_id is None
-        and root_info.owner_person_id == task_info.owner_person_id
-    ):
-        return _RequestLink(info=root_info, linked=True)
-    agent._logger.warning(
-        "Files sent to a step or delegated task cannot be kept on its request. "
-        "event=sent_files_root_not_usable task_id=%s root_task_id=%s reason=%s",
-        task_id,
-        root_id,
-        "not_held" if root_info is None else ("delegated" if root_info.task.parent_task_id else "other_person"),
-    )
-    return _RequestLink(linked=True)
+    # Bound into the operation: the lane copies an operation's arguments.
+    link: RequestLink = await task_manager.operations_runtime.run(partial(linked_request, task_manager), task_info)
+    if link.linked and link.info is None:
+        agent._logger.warning(
+            "Files sent to a step or delegated task cannot be kept on its request. "
+            "event=sent_files_root_not_usable task_id=%s root_task_id=%s reason=%s",
+            task_info.task.task_id,
+            link.root_task_id,
+            link.reason,
+        )
+    return link
 
 
-def _delegated_task_keeps_files(agent: Any, task_info: Any, request: _RequestLink) -> bool:
+def _delegated_task_keeps_files(agent: Any, task_info: Any, request: RequestLink) -> bool:
     """Whether a delegated task keeps the files of an answer the gateway vouched for (module docstring).
 
     Yes when it runs for a request this agent holds for the same person

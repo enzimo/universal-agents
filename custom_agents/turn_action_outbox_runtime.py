@@ -1374,7 +1374,11 @@ async def _execute_turn_action_record(
                         f"{existing_delegated_task_id}, but the local task record is missing."
                     )
             else:
-                task_info = await self._create_subtask_request(comms_message)
+                # The model names the subtask's files by id only (``delegated_files``).
+                task_info = await self._create_subtask_request(
+                    comms_message,
+                    attachment_ids=action.attachment_ids if isinstance(action, DelegateTaskAction) else None,
+                )
                 delegated_target_verified = task_info is not None
             if not task_info:
                 raise RuntimeError(

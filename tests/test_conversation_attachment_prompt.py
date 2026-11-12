@@ -12,8 +12,12 @@ context). Covers:
   history trimmed stay listed, and its tokens are reserved before the history
   is sized, so the prompt stays within the soft limit;
 - the list is left out only when overflow recovery is told to drop it, which
-  the default settings do not do, and focused turns (plan steps, recovery)
-  get no list; a task without a record gets no list and a warning;
+  the default settings do not do; a task without a record gets no list and a
+  warning;
+- a focused turn (a real plan step or isolated recovery task of the request)
+  lists its request's files and earlier turns' files and opens them by id,
+  found only through the task manager's links; a step whose request works for
+  someone else gets no list and a warning;
 - ``get_conversation_context_slice`` and ``get_conversation_turns`` show each
   turn's files (at most 20 per turn in the slice summary, with the count)
   without storage references;
@@ -43,6 +47,7 @@ from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import CommsMessage
 from custom_messages.contracts.task_v1 import TaskSteering
 from custom_messages.enums import TaskSteeringType
+from custom_tools.user_attachment_tools import inspect_user_attachment
 from custom_tools.providers.context_memory import get_conversation_context_slice, get_conversation_turns
 from default_values import AGENT_DEFAULTS
 from runtime_settings.instance_layout import InstanceLayout
@@ -233,12 +238,75 @@ async def test_overflow_recovery_drops_the_list_only_when_told_to(lead: Any, lay
     assert CONVERSATION_ATTACHMENTS_SECTION not in recovery["degrade_sections"]
 
 
+def _focused_task(lead: Any, flag: str) -> Any:
+    """A plan step or isolated recovery task of CURRENT, as the lead starts one (its own conversation id, no turn)."""
+
+    manager = lead.task_manager
+    assert manager.activate_plan_execution(
+        CURRENT,
+        steps=[{"title": "Look", "objective": "Look at the photos."}, {"title": "Answer", "objective": "Answer."}],
+        final_review=False,
+    )
+    [step] = [info for info in manager.task_state.tasks.values() if manager.is_plan_step_task(info.task.task_id)]
+    if flag == "plan_step_task":
+        return step
+    root = manager.get_task_info(CURRENT)
+    meta = root.meta.model_copy(update={"conversation_id": "recov_conv_1", "msg_correlation_id": "recovery_corr_1"})
+    return manager.start_isolated_recovery_task(
+        CURRENT,
+        failure_type="tool_failure",
+        failure_summary="The page did not load.",
+        recovery_brief="Try another way.",
+        header=root.header.model_copy(deep=True),
+        meta=meta,
+        notify_user=False,
+    )
+
+
 @pytest.mark.parametrize("flag", ["plan_step_task", "isolated_recovery_task"])
 @pytest.mark.asyncio
-async def test_focused_turns_get_no_list(lead: Any, layout: InstanceLayout, flag: str) -> None:
-    await _admit(lead, task_id=CURRENT, text="And the photo?", attachments=[])
+async def test_a_focused_turn_lists_and_opens_its_requests_files(lead: Any, layout: InstanceLayout, flag: str) -> None:
+    page = _upload(layout, "page one.png")
+    await _admit(lead, task_id=CURRENT, text="Read this recipe for that plant.", attachments=[page])
+    focused = _focused_task(lead, flag)
+    focused_id = focused.task.task_id
+    # The step has a conversation id of its own and no turn; its request is found through the plan links.
+    assert focused.meta.conversation_id != CONVERSATION and focused.task.parent_task_id is None
+    assert lead.task_manager.resolve_root_task_id(focused_id) == CURRENT
 
-    assert CONVERSATION_ATTACHMENTS_HEADING not in _assemble(lead, **{flag: True}).prompt
+    assembly = _assemble(lead, focused_id, **{flag: True})
+
+    listed = _section(assembly, CONVERSATION_ATTACHMENTS_SECTION)
+    # The request's own file (on its turn) first, then turn 1's photo, by turn and task.
+    assert _listed_ids(listed) == [page.attachment_id, _photo_id(lead)]
+    assert f"turn 2, task {CURRENT})" in listed and f"turn 1, task {FIRST})" in listed
+    assert str(layout.uploads_dir) not in assembly.prompt and "storage_refs" not in assembly.prompt
+    # The step's tool calls open them by id.
+    use_agent(lead, focused_id)
+    for attachment_id in (page.attachment_id, _photo_id(lead)):
+        assert inspect_user_attachment._tool_func(attachment_id=attachment_id)["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_a_step_whose_request_works_for_someone_else_gets_no_list(
+    lead: Any, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _admit(lead, task_id=CURRENT, text="And the photo?", attachments=[])
+    step = _focused_task(lead, "plan_step_task")
+    # As if the request were Bob's: the step may not use its files.
+    lead.task_manager.get_task_info(CURRENT).owner_person_id = "usr_bob"
+
+    with caplog.at_level(logging.WARNING):
+        assembly = _assemble(lead, step.task.task_id, plan_step_task=True)
+        use_agent(lead, step.task.task_id)
+        opened = inspect_user_attachment._tool_func(attachment_id=_photo_id(lead))
+
+    assert CONVERSATION_ATTACHMENTS_HEADING not in assembly.prompt
+    assert opened["status"] == "error"
+    assert (
+        f"event=step_request_files_not_usable task_id={step.task.task_id} root_task_id={CURRENT} reason=other_person"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
