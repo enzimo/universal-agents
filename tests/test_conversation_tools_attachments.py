@@ -4,8 +4,9 @@ Turns now keep the files the person sent (``storage.conversation_repository``).
 The tools that return turns to a model (``get_conversation_summary``,
 ``get_conversation_turns`` and ``get_conversation_context_slice``) must show a
 file's name, type, size and id, never its path in the instance's uploads
-folder or its digest. The tools run for the conversation's owner through the
-real signed-context check.
+folder or its digest. A summary slice names at most 10 files of a turn and
+counts them all. The tools run for the conversation's owner through the real
+signed-context check.
 """
 
 from __future__ import annotations
@@ -47,19 +48,22 @@ def _signed_contexts(monkeypatch: pytest.MonkeyPatch):
     _agent_ctx.set(None)
 
 
-def test_the_conversation_tools_never_show_where_a_file_is_stored(tmp_path: Path) -> None:
-    layout = InstanceLayout.at(tmp_path / "instance")
-    layout.ensure_directories()
-    upload = layout.uploads_dir / "session_alice" / "att_receipt"
-    receipt = UserTaskAttachment(
-        attachment_id="att_receipt",
-        filename="receipt.jpg",
+def _file(layout: InstanceLayout, attachment_id: str, *, filename: str = "receipt.jpg") -> UserTaskAttachment:
+    upload = layout.uploads_dir / "session_alice" / attachment_id
+    return UserTaskAttachment(
+        attachment_id=attachment_id,
+        filename=filename,
         content_type="image/jpeg",
         kind="image",
         size_bytes=2048,
         sha256="ab" * 32,
         storage_refs=[AttachmentStorageRef(storage_type="local", path=str(upload))],
     )
+
+
+def _conversation_with(layout: InstanceLayout, files: list[UserTaskAttachment]) -> None:
+    """The person's turn with ``files``; the tools then run in their request, whose signed context names them."""
+
     store = ConversationStore(db_path=str(layout.root / "conversations.db"), artifacts_dir=layout.conversation_artifacts_dir)
     store.ensure_thread(
         conversation_id=CONVERSATION,
@@ -81,9 +85,8 @@ def test_the_conversation_tools_never_show_where_a_file_is_stored(tmp_path: Path
         correlation_id="corr_tools",
         problem_text="Here is my receipt.",
         owner_canonical_user_id=PERSON,
-        attachments=[receipt.model_dump(mode="json")],
+        attachments=[file.model_dump(mode="json") for file in files],
     )
-    # The tools run in the person's request, whose signed context names them.
     task_manager = TaskManager(db_path=str(layout.root / "tasks.db"))
     task_manager.set_owner_identity("lead", "TeamLead", TEAM, "TeamArchitect")
     signed = context_signer().issue(team_id=TEAM, person_id=PERSON, person_roles=("member",))
@@ -110,6 +113,13 @@ def test_the_conversation_tools_never_show_where_a_file_is_stored(tmp_path: Path
         )
     )
 
+
+def test_the_conversation_tools_never_show_where_a_file_is_stored(tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    receipt = _file(layout, "att_receipt")
+    _conversation_with(layout, [receipt])
+
     outputs = {
         "summary": get_conversation_summary(conversation_id=CONVERSATION),
         "turns": get_conversation_turns(conversation_id=CONVERSATION),
@@ -132,3 +142,24 @@ def test_the_conversation_tools_never_show_where_a_file_is_stored(tmp_path: Path
             "size_bytes": 2048,
         }
     ]
+
+
+def test_a_summary_slice_names_each_turns_files_up_to_ten_and_counts_them(tmp_path: Path) -> None:
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    files = [_file(layout, f"att_page_{index:02d}", filename=f"page_{index:02d}.jpg") for index in range(12)]
+    _conversation_with(layout, files)
+
+    output = get_conversation_context_slice(conversation_id=CONVERSATION, mode="summary")
+
+    turn = json.loads(output)["turns"][0]
+    assert turn["attachment_count"] == 12
+    assert [item["attachment_id"] for item in turn["attachments"]] == [f"att_page_{index:02d}" for index in range(10)]
+    assert turn["attachments"][0] == {
+        "attachment_id": "att_page_00",
+        "filename": "page_00.jpg",
+        "content_type": "image/jpeg",
+        "kind": "image",
+        "size_bytes": 2048,
+    }
+    assert str(layout.uploads_dir) not in output and "ab" * 32 not in output

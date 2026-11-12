@@ -28,6 +28,13 @@ Which files a task may use (``request_files`` then ``attachment_scope``):
 An id the scope does not hold is "not found", with no hint that it exists in
 another conversation.
 
+Prompts name the same files (``DefaultContextEngine``, ``AttachmentScope.files``):
+the request's files its message does not carry go with the current request
+(``render_request_files``), and the team lead's prompt lists the newest 20
+files of earlier turns in a section of its own (``render_earlier_files``),
+whatever part of the conversation's history the prompt shows. Images are not
+attached again; the model opens a file by id when it needs it.
+
 Who may add files (``sent_files_refusal``): files that arrive while a
 top-level task runs, with guidance or with an answer to a question, are kept
 only when the message is verified to come from the person the task works for.
@@ -421,6 +428,27 @@ def attachment_scope(
     return AttachmentScope(request, conversation_id=conversation_id, store=conversation_store)
 
 
+def task_attachment_scope(
+    task_manager: Any,
+    task_id: str,
+    *,
+    conversation_store: Any,
+    is_team_lead: bool,
+    person_id: Optional[str],
+) -> Optional[AttachmentScope]:
+    """``attachment_scope`` of a task this agent holds; None for a task it does not hold.
+
+    Reads the task manager, so call it in the task-manager lane.
+    """
+
+    request = request_files(task_manager, task_id)
+    if request is None:
+        return None
+    return attachment_scope(
+        request, conversation_store=conversation_store, is_team_lead=is_team_lead, person_id=person_id
+    )
+
+
 def _conversation_refusal(conversation_store: Any, conversation_id: str, person_id: Optional[str]) -> Optional[str]:
     """Why the person may not read this conversation (None when they may), decided by ``access_control.ownership``."""
 
@@ -500,6 +528,56 @@ def render_attachment_lines(files: Iterable[SentFile | UserTaskAttachment]) -> l
     """``- <description>`` for each file, in order."""
 
     return [f"- {describe_attachment(file)}" for file in files]
+
+
+# How a prompt names the files of a request and of its conversation's earlier
+# turns (``render_request_files``, ``render_earlier_files``).
+REQUEST_FILES_HEADING = "Other Files For This Request"
+EARLIER_FILES_HEADING = "Earlier Files In This Conversation"
+_OPEN_BY_ID = (
+    "Open one by attachment_id with inspect_user_attachment, or with load_local_media_for_model_context when "
+    "you need to see an image or document yourself."
+)
+
+
+def render_request_files(files: ScopeFiles, *, shown_ids: Iterable[str]) -> list[str]:
+    """Prompt lines for the request's files that its message does not show; [] when there are none.
+
+    These are files the person sent with the request a plan step or recovery
+    task serves, or while the request ran: with guidance, with an answer to
+    a question, or while another of its plan steps ran. The message's own
+    files are listed with the message (``Current Request Attachments``).
+    """
+
+    shown = set(shown_ids)
+    rest = [file for file in files.current if file.attachment.attachment_id not in shown]
+    if not rest:
+        return []
+    return [
+        f"{REQUEST_FILES_HEADING} (sent with the request, with guidance or with an answer to a question; "
+        f"{_OPEN_BY_ID}):",
+        *render_attachment_lines(rest),
+    ]
+
+
+def render_earlier_files(files: ScopeFiles) -> str:
+    """The prompt section naming the files of the conversation's earlier turns; "" when there are none.
+
+    At most ``CONVERSATION_ATTACHMENT_LIST_LIMIT`` files, newest first, each
+    with its turn (``AttachmentScope.files``). It does not depend on how much
+    of the conversation's history the prompt shows, and it names files only:
+    images are not attached to the prompt again.
+    """
+
+    if not files.earlier:
+        return ""
+    return "\n".join(
+        [
+            f"{EARLIER_FILES_HEADING} (newest first, at most {CONVERSATION_ATTACHMENT_LIST_LIMIT}; "
+            f"they are not attached again. {_OPEN_BY_ID}):",
+            *render_attachment_lines(files.earlier),
+        ]
+    )
 
 
 class AttachmentSelectionError(ValueError):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -42,8 +42,18 @@ CONTINUING_REQUEST_LABEL = (
 
 
 def render_current_request_context(
-    task: Task, meta: Optional[MessageMeta], *, continuing: bool = False
+    task: Task,
+    meta: Optional[MessageMeta],
+    *,
+    continuing: bool = False,
+    request_file_lines: Sequence[str] = (),
 ) -> str:
+    """The current request as the prompt's final section.
+
+    ``request_file_lines`` names the request's other files, the ones its
+    message does not carry (``conversation_attachments.render_request_files``).
+    """
+
     sections = parse_bracketed_prompt_sections(task.problem_statement)
     request_text = extract_display_request_text(task.problem_statement) or "(no request text provided)"
     lines = []
@@ -79,9 +89,10 @@ def render_current_request_context(
     lines.extend([CONTINUING_REQUEST_LABEL if continuing else "Current Request:", request_text])
     lines.extend(_replied_message_block(getattr(task, "replied_message", None)))
     attachment_lines = _render_attachment_summary(getattr(task, "attachments", None))
-    if attachment_lines:
-        lines.append("")
-        lines.extend(attachment_lines)
+    for block in (attachment_lines, list(request_file_lines)):
+        if block:
+            lines.append("")
+            lines.extend(block)
     return "\n".join(lines).strip()
 
 

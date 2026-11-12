@@ -232,6 +232,12 @@ def plan_history_cleanup(what: str, older_than: str = "", conversation_ids: list
         return failed({"status": "refused", "reason": str(exc)})
 
 
+# A turn summary names at most this many of the files the person sent with the
+# turn (``storage.conversation_repository``: name, type, size and id, never
+# where a file is stored), and counts them all.
+_SUMMARY_TURN_FILES = 10
+
+
 def _conversation_turn_summary_payload(
     turn: dict[str, Any], saved_outputs: Optional[SavedOutputRetention] = None
 ) -> dict[str, Any]:
@@ -246,6 +252,9 @@ def _conversation_turn_summary_payload(
     )
     artifacts = turn.get("tool_artifact_manifest") or []
     artifact_summary = turn.get("artifact_summary") or []
+    attachments = turn.get("attachments") or []
+    if not isinstance(attachments, list):
+        attachments = []
     return {
         "turn_index": turn.get("turn_index"),
         "task_id": turn.get("task_id"),
@@ -265,6 +274,8 @@ def _conversation_turn_summary_payload(
         "has_full_user_text": bool(user_text),
         "has_full_assistant_text": bool(turn.get("final_answer_text")),
         "artifact_count": len(artifacts) if isinstance(artifacts, list) else 0,
+        "attachments": attachments[:_SUMMARY_TURN_FILES],
+        "attachment_count": len(attachments),
     }
 
 
