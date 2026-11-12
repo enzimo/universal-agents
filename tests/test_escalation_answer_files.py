@@ -32,9 +32,9 @@ it needs the person, the answer's file is kept on the specialist's escalation
 and on the run's: the specialist and the run both get it.
 
 The other tests cover the refusals: an escalation whose request, or whose
-run's escalation, works for someone else, a result that is not for an
-escalation, records outside the upload folders, and which results carry
-files at all.
+run's escalation, works for someone else, a run's escalation held by an
+agent that is not the team lead, a result that is not for an escalation,
+records outside the upload folders, and which results carry files at all.
 
 A worker's own question (a ``TaskQuery`` to the lead) never reaches the
 person: the lead's turn on it must answer it (``_validate_task_turn_llm_output``),
@@ -638,24 +638,35 @@ async def test_an_answer_to_a_specialists_escalation_for_a_job_runs_escalation_r
     assert [item["attachment_id"] for item in store.get_turn_by_task_id("task_run")["attachments"]] == [data.attachment_id]
 
 
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        # Bob's run's escalation: the work under it is Bob's.
+        ("other_person", "other_person"),
+        # Ann's, but held by an agent that is not the team lead: only the lead takes escalations.
+        ("not_the_team_lead", "delegated"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_an_escalation_under_another_persons_run_escalation_keeps_no_files_from_the_answer(
-    tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+async def test_an_escalation_under_a_run_escalation_that_cannot_take_them_keeps_no_files_from_the_answer(
+    case: str, reason: str, tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
 ) -> None:
     lead = _lead(tmp_path, layout)
     manager = lead.task_manager
-    # Bob's run's escalation, work the lead delegated from it, and Ann's escalation under that work.
+    if case == "not_the_team_lead":
+        lead.is_team_lead = False
+    # A run's escalation, work delegated from it, and Ann's escalation under that work.
     assert manager.add_task(
-        Task(task_id="task_run_escalation", parent_task_id="task_bobs_run", task_type=MessageMetaType.REQUEST, problem_statement="Need a researcher."),
+        Task(task_id="task_run_escalation", parent_task_id="task_a_run", task_type=MessageMetaType.REQUEST, problem_statement="Need a researcher."),
         MessageHeader(from_agent_id=WORKER_ID, response_routing_key=WORKER_ID),
-        MessageMeta(conversation_id="conv_bob", manager_escalation=ManagerEscalationContext(escalation_type="needs_specialist_support")),
-        owner_person_id="usr_bob",
+        MessageMeta(conversation_id="conv_run", manager_escalation=ManagerEscalationContext(escalation_type="needs_specialist_support")),
+        owner_person_id="usr_bob" if case == "other_person" else ANN,
     )
     assert manager.add_subtask(
         "task_run_escalation",
         Task(task_id="task_work", task_type=MessageMetaType.REQUEST, problem_statement="Research."),
         MessageHeader(from_agent_id=lead.id, to_routing_path="worker_2"),
-        MessageMeta(conversation_id="conv_bob"),
+        MessageMeta(conversation_id="conv_run"),
     )
     escalation = _escalation_held_by_under(lead, "task_work")
     assert manager.resolve_root_task_id(escalation.task.task_id) == "task_run_escalation"
@@ -671,7 +682,7 @@ async def test_an_escalation_under_another_persons_run_escalation_keeps_no_files
     [refused] = _messages(caplog, "sent_file_refused")
     assert f"reason=delegated_task attachment_id={notes.attachment_id} task_id=task_escalation" in refused
     [warning] = _messages(caplog, "sent_files_root_not_usable")
-    assert "task_id=task_escalation root_task_id=task_run_escalation reason=other_person" in warning
+    assert f"task_id=task_escalation root_task_id=task_run_escalation reason={reason}" in warning
 
 
 # --- Refusals -------------------------------------------------------------------------------------

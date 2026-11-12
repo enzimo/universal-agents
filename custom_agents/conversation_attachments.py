@@ -38,7 +38,8 @@ Which files are kept at all, before anything is saved:
   for when the lead holds that request for the same person
   (``sent_files_runtime.keep_sent_files``). An escalation from work the
   lead never held (a worker's scheduled job or maintenance run) keeps them
-  on itself only; one linked to a request here that cannot take them
+  on itself only, and is the request of the work the lead does for it
+  (``linked_request``); one linked to a request here that cannot take them
   (another person's) keeps none, and no other delegated task keeps any. The
   lead's result for the escalation carries them, and only them
   (``answer_files``), to the worker, which keeps the ones in the upload
@@ -71,9 +72,11 @@ What a task may use (``TaskAttachments``):
   prompt lists and its tools open the request's files and earlier turns'
   files, even when the request's turn was saved before turns kept their
   files. The request is found only through the task manager's plan-step and
-  recovery links (``linked_request``), must be a top-level task held here,
-  and must work for the step's person; otherwise the step uses only its own
-  files (logged).
+  recovery links (``linked_request``), must be a top-level task held here
+  or the team lead's escalation from a worker's own run, and must work for
+  the step's person; otherwise the step uses only its own files (logged).
+  A step of such an escalation uses the escalation's own files (the run's
+  files it was sent with, and its answers' files), never a conversation.
   A delegated task (a worker's, or the team lead's record of an escalation)
   never reads conversation records: it uses only the files it was given.
   Turns saved before turns kept their files have no records; the prompt's
@@ -265,6 +268,19 @@ class AttachmentSelectionError(ValueError):
         return "\n".join(lines)
 
 
+def team_lead_escalation(task_info: Any, *, is_team_lead: bool) -> bool:
+    """Whether ``task_info`` is the team lead's record of a worker's escalation.
+
+    ``is_team_lead`` is the holding agent's role; the escalation is marked
+    by ``manager_escalation`` in its admitted meta, set by the worker's
+    runtime when it escalated (``turn_action_outbox_runtime``). The same
+    test as ``task_context_runtime.sign_system_escalation``: only the team
+    lead accepts escalations, and people's answers reach only the team lead.
+    """
+
+    return bool(is_team_lead) and getattr(task_info.meta, "manager_escalation", None) is not None
+
+
 @dataclass(frozen=True)
 class RequestLink:
     """The request a plan step, recovery task or delegated task runs for, as this agent holds it.
@@ -273,21 +289,15 @@ class RequestLink:
     recovery and delegation links (``TaskManager.resolve_root_task_id``),
     never from a message or a model. ``root_task_id`` is the task it runs for
     (None when the task is its own request, or its parent is not held here);
-    ``info`` is that task when it may share the task's files: a top-level
-    task working for the same person (``owner_person_id``, recorded at
-    admission from verified identity). Otherwise ``reason`` says why not:
-    ``ROOT_NOT_HELD``, ``ROOT_DELEGATED`` or ``ROOT_OTHER_PERSON``. For
-    ``ROOT_DELEGATED``, ``delegated_root`` is that task as held here: the
-    links stop at a task whose parent this agent does not hold, so it is
-    work another agent delegated here, such as the team lead's record of an
-    escalation from a worker's own run, which the files a person sends are
-    kept on (``sent_files_runtime``). Reading never uses it.
+    ``info`` is that task when it may share the task's files: a request
+    working for the same person (``owner_person_id``, recorded at admission
+    from verified identity). Otherwise ``reason`` says why not:
+    ``ROOT_NOT_HELD``, ``ROOT_DELEGATED`` or ``ROOT_OTHER_PERSON``.
     """
 
     root_task_id: Optional[str] = None
     info: Optional[Any] = None
     reason: Optional[str] = None
-    delegated_root: Optional[Any] = field(default=None, repr=False)
 
     @property
     def linked(self) -> bool:
@@ -296,8 +306,20 @@ class RequestLink:
         return self.root_task_id is not None
 
 
-def linked_request(task_manager: Any, task_info: Any) -> RequestLink:
+def linked_request(task_manager: Any, task_info: Any, *, is_team_lead: bool) -> RequestLink:
     """The request the task in ``task_info`` runs for, through the task manager's links (``RequestLink``).
+
+    The links end at a top-level task, or at a task whose parent this agent
+    does not hold: work another agent delegated here. Such a task is the
+    request only when it is the team lead's escalation from work the lead
+    never held (``team_lead_escalation``; ``is_team_lead`` is the holding
+    agent's role), such as a worker's scheduled job run that asked for a
+    specialist: the work the lead does for it (plan steps, isolated recovery,
+    delegated work and its escalations) runs for it as work for a person's
+    request runs for that request. Any other delegated task is
+    ``ROOT_DELEGATED``. Both kinds of request must work for the task's
+    person. Reading (``step_request``) and keeping a person's files
+    (``sent_files_runtime``) use this one rule.
 
     Calls the task manager directly: run it on the task manager's operation
     lane from async code.
@@ -310,28 +332,31 @@ def linked_request(task_manager: Any, task_info: Any) -> RequestLink:
     root_info = task_manager.get_task_info(root_id)
     if root_info is None:
         return RequestLink(root_id, reason=ROOT_NOT_HELD)
-    if root_info.task.parent_task_id is not None:
-        return RequestLink(root_id, reason=ROOT_DELEGATED, delegated_root=root_info)
+    if root_info.task.parent_task_id is not None and not team_lead_escalation(root_info, is_team_lead=is_team_lead):
+        return RequestLink(root_id, reason=ROOT_DELEGATED)
     if root_info.owner_person_id != task_info.owner_person_id:
         return RequestLink(root_id, reason=ROOT_OTHER_PERSON)
     return RequestLink(root_id, info=root_info)
 
 
-def step_request(task_manager: Any, task_info: Any) -> Optional[Any]:
+def step_request(task_manager: Any, task_info: Any, *, is_team_lead: bool) -> Optional[Any]:
     """The request a plan step or isolated recovery task runs for, when it may use that request's files.
 
     A step or recovery task is a task of its own, with a conversation id of
     its own and no conversation turn; it works on its request, so it may use
-    the request's own files and the files of the request's conversation
-    (``TaskAttachments.load``). A delegated task never does: it uses only
-    the files it was given. None for a task that is its own request; a link
-    to a task that may not share its files (``RequestLink.reason``) is
-    logged and gives None.
+    the request's own files and, for a top-level request, the files of the
+    request's conversation (``TaskAttachments.load``). The request may be
+    the team lead's escalation from a worker's own run (``linked_request``);
+    as delegated work it reads no conversation, so the step then uses the
+    escalation's own files and its own. A delegated task never has a step
+    request: it uses only the files it was given. None for a task that is
+    its own request; a link to a task that may not share its files
+    (``RequestLink.reason``) is logged and gives None.
     """
 
     if task_info is None or task_manager is None or task_info.task.parent_task_id is not None:
         return None
-    link = linked_request(task_manager, task_info)
+    link = linked_request(task_manager, task_info, is_team_lead=is_team_lead)
     if link.linked and link.info is None:
         logger.warning(
             "A step's request may not share its files with it, so the step uses only its own. "
@@ -365,15 +390,19 @@ class TaskAttachments:
     turn_task_id: Optional[str] = None
 
     @classmethod
-    def for_task(cls, task_manager: Any, task_info: Any, conversation_store: Any) -> "TaskAttachments":
+    def for_task(
+        cls, task_manager: Any, task_info: Any, conversation_store: Any, *, is_team_lead: bool
+    ) -> "TaskAttachments":
         """The scope of the task in ``task_info``, a plan step's through its request (``step_request``).
 
+        ``is_team_lead`` is the holding agent's role (``linked_request``).
         Calls the task manager directly, as the prompt and the tools read
         task records; async code finds the request on the operation lane
         and calls ``load``.
         """
 
-        return cls.load(task_info, conversation_store, request_info=step_request(task_manager, task_info))
+        request_info = step_request(task_manager, task_info, is_team_lead=is_team_lead)
+        return cls.load(task_info, conversation_store, request_info=request_info)
 
     @classmethod
     def load(cls, task_info: Any, conversation_store: Any, *, request_info: Any = None) -> "TaskAttachments":
@@ -383,7 +412,9 @@ class TaskAttachments:
         (``step_request``): the step's own files then include the request's
         own files (first, as they came first; each id once), which holds even
         when the request's turn was saved before turns kept their files, and
-        the step uses the request's conversation under the same person check.
+        the step uses the request's conversation under the same person check
+        (none when the request is the team lead's escalation, which is
+        delegated work).
         """
 
         task = getattr(task_info, "task", None)
@@ -1038,5 +1069,6 @@ __all__ = [
     "steering_files_check",
     "step_request",
     "task_files_details",
+    "team_lead_escalation",
     "without_incoming_files_entries",
 ]

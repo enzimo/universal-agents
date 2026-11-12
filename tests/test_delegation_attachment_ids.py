@@ -25,6 +25,11 @@ file and a file sent with guidance. Each delegation goes through the outbox:
   earlier photo; left out, it sends its request's own files, as a delegation
   from the request does, also when the request's turn has no file records;
   a step whose request works for someone else sends none of them;
+- a plan step of a job run's escalation (the work the lead plans for a
+  worker's scheduled run) works on the escalation as on a request: it sends,
+  names, lists and opens the run's file and the file Ann sent with an
+  answer to an earlier step, which the escalation's result carries to the
+  run;
 - a worker can pass on only the files it was given, never its request's
   conversation.
 """
@@ -39,7 +44,9 @@ import pytest
 import pytest_asyncio
 from pydantic import ValidationError
 
-from custom_agents.conversation_attachments import AttachmentSelectionError
+from custom_agents import task_message_runtime
+from custom_agents.conversation_attachments import QUESTION_ANSWER_MESSAGE_TYPE, AttachmentSelectionError
+from custom_agents.sent_files_runtime import keep_escalation_result_files, result_with_answer_files
 from custom_agents.strands_agent import TurnActionRecoveryScheduled
 from custom_agents.structured_llm_messages import (
     COMPATIBLE_MODEL_AGENT_TURN_DECISION_FORCE_PROMPT,
@@ -58,19 +65,37 @@ from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.routing_v1 import ManagerEscalationContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskSteering
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType, TaskHistoryType, TaskSteeringType
+from custom_tools.user_attachment_tools import inspect_user_attachment
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import INVENTORY_LIMIT
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachment_prompt import _focused_task
 from tests.test_conversation_attachments import saved_before_upgrade
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, _admit, _answer, _lead
-from tests.test_escalation_answer_files import NOW, WORKER_TYPE, _last_sent, _sent, _worker
-from tests.test_question_answer_files import _answer_the_question_of, _ModelTurns, _root_working_for_bob
+from tests.test_escalation_answer_files import (
+    NOW,
+    WORKER_TYPE,
+    _deliver_claims,
+    _escalate,
+    _last_sent,
+    _sent,
+    _turn,
+    _worker,
+)
+from tests.test_question_answer_files import (
+    _answer_the_question_of,
+    _ModelTurns,
+    _prompt,
+    _root_working_for_bob,
+    _sections,
+)
 from tests.test_turn_files_recording import (  # noqa: F401  (autouse fixtures)
     TASK,
+    _files_entries,
     _gateway_meta,
     _messages,
     _no_background_work,
+    _own,
     _send,
     _upload,
     _verify_keys,
@@ -378,6 +403,85 @@ async def test_a_step_whose_request_works_for_someone_else_sends_none_of_its_fil
 
     assert (left_out.parent_task_id, left_out.attachments) == (step_id, [])
     assert f"event=step_request_files_not_usable task_id={step_id} root_task_id={bob} reason=other_person" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_plan_step_of_a_job_runs_escalation_works_on_the_escalations_files(
+    tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lead plans the work a job run's escalation asks for; its steps work on the escalation as on a request.
+
+    Ann's scheduled job run is a top-level task in the worker; it has a photo
+    and asks the lead for a specialist, and the escalation brings the run's
+    photo. The task manager's links from a step end at the escalation, whose
+    parent (the run) the lead never held. Before this change a step could
+    neither send nor name the photo (``step_request_files_not_usable
+    reason=delegated``), and a later step could not see the file Ann sent
+    with an answer to the first, though that file was kept on the escalation.
+    """
+
+    lead, runner = _lead(tmp_path, layout), _worker(tmp_path, layout)
+    manager = lead.task_manager
+    photo = _upload(layout, "fridge.png")
+    await _admit(runner, task_id="task_run", text="Plan this week's dinners.", attachments=[photo])
+    await _turn(runner, "task_run", [_escalate("needs_specialist_support")])
+    sent = _last_sent(runner, Task)
+    escalation_id = sent.msg_content.task_id
+    await task_message_runtime._handle_task_request(lead, sent.msg_content, sent.msg_header, sent.msg_meta)
+    await _deliver_claims(lead, runner)
+    escalation = manager.get_task_info(escalation_id)
+    assert (escalation.task.parent_task_id, escalation.owner_person_id) == ("task_run", ANN)
+    assert escalation.task.attachments == [photo]
+    plan = manager.activate_plan_execution(
+        escalation_id,
+        steps=[{"title": "Look", "objective": "Look in the fridge."}, {"title": "Plan", "objective": "Plan dinners."}],
+        final_review=False,
+    )
+    first = manager.get_task_info(plan.plan_steps[0].current_step_task_id)
+    assert manager.resolve_root_task_id(first.task.task_id) == escalation_id
+
+    with caplog.at_level(logging.INFO):
+        # Ann answers the first step's question with a file: kept on the step and on the escalation.
+        model = _ModelTurns(lead)
+        object.__setattr__(lead, "process_llm_interaction", model)
+        notes = _upload(layout, "list.png")
+        await _answer_the_question_of(lead, first, [notes])
+        assert len(_files_entries(manager, first.task.task_id)) == 1
+        first.task.answer = "The fridge holds eggs and spinach."
+        manager.complete_task(first.task.task_id, NOW)
+        second_id = manager.get_plan(plan.plan_id).plan_steps[1].current_step_task_id
+        assert manager.is_plan_step_task(second_id)
+        # The next step sends the escalation's files when it leaves them out, and names them.
+        await _run_turn(lead, second_id, [_delegation()])
+        left_out = _last_sent(lead, Task).msg_content
+        await _run_turn(lead, second_id, [_delegation([notes.attachment_id, photo.attachment_id])])
+        named = _last_sent(lead, Task).msg_content
+
+    assert _messages(caplog, "sent_file_refused") == []
+    assert _messages(caplog, "step_request_files_not_usable") == []
+    assert _messages(caplog, "sent_files_root_not_usable") == []
+    [entry] = _files_entries(manager, escalation_id)
+    assert entry.details["message_type"] == QUESTION_ANSWER_MESSAGE_TYPE and first.task.task_id in entry.summary
+    # The first step's turn already listed the run's photo as its own.
+    [first_prompt] = model.prompts
+    assert f"`{photo.attachment_id}` fridge.png" in _sections(first_prompt)["conversation_attachments"]
+    assert (left_out.parent_task_id, left_out.attachments) == (second_id, [photo, notes])
+    assert named.attachments == [notes, photo]
+    # The next step's turn lists both, and its tools open the answer's file by id.
+    second = manager.get_task_info(second_id)
+    use_agent(lead, second_id)
+    listed = _sections(_prompt(lead, second.task, second.header, second.meta))["conversation_attachments"]
+    assert f"`{photo.attachment_id}` fridge.png" in listed and f"`{notes.attachment_id}` list.png" in listed
+    assert inspect_user_attachment._tool_func(attachment_id=notes.attachment_id)["status"] == "success"
+    # The escalation's result carries the answer's file to the run, which keeps it as its own.
+    reply = await result_with_answer_files(
+        lead,
+        Task(task_id=escalation_id, parent_task_id="task_run", task_type=MessageMetaType.RESPONSE, answer="Planned."),
+        manager.get_task_info(escalation_id).task,
+    )
+    assert reply.attachments == [notes]
+    await keep_escalation_result_files(runner, runner.task_manager.get_task_info(escalation_id), reply)
+    assert _own(runner.task_manager, runner._conversation_store, "task_run") == [photo.attachment_id, notes.attachment_id]
 
 
 @pytest.mark.asyncio

@@ -663,7 +663,9 @@ class DefaultContextEngine:
             return ""
         listed_now = list(getattr(request.incoming_content, "attachments", None) or [])
         return inventory_text(
-            TaskAttachments.for_task(self.task_manager, task_info, self.conversation_store),
+            TaskAttachments.for_task(
+                self.task_manager, task_info, self.conversation_store, is_team_lead=self.is_team_lead
+            ),
             exclude_ids=[attachment.attachment_id for attachment in listed_now[:CURRENT_REQUEST_ATTACHMENT_LIMIT]],
         )
 

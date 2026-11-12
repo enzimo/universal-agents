@@ -650,7 +650,8 @@ async def _subtask_files(
     if attachment_ids is None or attachment_ids:
         task_manager = self.task_manager
         # Bound into the operation: the lane copies an operation's arguments.
-        request_info = await task_manager.operations_runtime.run(partial(step_request, task_manager), parent_task_info)
+        find = partial(step_request, task_manager, is_team_lead=bool(getattr(self, "is_team_lead", False)))
+        request_info = await task_manager.operations_runtime.run(find, parent_task_info)
     if attachment_ids:
         scope = await asyncio.to_thread(
             TaskAttachments.load,
