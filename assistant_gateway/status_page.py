@@ -342,6 +342,8 @@ class StatusPage:
             return []
         # Agents retry it like a server that does not answer (custom_agents.mcp_server_tools), and a
         # start is not a change their loader watches, so those that stopped trying need a restart.
+        # The action never says to stop and start it: the broker refuses a try while it is stopped,
+        # and an agent stops trying a server that refused it until the agent restarts.
         minutes = self._config.mcp.load_retry_window_minutes
         return [
             StatusFindingV1(
@@ -354,9 +356,10 @@ class StatusPage:
                     "(mcp.load_retry_window_minutes), then stop until they restart."
                 ),
                 action=(
-                    "Fix what the details name; for a port already in use, stop the process that holds it. Then "
-                    "stop and start the server in Settings → Runtime. Agents that stopped trying load its tools "
-                    "only when they restart, so restart the container if they still lack them."
+                    "Fix what the details name; for a port already in use, stop the process that holds it. Leave "
+                    "the server set to run: agents start it on their next try and load its tools. An agent that "
+                    "tries while the server is stopped, or that stopped trying, loads its tools only when it "
+                    "restarts, so restart the container if agents still lack them."
                 ),
                 source=BROKER_SOURCE,
                 since=failure.failed_at,

@@ -1289,7 +1289,9 @@ example because another process holds its port, counts as a server that does
 not answer: agents keep trying it on this schedule, and the first try after
 the port is free starts the sidecar and loads its tools. Starting the server
 is not a change agents watch, so agents that already stopped trying load its
-tools only when they restart. Agents see why a server's tools are missing (`load_status` in
+tools only when they restart. Leave the server set to run meanwhile: the broker
+refuses an agent that tries while it is stopped, and that agent also waits for
+its restart. Agents see why a server's tools are missing (`load_status` in
 `find_tools` and `mcp_connections(action="list")`) and can tell you. An `active`
 inventory record describes installation, not a successful connection. An
 OpenShell credential lease does not authorize MCP access. Removing the account

@@ -870,6 +870,8 @@ async def test_a_sidecar_left_over_from_an_earlier_broker_stops_the_start_and_sa
         message = str(refused.value)
         assert f"127.0.0.1:{port} is already in use" in message, message
         assert "Stop that process" in message, message
+        # Review C08: the reason never says to stop and start a server set to run.
+        assert "A server set to run then starts on an agent's next try; start a stopped one again." in message
         assert earlier_broker._processes[definition.hosted_server_id].returncode is None
         assert definition.hosted_server_id not in restarted_broker._processes
         # Not set to run: the person who started it got the reason in the answer.
@@ -1129,7 +1131,12 @@ async def test_every_list_of_hosted_servers_says_why_a_server_set_to_run_is_not_
     # Review C01: a start does not bring back agents that stopped trying.
     assert "agents keep trying for 60 minutes (mcp.load_retry_window_minutes)" in finding.summary
     assert "then stop until they restart" in finding.summary
-    assert "load its tools only when they restart" in finding.action
+    # Review C08: stopping a server set to run makes an agent that tries meanwhile stop trying.
+    assert "Leave the server set to run: agents start it on their next try" in finding.action
+    assert "tries while the server is stopped, or that stopped trying, loads its tools only when it restarts" in (
+        finding.action
+    )
+    assert "stop and start" not in finding.action
 
     broker = MCPHostedProcessSupervisor(config)
     try:

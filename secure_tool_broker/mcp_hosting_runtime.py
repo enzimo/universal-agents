@@ -187,9 +187,9 @@ class MCPHostedProcessSupervisor:
                 if _PORT_TAKEN in output:
                     raise HostedMCPPortInUse(
                         f"The hosted MCP server {definition.server_name} cannot start: {address} is already "
-                        "in use, most likely by its sidecar left over from an earlier broker run. Stop that "
-                        "process (`ps -ef | grep mcp_control.managed_server` shows it), then start the "
-                        "server again."
+                        "in use, most likely by its sidecar from an earlier broker run. Stop that process "
+                        "(`ps -ef | grep mcp_control.managed_server` shows it). A server set to run then "
+                        "starts on an agent's next try; start a stopped one again."
                     )
                 raise HostedMCPStartError(
                     f"The hosted MCP server {definition.server_name} stopped while starting, with status "
