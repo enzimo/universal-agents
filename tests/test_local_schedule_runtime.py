@@ -64,7 +64,7 @@ def test_a_new_per_person_kind_runs_on_its_own_on_demand_worker(lead, tmp_path, 
     review does, with no code change."""
 
 
-    from custom_agents.manager_control_runtime import _schedule_worker_assignment
+    from custom_agents.person_schedule_controls import schedule_worker_assignment as _schedule_worker_assignment
     from custom_agents.system_schedule_changes import SystemScheduleChangeService
     from custom_tools.providers.schedule_workers import configure_scheduled_worker
     from tests.task_work_support import set_agent_ref
@@ -101,7 +101,7 @@ def test_a_new_per_person_kind_runs_on_its_own_on_demand_worker(lead, tmp_path, 
 
 def test_a_new_per_person_kind_claimed_by_another_type_gets_no_local_worker(lead, monkeypatch):
     from custom_agents.local_schedule_policy import supports_local_worker
-    from custom_agents.manager_control_runtime import _schedule_worker_assignment
+    from custom_agents.person_schedule_controls import schedule_worker_assignment as _schedule_worker_assignment
 
     use_kind(monkeypatch, PERSON_KIND)
     schedule = curator_timer(lead, claim="TeamArchitect")

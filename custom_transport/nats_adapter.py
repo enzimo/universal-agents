@@ -60,6 +60,7 @@ from release_version import release_version
 
 _CONSUMER_DELETE_TIMEOUT_SECONDS = 3.0
 # Consumer roles. A worker queue is shared by every worker of one type.
+TEAM_LEAD_CONSUMER_ROLE = "team_lead"
 NAMED_WORKER_CONSUMER_ROLE = "named_worker"
 # What happened to an unreadable Core NATS message: nothing can give it back.
 _DROPPED = "dropped"
@@ -255,11 +256,15 @@ class NatsTransportConfig:
     pool_ack_wait_seconds: float = POOL_ACK_WAIT_SECONDS
     duplicate_window_seconds: float = 600.0
     work_max_age_seconds: Optional[float] = 604800.0
-    presence_max_age_seconds: Optional[float] = 600.0
     process_consumer_inactive_threshold_seconds: float = 300.0
     user: Optional[str] = None
     password: Optional[str] = None
     credentials_file: Optional[str] = None
+    # This process's protocol 1 runtime id: its NATS reply inbox becomes
+    # _INBOX.<runtime>., which the message contract requires (transport.yaml
+    # reply_inbox_prefix) so a host's credential can grant it only its own replies.
+    # None keeps nats-py's shared _INBOX prefix.
+    reply_inbox_runtime: Optional[str] = None
 
 
 class NatsTransportAdapter:
@@ -289,6 +294,14 @@ class NatsTransportAdapter:
     def connected(self) -> bool:
         return bool(self._nc)
 
+    @property
+    def nats_connection(self) -> Any:
+        """The open NATS connection, for protocol 1's live messages and records (``custom_transport.protocol1``)."""
+
+        if self._nc is None:
+            raise RuntimeError("The NATS transport adapter is not connected.")
+        return self._nc
+
     async def connect(self, *, reconcile_topology: bool = False) -> None:
         try:
             import nats
@@ -311,6 +324,12 @@ class NatsTransportAdapter:
             kwargs["password"] = self.config.password
         if self.config.credentials_file:
             kwargs["user_credentials"] = self.config.credentials_file
+        if self.config.reply_inbox_runtime:
+            # Imported here: the contract's generated module costs about half a second to
+            # load, which only protocol 1 hosts, which use it anyway, should pay.
+            from custom_messages.wire.kinds import REPLY_INBOX_PREFIX
+
+            kwargs["inbox_prefix"] = REPLY_INBOX_PREFIX.format(runtime=self.config.reply_inbox_runtime).encode("ascii")
         self._closing = False
         self._nc = await nats.connect(**kwargs)
         try:
@@ -556,8 +575,6 @@ class NatsTransportAdapter:
             await self.connect()
         if opts.operational:
             subject = self.mapper.operational_subject()
-        elif opts.broadcast or opts.presence:
-            subject = self.mapper.broadcast_subject(envelope=envelope)
         else:
             subject = self.mapper.route_subject(routing_key, envelope=envelope)
         return await self.publish_subject(
@@ -596,7 +613,6 @@ class NatsTransportAdapter:
         return self._consumer_config(
             durable_name=self.worker_queue_durable_name(named_agent_type),
             filter_subject=self.mapper.named_type_work_subject(named_agent_type),
-            deliver_last_per_subject=False,
             consumer_scope=ConsumerScope.ROUTE,
             consumer_role=NAMED_WORKER_CONSUMER_ROLE,
             owner_agent_id=None,
@@ -806,7 +822,6 @@ class NatsTransportAdapter:
         routing_key: str,
         handler: DeliveryHandler,
         durable_name: Optional[str] = None,
-        deliver_last_per_subject: bool = False,
         delivery: SubscriptionDelivery = SubscriptionDelivery.JETSTREAM_DURABLE,
         consumer_scope: ConsumerScope = ConsumerScope.ROUTE,
         consumer_role: str = "route",
@@ -821,7 +836,6 @@ class NatsTransportAdapter:
             handler=handler,
             durable_name=durable_name,
             logical_route=routing_key,
-            deliver_last_per_subject=deliver_last_per_subject,
             delivery=delivery,
             consumer_scope=consumer_scope,
             consumer_role=consumer_role,
@@ -829,37 +843,6 @@ class NatsTransportAdapter:
             fetch_policy=fetch_policy,
             ready=ready,
         )
-
-    async def consumer_is_listening(
-        self, *, stream_name: str, durable_name: str
-    ) -> Optional[bool]:
-        """Whether a durable pull consumer has a receiver asking for messages.
-
-        False when the consumer does not exist (its owner never started, or a
-        process-scoped consumer was removed after its process stopped asking).
-        True when a pull request is open. None otherwise: a receiver that is
-        handling a message has no request open for a moment, so the caller
-        falls back to presence heartbeats.
-        """
-
-        if self._nc is None:
-            await self.connect()
-        if self._js is None:
-            return None
-        try:
-            info = await self._js.consumer_info(stream_name, durable_name)
-        except Exception as exc:
-            message = str(exc).lower()
-            if "not found" in message:
-                return False
-            self._logger.debug(
-                "NATS consumer liveness probe failed for stream=%s durable=%s: %s",
-                stream_name,
-                durable_name,
-                exc,
-            )
-            return None
-        return True if int(getattr(info, "num_waiting", 0) or 0) > 0 else None
 
     async def subscribe_subject(
         self,
@@ -873,7 +856,6 @@ class NatsTransportAdapter:
         consumer_scope: ConsumerScope = ConsumerScope.ROUTE,
         consumer_role: str = "subject",
         owner_agent_id: Optional[str] = None,
-        deliver_last_per_subject: bool = False,
         fetch_policy: FetchPolicy = FetchPolicy.CONTINUOUS,
         ready: Optional[Callable[[], bool]] = None,
         core_queue_group: Optional[str] = None,
@@ -881,8 +863,8 @@ class NatsTransportAdapter:
         """Subscribe one handler.
 
         Durable JetStream subscriptions are pull consumers (ADR-019, see
-        ``custom_transport.nats_pull``). Core NATS and ephemeral JetStream
-        subscriptions (presence replay) are delivered as they arrive.
+        ``custom_transport.nats_pull``). Core NATS subscriptions are delivered
+        as they arrive; nothing on JetStream is pushed.
         ``core_queue_group`` lets one of several Core NATS listeners answer a
         live request (nothing is stored, so there is nothing to pull);
         JetStream subscriptions never use deliver groups.
@@ -950,7 +932,6 @@ class NatsTransportAdapter:
                 consumer_config=self._consumer_config(
                     durable_name=durable_name,
                     filter_subject=subject,
-                    deliver_last_per_subject=deliver_last_per_subject,
                     consumer_scope=consumer_scope,
                     consumer_role=consumer_role,
                     owner_agent_id=owner_agent_id,
@@ -979,12 +960,7 @@ class NatsTransportAdapter:
             ) = await self._create_push_subscription(
                 subject=subject,
                 callback=_callback,
-                delivery=delivery,
                 core_queue_group=core_queue_group,
-                deliver_last_per_subject=deliver_last_per_subject,
-                consumer_scope=consumer_scope,
-                consumer_role=consumer_role,
-                owner_agent_id=owner_agent_id,
             )
         handle = SubscriptionHandle(
             name=name,
@@ -1002,10 +978,7 @@ class NatsTransportAdapter:
 
     @staticmethod
     def _uses_jetstream(delivery: SubscriptionDelivery) -> bool:
-        return delivery in {
-            SubscriptionDelivery.JETSTREAM_DURABLE,
-            SubscriptionDelivery.JETSTREAM_EPHEMERAL,
-        }
+        return delivery == SubscriptionDelivery.JETSTREAM_DURABLE
 
     def _validate_subscription_request(
         self,
@@ -1026,23 +999,8 @@ class NatsTransportAdapter:
             raise RuntimeError(
                 f"Subscription {name!r} requires an initialized JetStream context."
             )
-        if delivery == SubscriptionDelivery.JETSTREAM_EPHEMERAL and durable_name:
-            raise ValueError(
-                "Ephemeral JetStream subscriptions cannot declare a durable name."
-            )
         if delivery == SubscriptionDelivery.JETSTREAM_DURABLE and not durable_name:
             raise ValueError("Durable JetStream subscriptions require a durable name.")
-        if (
-            delivery == SubscriptionDelivery.JETSTREAM_EPHEMERAL
-            and self._stream_name_for_subject(subject) == self.mapper.work_stream_name()
-        ):
-            # ADR-019: work is pulled by the receiver that can act on it. An
-            # ephemeral push listener on the work stream would take work
-            # without asking; only presence replay uses one.
-            raise ValueError(
-                f"Subscription {name!r} would push work-stream messages; "
-                "work is pulled through a durable subscription (ADR-019)."
-            )
         if fetch_policy == FetchPolicy.WHEN_READY and (
             delivery != SubscriptionDelivery.JETSTREAM_DURABLE or ready is None
         ):
@@ -1055,49 +1013,15 @@ class NatsTransportAdapter:
         *,
         subject: str,
         callback: Any,
-        delivery: SubscriptionDelivery,
         core_queue_group: Optional[str],
-        deliver_last_per_subject: bool,
-        consumer_scope: ConsumerScope,
-        consumer_role: str,
-        owner_agent_id: Optional[str],
     ) -> tuple[Any, Optional[str], Optional[str]]:
-        """Core NATS, or an ephemeral JetStream replay listener (presence).
+        """A Core NATS listener: every listener sees every message, nothing is stored or pulled."""
 
-        Every listener must see every message here, so there is no shared work
-        to hand out and nothing to pull.
-        """
-
-        if not self._uses_jetstream(delivery):
-            if core_queue_group:
-                subscription = await self._nc.subscribe(
-                    subject, queue=core_queue_group, cb=callback
-                )
-            else:
-                subscription = await self._nc.subscribe(subject, cb=callback)
-            return subscription, None, None
-        config = self._consumer_config(
-            durable_name=None,
-            filter_subject=None,
-            deliver_last_per_subject=deliver_last_per_subject,
-            consumer_scope=consumer_scope,
-            consumer_role=consumer_role,
-            owner_agent_id=owner_agent_id,
-            ack_wait_seconds=float(self.config.ack_wait_seconds),
-            max_deliver=int(self.config.max_deliver or 1),
-        )
-        subscription = await self._js.subscribe(
-            subject,
-            cb=callback,
-            manual_ack=True,
-            config=config,
-        )
-        stream_name, consumer_name = await self._consumer_identity(
-            subscription,
-            subject=subject,
-            fallback_consumer_name=None,
-        )
-        return subscription, stream_name, consumer_name
+        if core_queue_group:
+            subscription = await self._nc.subscribe(subject, queue=core_queue_group, cb=callback)
+        else:
+            subscription = await self._nc.subscribe(subject, cb=callback)
+        return subscription, None, None
 
     async def _consumer_identity(
         self,
@@ -1127,8 +1051,6 @@ class NatsTransportAdapter:
         )
 
     def _stream_name_for_subject(self, subject: str) -> str:
-        if subject.startswith(f"{self.mapper.prefix}.presence."):
-            return self.mapper.presence_stream_name()
         return self.mapper.work_stream_name()
 
     def _ttl_seconds_from_msg(self, msg: Any) -> Optional[float]:
@@ -1182,7 +1104,6 @@ class NatsTransportAdapter:
         *,
         durable_name: Optional[str],
         filter_subject: Optional[str],
-        deliver_last_per_subject: bool,
         consumer_scope: ConsumerScope,
         consumer_role: str,
         owner_agent_id: Optional[str],
@@ -1190,7 +1111,7 @@ class NatsTransportAdapter:
         max_deliver: int,
     ) -> Any:
         try:
-            from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+            from nats.js.api import AckPolicy, ConsumerConfig
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
                 "Installed nats-py does not expose JetStream consumer API classes."
@@ -1205,8 +1126,6 @@ class NatsTransportAdapter:
             kwargs["name"] = durable_name
         if filter_subject:
             kwargs["filter_subject"] = filter_subject
-        if deliver_last_per_subject:
-            kwargs["deliver_policy"] = DeliverPolicy.LAST_PER_SUBJECT
         if consumer_scope == ConsumerScope.PROCESS:
             threshold = float(self.config.process_consumer_inactive_threshold_seconds)
             if threshold <= 0:
@@ -1421,7 +1340,6 @@ class NatsTransportAdapter:
             config = self._consumer_config(
                 durable_name=durable,
                 filter_subject=self.mapper.dead_letter_notice_subjects(),
-                deliver_last_per_subject=False,
                 consumer_scope=ConsumerScope.ROUTE,
                 consumer_role=consumer_route,
                 owner_agent_id=None,

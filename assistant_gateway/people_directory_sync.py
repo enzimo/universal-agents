@@ -23,17 +23,34 @@ membership is ``removed``; an active membership of a disabled person is
 effective roles (an owner is also an administrator). A person with no
 membership in this team is not recorded.
 
+- ``person_ref`` gives the reference to put in a person's command to the team
+  services, which decide from this copy (``team_services.people``). It first
+  compares the copy with the gateway's records and writes it when it differs
+  or is missing, so a command never acts on an out-of-date standing or role.
+  When that write fails, the command is not sent (``PersonCopyNotCurrent``).
+
 A failed write is logged (``event=people_directory_write_failed``) and never
 undoes or blocks the change in the gateway's records. Until the next write
-for that person or the next gateway start, the scheduler sees their old
-standing: a disabled or removed person's schedules may keep running, and a
-person whose role changed keeps their old roles in scheduled runs. Callers
-that tell a person what happened use the returned ``False`` to say so.
+for that person (the next change to them, or their next command to the team
+services) or the next gateway start, the scheduler sees their old standing: a
+disabled or removed person's schedules may keep running, and a person whose
+role changed keeps their old roles in scheduled runs. Callers that tell a
+person what happened use the returned ``False`` to say so.
 
 ``changed_at_utc`` is when the gateway saw the standing or roles change: an
 unchanged person keeps their earlier time, so a restart does not make
 everyone look changed. This works the same with authorization on and off; it
 is about people, not access checks.
+
+Each person has an opaque reference (``person_ref``, plan decision 64) that
+protocol 1 frames name them by. A copy gives a person the reference it read
+for them, or a new one the first time; the access store keeps the reference
+it already holds, read inside its write transaction, so a person recorded by
+another writer in between (the running gateway and a command-line run both
+copy people) keeps the one stored first (``AccessRepository.record_person``).
+A full copy reads the store before the gateway's records and drops only people
+it found there (``replace_people(read_before=...)``), so someone the running
+gateway adds while it runs is neither dropped nor given a new reference later.
 """
 
 from __future__ import annotations
@@ -44,9 +61,10 @@ from collections.abc import Callable
 
 from access_control.people import effective_roles, person_standing
 from assistant_gateway.application.ports import GatewayClock
+from assistant_gateway.application.team_commands import PersonCopyNotCurrent
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.ports.repositories import IdentityRepository
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from storage.access_repository import AccessRepository
 
 # Logged as person_id when the whole team was being written.
@@ -82,6 +100,34 @@ class PeopleDirectorySync:
             return False
         return True
 
+    def person_ref(self, canonical_user_id: str) -> str | None:
+        """The person's reference for a command to the team services, after making the copy current.
+
+        None when the person has no standing in this team (no membership). Raises
+        ``PersonCopyNotCurrent`` when the copy differs from the gateway's records and
+        writing it failed, so the team services never decide from an old copy.
+        """
+
+        current = self._current(canonical_user_id)
+        if current is None:
+            return None
+        standing, role = current
+        store = self._access_store()
+        stored = store.team_person(self._team_id, canonical_user_id)
+        roles = effective_roles((role,)) if standing is PersonStanding.ACTIVE else ()
+        if stored is not None and stored.standing is standing and tuple(stored.roles) == roles:
+            return stored.person_ref
+        self._logger.warning(
+            "The access store's copy of a person was out of date; writing it before their command. "
+            "event=people_directory_copy_refreshed team_id=%s person_id=%s",
+            self._team_id,
+            canonical_user_id,
+        )
+        if not self.record(canonical_user_id):
+            raise PersonCopyNotCurrent()
+        written = store.team_person(self._team_id, canonical_user_id)
+        return None if written is None else written.person_ref
+
     def sync_all(self) -> Counter[PersonStanding] | None:
         """Copy everyone in the team and mark it synced; the counts by standing, or None when the write failed (logged)."""
 
@@ -100,7 +146,9 @@ class PeopleDirectorySync:
         )
         return counts
 
-    def _record(self, canonical_user_id: str) -> None:
+    def _current(self, canonical_user_id: str) -> tuple[PersonStanding, str] | None:
+        """The person's standing and role in this team from the gateway's records, or None."""
+
         person = self._identity.get_gateway_user(canonical_user_id)
         membership = next(
             (
@@ -112,13 +160,18 @@ class PeopleDirectorySync:
         )
         if person is None or membership is None:
             # Nothing to copy: only people with a membership in this team are recorded.
-            return
+            return None
         standing = person_standing(membership_status=membership.status, person_status=person.status)
-        if standing is None:
+        return None if standing is None else (standing, membership.role)
+
+    def _record(self, canonical_user_id: str) -> None:
+        current = self._current(canonical_user_id)
+        if current is None:
             return
+        standing, role = current
         store = self._access_store()
         previous = store.team_person(self._team_id, canonical_user_id)
-        store.record_person(self._copy(canonical_user_id, standing, membership.role, previous))
+        store.record_person(self._copy(canonical_user_id, standing, role, previous))
 
     def _sync_all(self) -> Counter[PersonStanding]:
         store = self._access_store()
@@ -129,7 +182,9 @@ class PeopleDirectorySync:
             if standing is None:
                 continue
             people.append(self._copy(row.canonical_user_id, standing, row.role, previous.get(row.canonical_user_id)))
-        store.replace_people(self._team_id, people, at=self._clock.now_utc())
+        # Read the store before the gateway's records: whoever another writer stores after
+        # this read and the records lack is someone just added, not someone gone.
+        store.replace_people(self._team_id, people, at=self._clock.now_utc(), read_before=previous.keys())
         return Counter(person.standing for person in people)
 
     def _copy(
@@ -148,6 +203,8 @@ class PeopleDirectorySync:
         return TeamPersonV1(
             team_id=self._team_id,
             person_id=person_id,
+            # A person keeps their opaque reference for as long as they are in the team (module docstring).
+            person_ref=previous.person_ref if previous is not None else new_person_ref(),
             standing=standing,
             roles=roles,
             changed_at_utc=changed_at,
@@ -163,8 +220,9 @@ class PeopleDirectorySync:
     def _write_failed(self, person_id: str) -> None:
         self._logger.exception(
             "Could not copy a person's standing to the access store; the gateway's own records "
-            "changed anyway, and the scheduler keeps the old copy until the next write or gateway "
-            "start. event=people_directory_write_failed team_id=%s person_id=%s",
+            "changed anyway, and scheduled runs keep the old copy until the next write (a change to "
+            "the person, their next command to the team services) or gateway start. "
+            "event=people_directory_write_failed team_id=%s person_id=%s",
             self._team_id,
             person_id,
         )

@@ -1087,6 +1087,28 @@ def test_edges_follow_the_kind_and_the_senders_role(kind: str, role: str, edge: 
     assert topology.edge_allowed(kind, "hub_and_spoke", role, edge, given_by_person=given_by_person) is allowed
 
 
+@pytest.mark.parametrize("name", sorted(topology.TOPOLOGIES))
+def test_a_tasks_requester_may_probe_its_holder_whatever_its_role(name: str) -> None:
+    """GEN-6, decision 70: worker hosts send task.probe, and every topology lets a worker's watchdog do so."""
+
+    assert "worker_host" in kinds.KINDS["task.probe"].senders
+    for role in ("lead", "worker"):
+        assert topology.edge_allowed("task.probe", name, role, "down") is True
+    # Only the requester's kinds: a worker still gives no other work down in hub and spoke.
+    if name == "hub_and_spoke":
+        assert topology.edge_allowed("agent.pause", name, "worker", "down") is False
+        assert topology.edge_allowed("task.answer", name, "worker", "down") is False
+    assert topology.edge_allowed("task.probe", name, "worker", "sideways") is False
+
+
+@pytest.mark.parametrize("kinds", [["task.no_such_kind"], ["task.result"]])
+def test_requester_kinds_name_kinds_that_are_sent_down(kinds: list[str]) -> None:
+    topologies = copy.deepcopy(EXPORT.load_yaml("team-topologies.yaml"))
+    topologies["requester_kinds"] = kinds
+    with pytest.raises(EXPORT.ContractError, match="requester_kinds names"):
+        EXPORT.check_registry(EXPORT.load_yaml("registry.yaml"), TRANSPORT, topologies, EXPORT.load_schemas())
+
+
 @pytest.mark.parametrize("kind", ["agent.resume", "agent.exit", "agent.status", "task.probe"])
 def test_a_kind_agent_hosts_send_to_an_agent_names_its_edges(kind: str) -> None:
     """The lead sends these to an agent's address, like agent.pause; none would skip the receiver's edge check."""
@@ -1877,6 +1899,21 @@ def test_a_host_record_of_another_contract_is_still_checked_for_its_signature() 
     with pytest.raises(FrameRefused) as refused:
         fixtures.verify_state(json.dumps(data).encode())
     assert refused.value.code == "bad_signature"
+
+
+@pytest.mark.parametrize("field", ["key", "runtime"])
+def test_a_host_record_of_another_contract_still_names_the_host_that_signed_it(field: str) -> None:
+    """A host writes only its own liveness, also on another contract: otherwise any host could tell readers that
+    another host, the team services included, runs another contract, and make them drain it."""
+
+    document = host_record_of_another_contract()
+    if field == "key":
+        document["key"] = "worker-host-1"
+    else:
+        document["body"]["runtime"] = "worker-host-1"
+    with pytest.raises(FrameRefused) as refused:
+        fixtures.verify_state(signed_state(document))
+    assert (refused.value.code, refused.value.at) == ("invalid_body", "/key" if field == "key" else "/body/runtime")
 
 
 def test_a_released_label_reads_every_host_record_strictly(monkeypatch: pytest.MonkeyPatch) -> None:

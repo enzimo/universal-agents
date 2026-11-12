@@ -60,10 +60,6 @@ def _project_transport(*, transport_cfg: dict[str, Any]) -> dict[str, Any]:
         "nats_work_max_age_seconds": transport_cfg.get(
             "work_max_age_seconds", TRANSPORT_DEFAULTS.work_max_age_seconds.value
         ),
-        "nats_presence_max_age_seconds": transport_cfg.get(
-            "presence_max_age_seconds",
-            TRANSPORT_DEFAULTS.presence_max_age_seconds.value,
-        ),
         "nats_process_consumer_inactive_threshold_seconds": transport_cfg.get(
             "process_consumer_inactive_threshold_seconds",
             TRANSPORT_DEFAULTS.process_consumer_inactive_threshold_seconds.value,

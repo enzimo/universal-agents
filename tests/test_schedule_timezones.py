@@ -210,7 +210,8 @@ async def test_a_schedule_made_in_chat_carries_the_persons_own_zone() -> None:
         ),
         delivery=SimpleNamespace(register_scheduled_request=lambda **_kwargs: None),
         manager=SimpleNamespace(manager_id="manager", publish_durable=publish_durable),
-        manager_commands=None,
+        team_commands=None,
+        delivery_refs=None,
         id_generator=SimpleNamespace(
             new_scheduled_job_id=lambda: next(ids),
             new_correlation_id=lambda: next(ids),

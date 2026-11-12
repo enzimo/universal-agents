@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tests.task_work_support import TurnHost
-from custom_agents.manager_control_runtime import handle_manager_runtime_work_command
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.routing_v1 import (
@@ -18,7 +17,7 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
 from custom_agents.manager_control_runtime import CommandPerson
-from test_manager_control_runtime import _CaptureComms, _gateway_signing_keys, _signed  # noqa: F401
+from test_manager_control_runtime import _CaptureComms
 
 
 @pytest.fixture(params=[True, False], ids=["lead", "worker"])
@@ -27,6 +26,13 @@ def agent(tmp_path, request):
         db_path=str(tmp_path / "tasks.db"), max_queued_top_level_tasks=50
     )
     manager.set_owner_identity("lead", "Lead", "team", "TeamArchitect")
+    from storage.access_repository import AccessRepository
+    from custom_messages.contracts.access_v2 import TeamPersonV1, PersonStanding
+    from datetime import datetime, timezone
+
+    AccessRepository(manager.storage_settings).record_person(TeamPersonV1(
+        team_id="team", person_id="owner", person_ref="p-OwnerOwnerOwnerOwnerOw", roles=("member",),
+        standing=PersonStanding.ACTIVE, changed_at_utc=datetime.now(timezone.utc)))
     return TurnHost(
         id="lead",
         name="Lead",
@@ -72,22 +78,27 @@ def final_replies(agent) -> list[str]:
 
 
 async def command(agent, action="list_tasks", **kwargs):
-    request = ManagerRuntimeWorkCommand(
-        action=action,
-        scope="user",
-        **kwargs,
-    )
-    await handle_manager_runtime_work_command(
-        agent,
-        command=request,
-        msg_header=MessageHeader(
-            from_agent_id="gateway", response_routing_key="gateway"
-        ),
-        msg_meta=MessageMeta(
-            gateway_context=_signed(GatewayContext(canonical_user_id="owner"), team_id="team", roles=["member"])
-        ),
-    )
-    return agent.team_comms.messages[-1].msg_content
+    """Run the production handler/helper; do not copy its inventory implementation."""
+    from custom_agents.relayed_task_controls import _task_control, tasks_list_finished
+    from tests.team_services_support import relayed_frame, checked_reply
+
+    body = {"offset": kwargs.get("task_offset", 0), "limit": kwargs.get("task_limit", 20)}
+    if action == "list_finished_tasks":
+        reply = checked_reply("tasks.list_finished", await tasks_list_finished(agent, relayed_frame(
+            "team", "tasks.list_finished", {"agent": agent.id, **body}, person_ref="p-OwnerOwnerOwnerOwnerOw")))
+        return SimpleNamespace(success=reply["outcome"] == "ok", task_total=reply["total"],
+                               finished_tasks=[SimpleNamespace(**row) for row in reply["tasks"]])
+    body.update(seen_queue_digest=kwargs.get("inventory_digest"), task_id=kwargs.get("target_task_id"))
+    return await _task_control(agent, action, body, CommandPerson(
+        canonical_user_id="owner", team_id="team", roles=("member",)))
+
+
+def test_removed_task_actions_are_not_durable_manager_commands():
+    from pydantic import ValidationError
+
+    for action in ("list_tasks", "list_finished_tasks", "remove_task", "purge_tasks"):
+        with pytest.raises(ValidationError):
+            ManagerRuntimeWorkCommand(action=action, scope="user")
 
 
 @pytest.mark.asyncio
@@ -234,8 +245,9 @@ async def test_cancelled_task_cannot_start_between_queue_selection_and_terminali
 
     add(agent, "selected")
     assert agent.task_manager.get_next_task_to_process() == "selected"
-    request = ManagerRuntimeWorkCommand(
-        action="purge_tasks", scope="user", )
+    from custom_agents.runtime_task_controls import TaskControlCommand
+
+    request = TaskControlCommand(action="purge_tasks")
     assert await agent.task_manager.operations_runtime.run(
         partial(_reserve_queued_cancellation, agent.task_manager), "selected", request,
         CommandPerson(canonical_user_id="owner", team_id="team", roles=("member",)),
@@ -246,87 +258,36 @@ async def test_cancelled_task_cannot_start_between_queue_selection_and_terminali
     assert agent.task_manager.current_task_id is None
 
 
-@pytest.mark.live
-@pytest.mark.integration
-@pytest.mark.nats
 @pytest.mark.asyncio
-async def test_live_task_inventory_and_purge_round_trip(agent):
-    import asyncio
-    from custom_messages.contracts.envelope_v1 import MessageEnvelope
-    from custom_tools.comms_tools import TeamComms
-    from custom_transport.subjects import NatsSubjectMapper
-    from test_live_nats_replacement_semantics import _adapter, _subscribe_queue, _team
+async def test_a_repeated_relayed_removal_returns_its_saved_receipt_and_sends_one_final_reply(agent):
+    from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+    from tests.team_services_support import checked_reply, relayed_frame
 
-    team = _team("tasks_controls")
-    agent.team_id = team
-    agent.task_manager.set_owner_identity("lead", "Lead", team, "TeamArchitect")
-    route, reply = f"{team}_TeamArchitect", f"{team}_gateway_response"
-    adapter = _adapter(
-        team,
-        mapper=NatsSubjectMapper(
-            team_id=team, named_agent_type_queue_map={"TeamArchitect": route}
-        ),
-    )
-    try:
-        await adapter.connect(reconcile_topology=True)
-        requests = await _subscribe_queue(
-            adapter,
-            name="task-controls-lead",
-            subject=adapter.mapper.agent_control_subject(route),
-            durable=False,
-        )
-        responses = await _subscribe_queue(
-            adapter,
-            name="task-controls-response",
-            routing_key=reply,
-            durable_name=adapter.mapper.durable_name("tasks_response"),
-        )
-        agent.team_comms = TeamComms(team_id=team, nats_adapter=adapter)
-        add(agent, "current", state=ProgressState.IN_PROGRESS)
-        add(agent, "queued")
+    add(agent, "remove-once")
+    view = await command(agent)
+    frame = relayed_frame("team", "tasks.remove", {
+        "agent": agent.id, "task_id": "remove-once", "seen_queue_digest": view.inventory_digest,
+    }, person_ref="p-OwnerOwnerOwnerOwnerOw", request_id="remove-once-command")
+    first = checked_reply("tasks.remove", await RELAYED_HANDLERS["tasks.remove"](agent, frame))
+    del agent._relayed_command_outcomes
+    repeated = checked_reply("tasks.remove", await RELAYED_HANDLERS["tasks.remove"](agent, frame))
+    assert first == repeated
+    assert first["outcome"] == "ok" and first["removed"] == 1
+    assert final_replies(agent) == ["remove-once"]
 
-        async def exchange(action, **kwargs):
-            request = ManagerRuntimeWorkCommand(
-                action=action,
-                scope="user",
-                **kwargs,
-            )
-            envelope = MessageEnvelope(
-                msg_content=request,
-                msg_header=MessageHeader(
-                    from_agent_id="gateway",
-                    to_routing_path=route,
-                    response_routing_key=reply,
-                ),
-                msg_meta=MessageMeta(
-                    gateway_context=_signed(
-                        GatewayContext(canonical_user_id="owner"), team_id=team, roles=["member"]
-                    )
-                ),
-            )
-            await agent.team_comms.send_message(message=envelope, routing_key=route)
-            delivery = await asyncio.wait_for(requests.get(), timeout=5)
-            incoming = delivery.envelope
-            await handle_manager_runtime_work_command(
-                agent,
-                command=incoming.msg_content,
-                msg_header=incoming.msg_header,
-                msg_meta=incoming.msg_meta,
-            )
-            await delivery.ack()
-            response = await asyncio.wait_for(responses.get(), timeout=5)
-            await response.ack()
-            return response.envelope.msg_content
 
-        listed = await exchange("list_tasks")
-        assert listed.task_total == 2
-        result = await exchange("purge_tasks", inventory_digest=listed.inventory_digest)
-        assert result.success
-        assert result.task_total == 1
-        assert result.roots[0].root_task_id == "current"
-        assert agent.task_manager.is_execution_cancelled("queued")
-        archived = await exchange("list_finished_tasks", task_limit=10)
-        assert archived.success
-        assert [(row.task_id, row.state) for row in archived.finished_tasks] == [("queued", "cancelled")]
-    finally:
-        await adapter.close()
+@pytest.mark.asyncio
+async def test_a_large_purge_keeps_receipts_within_the_message_contract(agent):
+    from custom_agents.relayed_task_controls import RELAYED_HANDLERS
+    from tests.team_services_support import checked_reply, relayed_frame
+
+    agent.task_manager._max_queued_top_level_tasks = 150
+    for i in range(105):
+        add(agent, f"queued-{i}")
+    view = await command(agent)
+    frame = relayed_frame("team", "tasks.purge", {
+        "agent": agent.id, "seen_queue_digest": view.inventory_digest,
+    }, person_ref="p-OwnerOwnerOwnerOwnerOw", request_id="large-purge")
+    reply = checked_reply("tasks.purge", await RELAYED_HANDLERS["tasks.purge"](agent, frame))
+    assert reply["removed"] == len(reply["receipts"]) == 100
+    assert (await command(agent)).task_total == 5

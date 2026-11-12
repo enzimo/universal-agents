@@ -8,6 +8,7 @@ This module provides the UniversalAgent class, which:
 - Supports the hub-and-spoke multi-agent architecture
 """
 
+from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.lease_loss_wind_down import divert_request_during_wind_down, is_winding_down
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_agents.task_queue_notifications import QueuePressureNotifications
@@ -61,8 +62,8 @@ from custom_agents.deferred_message_runtime import (
 )
 from custom_agents.agent_team_runtime import LocalAgentTeamRuntime, unregister_local_worker
 from custom_agents.custody_loss import install_custody_listeners
-from custom_agents.liveness_observation import LivenessObservation, NATS_PRESENCE_HEARTBEAT_SECONDS
-from custom_agents.agent_liveness import own_process_identity, parse_utc, reconcile_received_status
+from custom_agents.liveness_observation import LivenessObservation, SELF_REFRESH_SECONDS
+from custom_agents.agent_liveness import own_process_identity
 from storage.runtime_custody import DeferredMessageClaim, RuntimeCustodyLost
 from custom_agents.runtime_paths import (
     agent_layout,
@@ -129,10 +130,7 @@ from custom_agents.internal_improvement_runtime import (
     publish_internal_improvement_schedule_ensure,
 )
 from custom_agents.manager_control_runtime import (
-    handle_manager_memory_command,
     handle_manager_runtime_work_command,
-    handle_manager_schedule_command,
-    handle_manager_topic_command,
     handle_task_progress_status,
 )
 from custom_agents.manager_bootstrap_runtime import resume_manager_data_cleanups, run_manager_bootstrap
@@ -143,14 +141,12 @@ from custom_agents.sdk.strands.skills import (
 )
 from custom_agents.skill_catalog_runtime import (
     SkillCatalogRuntimeState,
-    handle_managed_skill_catalog_notification,
     repair_agent_skill_catalog,
 )
 from custom_agents.message_routing import (
     build_outgoing_meta,
     construct_header,
     resolve_outgoing_routing,
-    resolve_requester_routing_key,
 )
 from custom_agents.request_prompt_context import (
     build_request_conversation_context,
@@ -212,6 +208,7 @@ from custom_agents.strands_model_factory import (
     build_strands_model,
     resolve_context_window_tokens,
 )
+from custom_agents.agent_host import attach_agent, detach_agent, report_agent_state, report_restored_work
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.context_engine import (
     ContextEngine,
@@ -270,7 +267,7 @@ from custom_transport.base import (
     SubscriptionDelivery,
     TransportPublishOptions,
 )
-from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, NatsTransportAdapter
+from custom_transport.nats_adapter import NAMED_WORKER_CONSUMER_ROLE, TEAM_LEAD_CONSUMER_ROLE, NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from custom_agents.task_runtime_coordinator import (
     RuntimeBatchInterrupted,
@@ -287,11 +284,9 @@ from custom_messages.contracts.control_v1 import (
     AgentStatus,
     AgentStatusMap,
     ControlInstruction,
-    ManagerKnowledgeCommand,
-    ManagerMemoryCommand,
     ManagerRuntimeWorkCommand,
-    ManagerTopicCommand,
     PersonStandingCommandV1,
+    RetiredGatewayCommand,
 )
 from custom_messages.contracts.credentials_v1 import (
     SecureCredentialCollectionRequest,
@@ -314,7 +309,6 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.runtime_snapshot_v3 import TURN_ACTION_DONE_STATUSES
 from custom_messages.contracts.schedule_v1 import (
     AutomationMessage,
-    ManagerScheduleCommand,
     ScheduledMessage,
 )
 from custom_messages.contracts.task_v1 import (
@@ -346,7 +340,6 @@ from custom_messages.enums import (
     SystemScheduleKind,
     RecoverablePauseTrigger,
 )
-from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 from custom_messages.system_schedules import (
     AFTER_ACTION_REPORT_REVIEW_SCHEDULE_NAME_PREFIX,
     PROVIDER_OVERLOAD_RETRY_SCHEDULE_NAME_PREFIX,
@@ -455,38 +448,6 @@ def _local_named_agent_types(
     )
 
 
-def _validated_agent_status_id(
-    agent_status: AgentStatus,
-    *,
-    logger: logging.Logger,
-    receiving_agent_id: str,
-    msg_header: MessageHeader,
-    msg_meta: MessageMeta,
-) -> str | None:
-    """Return a usable status identity or reject the malformed update observably."""
-    if agent_status.self_id:
-        return agent_status.self_id
-    logger.error(
-        "[%s] Ignoring AgentStatus without self_id. "
-        "event=agent_status_identity_missing correlation_id=%s incoming_from_agent_id=%s",
-        receiving_agent_id,
-        getattr(msg_meta, "msg_correlation_id", None),
-        getattr(msg_header, "from_agent_id", None),
-    )
-    return None
-
-
-def _should_consume_broadcasts(
-    process_broadcasts: bool | None,
-    *,
-    is_team_lead: bool,
-) -> bool:
-    """Resolve the explicit override before the team-lead default."""
-    if process_broadcasts is not None:
-        return bool(process_broadcasts)
-    return is_team_lead
-
-
 def _direct_consumer_scope(*, configured_fields: set[str]) -> ConsumerScope:
     """Map configured identity lifetime to direct-mailbox ownership."""
 
@@ -517,8 +478,8 @@ async def _subscribe_manager_control_route(
     await subscribe_run_context_routes(agent, adapter, mapper)
 
 
-async def _publish_exit_presence(agent: Any) -> None:
-    """Stop local team members before publishing the lead's final presence."""
+async def _stop_local_team_members(agent: Any) -> None:
+    """The team lead stops the workers it runs as threads before it leaves."""
 
     if agent.is_team_lead and agent.team_id and agent._local_team_runtime is not None:
         await asyncio.to_thread(
@@ -527,7 +488,6 @@ async def _publish_exit_presence(agent: Any) -> None:
             agent.id,
             5.0,
         )
-    await agent._publish_presence_status(is_exiting=True)
 
 
 class UniversalAgent(BaseModel):
@@ -605,9 +565,6 @@ class UniversalAgent(BaseModel):
     nats_work_max_age_seconds: Optional[float] = Field(
         default=TRANSPORT_DEFAULTS.work_max_age_seconds.value
     )
-    nats_presence_max_age_seconds: Optional[float] = Field(
-        default=TRANSPORT_DEFAULTS.presence_max_age_seconds.value
-    )
     nats_process_consumer_inactive_threshold_seconds: float = Field(
         default=TRANSPORT_DEFAULTS.process_consumer_inactive_threshold_seconds.value,
         gt=0,
@@ -629,30 +586,6 @@ class UniversalAgent(BaseModel):
     default_request_timezone: Optional[str] = Field(
         default_factory=lambda: os.getenv("DEFAULT_REQUEST_TIMEZONE"),
         description="Optional IANA timezone used for top-level requests that omit request_timezone.",
-    )
-
-    # Broadcast processing configuration
-    broadcast_history_length: int = Field(
-        default=AGENT_DEFAULTS.broadcast_history_length.value,
-        description="Number of presence broadcasts to buffer in the exchange.",
-    )
-    max_broadcast_age_ms: int = Field(
-        default=AGENT_DEFAULTS.max_broadcast_age_ms.value,
-        description="Discard broadcast messages older than this threshold (in milliseconds).",
-    )
-    process_broadcasts: Optional[bool] = Field(
-        default=None,
-        description="Whether to consume broadcasts. Defaults to True for Team Leads and False for others.",
-    )
-    delete_fanout_on_exit: bool = Field(
-        default_factory=lambda: (
-            os.getenv(
-                "FANOUT_DELETE_ON_EXIT",
-                str(AGENT_DEFAULTS.delete_fanout_on_exit.value).lower(),
-            ).lower()
-            in ("true", "1", "yes")
-        ),
-        description="Whether the team lead should delete the fanout exchange on exit. Defaults to False (exchange persists). Set FANOUT_DELETE_ON_EXIT=true to enable.",
     )
 
     # Communication utilities
@@ -1161,10 +1094,12 @@ class UniversalAgent(BaseModel):
     _local_schedule_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     _worker_launch: Any = PrivateAttr(default=None)
     _worker_ready: bool = PrivateAttr(default=False)
-    _presence_task: Optional[asyncio.Task] = PrivateAttr(default=None)
+    _self_refresh_task: Optional[asyncio.Task] = PrivateAttr(default=None)
     _liveness_observation: LivenessObservation = PrivateAttr(default_factory=LivenessObservation)
     _scheduler_wake: Optional[asyncio.Event] = PrivateAttr(default=None)
     _agent_id_by_name: Dict[str, str] = PrivateAttr(default_factory=dict)
+    # Names two live agents share now, with their holders (custom_agents.team_directory).
+    _ambiguous_team_names: Dict[str, tuple[str, ...]] = PrivateAttr(default_factory=dict)
     _strands_agent: Optional[Agent] = PrivateAttr(default=None)
     _strands_model: Optional[Any] = PrivateAttr(default=None)
     # A person's own model for the current turn (custom_agents.person_model_runtime).
@@ -1264,17 +1199,7 @@ class UniversalAgent(BaseModel):
     _activity_client: Optional[ActivityCollectorClient] = PrivateAttr(default=None)
     _operational_exchange_name: Optional[str] = PrivateAttr(default=None)
     _operational_queue_name: Optional[str] = PrivateAttr(default=None)
-    # Probes sent to a worker type (no known holder): only a reply from a worker
-    # that knows the task counts (subtask_watchdog_runtime).
-    _known_only_task_status_probes: set[str] = PrivateAttr(default_factory=set)
     _untracked_subtask_warnings: set[str] = PrivateAttr(default_factory=set)
-    _pending_task_status_futures: Dict[str, asyncio.Future] = PrivateAttr(
-        default_factory=dict
-    )
-    _pending_agent_status_futures: Dict[
-        str,
-        tuple[Optional[str], Optional[str], datetime, asyncio.Future],
-    ] = PrivateAttr(default_factory=dict)
     _runtime_loop: Optional[asyncio.AbstractEventLoop] = PrivateAttr(default=None)
     _task_runtime_coordinator: Optional[TaskRuntimeCoordinator] = PrivateAttr(
         default=None
@@ -1328,27 +1253,13 @@ class UniversalAgent(BaseModel):
                 await self._announce_execution_state()
 
     async def _announce_execution_state(self) -> None:
-        """Record and broadcast that this agent started or finished work.
+        """Record that this agent started or finished work.
 
-        The heartbeat alone reports a change up to NATS_PRESENCE_HEARTBEAT_SECONDS
-        late; Web Chat's activity mesh lights an agent while it works, so the
-        change is broadcast as it happens. A failed broadcast never affects the
-        work; the next heartbeat repeats the state.
+        Its signed record follows at once (``custom_agents.agent_host``), so Web Chat's
+        activity mesh lights the agent while it works, and its own status row is refreshed.
         """
 
         await self._refresh_self_agent_state()
-        try:
-            await self._publish_presence_status(is_exiting=False)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._logger.warning(
-                "Could not broadcast the agent's working state; the next heartbeat repeats it. "
-                "event=agent_execution_presence_failed agent_id=%s is_executing=%s error_type=%s",
-                self.id,
-                self.is_executing,
-                type(exc).__name__,
-            )
 
     def __init__(self, **kwargs):
         """
@@ -1530,7 +1441,6 @@ class UniversalAgent(BaseModel):
             nats_max_deliver=self.nats_max_deliver,
             nats_duplicate_window_seconds=self.nats_duplicate_window_seconds,
             nats_work_max_age_seconds=self.nats_work_max_age_seconds,
-            nats_presence_max_age_seconds=self.nats_presence_max_age_seconds,
             nats_process_consumer_inactive_threshold_seconds=(
                 self.nats_process_consumer_inactive_threshold_seconds
             ),
@@ -1681,16 +1591,6 @@ class UniversalAgent(BaseModel):
 
     def _resolve_manager_identity(self, *args, **kwargs):
         return delegation_runtime._resolve_manager_identity(self, *args, **kwargs)
-
-    def _agent_status_matches_named_type(self, *args, **kwargs):
-        return delegation_runtime._agent_status_matches_named_type(
-            self, *args, **kwargs
-        )
-
-    def _resolve_pending_agent_status_probes(self, *args, **kwargs):
-        return delegation_runtime._resolve_pending_agent_status_probes(
-            self, *args, **kwargs
-        )
 
     async def _record_delegation_subtask_abort(self, *args, **kwargs):
         return await delegation_runtime._record_delegation_subtask_abort(
@@ -2580,7 +2480,14 @@ class UniversalAgent(BaseModel):
 
     _agent_state_io: BlockingIOLane = PrivateAttr(default_factory=BlockingIOLane)
 
+    def _report_record_state(self) -> None:
+        """Tell this process's host the agent's state; it writes the signed record when it changed."""
+
+        report_agent_state(self)
+
     async def _refresh_self_agent_state(self, *, is_exiting: bool = False) -> None:
+        # The host writes the agent's signed record when this changed it (custom_agents.agent_host).
+        report_agent_state(self)
         if self._agent_state_store is None:
             return
         try:
@@ -2590,8 +2497,12 @@ class UniversalAgent(BaseModel):
                 self.get_self_status(is_exiting=effective_is_exiting),
             )
         except Exception as exc:
+            # The liveness rules read this row's time; the next refresh, at most
+            # SELF_REFRESH_SECONDS later, writes it again.
             self._logger.warning(
-                f"[{self.id}] Failed to refresh self AgentState row: {exc}"
+                "[%s] Could not refresh the agent's own status row; the next refresh tries again. "
+                "event=agent_state_row_refresh_failed agent_id=%s error_type=%s error=%s",
+                self.id, self.id, type(exc).__name__, exc,
             )
 
     async def _resume_parent_task_if_ready(self, parent_task_id: str, *args, **kwargs):
@@ -4003,9 +3914,7 @@ class UniversalAgent(BaseModel):
                 msg_content, msg_header=msg_header, msg_meta=msg_meta
             )
         elif isinstance(msg_content, AgentStatus):
-            await self.handle_info_req_message(
-                info_request=msg_content, msg_header=msg_header, msg_meta=msg_meta
-            )
+            self._ignore_agent_status(msg_content, msg_header, msg_meta)
         elif isinstance(msg_content, TaskStatus):
             await self._handle_task_status_message(
                 task_status=msg_content, msg_header=msg_header, msg_meta=msg_meta
@@ -4017,31 +3926,8 @@ class UniversalAgent(BaseModel):
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )
-        elif isinstance(msg_content, ManagerScheduleCommand):
-            await handle_manager_schedule_command(
-                self,
-                command=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
         elif isinstance(msg_content, ManagerRuntimeWorkCommand):
             await handle_manager_runtime_work_command(
-                self,
-                command=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
-        elif isinstance(msg_content, ManagerMemoryCommand):
-            await handle_manager_memory_command(
-                self,
-                command=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
-        elif isinstance(msg_content, ManagerKnowledgeCommand):
-            from custom_agents.knowledge_command_runtime import handle_manager_knowledge_command
-
-            await handle_manager_knowledge_command(
                 self,
                 command=msg_content,
                 msg_header=msg_header,
@@ -4056,8 +3942,12 @@ class UniversalAgent(BaseModel):
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )
-        elif isinstance(msg_content, ManagerTopicCommand):
-            await handle_manager_topic_command(
+        elif isinstance(msg_content, RetiredGatewayCommand):
+            # A 0.9 gateway's command queued before an in-place upgrade: the person is
+            # told it was not carried out (custom_agents.retired_gateway_commands).
+            from custom_agents.retired_gateway_commands import answer_retired_gateway_command
+
+            await answer_retired_gateway_command(
                 self,
                 command=msg_content,
                 msg_header=msg_header,
@@ -4078,13 +3968,6 @@ class UniversalAgent(BaseModel):
             await handle_worker_task_handback(
                 self,
                 handback=msg_content,
-                msg_header=msg_header,
-                msg_meta=msg_meta,
-            )
-        elif isinstance(msg_content, ManagedSkillCatalogChangedV1):
-            await handle_managed_skill_catalog_notification(
-                self,
-                notification=msg_content,
                 msg_header=msg_header,
                 msg_meta=msg_meta,
             )
@@ -4177,18 +4060,11 @@ class UniversalAgent(BaseModel):
 
     @staticmethod
     def _is_operational_content(content: ContentType) -> bool:
-        return isinstance(
-            content,
-            (
-                AgentStatus,
-                ControlInstruction,
-                ManagedSkillCatalogChangedV1,
-                ManagerRuntimeWorkCommand,
-                TaskProgressStatus,
-                TaskStatus,
-                TaskSteering,
-            ),
-        )
+        """What still travels on the operational subject until phase 3 (plan decision 68): the gateway's task
+        progress, its parent-task status probe and thread guidance, with their replies. Agents ask each other
+        on their own addresses (``custom_agents.live_controls``)."""
+
+        return isinstance(content, (TaskProgressStatus, TaskStatus, TaskSteering))
 
     def _operational_target_matches(
         self,
@@ -4197,70 +4073,39 @@ class UniversalAgent(BaseModel):
         msg_header: MessageHeader,
         msg_meta: MessageMeta,
     ) -> bool:
-        target_agent_id = (
-            getattr(msg_content, "target_agent_id", None) or msg_header.to_routing_path
-        )
-        if target_agent_id in {
-            None,
-            "",
-            RoutingType.ALL_AGENTS_ROUTE.value,
-            RoutingType.ALL_AGENTS_ROUTE,
-        }:
-            target_agent_id = None
-        target_agent_name = getattr(msg_content, "target_agent_name", None) or getattr(
-            msg_meta, "to_agent_name", None
-        )
-        target_named_agent_type = getattr(
-            msg_content, "target_named_agent_type", None
-        ) or getattr(msg_meta, "to_named_agent_type", None)
+        """Whether a command on the operational subject names this agent (plan decision 68).
 
+        Every agent receives the subject, so an agent acts only on a command that names it by
+        id (``target_agent_id``, else the address) or by name; a named type, when given, must
+        match too. The gateway names the team lead in each of its three commands (task
+        progress, the parent-task probe and thread guidance). A command naming no agent is
+        ignored with a warning: until message contract step 7d it fanned out to every agent and
+        the one holding the task (or a task with the same correlation id) picked it out.
+        """
+
+        target_agent_id = getattr(msg_content, "target_agent_id", None) or msg_header.to_routing_path
+        if target_agent_id in {None, "", RoutingType.ALL_AGENTS_ROUTE.value, RoutingType.ALL_AGENTS_ROUTE}:
+            target_agent_id = None
+        target_agent_name = getattr(msg_content, "target_agent_name", None) or getattr(msg_meta, "to_agent_name", None)
+        target_named_agent_type = getattr(msg_content, "target_named_agent_type", None) or getattr(
+            msg_meta, "to_named_agent_type", None
+        )
+        if not target_agent_id and not target_agent_name:
+            self._logger.warning(
+                "[%s] Ignored a command on the operational subject that names no agent. "
+                "event=operational_command_unaddressed agent_id=%s content_type=%s from_agent_id=%s "
+                "correlation_id=%s",
+                self.id, self.id, type(msg_content).__name__, msg_header.from_agent_id,
+                getattr(msg_meta, "msg_correlation_id", None),
+            )
+            return False
         if target_agent_id and str(target_agent_id) != self.id:
             return False
         if target_agent_name and str(target_agent_name) != self.name:
             return False
-        if target_named_agent_type and str(target_named_agent_type) != str(
-            self.named_agent_type or ""
-        ):
+        if target_named_agent_type and str(target_named_agent_type) != str(self.named_agent_type or ""):
             return False
-
-        if isinstance(msg_content, TaskStatus):
-            return bool(
-                target_agent_id or target_named_agent_type or target_agent_name
-            ) or (self.task_manager.get_task_info(msg_content.task_id) is not None)
-        if isinstance(msg_content, TaskSteering):
-            target_task_id = getattr(msg_content, "target_task_id", None)
-            target_correlation_id = getattr(msg_content, "target_correlation_id", None)
-            if target_task_id:
-                # A directly addressed receiver must answer STALE when the
-                # task ended. Unaddressed fanout still belongs only to the
-                # worker holding the exact task, never a correlation sibling.
-                return bool(target_agent_id or target_agent_name) or (
-                    self.task_manager.get_task_info(target_task_id) is not None
-                )
-            if (
-                target_correlation_id
-                and self.task_manager.find_task_info_by_correlation_id(
-                    target_correlation_id
-                )
-                is not None
-            ):
-                return True
-            return bool(target_agent_id or target_named_agent_type or target_agent_name)
-        if isinstance(msg_content, ControlInstruction) and msg_content.target_task_id:
-            if target_agent_id or target_agent_name or target_named_agent_type:
-                return True
-            return (
-                self.task_manager.get_task_info(msg_content.target_task_id) is not None
-            )
-        return bool(
-            target_agent_id
-            or target_agent_name
-            or target_named_agent_type
-            or isinstance(
-                msg_content,
-                (AgentStatus, ManagedSkillCatalogChangedV1),
-            )
-        )
+        return True
 
     async def _send_operational_message(self, message: MessageEnvelope) -> None:
         if not self.team_id:
@@ -4285,16 +4130,7 @@ class UniversalAgent(BaseModel):
         msg_meta: MessageMeta,
     ) -> None:
         if task_status.status_type == MessageMetaType.RESPONSE:
-            future = self._pending_task_status_futures.get(task_status.task_status_id)
-            if (
-                task_status.task_status_id in self._known_only_task_status_probes
-                and not task_status.is_known_task
-            ):
-                # Another worker of the type answered that it does not hold the
-                # task; wait for the one that does, or the probe's timeout.
-                return
-            if future is not None and not future.done():
-                future.set_result(task_status)
+            # Agents ask each other with task.probe (custom_agents.live_controls); a reply here is the gateway's.
             return
 
         if not self._operational_target_matches(
@@ -4816,7 +4652,7 @@ class UniversalAgent(BaseModel):
         if (
             isinstance(
                 msg_content,
-                (AgentStatus, AgentCreationRequest, ManagedSkillCatalogChangedV1),
+                (AgentStatus, AgentCreationRequest),
             )
             and msg_content.team_id
             and msg_content.team_id != "NO_TEAM"
@@ -4877,6 +4713,11 @@ class UniversalAgent(BaseModel):
     ) -> None:
         """Read this agent's type queue, shared by every agent of the type (ADR-019)."""
 
+        from custom_agents.contract_drain import drain_agent
+        from custom_agents.contract_drain_state import is_contract_draining
+
+        if is_contract_draining(self):
+            return
         named_type = str(self.named_agent_type)
         queue_name = self.named_agent_type_queue_map.get(named_type) or f"{self.team_id}_{named_type}"
         await adapter.subscribe_subject(
@@ -4888,8 +4729,11 @@ class UniversalAgent(BaseModel):
             consumer_role=NAMED_WORKER_CONSUMER_ROLE,
             owner_agent_id=self.id,
             fetch_policy=policy,
-            ready=ready,
+            ready=lambda: not is_contract_draining(self) and ready(),
         )
+        if is_contract_draining(self):
+            await drain_agent(self, self._contract_drain.reason)
+            return
         self._logger.info(
             "[%s] NATS type queue ready for %s. event=agent_type_queue_ready "
             "agent_type=%s fetch_policy=%s",
@@ -4909,13 +4753,16 @@ class UniversalAgent(BaseModel):
         await adapter.connect(
             reconcile_topology=self.is_team_lead and not self.instance_config_path
         )
+        # This process's protocol 1 host gives the agent a session; it never waits for it.
+        attach_agent(self, adapter)
         try:
             # A durable subscription can deliver before its setup await returns.
             # Prepare shared schedule state first; start the scheduler only after
             # bootstrap below, and retain any store opened by earlier setup.
             self._ensure_schedule_store()
-            # Before any subscription: the lead stores presence as it arrives,
-            # including the replay of every agent's last status at subscribe.
+            # Before any subscription: every agent refreshes its own status row
+            # here (custom_agents.agent_liveness); who else is on the team comes
+            # from the team's agent records (custom_agents.team_directory).
             self._agent_state_store = AgentStateStore(
                 db_path=self.task_manager._db_path,
                 logger=self._logger,
@@ -4955,7 +4802,10 @@ class UniversalAgent(BaseModel):
                 # target the requesting agent id and are correlated in memory.
                 self._operational_queue_name = self.id
 
-                if self.is_team_lead:
+                from custom_agents.contract_drain import drain_agent
+                from custom_agents.contract_drain_state import is_contract_draining
+
+                if self.is_team_lead and not is_contract_draining(self):
                     await adapter.subscribe_route(
                         name=f"{self.id}:lead",
                         routing_key=self.team_id,
@@ -4963,33 +4813,13 @@ class UniversalAgent(BaseModel):
                         durable_name=self._nats_mapper().durable_name(
                             f"lead_{self.team_id}"
                         ),
-                        consumer_role="team_lead",
+                        consumer_role=TEAM_LEAD_CONSUMER_ROLE,
                         owner_agent_id=self.id,
-                        ready=lambda: mailbox_has_room(self),
+                        ready=lambda: not is_contract_draining(self) and mailbox_has_room(self),
                     )
+                    if is_contract_draining(self):
+                        await drain_agent(self, self._contract_drain.reason)
 
-                if _should_consume_broadcasts(
-                    self.process_broadcasts,
-                    is_team_lead=self.is_team_lead,
-                ):
-                    await adapter.subscribe_subject(
-                        name=f"{self.id}:broadcast",
-                        subject=f"{self._nats_mapper().prefix}.broadcast",
-                        handler=self.on_nats_delivery,
-                        logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                        delivery=SubscriptionDelivery.CORE,
-                    )
-                    await adapter.subscribe_subject(
-                        name=f"{self.id}:presence",
-                        subject=f"{self._nats_mapper().prefix}.presence.*",
-                        handler=self.on_nats_delivery,
-                        logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                        delivery=SubscriptionDelivery.JETSTREAM_EPHEMERAL,
-                        consumer_scope=ConsumerScope.PROCESS,
-                        consumer_role="presence_snapshot",
-                        owner_agent_id=self.id,
-                        deliver_last_per_subject=True,
-                    )
 
             if self.is_team_lead and self.named_agent_type:
                 # The lead is the only TeamArchitect; work addressed to its type
@@ -5004,10 +4834,9 @@ class UniversalAgent(BaseModel):
             ] = f"{self.team_id}_{self.user_queue_postfix}"
 
             if self.team_id:
-                await self._publish_presence_status(is_exiting=False)
-                self._presence_task = asyncio.create_task(
-                    self._presence_heartbeat_loop(),
-                    name=f"{self.id}:presence_heartbeat",
+                self._self_refresh_task = asyncio.create_task(
+                    self._self_refresh_loop(),
+                    name=f"{self.id}:self_refresh",
                 )
 
             if self.is_team_lead:
@@ -5061,6 +4890,10 @@ class UniversalAgent(BaseModel):
             # request during a resumed turn still reaches cleanup.
             schedule_pending_work(self)
 
+            report_agent_state(self)
+            # Its saved subtasks are restored now: fail those sent by name to agents that
+            # left for good while it was down, once the team's view is read.
+            report_restored_work(self)
             self._logger.info(
                 "[%s] NATS transport ready; waiting for messages until exit.", self.id
             )
@@ -5091,11 +4924,11 @@ class UniversalAgent(BaseModel):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._local_schedule_task
             self._local_schedule_task = None
-        if self._presence_task and not self._presence_task.done():
-            self._presence_task.cancel()
+        if self._self_refresh_task and not self._self_refresh_task.done():
+            self._self_refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._presence_task
-            self._presence_task = None
+                await self._self_refresh_task
+            self._self_refresh_task = None
 
         if self._scheduler_task and not self._scheduler_task.done():
             self._scheduler_task.cancel()
@@ -5104,59 +4937,50 @@ class UniversalAgent(BaseModel):
 
         if self.team_id:
             try:
-                await _publish_exit_presence(self)
+                await _stop_local_team_members(self)
             except Exception as exc:
                 self._logger.warning(
-                    "[%s] Failed to publish NATS exit presence: %s", self.id, exc
+                    "[%s] Failed to stop the team's local workers: %s", self.id, exc
                 )
 
+        # Its protocol 1 session closes while the connection is still up.
+        await detach_agent(self)
         # Delivery callbacks can still be committing task state while shutdown
         # starts. Join them before releasing their provider and state resources.
         await adapter.close()
 
         # Every agent, the lead included, writes only its own status row as it
         # stops. Once the exit flag is set every refresh already marks the row
-        # exiting, and the exit presence went out above; this last write comes
+        # exiting, and its record said "exiting" as it detached; this last write comes
         # after deliveries settled, so the row ends exiting whatever ran before.
         # The lead used to delete the whole team's rows here, so startup agents
         # that keep running through a manager-only restart looked gone; old rows
         # are now removed by agent_liveness.prune_departed_agent_rows.
         await self._refresh_self_agent_state(is_exiting=True)
 
-    async def _publish_presence_status(self, *, is_exiting: bool) -> None:
-        if not self.team_id:
-            return
-        message = MessageEnvelope(
-            msg_content=self.get_self_status(is_exiting=is_exiting),
-            msg_meta=MessageMeta(from_agent_name=self.name, to_named_agent_type=None),
-            msg_header=MessageHeader(
-                from_agent_id=self.id,
-                to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-                agent_signature="",
-            ),
-        )
-        await self.team_comms.broadcast_message(
-            message=message,
-            team_id=self.team_id,
-        )
+    async def _self_refresh_loop(self) -> None:
+        """Every ``SELF_REFRESH_SECONDS``: check the skill catalog and refresh this agent's own status row.
 
-    async def _presence_heartbeat_loop(self) -> None:
+        The row's time is the heartbeat the liveness rules read (``custom_agents.agent_liveness``);
+        the catalog check picks up a skill change whose event this agent missed. Who is live is
+        told by the signed records; nothing is broadcast.
+        """
+
         while not self._should_exit.is_set():
-            await asyncio.sleep(NATS_PRESENCE_HEARTBEAT_SECONDS)
+            await asyncio.sleep(SELF_REFRESH_SECONDS)
             if self._should_exit.is_set():
                 return
             try:
                 await repair_agent_skill_catalog(
                     self,
-                    reason="presence_heartbeat",
+                    reason="self_refresh",
                 )
-                await self._publish_presence_status(is_exiting=False)
                 await self._refresh_self_agent_state()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._logger.warning(
-                    "[%s] Failed to publish NATS presence heartbeat: %s", self.id, exc
+                    "[%s] The agent's own refresh failed: %s event=agent_self_refresh_failed", self.id, exc
                 )
 
     async def connect(self):
@@ -5188,7 +5012,6 @@ class UniversalAgent(BaseModel):
             return
 
         effective_to_routing_path = msg_header.to_routing_path or delivery.logical_route
-        is_for_all = effective_to_routing_path == RoutingType.ALL_AGENTS_ROUTE.value
         is_for_me = (
             effective_to_routing_path == self.id or delivery.logical_route == self.id
         )
@@ -5204,37 +5027,9 @@ class UniversalAgent(BaseModel):
             and self.is_team_lead
         )
 
-        if is_for_all and self._should_apply_stale_broadcast_filter(msg_envelope):
-            if msg_header.timestamp:
-                try:
-                    msg_time = datetime.fromisoformat(msg_header.timestamp)
-                    if msg_time.tzinfo is None:
-                        msg_time = msg_time.replace(tzinfo=timezone.utc)
-                    age_ms = (
-                        datetime.now(timezone.utc) - msg_time
-                    ).total_seconds() * 1000.0
-                    if age_ms > self.max_broadcast_age_ms:
-                        await delivery.ack()
-                        return
-                except Exception as exc:
-                    self._logger.warning(
-                        "[%s] Failed to parse NATS broadcast timestamp: %s",
-                        self.id,
-                        exc,
-                    )
-
+        # Nothing is broadcast to every agent's mailbox any more (message contract step 7d):
+        # a delivery is this agent's, its type's, or the lead's.
         should_process = is_for_me or is_for_my_type or is_for_team_lead
-        if is_for_all and isinstance(
-            msg_content,
-            (
-                AgentStatus,
-                ControlInstruction,
-                ManagerRuntimeWorkCommand,
-                TaskProgressStatus,
-                TaskSteering,
-            ),
-        ):
-            should_process = True
         if not should_process:
             self._logger.warning(
                 "NATS delivery does not target this agent. "
@@ -5305,21 +5100,22 @@ class UniversalAgent(BaseModel):
             await delivery.ack()
             return
         if not self._is_operational_content(msg_content):
+            # Agent status, pause, resume, exit and the other commands that moved to agents' own
+            # addresses in step 7 (custom_agents.live_controls) are not read here any more.
             self._logger.warning(
-                "[%s] Ignoring non-operational NATS message on operational subject: %s.",
-                self.id,
-                type(msg_content).__name__,
+                "[%s] Ignored a message type the operational subject no longer carries. "
+                "event=operational_message_ignored agent_id=%s content_type=%s from_agent_id=%s correlation_id=%s",
+                self.id, self.id, type(msg_content).__name__, msg_header.from_agent_id,
+                getattr(msg_meta, "msg_correlation_id", None),
             )
             await delivery.ack()
             return
 
         if (
-            isinstance(msg_content, (TaskStatus, AgentStatus))
+            isinstance(msg_content, (TaskStatus, TaskProgressStatus))
             and msg_content.status_type == MessageMetaType.RESPONSE
         ):
-            await self._dispatch_message(
-                msg_header=msg_header, msg_content=msg_content, msg_meta=msg_meta
-            )
+            # Answers to the gateway's questions, for the gateway only.
             await delivery.ack()
             return
 
@@ -5424,7 +5220,8 @@ class UniversalAgent(BaseModel):
             has_execution_capacity=status_metrics["has_execution_capacity"],
             is_busy=self.is_executing,
             is_exiting=is_exiting,
-            accepting_work=not is_winding_down(self),
+            # A worker winding down, or an agent whose process runs another message contract, takes no new work.
+            accepting_work=not is_winding_down(self) and not is_contract_draining(self),
             is_team_lead=self.is_team_lead,
             top_level_queue_depth=status_metrics["top_level_queue_depth"],
             waiting_top_level_task_count=status_metrics["waiting_top_level_task_count"],
@@ -5509,8 +5306,8 @@ class UniversalAgent(BaseModel):
         refresh_state = True
         try:
             # Admission must be exclusive before its first storage await. An
-            # empty probe must not publish busy/idle transitions: receiving
-            # those presence messages would trigger another empty probe.
+            # empty probe must not publish busy/idle transitions that did not
+            # happen: they change the agent's record and its status row.
             async with self._execution_lanes.hold(MAIN_LANE):
                 started = await task_message_runtime._check_and_process_next_task(
                     self, MAIN_LANE
@@ -5536,182 +5333,31 @@ class UniversalAgent(BaseModel):
     async def _handle_task_response(self, *args, **kwargs):
         return await task_message_runtime._handle_task_response(self, *args, **kwargs)
 
-    async def handle_info_req_message(
+    def _ignore_agent_status(
         self,
-        info_request: AgentStatus,
+        status: AgentStatus,
         msg_header: MessageHeader,
         msg_meta: MessageMeta,
-    ):
+    ) -> None:
+        """A status message in a mailbox: logged, never answered (message contract step 7d).
+
+        Agents ask each other with ``agent.status`` on their own addresses
+        (``custom_agents.live_controls``) and learn who is live from the team's signed records
+        (``custom_agents.team_directory``); nothing sends a status request any more, but a 0.9
+        sender may have left one queued. Answering it would publish a status on the
+        operational subject, which no longer carries them.
         """
-        Handles incoming AgentStatus messages by determining whether it is a request or a reply.
 
-        Args:
-            info_request (AgentStatus): The parsed AgentStatus payload.
-            msg_header (MessageHeader): The MessageHeader of the incoming message.
-            msg_meta (MessageMeta): The MessageMeta of the incoming message.
-        """
-        if info_request.status_type == MessageMetaType.REQUEST:
-            await repair_agent_skill_catalog(
-                self,
-                reason="agent_status_request",
-            )
-            response_key = await resolve_requester_routing_key(
-                incoming_header=msg_header,
-                incoming_meta=msg_meta,
-                agent_id_by_name=self._agent_id_by_name,
-                named_agent_type_queue_map=self.named_agent_type_queue_map,
-                team_id=self.team_id,
-                logger=self._logger,
-                agent_id=self.id,
-                repair_recorder=self._record_runtime_repair_anomaly,
-            )
-            message_env = MessageEnvelope(
-                msg_content=self.get_self_status(info_type=info_request.info_type),
-                msg_header=MessageHeader(
-                    from_agent_id=self.id,
-                    to_routing_path=response_key,
-                ),
-                msg_meta=MessageMeta(
-                    msg_correlation_id=msg_meta.msg_correlation_id,
-                    conversation_id=getattr(msg_meta, "conversation_id", None),
-                ),
-            )
-            if response_key:
-                self._logger.debug(
-                    "[%s] event=agent_status_response_send correlation_id=%s requester_from_agent_id=%s "
-                    "response_key=%s local_agent_id=%s local_team_id=%s local_named_agent_type=%s "
-                    "info_type=%s",
-                    self.id,
-                    getattr(msg_meta, "msg_correlation_id", None),
-                    getattr(msg_header, "from_agent_id", None),
-                    response_key,
-                    self.id,
-                    self.team_id,
-                    self.named_agent_type,
-                    info_request.info_type,
-                )
-                await self._send_operational_message(message_env)
-            else:
-                self._logger.error(
-                    "[%s] Received AgentStatus request with no response routing key. "
-                    "event=agent_status_response_missing_route correlation_id=%s "
-                    "incoming_from_agent_id=%s incoming_response_routing_key=%s "
-                    "incoming_from_agent_name=%s incoming_to_agent_name=%s "
-                    "incoming_to_named_agent_type=%s",
-                    self.id,
-                    getattr(msg_meta, "msg_correlation_id", None),
-                    getattr(msg_header, "from_agent_id", None),
-                    getattr(msg_header, "response_routing_key", None),
-                    getattr(msg_meta, "from_agent_name", None),
-                    getattr(msg_meta, "to_agent_name", None),
-                    getattr(msg_meta, "to_named_agent_type", None),
-                )
-        else:
-            await self.handle_agent_status_message(
-                agent_status=info_request, msg_header=msg_header, msg_meta=msg_meta
-            )
-
-    async def handle_agent_status_message(
-        self,
-        agent_status: AgentStatus,
-        msg_header: MessageHeader,
-        msg_meta: MessageMeta,
-    ):
-        """
-        Processes a status message sent by another agent.
-
-        Args:
-            agent_status (AgentStatus): The received AgentStatus payload.
-            msg_header (MessageHeader): The MessageHeader of the incoming message.
-            msg_meta (MessageMeta): The MessageMeta of the incoming message.
-        """
-        agent_id = _validated_agent_status_id(
-            agent_status,
-            logger=self._logger,
-            receiving_agent_id=self.id,
-            msg_header=msg_header,
-            msg_meta=msg_meta,
-        )
-        if not agent_id:
-            return
-        agent_name = agent_status.name or f"Agent_{agent_id}"
-
-        if agent_id == self.id:
-            self._logger.debug(
-                f"[{self.id}] Received status message about self. Ignoring."
-            )
-            return
-
-        self._logger.debug(
-            f"[{self.id}] Received status update for agent '{agent_name}' ({agent_id})."
-        )
-
-        # Keep the message's raw time for probe evidence. A missing timestamp
-        # must not become a fresh reply when normalized to arrival below.
-        sent_at = parse_utc(agent_status.last_seen_at)
-        agent_status = await reconcile_received_status(self, agent_status)
-        agent_name = agent_status.name or f"Agent_{agent_id}"
-        self.known_agents.agent_map[agent_id] = agent_status
-        self._resolve_pending_agent_status_probes(
-            agent_status, getattr(msg_meta, "msg_correlation_id", None), sent_at
-        )
-        if agent_status.name:
-            self._agent_id_by_name[agent_status.name] = agent_id
-
-        if agent_status.is_exiting:
+        if status.status_type == MessageMetaType.REQUEST:
             self._logger.warning(
-                f"[{self.id}] Agent '{agent_name}' ({agent_id}) is exiting."
+                "[%s] Ignored an agent status request; agents ask each other with agent.status now. "
+                "event=agent_status_request_ignored agent_id=%s from_agent_id=%s correlation_id=%s",
+                self.id, self.id, getattr(msg_header, "from_agent_id", None),
+                getattr(msg_meta, "msg_correlation_id", None),
             )
-            if agent_id in self.known_agents.agent_map:
-                del self.known_agents.agent_map[agent_id]
-            if agent_status.name and agent_status.name in self._agent_id_by_name:
-                del self._agent_id_by_name[agent_status.name]
-            if self.is_team_lead and agent_status.name:
-                pending_direct_subtasks = [
-                    subtask_info
-                    for subtask_info in await self.task_manager.operations_runtime.run(
-                        self.task_manager.get_pending_subtasks,
-                    )
-                    if getattr(subtask_info.meta, "to_agent_name", None)
-                    == agent_status.name
-                ]
-                for subtask_info in pending_direct_subtasks:
-                    parent_task_id = await self.task_manager.operations_runtime.run(
-                        self.task_manager.get_parent_task_id, subtask_info.task.task_id
-                    )
-                    if not parent_task_id:
-                        continue
-                    await self._fail_subtask_and_reconcile_parent(
-                        parent_task_id=parent_task_id,
-                        subtask_info=subtask_info,
-                        error_message=(
-                            f"Delegated subtask failed because assigned agent "
-                            f"{agent_status.name} exited before replying."
-                        ),
-                    )
-
-            # Keep the agent in the persistent store to maintain history,
-            # but log that it has exited.
-            if self._agent_state_store and self.is_team_lead:
-                self._logger.info(
-                    f"[{self.id}] Team lead maintained exited agent '{agent_name}' ({agent_id}) in AgentStateStore."
-                )
-        else:
-            self._logger.debug(
-                f"[{self.id}] Agent '{agent_name}' Status: Type={agent_status.named_agent_type}, "
-                f"Executing={agent_status.is_executing}, HasCapacity={agent_status.has_execution_capacity}"
-            )
-
-        # AgentStatus traffic is operational metadata; keep it out of the LLM loop.
-        return
-
-    def _should_apply_stale_broadcast_filter(
-        self, msg_envelope: MessageEnvelope
-    ) -> bool:
-        # Presence replays the last snapshot after a restart, which can take
-        # longer than the broadcast age limit. Keep the sender's last_seen_at;
-        # agent_liveness decides freshness from that time and process evidence.
-        return not isinstance(getattr(msg_envelope, "msg_content", None), AgentStatus)
+            return
+        self._logger.debug("[%s] Ignored an agent status reply. event=agent_status_reply_ignored from_agent_id=%s",
+                           self.id, getattr(msg_header, "from_agent_id", None))
 
     async def handle_control_message(
         self,
@@ -5721,7 +5367,13 @@ class UniversalAgent(BaseModel):
         msg_meta: MessageMeta,
     ):
         """
-        Handles messages with a ControlInstruction payload.
+        Handles messages with a ControlInstruction payload: only ``stop`` for a task.
+
+        Pausing, resuming or stopping an agent comes only as the team lead's signed
+        ``agent.pause``, ``agent.resume`` and ``agent.exit`` (``custom_agents.live_controls``),
+        which check the sender's session. This message's sender is whatever it says
+        (``from_agent_id``), and any process with the team's NATS login can publish it, so
+        every other instruction is dropped and logged with the sender it claims.
 
         Args:
             control_instruction (ControlInstruction): The extracted ControlInstruction object.
@@ -5731,37 +5383,7 @@ class UniversalAgent(BaseModel):
             instruct_string = control_instruction.instruction.instruction
 
             if control_type == ControlType.CONTROL_MSG:
-                if instruct_string == "exit":
-                    self._logger.info(
-                        f"[{self.id}] Agent received 'exit' control instruction."
-                    )
-                    await self.exit_agent()
-                elif instruct_string == "pause":
-                    self._logger.info(
-                        f"[{self.id}] Agent received 'pause' control instruction."
-                    )
-                    await self.pause()
-                elif instruct_string == "resume":
-                    self._logger.info(
-                        f"[{self.id}] Agent received 'resume' control instruction."
-                    )
-                    await self.resume()
-                elif instruct_string == "debug_context_dump":
-                    settings = dict(control_instruction.runtime_settings or {})
-                    applied = self.apply_runtime_context_dump_settings(
-                        enabled=bool(settings.get("enabled", False)),
-                        mode=str(settings.get("mode") or "on_error"),
-                        source="web_chat_control",
-                    )
-                    await self._send_control_status_response(
-                        msg_header=msg_header,
-                        msg_meta=msg_meta,
-                        status_text=(
-                            "Context debug dump settings applied: "
-                            f"enabled={str(applied['enabled']).lower()} mode={applied['mode']}."
-                        ),
-                    )
-                elif instruct_string == "stop":
+                if instruct_string == "stop":
                     self._logger.info(
                         f"[{self.id}] Agent received 'stop' control instruction: "
                         f"target_task_id={control_instruction.target_task_id or 'unknown'} "
@@ -5846,7 +5468,15 @@ class UniversalAgent(BaseModel):
                     )
                 else:
                     self._logger.warning(
-                        f"[{self.id}] Received unknown CONTROL_MSG instruction: '{instruct_string}'"
+                        "[%s] A control message other than a task stop was dropped: an agent is paused, "
+                        "resumed or stopped only by the team lead's signed request. "
+                        "event=agent_control_instruction_dropped agent_id=%s instruction=%s "
+                        "claimed_from_agent_id=%s claimed_from_agent_name=%s",
+                        self.id,
+                        self.id,
+                        instruct_string,
+                        getattr(msg_header, "from_agent_id", None),
+                        getattr(msg_meta, "from_agent_name", None),
                     )
         except Exception as e:
             self._logger.error(

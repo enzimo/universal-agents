@@ -19,12 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 async def reload_agent_skills(agent: Any) -> None:
-    """Rebuild the current SDK cache and immediately republish skill presence."""
+    """Rebuild the current SDK cache; the team's agents get the skills.changed event."""
 
     await refresh_agent_skill_catalog(
         agent,
         force=True,
-        publish_presence=True,
         reason="local_managed_skill_mutation",
     )
 
@@ -45,7 +44,7 @@ async def reload_runtime_skills_after_change(
         await reload_agent_skills(agent)
     except Exception as exc:
         local_status = "failed"
-        failures.append("the current agent cache or presence update failed")
+        failures.append("the current agent cache update failed")
         logger.exception(
             "Managed skill mutation completed but the local cache refresh failed. "
             "event=managed_skill_cache_reload_failed operation=%s change_id=%s "
@@ -84,8 +83,8 @@ async def reload_runtime_skills_after_change(
         refresh_status["warning"] = (
             "The managed skill change completed, but "
             + " and ".join(failures)
-            + ". The remaining refresh work will be retried by agent invocation "
-            "and presence-heartbeat fingerprint checks without a process restart."
+            + ". Each agent's own catalog check, every 20 seconds and whenever it is asked for its "
+            "status, repeats the refresh without a process restart."
         )
     result["runtime_skill_refresh"] = refresh_status
     return result

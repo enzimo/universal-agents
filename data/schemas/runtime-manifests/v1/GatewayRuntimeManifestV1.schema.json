@@ -105,19 +105,6 @@
         "password": {
           "$ref": "#/$defs/RuntimeSecretReferenceV1"
         },
-        "presence_max_age_seconds": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Presence Max Age Seconds"
-        },
         "process_consumer_inactive_threshold_seconds": {
           "exclusiveMinimum": 0,
           "title": "Process Consumer Inactive Threshold Seconds",

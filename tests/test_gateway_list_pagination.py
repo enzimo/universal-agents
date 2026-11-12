@@ -13,10 +13,10 @@ from tests.test_gateway_phase1 import gateway_signed_commands  # noqa: F401 - fi
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("gateway_signed_commands")
-async def test_memory_creation_through_http_manager_and_real_store(
+async def test_memory_creation_through_http_team_services_and_real_store(
     tmp_path, monkeypatch
 ):
-    from tests.test_gateway_phase1 import _attach_in_process_manager_control
+    from tests.team_services_support import InProcessTeamServices
 
     config = _config(tmp_path)
     config.gateway.users.enabled = True
@@ -29,8 +29,8 @@ async def test_memory_creation_through_http_manager_and_real_store(
         config,
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "gateway.db")),
+        team_services=InProcessTeamServices(config),
     )
-    _attach_in_process_manager_control(gateway, config)
     app = InternalWebsiteInteractiveApp(
         config, gateway=gateway, bridge=SimpleNamespace()
     )
@@ -86,12 +86,16 @@ async def test_memory_creation_through_http_manager_and_real_store(
             ]
 
         # Removing administrator membership changes both the offered action and
-        # the manager's write decision, even if the browser still shows New.
+        # the team services' write decision, even if the browser still shows New.
+        # The team services read roles from the gateway's copy of the people, which
+        # a role change records (GatewayIdentityService.set_user_role); this test
+        # writes the membership directly, so it records the copy the same way.
         gateway.identity_repository.create_team_membership(
             canonical_user_id=config.user.canonical_user_id,
             team_id=config.gateway.team_id,
             role="member",
         )
+        gateway._identity_service._people_directory.record(config.user.canonical_user_id)
         listing = await client.get(
             "/api/web-chat/memories", params={"session_key": session, "scope": "team"}
         )

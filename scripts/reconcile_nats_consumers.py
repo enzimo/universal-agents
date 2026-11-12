@@ -187,10 +187,7 @@ async def reconcile_nats_consumers(
             "subject_prefix=%s stream_names=%s apply=%s",
             team_id,
             mapper.prefix,
-            (
-                mapper.work_stream_name(),
-                mapper.presence_stream_name(),
-            ),
+            (mapper.work_stream_name(),),
             apply,
         )
         reconciler = NatsConsumerReconciler(

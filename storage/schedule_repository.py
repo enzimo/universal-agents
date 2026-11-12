@@ -8,11 +8,13 @@ from storage.schedule_occurrences import ensure_occurrence_schema, has_unfinishe
 from storage.sql_dialect import SQLITE, POSTGRES, SqlDialect
 
 import logging
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import Any, Callable, List, Literal, Mapping, NamedTuple, Optional, Protocol
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, List, Literal, Mapping, NamedTuple, Optional, Protocol
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
 
@@ -26,6 +28,9 @@ from .postgres_connection import (
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
 from .runtime_custody import DeferredMessageClaim, check_deferred_message
+from .operation_outcomes import (
+    CommandOutcome, StoredOutcome, ensure_outcome_table, purge_expired, save_refusal, stored_outcome,
+)
 from .schema_setup import begin_schema_setup
 from .sqlite_connection import connect_sqlite
 from .table_columns import ensure_column
@@ -95,13 +100,16 @@ class RowWrite:
 
     ``columns`` are set on the existing row, or form the new row when
     ``insert``; ``delete`` removes the row; with neither nothing is written.
-    ``result`` is handed back to the caller unchanged.
+    ``result`` is handed back to the caller unchanged. ``listed_digest`` is the
+    schedule's listing digest after the write, for a person's command whose
+    reply names the version it saved (``storage.operation_outcomes``).
     """
 
     columns: Mapping[str, Any] = field(default_factory=dict)
     insert: bool = False
     delete: bool = False
     result: Any = None
+    listed_digest: Optional[str] = None
 
 
 RowDecision = Callable[[Optional[dict[str, Any]]], RowWrite]
@@ -133,6 +141,7 @@ class ScheduleRepository(Protocol):
     def write_locked(
         self, schedule_id: str, decide: RowDecision,
         *, deferred_message: DeferredMessageClaim | None = None, runs_at: datetime | None = None,
+        command_outcome: CommandOutcome | None = None,
     ) -> RowWrite: ...
 
     def add_schedule_row_if_absent(
@@ -308,6 +317,8 @@ class _RelationalScheduleRepository:
                     ON scheduled_messages(owner_canonical_user_id, next_fire_at)
                     """
                 )
+                # People's schedule commands from the team services store their outcomes with the change.
+                ensure_outcome_table(conn)
                 conn.commit()
             self._logger.info(f"{backend_name} schedule repository initialized at {storage_target}")
         except Exception as exc:
@@ -321,6 +332,7 @@ class _RelationalScheduleRepository:
     def write_locked(
         self, schedule_id: str, decide: RowDecision,
         *, deferred_message: DeferredMessageClaim | None = None, runs_at: datetime | None = None,
+        command_outcome: CommandOutcome | None = None,
     ) -> RowWrite:
         """Read one schedule row, decide what to write and write it, in one write transaction.
 
@@ -344,6 +356,10 @@ class _RelationalScheduleRepository:
 
         with self._connect() as conn:
             conn.begin_write()
+            if command_outcome is not None:
+                self._lock_command(conn, command_outcome)
+                # A person's command answered before changes nothing (storage.operation_outcomes).
+                command_outcome.raise_if_stored(conn, self._dialect)
             if deferred_message is not None:
                 check_deferred_message(
                     conn, self._dialect, deferred_message, consume=True, logger=self._logger,
@@ -356,8 +372,43 @@ class _RelationalScheduleRepository:
                 )
             write = decide(row)
             self._apply_write(conn, schedule_id, write, existed=row is not None)
+            if command_outcome is not None and write.result:
+                command_outcome.save(conn, self._dialect, write)
             conn.commit()
         return write
+
+    @contextmanager
+    def _write(self) -> Iterator[Any]:
+        """A write transaction of its own for stored refusals and retention."""
+
+        with self._connect() as conn:
+            conn.begin_write()
+            yield conn
+            conn.commit()
+
+    def stored_command_outcome(self, outcome: CommandOutcome) -> Optional[StoredOutcome]:
+        with self._connect() as conn:
+            return stored_outcome(conn, self._dialect, outcome.team_id, outcome.retry_key)
+
+    def save_command_refusal(self, outcome: CommandOutcome, reply: dict[str, Any]) -> Optional[StoredOutcome]:
+        with self._write() as conn:
+            self._lock_command(conn, outcome)
+            return save_refusal(conn, self._dialect, outcome, reply)
+
+    def purge_command_outcomes(self, now: datetime) -> int:
+        with self._write() as conn:
+            return purge_expired(conn, self._dialect, now)
+
+    def _lock_command(self, conn: Any, outcome: CommandOutcome) -> None:
+        """Serialize a retry key before reading its outcome, including commands naming different rows.
+
+        SQLite already holds its write lock. PostgreSQL's per-schedule lock alone
+        cannot protect the command key when a defective sender repeats it with another body.
+        Take this lock before any schedule lock; refusal writes take it too.
+        """
+        if self._dialect == POSTGRES:
+            key = json.dumps([outcome.team_id, outcome.retry_key], separators=(",", ":"))
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"schedule_command:{key}",))
 
     def _locked_row(self, conn: Any, schedule_id: str) -> Any:
         raise NotImplementedError

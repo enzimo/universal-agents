@@ -42,6 +42,20 @@ ENVIRONMENT_SECRETS_DOCS = "/docs/docker/#secrets-from-the-environment"
 # /auth model (onboarding hands the tested key to the credential store), and
 # the Status page lists a configured endpoint that has none.
 
+# The environment variables should_generate_internal_nats_credentials reads,
+# in its order: a credentials file means an external server; otherwise
+# NATS_SERVERS, then NATS_URL, name the servers ahead of the saved addresses.
+# The team export compares this decision between the instance's environment
+# and its own command's (team_transfer.operator_secrets), so the names live
+# here, beside the rule that reads them.
+ENV_NATS_CREDENTIALS_FILE = "NATS_CREDENTIALS_FILE"
+ENV_NATS_SERVERS = "NATS_SERVERS"
+ENV_NATS_URL = "NATS_URL"
+NATS_DECISION_ENV_NAMES = (ENV_NATS_CREDENTIALS_FILE, ENV_NATS_SERVERS, ENV_NATS_URL)
+# The login that decision is about: generated for a local server, brought by
+# an external one.
+NATS_CREDENTIAL_ENV_NAMES = ("NATS_USER", "NATS_PASSWORD")
+
 # Generated names the environment does not have to hold: the supervisor derives
 # the verification keys from the signing keys; the local message broker makes
 # and stores its own user and password on first start when none are set
@@ -49,7 +63,7 @@ ENVIRONMENT_SECRETS_DOCS = "/docs/docker/#secrets-from-the-environment"
 # Workspace sign-in needs the keyring password (the broker says so when it is
 # missing).
 _NOT_REQUIRED_INTERNAL_NAMES = frozenset(
-    {ENV_VERIFY_KEYS, "NATS_USER", "NATS_PASSWORD", "GOG_KEYRING_PASSWORD"}
+    {ENV_VERIFY_KEYS, *NATS_CREDENTIAL_ENV_NAMES, "GOG_KEYRING_PASSWORD"}
 )
 # Secrets a channel names but does not need to start: the Photon sidecar token
 # is made fresh at each start when unset.
@@ -80,12 +94,15 @@ class SecretRequirement:
 
 
 def should_generate_internal_nats_credentials(config: GatewayInstanceConfig, env: Mapping[str, str]) -> bool:
-    """Local NATS needs a generated user and password; an external one brings its own."""
+    """Local NATS needs a generated user and password; an external one brings its own.
 
-    if env.get("NATS_CREDENTIALS_FILE"):
+    ``env`` is read only for ``NATS_DECISION_ENV_NAMES``.
+    """
+
+    if env.get(ENV_NATS_CREDENTIALS_FILE):
         return False
-    explicit_servers = _split_nats_servers(env.get("NATS_SERVERS"))
-    explicit_url = _split_nats_servers(env.get("NATS_URL"))
+    explicit_servers = _split_nats_servers(env.get(ENV_NATS_SERVERS))
+    explicit_url = _split_nats_servers(env.get(ENV_NATS_URL))
     if explicit_servers or explicit_url:
         endpoints = explicit_servers or explicit_url
     else:
@@ -289,9 +306,9 @@ def ensure_internal_credential_env_file(
         rotate=rotate,
     )
     generated = generate_internal_credentials(request, existing=existing)
-    remove_keys = set(INTERNAL_ENV_KEYS - {"NATS_USER", "NATS_PASSWORD"}) - set(generated)
-    for key in ("NATS_USER", "NATS_PASSWORD"):
-        if existing.get(f"{key}_FILE") or existing.get("NATS_CREDENTIALS_FILE"):
+    remove_keys = set(INTERNAL_ENV_KEYS - set(NATS_CREDENTIAL_ENV_NAMES)) - set(generated)
+    for key in NATS_CREDENTIAL_ENV_NAMES:
+        if existing.get(f"{key}_FILE") or existing.get(ENV_NATS_CREDENTIALS_FILE):
             remove_keys.add(key)
     merge_env_file(env_path, generated, rotate=rotate, remove_keys=remove_keys - set(preserve_env_keys))
     return env_path
@@ -311,6 +328,11 @@ def ensure_instance_sealbox_material(config: GatewayInstanceConfig, *, rotate_to
 
 __all__ = [
     "ENVIRONMENT_SECRETS_DOCS",
+    "ENV_NATS_CREDENTIALS_FILE",
+    "ENV_NATS_SERVERS",
+    "ENV_NATS_URL",
+    "NATS_CREDENTIAL_ENV_NAMES",
+    "NATS_DECISION_ENV_NAMES",
     "SecretRequirement",
     "ensure_instance_sealbox_material",
     "ensure_internal_credential_env_file",

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from custom_agents.pinned_memory_transfer import run_memory_command
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from storage.access_repository import AccessRepository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 
@@ -27,6 +27,23 @@ def new_instance(tmp_path: Path, name: str, team_id: str, memory: dict[str, Any]
     return path, config
 
 
+def zero_nine_instance(tmp_path: Path, name: str, team_id: str) -> Path:
+    """A saved ``instance_config.yaml`` shaped like 0.9's (schema 12), not yet upgraded.
+
+    0.9 onboarding wrote every default out, ``transport.presence_max_age_seconds`` included;
+    the presence stream it sized was removed in message contract step 7d.
+    """
+
+    import yaml
+
+    path, _config = new_instance(tmp_path, name, team_id)
+    saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+    saved["schema_version"] = 12
+    saved["transport"]["presence_max_age_seconds"] = 600.0
+    path.write_text(yaml.safe_dump(saved, sort_keys=False), encoding="utf-8")
+    return path
+
+
 def record_people(config: Any, team_id: str, standing: dict[str, PersonStanding]) -> None:
     """Write the gateway's copy of the team's people, as a started gateway does."""
 
@@ -34,7 +51,7 @@ def record_people(config: Any, team_id: str, standing: dict[str, PersonStanding]
     AccessRepository(config.manager_storage_settings).replace_people(
         team_id,
         [
-            TeamPersonV1(team_id=team_id, person_id=person, standing=value, changed_at_utc=now)
+            TeamPersonV1(person_ref=new_person_ref(), team_id=team_id, person_id=person, standing=value, changed_at_utc=now)
             for person, value in standing.items()
         ],
         at=now,

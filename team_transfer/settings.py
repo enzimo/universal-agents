@@ -33,9 +33,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Iterator
 
-import yaml
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
+from runtime_settings.transport import RETIRED_PRESENCE_SETTING
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     SECTION_UPGRADES,
@@ -92,7 +92,8 @@ class SettingsSection:
     # 6: agent.request_conflict_checks (checks between a person's separate requests) joined it.
     # 7: tool_policy.output_retention_days (how long saved tool outputs are kept) joined it.
     # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
-    schema_version: ClassVar[int] = 8
+    # 9: transport.presence_max_age_seconds left it (the presence stream was removed, message contract step 7d).
+    schema_version: ClassVar[int] = 9
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -100,9 +101,11 @@ class SettingsSection:
     # -- export ----------------------------------------------------------------
 
     def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
-        from assistant_gateway.config import GatewayInstanceConfig
+        from assistant_gateway.config import GatewayInstanceConfig, read_upgraded_instance_config
 
-        saved = _read_yaml(source.layout.instance_config_path)
+        # As this version reads the file: one the launcher has not rewritten since the
+        # code was upgraded still holds settings this version removed.
+        saved = read_upgraded_instance_config(source.layout.instance_config_path)
         baseline = GatewayInstanceConfig.create(
             instance_name=source.instance_name,
             instance_root=str(source.layout.root),
@@ -658,13 +661,6 @@ def planned_config(context: ImportContext) -> "GatewayInstanceConfig":
     return config
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"{path} does not hold a configuration mapping.")
-    return data
-
-
 __all__ = [
     "INSTANCE_ROOT_TOKEN",
     "SettingV1",
@@ -677,7 +673,14 @@ __all__ = [
 # V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
 # and V8 gateway.storage_warnings. Their records keep the same shape and carry
 # only values that differ from defaults, so old choices pass on unchanged and
-# settings absent from an older export use the current defaults.
-SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records
-SECTION_UPGRADES[(SettingsSection.name, 6, SettingsSection.schema_version)] = lambda records: records
-SECTION_UPGRADES[(SettingsSection.name, 7, SettingsSection.schema_version)] = lambda records: records
+# settings absent from an older export use the current defaults. V9 removed
+# transport.presence_max_age_seconds (RETIRED_PRESENCE_SETTING): an older
+# export's value for it is dropped.
+
+
+def _without_retired_settings(records: SectionRecords) -> SectionRecords:
+    return [record for record in records if tuple(record.get("path", ())) != RETIRED_PRESENCE_SETTING]
+
+
+for _source in (5, 6, 7, 8):
+    SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _without_retired_settings

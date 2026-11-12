@@ -73,6 +73,8 @@ PROCESS_ACTIVITY_COLLECTOR = "activity_collector"
 PROCESS_EXECUTION_CONTROLLER = "execution_controller"
 PROCESS_ADAPTER_HOST = "adapter_host"
 PROCESS_CONSUMER_CHECK = "consumer_check"
+PROCESS_INSTALLATION_AUTHORITY = "installation_authority"
+PROCESS_TEAM_SERVICES = "team_services"
 PROCESS_OPENSHELL_GATEWAY = "openshell_gateway"
 # Third-party servers and tools that receive no listed variable.
 PROCESS_NATS = "nats"
@@ -89,6 +91,8 @@ PROCESS_NAMES = frozenset(
         PROCESS_EXECUTION_CONTROLLER,
         PROCESS_ADAPTER_HOST,
         PROCESS_CONSUMER_CHECK,
+        PROCESS_INSTALLATION_AUTHORITY,
+        PROCESS_TEAM_SERVICES,
         PROCESS_OPENSHELL_GATEWAY,
         PROCESS_NATS,
         PROCESS_OPENSHELL_CLI,

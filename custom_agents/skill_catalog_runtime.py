@@ -17,10 +17,7 @@ from custom_agents.sdk.strands.skills import (
     is_agent_skills_plugin,
     list_agent_skill_names,
 )
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
-from custom_messages.enums import RoutingType
 from custom_messages.skill_catalog import ManagedSkillCatalogChangedV1
 
 
@@ -189,23 +186,13 @@ async def _hydrate_skill_plugins(
     return reloaded_plugin_count, available_skill_names
 
 
-async def _publish_refresh_presence(agent: Any, *, publish_presence: bool) -> None:
-    if (
-        publish_presence
-        and getattr(agent, "team_id", None)
-        and getattr(agent, "_runtime_loop", None) is not None
-    ):
-        await agent._publish_presence_status(is_exiting=False)
-
-
 async def refresh_agent_skill_catalog(
     agent: Any,
     *,
     force: bool,
-    publish_presence: bool,
     reason: str,
 ) -> SkillCatalogRefreshResult:
-    """Rescan local sources, hydrate SDK caches, and optionally publish presence."""
+    """Rescan local sources and hydrate SDK caches; the gateway reads the skills with ``agent.status``."""
 
     refresh = getattr(agent, "_refresh_skills_plugins", None)
     if not callable(refresh):
@@ -241,7 +228,6 @@ async def refresh_agent_skill_catalog(
     refresh_state = getattr(agent, "_refresh_self_agent_state", None)
     if callable(refresh_state):
         await refresh_state()
-    await _publish_refresh_presence(agent, publish_presence=publish_presence)
     getattr(agent, "_logger", logger).info(
         "[%s] Reloaded %s AgentSkills plugin(s). "
         "event=managed_skill_catalog_reloaded reason=%s available_skill_count=%s",
@@ -282,60 +268,40 @@ async def publish_managed_skill_catalog_notification(
     *,
     operation: Literal["install", "uninstall"],
 ) -> ManagedSkillCatalogChangedV1:
-    """Publish a live all-agent reload hint after the receipt is durable."""
+    """Tell every agent of the team, after the receipt is durable (the ``skills.changed`` event).
+
+    Every agent process receives it once and hands it to each agent it runs
+    (``custom_agents.agent_host``); an agent that missed it picks the change up when it
+    is next asked for its status or at its next own catalog check.
+    """
+
+    from custom_agents.agent_requests import announce
 
     notification = build_managed_skill_catalog_notification(
         agent,
         result,
         operation=operation,
     )
-    envelope = MessageEnvelope(
-        msg_content=notification,
-        msg_header=MessageHeader(
-            from_agent_id=str(agent.id),
-            to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-            agent_signature="",
-            idempotency_key=notification.notification_id,
-        ),
-        msg_meta=MessageMeta(from_agent_name=str(agent.name)),
-    )
-    await agent._send_operational_message(envelope)
+    await announce(agent, "skills.changed", {
+        "operation": notification.operation,
+        "change_id": notification.change_id,
+        "skill_name": notification.skill_name,
+        "installed_tree_sha256": notification.installed_tree_sha256,
+    })
     return notification
 
 
-async def handle_managed_skill_catalog_notification(
+async def apply_managed_skill_catalog_change(
     agent: Any,
-    *,
     notification: ManagedSkillCatalogChangedV1,
-    msg_header: MessageHeader,
-    msg_meta: MessageMeta,
 ) -> bool:
-    """Verify and apply one authority-free team catalog reload hint."""
+    """Verify and apply one team catalog reload hint (the ``skills.changed`` event, ``custom_agents.live_controls``).
 
-    _ = msg_meta
+    The event's sender was checked to be the team lead's session; the hint carries no
+    authority, so the receipt it names is verified from this instance's storage first.
+    """
+
     agent_logger = getattr(agent, "_logger", logger)
-    if msg_header.from_agent_id != notification.source_agent_id:
-        agent_logger.warning(
-            "Rejected managed skill catalog notification with mismatched sender. "
-            "event=managed_skill_catalog_sender_rejected agent_id=%s source_agent_id=%s "
-            "header_from_agent_id=%s change_id=%s",
-            getattr(agent, "id", "unknown"),
-            notification.source_agent_id,
-            msg_header.from_agent_id,
-            notification.change_id,
-        )
-        return False
-    if notification.source_named_agent_type != TEAM_ARCHITECT_AGENT_TYPE:
-        agent_logger.warning(
-            "Rejected managed skill catalog notification from a non-manager type. "
-            "event=managed_skill_catalog_sender_type_rejected agent_id=%s "
-            "source_named_agent_type=%s change_id=%s",
-            getattr(agent, "id", "unknown"),
-            notification.source_named_agent_type,
-            notification.change_id,
-        )
-        return False
-
     mutation_key = _mutation_key(notification)
     seen = _seen_mutations(agent)
     if mutation_key in seen:
@@ -356,7 +322,6 @@ async def handle_managed_skill_catalog_notification(
         await refresh_agent_skill_catalog(
             agent,
             force=True,
-            publish_presence=True,
             reason=f"managed_{notification.operation}_notification",
         )
     except Exception as exc:
@@ -395,12 +360,11 @@ async def repair_agent_skill_catalog(agent: Any, *, reason: str) -> bool:
         result = await refresh_agent_skill_catalog(
             agent,
             force=False,
-            publish_presence=False,
             reason=reason,
         )
     except Exception as exc:
         getattr(agent, "_logger", logger).warning(
-            "Managed skill catalog repair failed; stale presence will remain visible. "
+            "Managed skill catalog repair failed; the agent keeps its earlier skills until the next check. "
             "event=managed_skill_catalog_repair_failed agent_id=%s reason=%s "
             "error_type=%s error=%s",
             getattr(agent, "id", "unknown"),
@@ -417,7 +381,7 @@ __all__ = [
     "SkillCatalogRefreshResult",
     "SkillCatalogRuntimeState",
     "build_managed_skill_catalog_notification",
-    "handle_managed_skill_catalog_notification",
+    "apply_managed_skill_catalog_change",
     "publish_managed_skill_catalog_notification",
     "refresh_agent_skill_catalog",
     "repair_agent_skill_catalog",

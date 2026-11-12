@@ -58,10 +58,7 @@ from assistant_gateway.translation import ChannelInboundMessage
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.schedule_store import ScheduleStore
-from custom_messages.contracts.control_v1 import ControlInstruction, Instruction
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.enums import ControlType, RoutingType
 from config_loader import load_config
 from live_db_fixtures import provision_db, suite_default_db_path
 from live_storage_utils import (
@@ -72,7 +69,6 @@ from live_storage_utils import (
 )
 from storage.config import StorageSettings
 from storage.postgres_connection import connect_postgres
-import live_nats_client
 from id_generation import new_id, new_id_suffix
 
 
@@ -477,28 +473,6 @@ class ManagedManagerProcess:
             if handle is not None and not handle.closed:
                 handle.flush()
                 handle.close()
-
-
-async def _send_exit_instruction(
-    *,
-    team_id: str,
-    target_agent_id: str,
-) -> None:
-    envelope = MessageEnvelope(
-        msg_content=ControlInstruction(
-            type=ControlType.CONTROL_MSG,
-            instruction=Instruction(instruction="exit"),
-        ),
-        msg_meta=MessageMeta(from_agent_name="live_gateway_scenarios"),
-        msg_header=MessageHeader(
-            from_agent_id="live_gateway_scenarios",
-            to_routing_path=target_agent_id,
-            response_routing_key=RoutingType.NULL_ROUTE.value,
-            agent_signature="",
-        ),
-    )
-    async with live_nats_client.LiveNatsClient(team_id) as client:
-        await client.publish(target_agent_id, envelope, durable=True)
 
 
 async def _wait_for_manager_route(
@@ -1680,10 +1654,14 @@ async def run_test_45(
                     f"Unexpected initial gateway response: {first.text}"
                 )
 
-            await _send_exit_instruction(
-                team_id=team_id, target_agent_id=manager.agent_id
-            )
-            graceful_exit_code = await manager.wait(timeout_seconds=30)
+            # Stopped as the launcher stops it: SIGTERM, which strands_main turns into a graceful
+            # exit. An agent obeys an exit request only from the team lead's signed agent.exit.
+            graceful_exit_code = await manager.stop(timeout_seconds=30)
+            if graceful_exit_code != 0:
+                # stop() kills a manager that has not exited within 30 s (-9): that is no graceful exit.
+                raise AssertionError(
+                    f"The manager did not exit gracefully on SIGTERM: exit code {graceful_exit_code}"
+                )
             await _wait_for_manager_unavailable(gateway, timeout_seconds=30)
 
             unavailable = await gateway.send_user_message(

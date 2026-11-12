@@ -11,10 +11,7 @@ from assistant_gateway.application.runtime_application import (
     GatewayRuntimeApplicationSettings,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
-from custom_messages.contracts.schedule_v1 import ScheduledMessage
-from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType
+from assistant_gateway.application.schedule_management import GatewayScheduleView
 
 
 def _session_record() -> SessionRecord:
@@ -90,21 +87,22 @@ class _Clarification:
 
 class _Schedules:
     @staticmethod
-    async def list(**_kwargs) -> list[ScheduledMessage]:
+    async def list(**_kwargs) -> list[GatewayScheduleView]:
+        # A row as the team services list it (the contract's schedules.list item).
         return [
-            ScheduledMessage(
-                schedule_id="schedule_1",
-                next_fire_at="2026-07-27T00:00:00+00:00",
-                payload=Task(
-                    task_type=MessageMetaType.REQUEST,
-                    problem_statement="Context line\nSend the report",
-                ),
-                payload_meta=MessageMeta(
-                    gateway_context=GatewayContext(
-                        session_key="session_1",
-                        scheduled_job_id="friendly_schedule_id",
-                    )
-                ),
+            GatewayScheduleView.from_wire(
+                {
+                    "schedule_id": "schedule_1",
+                    "management_class": "user",
+                    "timing": {"kind": "interval", "interval_ms": 60_000},
+                    "enabled": True,
+                    "timing_revision": 0,
+                    "seen_version": "a" * 64,
+                    "worker": {"automatic_creation": "not_configured"},
+                    "next_fire_at": "2026-07-27T00:00:00+00:00",
+                    "instruction_preview": "Send the report",
+                },
+                session_key="session_1",
             )
         ]
 
@@ -162,6 +160,7 @@ async def test_runtime_application_normalizes_queries_and_schedule_models() -> N
     jobs = await application.list_scheduled_jobs(session_key="session_1")
 
     assert len(jobs) == 1
-    assert jobs[0].scheduled_job_id == "friendly_schedule_id"
+    assert jobs[0].scheduled_job_id == "schedule_1"
+    assert jobs[0].session_key == "session_1"
     assert jobs[0].next_fire_at == "2026-07-27T00:00:00+00:00"
     assert jobs[0].task_summary == "Send the report"

@@ -147,7 +147,6 @@ class DrainAgent:
     _dispatch_deferred_envelope = UniversalAgent._dispatch_deferred_envelope
     _execution_scope = UniversalAgent._execution_scope
     _requires_execution_slot = UniversalAgent._requires_execution_slot
-    _should_apply_stale_broadcast_filter = UniversalAgent._should_apply_stale_broadcast_filter
 
     def __init__(self, agent_id: str = "agent_worker") -> None:
         self.id = agent_id
@@ -156,7 +155,6 @@ class DrainAgent:
         self.is_team_lead = False
         self.named_agent_type = "WebResearchAgent"
         self.named_agent_type_queue_map: dict[str, str] = {}
-        self.max_broadcast_age_ms = 60_000
         self.nats_max_deliver = 5
         self.paused = False
         self._should_exit = asyncio.Event()

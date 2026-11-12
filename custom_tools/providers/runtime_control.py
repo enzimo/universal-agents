@@ -21,11 +21,14 @@ def plan_runtime_restart(
     """Stage a supervised restart with an immutable runtime-impact snapshot.
 
     Records affected processes, active/queued/waiting task identifiers and
-    states, and team-visible work for an ``all`` restart. It never restarts
-    anything: apply the returned change_id with apply_change; a person
-    approves interrupting the listed tasks (or, with authorization off, agrees
-    in chat). The approval holds while those tasks finish or change state; a
-    new task the restart would interrupt needs a fresh plan and approval.
+    states, and, for an ``all`` restart, what each other agent answers it is
+    running; an agent that does not answer within a few seconds is listed as
+    not answering (its work is unknown). It never restarts anything: apply the
+    returned change_id with apply_change; a person approves interrupting the
+    listed tasks (or, with authorization off, agrees in chat). The approval
+    holds while those tasks finish or change state; a new task the restart
+    would interrupt, or an agent that stops answering, needs a fresh plan and
+    approval.
     """
     agent = get_agent_ref()
     if agent is None:

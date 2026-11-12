@@ -715,7 +715,9 @@ class ScheduleWorkerRepository:
             rows = conn.execute(
                 f"SELECT schedule_id,payload_json,previous_binding_json FROM schedule_worker_bindings{suffix}"
             ).fetchall()
-            for schedule_id, payload, previous in rows:
+            for row in rows:
+                # By position: a PostgreSQL row is a mapping, and unpacking it gives its column names.
+                schedule_id, payload, previous = row[0], row[1], row[2]
                 old_payload = bool(payload) and _is_old_binding(json.loads(payload))
                 old_previous = bool(previous) and _is_old_binding(json.loads(previous))
                 if not (old_payload or old_previous):

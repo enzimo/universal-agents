@@ -25,7 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -101,6 +101,12 @@ from custom_agents.memory_graph_embedding_profile_runtime import (
     build_embedding_profile_spec,
     ensure_memory_graph_embedding_profile,
 )
+from docker.message_hosts import (
+    MessageServices,
+    build_installation_authority_command,
+    build_team_services_command,
+    expected_host,
+)
 from env_secrets import (
     PROCESS_ACTIVITY_COLLECTOR,
     PROCESS_ADAPTER_HOST,
@@ -108,16 +114,28 @@ from env_secrets import (
     PROCESS_CONSUMER_CHECK,
     PROCESS_EXECUTION_CONTROLLER,
     PROCESS_GATEWAY,
+    PROCESS_INSTALLATION_AUTHORITY,
     PROCESS_MANAGER,
     PROCESS_OPENSHELL_CLI,
     PROCESS_OPENSHELL_GATEWAY,
     PROCESS_SEALBOX,
     PROCESS_SECURE_BROKER,
+    PROCESS_TEAM_SERVICES,
     environment_for,
     materialize_secret_file_envs,
     withheld_names,
 )
 from runtime_settings.secret_names import configured_secret_names
+from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
+from assistant_gateway.message_host import GATEWAY_RUNTIME, gateway_profile
+from custom_agents.agent_host import (
+    LEAD_HOST_RUNTIME,
+    agent_host_runtime,
+    lead_host_profile,
+    lead_session_limit,
+    startup_agent_host_profile,
+)
+from installation_authority.expected_hosts import ExpectedHost
 from secure_tool_broker.credential_state import resolve_broker_credentials_dir
 from secure_tool_broker.defaults import resolve_secure_tool_broker_internal_base_url
 from secure_tool_broker.sealbox_runtime import (
@@ -1586,6 +1604,7 @@ def build_agent_command(
     *,
     agent_type: str,
     is_lead: bool,
+    host_runtime: str | None = None,
     python_executable: str | None = None,
 ) -> list[str]:
     command = [
@@ -1601,6 +1620,9 @@ def build_agent_command(
     ]
     if is_lead:
         command.append("--is-lead")
+    if host_runtime:
+        # The process's protocol 1 host (custom_agents.agent_host), listed for the authority below.
+        command.extend(["--host-runtime", host_runtime])
     if config.state.storage.backend == STORAGE_DEFAULTS.backend.value:
         command.extend(
             [
@@ -1609,6 +1631,26 @@ def build_agent_command(
             ]
         )
     return command
+
+
+def agent_process_hosts(
+    config: GatewayInstanceConfig, startup_agent_commands: Iterable[tuple[str, list[str]]]
+) -> dict[str, ExpectedHost]:
+    """The agent processes as hosts the authority approves: the team lead's, which may run any type in
+    the instance's catalog (read by the authority at each join), and each startup agent's."""
+
+    team = config.manager.team_id
+    hosts = {
+        LEAD_HOST_RUNTIME: expected_host(
+            config.layout,
+            lead_host_profile(team, (), lead_session_limit(config.agent.worker_pools)),
+            agent_types_from_catalog=True,
+        )
+    }
+    for label, _command in startup_agent_commands:
+        profile = startup_agent_host_profile(team, agent_host_runtime(label), startup_agent_type(label))
+        hosts[profile.runtime] = expected_host(config.layout, profile)
+    return hosts
 
 
 def build_manager_command(
@@ -1620,6 +1662,7 @@ def build_manager_command(
         config,
         agent_type=config.manager.named_agent_type,
         is_lead=True,
+        host_runtime=LEAD_HOST_RUNTIME,
         python_executable=python_executable,
     )
 
@@ -1724,6 +1767,7 @@ def build_startup_agent_commands(
                         config,
                         agent_type=agent_type,
                         is_lead=False,
+                        host_runtime=agent_host_runtime(label),
                         python_executable=python_executable,
                     ),
                 )
@@ -2212,6 +2256,7 @@ def run_supervised(
     settings_environment: SettingsEnvironment | None = None,
     agent_pass_fds: tuple[int, ...] = (),
     first_start_tasks: tuple[tuple[str, list[str], Mapping[str, str]], ...] = (),
+    message_services: MessageServices | None = None,
 ) -> int:
     """Start and watch every runtime process; restarts reuse the environments given here.
 
@@ -2230,6 +2275,13 @@ def run_supervised(
     before the manager, startup agents or gateway initialize, so their model
     and embedding keys are already stored (``build_finish_import_task``).
     Failure stops startup; the retained handover retries at the next start.
+
+    ``message_services``, the installation authority and the team services, are already
+    running and ready (``docker.message_hosts``). The supervisor watches them with the
+    others and stops them after the others; a restart of everything stops the others, then
+    them, starts them again (the authority, then the team services, each once the one
+    before is ready) and only then the others. If they cannot start again, the runtime
+    stops.
     """
     stop_requested = False
     restart_env = functools.partial(_environment_for_restart, settings_environment)
@@ -2288,6 +2340,8 @@ def run_supervised(
             items.append(("execution controller", execution_controller))
         if adapter_host is not None:
             items.append(("adapter host", adapter_host))
+        if message_services is not None:
+            items.extend(message_services.processes())
         items.extend(external_processes)
         return tuple((name, process) for name, process in items if process is not None)
 
@@ -2318,6 +2372,25 @@ def run_supervised(
             gateway_command, cwd=REPO_ROOT, env=restart_env(gateway_env, "gateway")
         )
 
+    def restart_message_services(services: MessageServices) -> bool:
+        """Stop the authority and the team services and start them again; ``False`` when the runtime stops instead."""
+
+        nonlocal stop_requested, exit_name, exit_code
+        services.stop(terminate_process)
+        LOGGER.info("Restarting the installation authority and the team services after runtime restart request.")
+        try:
+            if services.start(restart_env, lambda: stop_requested):
+                return True
+        except (OSError, RuntimeError, ValueError) as exc:
+            LOGGER.error(
+                "The runtime stops: after the restart request the installation authority or the team "
+                "services could not start again. event=runtime_restart_failed error=%s",
+                exc,
+            )
+            exit_name, exit_code = "message services", 1
+            stop_requested = True
+        return False
+
     def restart_core() -> None:
         nonlocal manager, activity_collector, gateway, execution_controller, adapter_host
         if adapter_host is not None:
@@ -2331,6 +2404,8 @@ def run_supervised(
         terminate_startup_agents()
         if manager is not None:
             terminate_process(manager, "manager")
+        if message_services is not None and not restart_message_services(message_services):
+            return
         LOGGER.info(
             "Restarting manager after runtime restart request: %s",
             " ".join(manager_command),
@@ -2454,6 +2529,8 @@ def run_supervised(
             if stop_requested:
                 break
             process_restart_request()
+            if stop_requested:  # a restart that could not finish, or a stop during it
+                break
             for name, process in current_processes():
                 code = process.poll()
                 if code is not None:
@@ -2483,7 +2560,11 @@ def run_supervised(
         terminate_startup_agents()
         if manager is not None:
             terminate_process(manager, "manager")
-        stop_external_processes(external_processes, before_external_shutdown)
+        try:
+            if message_services is not None:
+                message_services.stop(terminate_process)
+        finally:
+            stop_external_processes(external_processes, before_external_shutdown)
 
     return exit_code if exit_name is not None else 0
 
@@ -2499,6 +2580,74 @@ def stop_external_processes(
             cleanup.callback(terminate_process, process, name)
         if before_external_shutdown is not None:
             before_external_shutdown()
+
+
+MESSAGE_SERVICES_START_ERRORS = (OSError, RuntimeError, ValueError)
+
+
+def start_message_services_before_services(
+    services: MessageServices,
+    *,
+    external_processes: tuple[tuple[str, subprocess.Popen[bytes]], ...],
+    before_external_shutdown: Callable[[], None] | None,
+) -> int | None:
+    """Start the installation authority and the team services; ``None`` when both serve, else the launch's exit code.
+
+    Waiting for them can take minutes (after an unclean stop the team services wait out
+    the stopped instance's lease), so a stop signal (``docker stop``, Ctrl+C) is honoured
+    during the wait: what started is stopped, the team services releasing their lock, and
+    the launch ends with code 0. Like the stream preparation before it, every failure,
+    interruption included, stops what already started: the message services
+    (``MessageServices.stop``; a process that was still starting is stopped by
+    ``docker.message_hosts``) and the managed services. Expected failures end the launch
+    with code 2; unexpected ones keep their traceback. Each process's environment is its
+    own: the NATS login and nothing else (``env_secrets.PROCESS_INSTALLATION_AUTHORITY``,
+    ``PROCESS_TEAM_SERVICES``, renamed secrets included).
+    """
+
+    signals: list[int] = []
+
+    def _stop_signal(signum: int, _frame: object) -> None:
+        signals.append(signum)
+        LOGGER.info("Received signal %s while the message services start; stopping. event=message_services_start_stopped",
+                    signum)
+
+    previous = {signum: signal.signal(signum, _stop_signal) for signum in (signal.SIGTERM, signal.SIGINT)}
+
+    def _stop_started(exc_type: str) -> None:
+        for cleanup, event in (
+            (lambda: services.stop(terminate_process), "message_services_start_stop_failed"),
+            (lambda: stop_external_processes(external_processes, before_external_shutdown),
+             "message_services_start_cleanup_failed"),
+        ):
+            try:
+                cleanup()
+            except BaseException:
+                LOGGER.exception(
+                    "Cleanup failed after the message services' start stopped. event=%s start_error_type=%s",
+                    event,
+                    exc_type,
+                )
+
+    try:
+        if services.start(stop_requested=lambda: bool(signals)):
+            return None
+        _stop_started("stop_signal")
+        LOGGER.info("The launch stopped while the message services started. event=message_services_start_stopped")
+        return 0
+    except BaseException as exc:
+        _stop_started(type(exc).__name__)
+        if not isinstance(exc, MESSAGE_SERVICES_START_ERRORS):
+            raise
+        LOGGER.error(
+            "Headless launch refused: the installation authority or the team services could not start. "
+            "event=message_services_start_failed error=%s",
+            exc,
+        )
+        return 2
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def prepare_message_streams_before_services(
@@ -2537,6 +2686,22 @@ def prepare_message_streams_before_services(
         )
         return False
     return True
+
+
+def message_hosts_to_approve(
+    config: GatewayInstanceConfig, startup_agent_commands: Iterable[tuple[str, list[str]]]
+) -> dict[str, ExpectedHost]:
+    """The hosts the launcher starts, which the authority approves without asking anyone.
+
+    Read from the saved configuration at launch and again at each restart of everything,
+    so a saved change to what a host may ask for, such as the team lead's session limit,
+    takes effect with that restart.
+    """
+
+    return agent_process_hosts(config, startup_agent_commands) | {
+        TEAM_SERVICES_RUNTIME: expected_host(config.layout, team_services_profile(config.manager.team_id)),
+        GATEWAY_RUNTIME: expected_host(config.layout, gateway_profile(config.manager.team_id)),
+    }
 
 
 def main() -> int:
@@ -2767,6 +2932,24 @@ def main() -> int:
         before_external_shutdown=cleanup_managed_openshell,
     ):
         return 2
+    # The message hosts' keys, the installation authority and the team services, each ready
+    # before any later host starts (docker.message_hosts); a restart of everything repeats this.
+    message_services = MessageServices(
+        config.layout,
+        lambda: message_hosts_to_approve(GatewayInstanceConfig.load_for_process(config_path), startup_agent_commands),
+        build_installation_authority_command(config_path, repo_root=REPO_ROOT),
+        environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env, renamed=renamed_secrets),
+        build_team_services_command(config_path, repo_root=REPO_ROOT),
+        environment_for(PROCESS_TEAM_SERVICES, inherited_env, renamed=renamed_secrets),
+        cwd=REPO_ROOT,
+    )
+    stopped_or_refused = start_message_services_before_services(
+        message_services,
+        external_processes=external_processes,
+        before_external_shutdown=cleanup_managed_openshell,
+    )
+    if stopped_or_refused is not None:
+        return stopped_or_refused
 
     return run_supervised(
         manager_command=manager_command,
@@ -2789,6 +2972,7 @@ def main() -> int:
         settings_environment=settings_environment,
         agent_pass_fds=process_run.pass_fds(),
         first_start_tasks=(finish_import,) if finish_import else (),
+        message_services=message_services,
     )
 
 

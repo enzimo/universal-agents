@@ -70,7 +70,6 @@ def make_host(sdk: Agent) -> Host:
         task_manager=SimpleNamespace(operations_runtime=TaskOperationRuntime(), lane_of=lambda _task_id: MAIN_LANE),
         _logger=LOGGER,
         _refresh_self_agent_state=AsyncMock(),
-        _publish_presence_status=AsyncMock(),
         _strands_agent=sdk,
     )
 

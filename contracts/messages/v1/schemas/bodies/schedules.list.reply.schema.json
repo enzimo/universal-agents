@@ -242,6 +242,20 @@
                     },
                     "required": [],
                     "additionalProperties": false
+                  },
+                  "invalid_time_fields": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "next_fire_at",
+                        "paused_until",
+                        "expires_at_utc"
+                      ]
+                    },
+                    "description": "Saved optional times omitted because they cannot be decoded. An invalid pause remains resumable."
                   }
                 },
                 "required": [
@@ -502,6 +516,20 @@
                     },
                     "required": [],
                     "additionalProperties": false
+                  },
+                  "invalid_time_fields": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "next_fire_at",
+                        "paused_until",
+                        "expires_at_utc"
+                      ]
+                    },
+                    "description": "Saved optional times omitted because they cannot be decoded. An invalid pause remains resumable."
                   }
                 },
                 "required": [

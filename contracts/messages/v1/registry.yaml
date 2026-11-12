@@ -227,14 +227,15 @@ state_records:
     ttl_seconds: 30
     write_rule: written by the host itself every 10 seconds, expiring within ttl_seconds (30 seconds), so a host that stops is reported unavailable within about 30 seconds; a host writes only its own record, names the certificate it signs with and allows at most that certificate's sessions
   agent:
-    description: An agent's state, written by the host it is placed on when the state changes.
+    description: An agent's state, written on change and refreshed by the host it is placed on.
     bucket: UA1_AGENTS
     key: "<team>.<agent>"
     signer: host
     signer_roles: [lead_host, worker_host]
     writers: [lead_host, worker_host]
     body: state/agent.schema.json
-    write_rule: written on change, at most once per 2 seconds; readers accept it only from the placement's host
+    ttl_seconds: 180
+    write_rule: written on change, at most once per 2 seconds, and refreshed every 60 seconds with current trust; expires within 180 seconds so abandoned or unverifiable records do not accumulate; exiting is written immediately before session closure and conditional removal; readers accept it only from the placement's host with its current session and matching type
   placement:
     description: Which host runs an agent; its signed sequence is the fencing token.
     bucket: UA1_PLACEMENT
@@ -287,13 +288,13 @@ kinds:
     rendering: none
 
   agent.pause:
-    description: Pause one agent at its next safe point; it keeps its queued work.
+    description: Pause one agent at its next safe point; it keeps its queued work. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/agent.pause.schema.json
     reply:
       body: bodies/agent.pause.reply.schema.json
-      errors: [agent_exiting]
+      errors: [agent_exiting, not_allowed]
     senders: [lead_host, team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
@@ -2172,7 +2173,7 @@ kinds:
     body: bodies/debug.dump.schema.json
     reply:
       body: bodies/debug.dump.reply.schema.json
-      errors: [not_allowed]
+      errors: [not_allowed, runtime_error]
     senders: [gateway, team_services]
     senders_by_address: {svc.team: [gateway], "ctl.agent.{agent}": [team_services]}
     receivers: [team_services, lead_host, worker_host]
@@ -2680,13 +2681,13 @@ kinds:
     covered_change: {record_kind: staged_change, seen_version: required}
 
   agent.resume:
-    description: Resume a paused agent.
+    description: Resume a paused agent. Only the team lead's session or the team services may ask, and never for the asking session's own agent; anyone else is answered not_allowed.
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/agent.resume.schema.json
     reply:
       body: bodies/agent.resume.reply.schema.json
-      errors: [agent_exiting]
+      errors: [agent_exiting, not_allowed]
     senders: [lead_host, team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
@@ -2700,13 +2701,13 @@ kinds:
     rendering: none
 
   agent.exit:
-    description: Stop an agent after its current step.
+    description: Stop an agent after its current step. Only the team lead's session may ask, and never for its own agent; anyone else is answered not_allowed.
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/agent.exit.schema.json
     reply:
       body: bodies/agent.exit.reply.schema.json
-      errors: []
+      errors: [not_allowed]
     senders: [lead_host]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
@@ -2740,14 +2741,14 @@ kinds:
     rendering: none
 
   task.probe:
-    description: Whether the holder still has a task, asked by the watchdog.
+    description: Whether the holder still has a task, asked by the watchdog of the agent that delegated it (any agent may delegate, so worker hosts send it too).
     class: request_reply
     address: ctl.agent.{agent}
     body: bodies/task.probe.schema.json
     reply:
       body: bodies/task.probe.reply.schema.json
       errors: []
-    senders: [lead_host, team_services]
+    senders: [lead_host, worker_host, team_services]
     receivers: [lead_host, worker_host]
     expiry_seconds: 30
     authority: none

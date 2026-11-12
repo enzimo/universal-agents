@@ -47,6 +47,7 @@ from assistant_gateway.application.gateway_application import (
     GatewayDeliveryEvent,
 )
 from assistant_gateway.gateway import UserGateway
+from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
 from assistant_gateway.application.interactive_commands import parse_reply_command
 from assistant_gateway.interactive_apps import InteractiveAppManager
 from assistant_gateway.interactive_apps.builtin_registry import (
@@ -960,6 +961,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--env", default=None, help="Optional .env file to load before connecting"
     )
 
+    run_authority = subparsers.add_parser(
+        "run-installation-authority",
+        help="Run the installation authority, which signs the message hosts' certificates",
+    )
+    run_authority.add_argument(
+        "--config", required=False, default=None, help="Path to instance_config.yaml"
+    )
+    run_authority.add_argument(
+        "--env", default=None, help="Optional .env file to load before connecting"
+    )
+
+    run_team_services = subparsers.add_parser(
+        "run-team-services",
+        help="Run the team services, which place agents and sign their sessions",
+    )
+    run_team_services.add_argument(
+        "--config", required=False, default=None, help="Path to instance_config.yaml"
+    )
+    run_team_services.add_argument(
+        "--env", default=None, help="Optional .env file to load before connecting"
+    )
+
     run_broker = subparsers.add_parser(
         "run-secure-tool-broker", help="Run the credential-owning secure CLI broker"
     )
@@ -985,7 +1008,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run_app = subparsers.add_parser(
-        "run-app", help="Run one configured interactive app against the live gateway"
+        "run-app",
+        help="Run the gateway service with only one configured interactive app, in place of run-gateway",
     )
     run_app.add_argument(
         "--config", required=False, default=None, help="Path to instance_config.yaml"
@@ -3841,7 +3865,13 @@ async def _run_gateway_services(
     async def output_sink(text: str) -> None:
         print(f"\n{text}\n")
 
-    gateway = UserGateway(config, output_sink=output_sink)
+    # The gateway service is the one process that runs the gateway's protocol 1 host
+    # (assistant_gateway.message_host); command-line runs open gateways without one.
+    gateway = UserGateway(
+        config,
+        output_sink=output_sink,
+        manager_runtime=NatsGatewayManagerRuntime.for_gateway_service(config),
+    )
     app_manager = InteractiveAppManager(
         config,
         gateway.application,
@@ -3948,6 +3978,20 @@ async def _run_activity_collector_service(
 ) -> None:
     config = _load_gateway_instance_config(config_path, env_path=env_path)
     await run_activity_collector(build_collector_runtime_settings(config))
+
+
+async def _run_installation_authority_service(
+    config_path: str, *, env_path: str | None = None
+) -> None:
+    from installation_authority.process import run_installation_authority
+
+    await run_installation_authority(_load_gateway_instance_config(config_path, env_path=env_path))
+
+
+async def _run_team_services_service(config_path: str, *, env_path: str | None = None) -> None:
+    from team_services.process import run_team_services
+
+    await run_team_services(_load_gateway_instance_config(config_path, env_path=env_path))
 
 
 async def _run_secure_tool_broker_service(
@@ -5378,6 +5422,22 @@ def main() -> None:
     if args.command == "run-activity-collector":
         asyncio.run(
             _run_activity_collector_service(
+                _ensure_instance_config_ready(args.config),
+                env_path=args.env,
+            )
+        )
+        return
+    if args.command == "run-installation-authority":
+        asyncio.run(
+            _run_installation_authority_service(
+                _ensure_instance_config_ready(args.config),
+                env_path=args.env,
+            )
+        )
+        return
+    if args.command == "run-team-services":
+        asyncio.run(
+            _run_team_services_service(
                 _ensure_instance_config_ready(args.config),
                 env_path=args.env,
             )

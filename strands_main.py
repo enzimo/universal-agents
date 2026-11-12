@@ -57,6 +57,8 @@ from config_loader import (
     set_config,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from custom_agents.agent_host import process_host_for
+from custom_agents.agent_requests import configure_process_host
 from access_control.caller_tokens import CALLER_MANAGER, agent_caller_label, with_own_caller_token
 from runtime_settings.access_cutover import obsolete_binding_data, obsolete_binding_message
 from runtime_settings.legacy_layout import legacy_layout_message, legacy_layout_moves
@@ -596,6 +598,14 @@ def build_parser() -> argparse.ArgumentParser:
         help='Whether this agent is the team leader'
     )
     parser.add_argument(
+        '--host-runtime',
+        type=str,
+        default=None,
+        help=("This process's protocol 1 host id (the launcher sets it). Without it the process runs no host, so "
+              "its agents hold no session: other agents and the gateway do not see them, and a run with several "
+              "agents needs the launcher"),
+    )
+    parser.add_argument(
         '--model-provider',
         type=str,
         default=None,
@@ -887,6 +897,16 @@ def run_with_args(args: argparse.Namespace) -> None:
         logger.error("Agent start refused. %s", obsolete_binding_message(obsolete_bindings))
         sys.exit(2)
     skills_dir = str(layout.skills_dir)
+    if args.host_runtime:
+        configure_process_host(
+            process_host_for(args.host_runtime, layout, team_id, is_lead=args.is_lead, agent_type=args.agent_type,
+                             worker_pools=cfg.get('agent.worker_pools') or {})
+        )
+    else:
+        configure_process_host(None)
+        logger.warning("This manual agent has no message host. Its Tasks controls and live context dump setting "
+                       "are unavailable. Start the team through the launcher for those controls. "
+                       "event=agent_host_not_prepared agent_type=%s", args.agent_type)
     task_history_db_path = resolve_task_history_db_path(
         args.task_history_db_path or storage_sqlite_path or agent_runtime_settings['task_history_db_path'],
         instance_root=instance_root,
@@ -924,7 +944,6 @@ def run_with_args(args: argparse.Namespace) -> None:
                 'max_deliver': agent_runtime_settings.get('nats_max_deliver'),
                 'duplicate_window_seconds': agent_runtime_settings.get('nats_duplicate_window_seconds'),
                 'work_max_age_seconds': agent_runtime_settings.get('nats_work_max_age_seconds'),
-                'presence_max_age_seconds': agent_runtime_settings.get('nats_presence_max_age_seconds'),
                 'process_consumer_inactive_threshold_seconds': agent_runtime_settings.get(
                     'nats_process_consumer_inactive_threshold_seconds'
                 ),

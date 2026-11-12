@@ -18,7 +18,7 @@ from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents import scheduled_runtime
 from custom_agents.scheduled_runtime import enqueue_heartbeat_items
 from custom_agents.task_context_runtime import scheduler_signer
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
@@ -190,6 +190,7 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
     owner_id = "usr_admin" if owner_key == "admin" else f"usr_{owner_key}"
     roles = ("admin",) if owner_key == "admin" else ("member",)
     AccessRepository(manager.storage_settings).record_person(TeamPersonV1(
+        person_ref=new_person_ref(),
         team_id="team_1", person_id=owner_id, standing=PersonStanding.ACTIVE,
         roles=roles, changed_at_utc=datetime.now(timezone.utc),
     ))

@@ -1,0 +1,262 @@
+"""Signed records in the key-value buckets (README "State records", registry ``state_records``).
+
+A host writes its own records (its liveness, its agents' states; the team services
+write placements, sessions, the team view, the block list and their lock), each a
+signed state document. Readers verify every record they read: trust records
+(certificates, revocations, sessions, agreements) go into the host's trust store,
+state reports are checked with ``TrustStore.verify``. Where a record is stored adds no
+trust, so nothing read from a bucket is used before that check.
+
+Writers take each sequence above the highest in the bucket (a placement takes the next
+one, with compare-and-set on the bucket revision); records whose readers keep the
+highest sequence (the block list, revocations) also take at least the record's issue
+time in milliseconds, so a writer restored from a backup never writes a lower one
+(registry write rules). A record read under another key than its own is refused: a
+copy of another agent's record is not this one's.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
+
+from nats.js.errors import BadRequestError, KeyNotFoundError, KeyWrongLastSequenceError, NoKeysError, NotFoundError
+
+from custom_messages.wire.encoding import format_timestamp
+from custom_messages.wire.buckets import bucket_name
+from custom_messages.wire.kinds import PROTOCOL, STATE_RECORDS
+from custom_messages.wire.refusals import FrameRefused
+from custom_messages.wire.trust import VerifiedRecord, sign_state
+from custom_transport.protocol1.identity import HostIdentity
+from custom_transport.protocol1.trust_state import PersistentTrustStore
+from custom_transport.send_barrier import before_send
+
+# JetStream's error code for a write that names another last revision of the key.
+WRONG_LAST_SEQUENCE = 10071
+
+
+def wrong_revision(error: BaseException) -> bool:
+    """Whether a key-value write failed because the key is no longer at the revision it named.
+
+    nats-py raises ``KeyWrongLastSequenceError`` for a refused create or update, but reports
+    a refused delete as a ``BadRequestError`` with JetStream's wrong-last-sequence code.
+    """
+
+    return isinstance(error, KeyWrongLastSequenceError) or (
+        isinstance(error, BadRequestError) and error.err_code == WRONG_LAST_SEQUENCE)
+
+
+def rising_sequence(previous: int, issued_at: datetime) -> int:
+    """The next sequence of a record whose readers keep the highest: above ``previous`` and at least
+    the issue time in milliseconds, so a writer that lost the record it wrote (a deleted key, a
+    restore from a backup) still never writes a lower one (README "Sequences never go back")."""
+
+    return max(previous + 1, int(issued_at.timestamp() * 1000))
+
+
+@dataclass(frozen=True)
+class StoredRecord:
+    """A record as read from its bucket: the key-value revision and the verified record."""
+
+    revision: int
+    record: VerifiedRecord
+
+
+def require_record_key(verified: VerifiedRecord, key: str) -> None:
+    """A valid signature authenticates the document, never the bucket key holding it."""
+
+    if verified.document.key != key:
+        raise FrameRefused("invalid_body", f"a record of {verified.document.key} is stored under {key}", at="/key")
+
+
+class StateRecords:
+    """One host's reads and writes of signed records in the key-value buckets."""
+
+    @classmethod
+    def on_connection(cls, nc: Any, identity: Callable[[], HostIdentity], trust: PersistentTrustStore, *,
+                      fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> "StateRecords":
+        """Records on a host's NATS connection; its JetStream handle stays in this module (NATS_CLIENT_MODULES)."""
+
+        return cls(nc.jetstream(), identity, trust, fetch_trust=fetch_trust)
+
+    def __init__(self, js: Any, identity: Callable[[], HostIdentity], trust: PersistentTrustStore, *,
+                 fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> None:
+        self._js = js
+        # The host's identity as it is now: a renewal or a new join changes its certificate,
+        # and every record is signed with the one its frames are signed with.
+        self._identity = identity
+        self._trust = trust
+        # Reads a writer's certificate this host does not hold yet (``MessageHost.fetch_trust``).
+        self._fetch_trust = fetch_trust
+
+    async def _bucket(self, record: str, key: Optional[str] = None, *, team: Optional[str] = None) -> Any:
+        """Bind the contract's bucket; a record key starts with its team for per-team buckets.
+
+        Operations without a record key must name the team explicitly. A host may
+        serve several teams, so its certificate cannot choose one for the caller.
+        """
+
+        name = bucket_name(STATE_RECORDS[record].bucket, team if team is not None else key.split(".", 1)[0] if key else None)
+        return await self._js.key_value(name)
+
+    def signed(self, record: str, key: str, body: Mapping[str, Any], *, sequence: int, issued_at: datetime,
+               expires_at: Optional[datetime] = None) -> dict[str, Any]:
+        """A state document of ``record`` under ``key``, signed by this host's key."""
+
+        spec = STATE_RECORDS[record]
+        spec.body_model.validate_python(dict(body))
+        identity = self._identity()
+        certificate = identity.certificate
+        document: dict[str, Any] = {
+            "record": record,
+            "protocol": PROTOCOL,
+            "key": key,
+            "writer": {"type": "host", "installation": certificate.installation, "runtime": certificate.runtime,
+                       "membership_epoch": certificate.membership_epoch, "key_id": identity.keys.key_id},
+            "sequence": sequence,
+            "issued_at": format_timestamp(issued_at),
+        }
+        if expires_at is not None:
+            document["expires_at"] = format_timestamp(expires_at)
+        document["body"] = dict(body)
+        return sign_state(document, identity.keys.application_key)
+
+    async def put(self, record: str, key: str, document: Mapping[str, Any], *,
+                  last_revision: Optional[int] = None) -> int:
+        """Store a signed document; with ``last_revision``, only if the key is still at that revision (0: absent).
+
+        Returns the new revision. A compare-and-set that lost raises the client's
+        ``KeyWrongLastSequenceError``, so a placement writer never overwrites another.
+        """
+
+        bucket = await self._bucket(record, key)
+        data = json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        await before_send()
+        if last_revision is None:
+            return int(await bucket.put(key, data))
+        if last_revision == 0:
+            return int(await bucket.create(key, data))
+        return int(await bucket.update(key, data, last=last_revision))
+
+    async def read_report(self, record: str, key: str, *, now: datetime,
+                          held: Optional[tuple[int, str]] = None) -> Optional[StoredRecord]:
+        """Read and verify one state report (host, agent, placement, team view, block list); ``None`` when absent.
+
+        A record stored under another key than its own is refused (``invalid_body`` at
+        ``/key``): a copy of another agent's record is not this one's.
+        """
+
+        entry = await self._get(record, key)
+        if entry is None:
+            return None
+        try:
+            verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        except FrameRefused as refused:
+            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
+                raise
+            verified = self._trust.store.verify(entry.value, record=record, now=now, held=held)
+        require_record_key(verified, key)
+        return StoredRecord(int(entry.revision), verified)
+
+    async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
+        """Read one trust record (certificate, revocations, session, agreement) into the trust store.
+
+        Returns whether the store took it as new; a missing key takes nothing. A record
+        whose signer's certificate this host does not hold yet, such as a session the team
+        services signed before they renewed, is taken after reading that certificate.
+        """
+
+        entry = await self._get(record, key)
+        if entry is None:
+            return False
+        # Check before mutating the trust store. A copied session is still authentic,
+        # but it cannot supply the session requested under a different bucket key.
+        try:
+            document = json.loads(entry.value)
+        except (ValueError, TypeError) as error:
+            raise FrameRefused("malformed", at="/key") from error
+        if not isinstance(document, dict) or document.get("key") != key:
+            raise FrameRefused("invalid_body", "a trust record is stored under another key", at="/key")
+        try:
+            return self._trust.add(entry.value, now=now)
+        except FrameRefused as refused:
+            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
+                raise
+            return self._trust.add(entry.value, now=now)
+
+    def writer(self) -> HostIdentity:
+        """The identity this host signs records with now."""
+
+        return self._identity()
+
+    async def raw(self, record: str, key: str) -> Optional[tuple[int, bytes]]:
+        """The key's revision and stored bytes, unverified, for a writer's own upkeep; ``None`` when it holds none."""
+
+        entry = await self._get(record, key)
+        return None if entry is None else (int(entry.revision), entry.value)
+
+    async def revision(self, record: str, key: str) -> int:
+        """The key's current revision whatever it holds, so a compare-and-set can replace it; 0 when absent or deleted."""
+
+        bucket = await self._bucket(record, key)
+        try:
+            entry = await bucket.get(key)
+        except KeyNotFoundError:
+            return 0
+        return int(entry.revision)
+
+    async def delete(self, record: str, key: str, *, last_revision: int) -> bool:
+        """Delete the key only while it is at ``last_revision``; ``False`` when another write came first."""
+
+        bucket = await self._bucket(record, key)
+        await before_send()
+        try:
+            await bucket.delete(key, last=last_revision)
+        except BadRequestError as error:
+            if not wrong_revision(error):
+                raise
+            return False
+        return True
+
+    async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
+        """The keys of ``record``'s bucket that start with ``prefix``; none when the bucket is empty."""
+
+        bucket = await self._bucket(record, team=team)
+        try:
+            return [key for key in await bucket.keys() if key.startswith(prefix)]
+        except (NoKeysError, NotFoundError):
+            return []
+
+    async def _get(self, record: str, key: str) -> Any:
+        bucket = await self._bucket(record, key)
+        try:
+            entry = await bucket.get(key)
+        except KeyNotFoundError:
+            return None
+        return entry if entry.value else None
+
+    async def watch(self, record: str, keys: str = ">", *,
+                    team: Optional[str] = None,
+                    caught_up: Optional[asyncio.Event] = None) -> AsyncIterator[tuple[str, Optional[bytes]]]:
+        """Each change under ``keys`` as (key, raw record), with ``None`` when the key was deleted or purged.
+
+        The caller verifies each record it uses, as ``read_report`` does, keeping the
+        sequence it holds per key. ``caught_up`` is set once the bucket's current values
+        have all been given. A record that expires by its bucket's age limit (host
+        liveness) gives no change: readers judge those by the record's own expiry.
+        """
+
+        bucket = await self._bucket(record, team=team)
+        watcher = await bucket.watch(keys)
+        try:
+            async for entry in watcher:
+                if entry is None:
+                    if caught_up is not None:
+                        caught_up.set()  # the end of the initial values
+                    continue
+                yield entry.key, (entry.value or None)
+        finally:
+            await watcher.stop()

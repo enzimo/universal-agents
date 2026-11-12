@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from assistant_gateway.application.ports import GatewayManagerEnvelopeHandler
 from assistant_gateway.config import GatewayInstanceConfig
@@ -17,6 +17,9 @@ from custom_transport.base import (
 )
 from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
+
+if TYPE_CHECKING:
+    from assistant_gateway.message_host import GatewayMessageHost
 
 
 @dataclass(frozen=True)
@@ -36,7 +39,6 @@ class NatsGatewayManagerRuntimeSettings:
     max_deliver: int
     duplicate_window_seconds: float
     work_max_age_seconds: float | None
-    presence_max_age_seconds: float | None
     process_consumer_inactive_threshold_seconds: float
     user: str | None
     password: str | None
@@ -66,7 +68,6 @@ class NatsGatewayManagerRuntimeSettings:
             max_deliver=transport.max_deliver,
             duplicate_window_seconds=transport.duplicate_window_seconds,
             work_max_age_seconds=transport.work_max_age_seconds,
-            presence_max_age_seconds=transport.presence_max_age_seconds,
             process_consumer_inactive_threshold_seconds=(
                 transport.process_consumer_inactive_threshold_seconds
             ),
@@ -84,8 +85,12 @@ class NatsGatewayManagerRuntime:
         *,
         settings: NatsGatewayManagerRuntimeSettings,
         adapter: NatsTransportAdapter | None = None,
+        message_host: "GatewayMessageHost | None" = None,
     ) -> None:
         self.settings = settings
+        # The gateway service's protocol 1 host; None in every other process that opens a
+        # gateway (assistant_gateway.message_host).
+        self.message_host = message_host
         self._mapper = NatsSubjectMapper(
             team_id=settings.team_id,
             subject_prefix=settings.subject_prefix,
@@ -103,13 +108,15 @@ class NatsGatewayManagerRuntime:
                 max_deliver=settings.max_deliver,
                 duplicate_window_seconds=settings.duplicate_window_seconds,
                 work_max_age_seconds=settings.work_max_age_seconds,
-                presence_max_age_seconds=settings.presence_max_age_seconds,
                 process_consumer_inactive_threshold_seconds=(
                     settings.process_consumer_inactive_threshold_seconds
                 ),
                 user=settings.user,
                 password=settings.password,
                 credentials_file=settings.credentials_file,
+                # The host's requests take their replies on its own inbox, which its
+                # credential may be limited to (custom_transport.protocol1.live).
+                reply_inbox_runtime=message_host.runtime if message_host is not None else None,
             ),
             mapper=self._mapper,
         )
@@ -121,6 +128,7 @@ class NatsGatewayManagerRuntime:
         config: GatewayInstanceConfig,
         *,
         adapter: NatsTransportAdapter | None = None,
+        message_host: "GatewayMessageHost | None" = None,
     ) -> "NatsGatewayManagerRuntime":
         """Build the runtime from the composition root's resolved config."""
 
@@ -129,6 +137,21 @@ class NatsGatewayManagerRuntime:
                 config
             ),
             adapter=adapter,
+            message_host=message_host,
+        )
+
+    @classmethod
+    def for_gateway_service(cls, config: GatewayInstanceConfig) -> "NatsGatewayManagerRuntime":
+        """The gateway service's runtime, the one process that runs the gateway's protocol 1 host.
+
+        Command-line runs build theirs with ``from_gateway_config`` and run no host
+        (assistant_gateway.message_host); nor do they load its code, imported here.
+        """
+
+        from assistant_gateway.message_host import prepared_gateway_host
+
+        return cls.from_gateway_config(
+            config, message_host=prepared_gateway_host(config.layout, config.manager.team_id)
         )
 
     @property
@@ -160,7 +183,6 @@ class NatsGatewayManagerRuntime:
         *,
         on_response: GatewayManagerEnvelopeHandler,
         on_operational: GatewayManagerEnvelopeHandler,
-        on_presence: GatewayManagerEnvelopeHandler,
     ) -> None:
         if self._connected:
             return
@@ -183,25 +205,22 @@ class NatsGatewayManagerRuntime:
                 logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
                 delivery=SubscriptionDelivery.CORE,
             )
-            await self._adapter.subscribe_subject(
-                name=f"{self.settings.instance_name}:presence",
-                subject=f"{self._mapper.prefix}.presence.*",
-                handler=self._delivery_handler(on_presence),
-                durable_name=self._mapper.durable_name(
-                    f"gateway_presence_{response_route}"
-                ),
-                logical_route=RoutingType.ALL_AGENTS_ROUTE.value,
-                consumer_role="gateway_presence",
-                deliver_last_per_subject=True,
-            )
         except Exception:
             await self._adapter.close()
             raise
         self._connected = True
+        if self.message_host is not None:
+            # Joins in the background: the gateway's other work never waits for it.
+            self.message_host.start(self._adapter.nats_connection)
 
     async def close(self) -> None:
-        await self._adapter.close()
-        self._connected = False
+        try:
+            if self.message_host is not None:
+                # Before the connection it runs on; it writes its last host record.
+                await self.message_host.close()
+        finally:
+            await self._adapter.close()
+            self._connected = False
 
     def stopped_receivers(self) -> tuple[Any, ...]:
         return self._adapter.stopped_receivers()
@@ -258,18 +277,6 @@ class NatsGatewayManagerRuntime:
                     or envelope.msg_header.message_id
                 ),
             ),
-        )
-
-    async def manager_has_live_consumer(
-        self,
-        manager_id: str,
-    ) -> bool | None:
-        # The manager's direct mailbox is a pull consumer: missing means the
-        # manager is gone, an open request means it is listening, otherwise
-        # unknown (it may be handling a message) and presence decides.
-        return await self._adapter.consumer_is_listening(
-            stream_name=self._mapper.work_stream_name(),
-            durable_name=self._mapper.durable_name(f"agent_{manager_id}"),
         )
 
     async def put_object(
