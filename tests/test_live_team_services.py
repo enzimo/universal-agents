@@ -906,15 +906,17 @@ async def test_a_team_has_one_lead_session_even_after_services_restart(broker: s
         try:
             assert (await open_session(lead, "lead-3", "TeamArchitect"))["outcome"] == "not_allowed"
             assert (await renew_session(lead, session))["outcome"] == "ok"
-            from custom_transport.protocol1.live import RequestRefused
-
             bucket = await lead.nc.jetstream().key_value("UA1_CERTS")
             key = f"session.{lead.identity.installation}.{TEAM}.{session}"
             saved = await bucket.get(key)
             await bucket.put(key, b"{}")
             try:
-                with pytest.raises(RequestRefused):
-                    await open_session(other, "lead-with-unreadable-records", "TeamArchitect")
+                # An unverified session record may be a lead's: a lead's open is answered, naming
+                # the key, and refused; a worker's open does not depend on it.
+                refused = await open_session(other, "lead-with-unreadable-records", "TeamArchitect")
+                assert refused["outcome"] == "runtime_error"
+                assert f"{key} (invalid_body)" in refused["message"]
+                assert (await open_session(other, "researcher-beside-bad-record"))["outcome"] == "ok"
             finally:
                 await bucket.put(key, saved.value)
             assert (await close_session(lead, session))["outcome"] == "ok"

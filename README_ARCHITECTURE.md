@@ -5192,7 +5192,10 @@ several agents at once under one deadline and keeps each answer or error apart.
   signed retained records under the session mutation lock, including after a service
   restart. Reopening the same lead ends its previous sessions before signing a replacement.
   A restarting lead host closes its earlier sessions before asking for its new lead's session;
-  an unavailable host alone never authorizes a second lead.
+  an unavailable host alone never authorizes a second lead. Nor does a stored session record
+  that does not verify: a lead's open is answered `runtime_error` naming its key
+  (`event=lead_session_record_unreadable`) until it verifies or an operator deletes it
+  (user docs, Docker, "Message host trust"); other agents still open.
   It waits the request's whole lifetime (30 s), says nothing changed only when nothing can
   have run, and says the outcome is unknown after a lost reply, `handler_failed` or an
   unreadable answer.

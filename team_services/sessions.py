@@ -10,7 +10,10 @@ team services decide:
   revision, is signed into ``UA1_CERTS`` for every receiver to read. Only the team lead's
   type (``TeamArchitect``) on a lead host gets the ``lead`` role. At most one
   unended lead session exists per team. A second lead is refused; reopening the
-  same agent ends its earlier lead sessions before a replacement is signed.
+  same agent ends its earlier lead sessions before a replacement is signed. A stored
+  session record that does not verify may be a lead's, so a lead's open is answered
+  ``runtime_error`` naming its key until it verifies or an operator deletes it
+  (``event=lead_session_record_unreadable``); workers still open.
 - ``sessions.renew``: a session that places the agent on the asking host, re-signed for
   another 7 days. Only one that has not ended and whose placement is still the agent's
   current one: a session closed earlier must not come back because its agent was placed
@@ -53,8 +56,9 @@ read there only when it verifies: signed by a team services host (the registry's
 roles, which the reader checks) and stored under its own key. One that does not verify,
 or a key that holds no record at all, counts as absent and is logged with its key and
 the refusal (``event=team_services_record_refused``); its revision still lets the next
-placement replace it. A renewal or close re-signs the session the team services hold,
-never what another process wrote.
+placement replace it. The one exception is a lead's open, above: there an unverified
+session record blocks instead. A renewal or close re-signs the session the team services
+hold, never what another process wrote.
 """
 
 from __future__ import annotations
@@ -203,7 +207,12 @@ class SessionService:
             return self._refusal("sessions.open", "limit_reached",
                                  "This host already runs as many agents as its certificate allows.", asked)
         role = LEAD_ROLE if agent_type == MANAGER_AGENT_TYPE and "lead_host" in certificate.roles else WORKER_ROLE
-        earlier_leads = await self._lead_sessions(team) if role == LEAD_ROLE else []
+        earlier_leads, unreadable = await self._lead_sessions(team) if role == LEAD_ROLE else ([], [])
+        if unreadable:
+            return self._refusal("sessions.open", "runtime_error",
+                                 f"Stored session records do not verify: {', '.join(unreadable)}. The team services "
+                                 "cannot rule out another lead, so the lead opens once each verifies or an operator "
+                                 "deletes it from the UA1_CERTS bucket.", asked)
         if any(session.agent != agent or session.runtime != certificate.runtime for session in earlier_leads):
             return self._refusal("sessions.open", "not_allowed",
                                  "This team already has a lead session; close it before starting another lead.", asked)
@@ -240,21 +249,30 @@ class SessionService:
                          "session=%s role=%s", team, agent, certificate.runtime, session, role)
         return {"outcome": "ok", "session": record}
 
-    async def _lead_sessions(self, team: str) -> list[AgentSession]:
-        """All unended lead sessions, under the same mutation lock as open and close.
+    async def _lead_sessions(self, team: str) -> tuple[list[AgentSession], list[str]]:
+        """All unended lead sessions, and each retained session record that does not verify, by key and code.
 
-        Read retained signed records, so a team-services restart cannot forget the
-        lead. A restarting lead host closes its earlier sessions before opening a
-        new one (AgentProcessHost._close_earlier_sessions); silence alone is not a close.
+        Runs under the same mutation lock as open and close. Read retained signed records,
+        so a team-services restart cannot forget the lead. A restarting lead host closes its
+        earlier sessions before opening a new one (AgentProcessHost._close_earlier_sessions);
+        silence alone is not a close. A record that does not verify may be a lead's, so the
+        caller refuses the lead instead of counting it as absent (module docstring).
         """
 
         prefix = f"session.{self.installation}.{team}."
-        sessions = []
+        sessions, unreadable = [], []
         for key in await self.records.keys(AGENT_SESSION, prefix):
-            session = await self._session(team, key[len(prefix):], require_readable=True)
+            try:
+                session = await self._session(team, key[len(prefix):], require_readable=True)
+            except FrameRefused as refused:
+                self.logger.error("A stored session record does not verify, so no team lead opens until it verifies or "
+                                  "an operator deletes it. event=lead_session_record_unreadable team=%s key=%s code=%s "
+                                  "at=%s", team, key, refused.code, refused.at)
+                unreadable.append(f"{key} ({refused.code})")
+                continue
             if session is not None and session.agent_role == LEAD_ROLE and session.ends_at > self.clock():
                 sessions.append(session)
-        return sessions
+        return sessions, unreadable
 
     async def _store_session(self, team: str, session: str, record: dict[str, Any]) -> None:
         await self.records.put(AGENT_SESSION, session_key(self.installation, team, session), record)
@@ -266,18 +284,17 @@ class SessionService:
         A newer record in ``UA1_CERTS`` that verifies is taken; one that does not is
         logged, and the one held stays (none after a restart: the session counts as absent).
         Opening a lead requires every retained session to be readable, so that check
-        raises instead: unreadable evidence never authorizes a second lead.
+        (``require_readable``) raises instead, for ``_lead_sessions`` to report: unreadable
+        evidence never authorizes a second lead.
         """
 
         key = session_key(self.installation, team, session)
         try:
             await self.records.take_trust_record(AGENT_SESSION, key, now=self.clock())
         except FrameRefused as refused:
-            self._refused(AGENT_SESSION, key, refused)
             if require_readable:
-                # A missing verification dependency is not proof that no lead exists.
-                # Opening another lead must wait until the retained sessions are readable.
-                raise
+                raise  # it blocks the lead's open, not counted as absent; _lead_sessions logs it
+            self._refused(AGENT_SESSION, key, refused)
         return self.trust.store.agent_session(self.installation, team, session)
 
     async def _own_session(self, verified: VerifiedFrame) -> tuple[Optional[AgentSession], Optional[dict[str, Any]]]:
