@@ -12,8 +12,9 @@ team services decide:
   unended lead session exists per team. A second lead is refused; reopening the
   same agent ends its earlier lead sessions before a replacement is signed. A stored
   session record that does not verify may be a lead's, so a lead's open is answered
-  ``runtime_error`` naming its key until it verifies or an operator deletes it
-  (``event=lead_session_record_unreadable``); workers still open.
+  ``runtime_error`` naming the first such key and how many more until each verifies or an
+  operator deletes it (``event=lead_session_record_unreadable``, one line per key); workers
+  still open.
 - ``sessions.renew``: a session that places the agent on the asking host, re-signed for
   another 7 days. Only one that has not ended and whose placement is still the agent's
   current one: a session closed earlier must not come back because its agent was placed
@@ -87,6 +88,8 @@ PLACEMENT, AGENT_SESSION = "placement", "agent_session"
 HANDED_OVER = "handed_over"
 # One placement of an agent later than the one before it, so ``placed_at`` names each placement.
 _PLACED_STEP = timedelta(milliseconds=1)
+# The contract's short text (``ShortText``): every reply message fits it.
+_MESSAGE_MAX = 500
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -96,6 +99,26 @@ def placement_key(team: str, agent: str) -> str:
 
 def session_key(installation: str, team: str, session: str) -> str:
     return f"session.{installation}.{team}.{session}"
+
+
+def _unreadable_refusal(unreadable: list[str]) -> str:
+    """A lead's refusal for stored session records that do not verify, within ``_MESSAGE_MAX`` characters.
+
+    A reply longer than the contract allows is never sent: the host would get
+    ``handler_failed`` and retry with no reason shown. Damage seldom hits one record alone
+    (a bad script, a wrong restore), so the refusal names the first record and counts the
+    rest; the team services log each on its own line (``event=lead_session_record_unreadable``).
+    A key is whatever another process wrote under the team's prefix, not a checked id, so
+    the named one is cut to the room left.
+    """
+
+    more = len(unreadable) - 1
+    others = f" and {more} more, each logged as event=lead_session_record_unreadable" if more else ""
+    text = ("Stored session records do not verify: {first}{others}. The team services cannot rule out another lead, "
+            "so the lead opens once each verifies or an operator deletes it from the UA1_CERTS bucket.")
+    room = _MESSAGE_MAX - len(text.format(first="", others=others))
+    first = unreadable[0] if len(unreadable[0]) <= room else unreadable[0][: room - 1] + "…"
+    return text.format(first=first, others=others)
 
 
 def _places(placement: Optional[VerifiedRecord], session: AgentSession) -> bool:
@@ -209,10 +232,7 @@ class SessionService:
         role = LEAD_ROLE if agent_type == MANAGER_AGENT_TYPE and "lead_host" in certificate.roles else WORKER_ROLE
         earlier_leads, unreadable = await self._lead_sessions(team) if role == LEAD_ROLE else ([], [])
         if unreadable:
-            return self._refusal("sessions.open", "runtime_error",
-                                 f"Stored session records do not verify: {', '.join(unreadable)}. The team services "
-                                 "cannot rule out another lead, so the lead opens once each verifies or an operator "
-                                 "deletes it from the UA1_CERTS bucket.", asked)
+            return self._refusal("sessions.open", "runtime_error", _unreadable_refusal(unreadable), asked)
         if any(session.agent != agent or session.runtime != certificate.runtime for session in earlier_leads):
             return self._refusal("sessions.open", "not_allowed",
                                  "This team already has a lead session; close it before starting another lead.", asked)

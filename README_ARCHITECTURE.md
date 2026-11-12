@@ -5193,7 +5193,8 @@ several agents at once under one deadline and keeps each answer or error apart.
   restart. Reopening the same lead ends its previous sessions before signing a replacement.
   A restarting lead host closes its earlier sessions before asking for its new lead's session;
   an unavailable host alone never authorizes a second lead. Nor does a stored session record
-  that does not verify: a lead's open is answered `runtime_error` naming its key
+  that does not verify: a lead's open is answered `runtime_error` naming the first such key
+  and how many more, within the reply's 500 characters, and the team services log each key
   (`event=lead_session_record_unreadable`) until it verifies or an operator deletes it
   (user docs, Docker, "Message host trust"); other agents still open.
   It waits the request's whole lifetime (30 s), says nothing changed only when nothing can

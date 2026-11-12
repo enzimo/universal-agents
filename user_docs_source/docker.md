@@ -439,9 +439,9 @@ is stopped, and restore them together. To recover:
   team services wrote that record, or it is damaged. The team services cannot tell
   whether it was a lead's, so no lead starts while it is there; other agents still
   start. Make sure no second container or host runs this team's lead, then delete
-  the key the log names, for example with `nats kv del UA1_CERTS
-  session.<installation id>.<team>.<session>`. The lead starts within about five
-  minutes.
+  each key the log names (one line per record), for example with `nats kv del
+  UA1_CERTS session.<installation id>.<team>.<session>`. The lead starts within
+  about five minutes.
 - **The authority refuses to start because a record is dated later than the
   machine's clock** (`AuthorityClockBehind`). Correct the clock; nothing needs to
   be deleted.
