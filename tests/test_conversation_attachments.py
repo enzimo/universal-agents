@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from access_control import safe_open
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents.conversation_attachments import (
     CONVERSATION_ATTACHMENTS_HEADING,
@@ -510,7 +511,41 @@ def test_an_upload_inside_an_upload_folder_is_located(layout) -> None:
 
     located = locate_upload(photo, folders, task_id=CURRENT, conversation_id=CONVERSATION)
 
-    assert located == LocatedUpload(Path(photo.local_path()).resolve(), len(b"photo bytes"))
+    assert located == LocatedUpload(
+        Path(photo.local_path()).resolve(), len(b"photo bytes"), layout.uploads_dir.resolve()
+    )
+    assert located.read_bytes(max_bytes=100) == b"photo bytes"
+    with located.reader() as reader:
+        assert reader.read() == b"photo bytes"
+
+
+def test_a_located_upload_is_read_without_following_a_link_swapped_in_later(layout) -> None:
+    folders = UploadFolders.for_instance(layout.root)
+    photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
+    located = locate_upload(photo, folders, task_id=CURRENT, conversation_id=CONVERSATION)
+    assert isinstance(located, LocatedUpload)
+    secret = layout.state_dir / "secret.db"
+    secret.write_bytes(b"not an upload")
+    # After the check, the upload is replaced by a link to a file outside the folder.
+    located.path.unlink()
+    os.symlink(secret, located.path)
+
+    with pytest.raises(safe_open.UnsafePath) as refused:
+        located.read_bytes(max_bytes=100)
+    assert refused.value.reason == safe_open.REASON_LINK
+    with pytest.raises(safe_open.UnsafePath):
+        with located.reader():
+            pass
+
+
+def test_a_located_upload_that_grew_past_the_limit_is_refused(layout) -> None:
+    photo = _upload(layout.uploads_dir, "att_photo", data=b"photo bytes")
+    located = locate_upload(photo, UploadFolders.for_instance(layout.root), task_id=CURRENT, conversation_id=None)
+    assert isinstance(located, LocatedUpload)
+
+    with pytest.raises(safe_open.UnsafePath) as refused:
+        located.read_bytes(max_bytes=4)
+    assert refused.value.reason == safe_open.REASON_TOO_LARGE
 
 
 def test_a_deleted_upload_says_to_send_it_again(layout, caplog) -> None:

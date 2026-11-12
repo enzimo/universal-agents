@@ -62,20 +62,25 @@ Where bytes are read from (``UploadFolders``, ``locate_upload``): only from
 inside this host's upload folders, ``state/uploads`` and the adapter host's
 upload folder. A record's path is not trusted by itself (a delegated task's
 files are not vouched for by the gateway): a record pointing anywhere else
-is refused and logged.
+is refused and logged. The bytes are then read from that folder without
+following links (``LocatedUpload.read_bytes``). The attachment tools open
+files by id through ``custom_tools.task_uploads``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import stat
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, BinaryIO, Optional
 
 from pydantic import ValidationError
 
+from access_control import safe_open
 from access_control.identity import IdentityRejected
 from access_control.ownership import (
     OwnershipDecision,
@@ -514,10 +519,34 @@ def _adapter_host_settings(agent: Any) -> Any:
 
 @dataclass(frozen=True)
 class LocatedUpload:
-    """An upload's bytes on this host: a regular file inside an upload folder."""
+    """An upload's bytes on this host: a regular file inside an upload folder.
+
+    ``path`` is resolved and lies below ``folder``. Read it with
+    ``read_bytes`` or ``reader``, which open it from ``folder`` one component
+    at a time without following links (``access_control.safe_open``), so a
+    link swapped in after ``locate_upload`` checked the path is refused, not
+    followed.
+    """
 
     path: Path
     size_bytes: int
+    folder: Path
+
+    def _parts(self) -> tuple[str, ...]:
+        return self.path.relative_to(self.folder).parts
+
+    def read_bytes(self, *, max_bytes: int) -> bytes:
+        """The file's bytes; ``safe_open.UnsafePath`` when it is larger than ``max_bytes`` or unsafe to open."""
+
+        return safe_open.read_bytes(self.folder, self._parts(), max_bytes=max_bytes)
+
+    @contextmanager
+    def reader(self) -> Iterator[BinaryIO]:
+        """A binary reader of the file (``safe_open.UnsafePath`` when it is unsafe to open)."""
+
+        with safe_open.opened_file(self.folder, self._parts()) as (descriptor, _status):
+            with os.fdopen(os.dup(descriptor), "rb") as opened:
+                yield opened
 
 
 @dataclass(frozen=True)
@@ -560,7 +589,7 @@ def locate_upload(
     except (FileNotFoundError, NotADirectoryError):
         entry = None
     if entry is not None and stat.S_ISREG(entry.st_mode):
-        return LocatedUpload(resolved, entry.st_size)
+        return LocatedUpload(resolved, entry.st_size, folder)
     if folder.is_dir():
         logger.info(
             "An upload's file is gone from this host's upload folder. "
