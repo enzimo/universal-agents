@@ -1169,6 +1169,66 @@ scanned plan waits for approval; and
 separate 500-file, 20 MiB total, and 5 MiB per-file limits in the trusted
 acquisition boundary.
 
+`semantic_review.mode` defaults to `"off"`, so local checks finish without
+extra model configuration. Set it to `"task_model"` to add semantic assessment
+using the model selected for the calling task, including a person's own model
+and its existing broker-managed authentication. Do not supply a key in these
+settings or expose one to the scanner. Configure an existing provider with
+`/auth model` or `/auth model me` when needed. This setting authorizes submitting
+the quarantined skill contents to that selected model; a local model stays local.
+
+`semantic_review.max_input_bytes` defaults to 262144 and accepts 1024-1048576.
+It bounds the complete UTF-8 request, including metadata. Selected assessment
+refuses binary content, exceeded bounds, partial coverage and provider failures
+rather than truncating or silently dropping back to local-only review. It also
+refuses when the task that staged the skill has no model or stops before the
+review ends; only `mode: "off"` finishes on the local checks alone. MEDIUM
+or higher semantic findings also prevent a plan. Both the result and settings
+are bound to the approved snapshot: approval checks the report again against
+the settings in force, so changing these settings means staging the skill
+again. Existing pending installation plans must be re-staged after this
+update; already installed attested skills remain valid.
+
+```yaml
+workspace:
+  skill_installation:
+    semantic_review:
+      mode: "task_model"
+      max_input_bytes: 262144
+```
+
+When a selected review does not pass, no installation is proposed. The lead
+tells you the reason and what to do, the report shows that the local checks
+passed, and the log line `event=skill_semantic_review_refused` names the
+change id, skill, reason and model (never file contents or keys). The reasons:
+
+- `task_model_unavailable` or `turn_finished`: the review needs the running
+  task that staged the skill. Stage it again from a running task; if no model
+  is found again, check the agent's model settings.
+- `input_too_large`: the skill is larger than `max_input_bytes`. Raise
+  `max_input_bytes` (up to 1 MiB), or use a smaller skill.
+- `input_too_large_for_model`: the skill fits `max_input_bytes` but not the
+  model's context window, so raising `max_input_bytes` does not help. Use a
+  model with a larger context window for this agent, or lower
+  `max_input_bytes` so such skills are refused before any model call.
+- `model_key_refused` or `model_key_rejected`: the task may not use a model
+  key, or the provider refused it. The refusal says who saves a working key
+  with `/auth model` or `/auth model me`.
+- `model_timed_out`, `model_unreachable` or `model_busy`: the provider did not
+  answer. Try again later; check the endpoint if it continues.
+- `model_did_not_finish`: the model stopped early, at its output token limit
+  or at the provider's content filter. Raise the model's output token limit,
+  or use a smaller skill.
+- `model_output_invalid`, `incomplete_file_coverage` or
+  `finding_outside_reviewed_files`: the model's answer could not be used. Try
+  again, or choose a model that follows structured output well.
+- `non_text_content`: the skill holds a binary file; remove it.
+- `input_changed` or `artifact_changed`: a file changed during the review;
+  stage the skill again.
+- `findings`: the model found a MEDIUM or higher risk, so the skill cannot be
+  installed as it is.
+- `model_call_failed`: any other failure; the log names the error type.
+
 Team skills belong to the team. With authorization on, TeamArchitect applies
 a scanned plan with `apply_change`: a person approves each install, replacement
 or removal in the Inbox, unless an administrator granted TeamArchitect full
@@ -1666,7 +1726,8 @@ outbound text-to-speech are controlled separately.
 ## Website Host and Generated Sites
 
 The shared website app serves user docs, generated skill docs, generated
-article, comparison, how-to, and app sites, plus embedded generated-site chat.
+article, comparison, how-to, app, and work report sites, plus embedded
+generated-site chat.
 The default settings are:
 
 ```yaml

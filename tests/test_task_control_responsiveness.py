@@ -52,7 +52,12 @@ OWNER_REF = "p-OwnerOwnerOwnerOwnerOw"
 @pytest.mark.nats
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_team_lead", [True, False])
-async def test_controls_remain_available_during_model_work_and_after_stop(tmp_path, is_team_lead, gateway_signed_commands):
+@pytest.mark.parametrize("slow_cleanup", [False, True])
+async def test_controls_remain_available_during_model_work_and_after_stop(
+    tmp_path, is_team_lead, gateway_signed_commands, slow_cleanup, monkeypatch, caplog,
+):
+    from custom_agents import control_runtime
+
     team = _team("controls")
     manager = TaskManager(db_path=str(tmp_path / "tasks.db"), max_queued_top_level_tasks=50)
     manager.set_owner_identity("lead", "Lead", team, "TeamArchitect")
@@ -62,6 +67,9 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
     agent.task_manager.set_owner_identity(agent.id, "Lead", team, "TeamArchitect")
     adapter = _adapter(team)
     entered, release = asyncio.Event(), asyncio.Event()
+    cleanup_allowed = asyncio.Event()
+    if slow_cleanup:
+        monkeypatch.setattr(control_runtime, "ACTIVE_STOP_GRACE_SECONDS", 0.01)
 
     async def held_turn(content, header, meta):
         agent._set_active_execution_context(content.task_id)
@@ -69,6 +77,10 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
         try:
             await release.wait()
             return content.model_copy(update={"task_type": MessageMetaType.RESPONSE})
+        except asyncio.CancelledError:
+            if slow_cleanup:
+                await cleanup_allowed.wait()
+            raise
         finally:
             agent._clear_active_execution_context()
 
@@ -163,7 +175,7 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
             )
             # Each stopped request also gets its final reply, its cancellation,
             # before the command's answer (control_runtime.stop_task_execution):
-            # current work from its stopped turn, queued work from the stop.
+            # the explicit stop owns this reply for current and queued work.
             cancelled.clear()
             while True:
                 received = await asyncio.wait_for(responses.get(), MANAGER_CONTROL_TIMEOUT_SECONDS)
@@ -224,19 +236,34 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
         else:
             stopped = await relayed("remove_task", task_id="held", seen_queue_digest=purged["queue_digest"])
             assert stopped["outcome"] == "ok" and stopped["all_confirmed"]
-        assert cancelled == ["held"], "one final reply, from the stopped turn"
+        assert cancelled == ["held"], "one final reply from the stop"
+        if slow_cleanup:
+            assert "event=active_turn_stop_timeout" in caplog.text
+        cleanup_allowed.set()
         assert agent.task_manager.is_execution_cancelled("held")
         assert agent._conversation_store.get_turn_by_task_id("held")["task_status"] == "cancelled"
         agent._conversation_summary_generator.summarize_turn.assert_not_called()
         agent._conversation_compactor.compact_if_needed.assert_not_called()
         assert (await relayed("list_tasks"))["total"] == 0
+        assert cancelled == [], "no second reply after cleanup"
         if agent._pending_work_task is not None:
             await asyncio.wait_for(asyncio.shield(agent._pending_work_task), 3)
             assert not agent._pending_work_task.cancelled()
+        # The handler's own cleanup must not fail. With normal cleanup it calls
+        # the agent's cancel wrapper (#79 once passed it a keyword it lacked);
+        # with slow cleanup the stop has already archived the task and the
+        # handler skips the call. Checked in all four cases.
+        assert "event=pending_work_failed" not in caplog.text
+        assert "unexpected keyword argument" not in caplog.text
+        # The stop owns the only reply (#79): once the handler has finished,
+        # a late duplicate would still be waiting in the response queue.
+        await relayed("list_tasks")
+        assert cancelled == [], "no second reply after cleanup"
         assert adapter.connected
     finally:
         agent._should_exit.set()
         release.set()
+        cleanup_allowed.set()
         pending = getattr(agent, "_pending_work_task", None)
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)

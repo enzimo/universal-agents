@@ -26,7 +26,7 @@ def test_nightly_runs_daily_or_by_hand_from_main_only() -> None:
     }
     job = workflow["jobs"]["nightly"]
     assert job["if"] == "github.ref == 'refs/heads/main' && github.event_name != 'pull_request'"
-    assert job["runs-on"] == ["self-hosted", "Linux", "X64", "ua-build", "ua-linux"]
+    assert job["runs-on"] == ["self-hosted", "Linux", "X64", "ua-light", "ua-linux"]
     # Releases and tags need contents: write; starting publish-container needs actions: write.
     assert job["permissions"] == {"contents": "write", "actions": "write"}
 

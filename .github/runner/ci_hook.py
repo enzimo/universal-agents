@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import build_cache
+import runner_metrics
 
 LOG = logging.getLogger("ua.ci")
 LABEL = "com.universalagents.ci.job"
@@ -95,6 +96,13 @@ def cleanup(config: dict, *, before_job: bool = False) -> None:
     job_id = job["id"]
     if len(job_id) != 24 or any(c not in "0123456789abcdef" for c in job_id):
         raise ValueError("Invalid CI job identity")
+    if config.get("metrics"):
+        try:
+            runner_metrics.finish(config, job, recovered=before_job)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            # Observations are advisory. ENOSPC must not prevent the very
+            # reclamation that restores disk space, including crash recovery.
+            LOG.warning("Resource observations unavailable; reclaiming job resources: %s", error)
     if job.get("compiler_env"):
         build_cache.stop(job["compiler_env"])
     # An intent file is written before the first Docker mutation. A broken daemon
@@ -183,7 +191,7 @@ def begin(config: dict) -> None:
     state = Path(config["state"])
     state.mkdir(parents=True, exist_ok=True)
     cleanup(config, before_job=True)
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     require_trusted_event(config, os.environ, event)
     repository = os.environ["GITHUB_REPOSITORY"]
     workspace = child(Path(os.environ["GITHUB_WORKSPACE"]), Path(config["work"]))
@@ -211,9 +219,10 @@ def begin(config: dict) -> None:
     )
     job_id = hashlib.sha256(identity.encode()).hexdigest()[:24]
     # Record ownership before creating anything that requires reclamation.
-    (state / "job.json").write_text(
-        json.dumps({"id": job_id, "workspace": str(workspace)})
-    )
+    job = {"id": job_id, "workspace": str(workspace), "started_at": time.time(),
+           "job": os.environ["GITHUB_JOB"], "run_id": os.environ["GITHUB_RUN_ID"],
+           "attempt": os.environ["GITHUB_RUN_ATTEMPT"]}
+    build_cache.write_json(state / "job.json", job)
     # Recovery may remove the directory that GitHub prepared for this job.
     # Every step, including the pre-checkout guard, starts with it as cwd.
     workspace.mkdir(parents=True, exist_ok=True)
@@ -234,7 +243,7 @@ def begin(config: dict) -> None:
         "CARGO_HOME": str(cache / "cargo"),
         "RUSTUP_TOOLCHAIN": "1.95.0",
         "CARGO_INCREMENTAL": "0",
-        "CARGO_BUILD_JOBS": "2",
+        "CARGO_BUILD_JOBS": str(config.get("build_jobs", 2)),
         "npm_config_cache": str(cache / "npm"),
         "PIP_CACHE_DIR": str(cache / "pip"),
         "XDG_CACHE_HOME": str(cache / "xdg"),
@@ -249,11 +258,14 @@ def begin(config: dict) -> None:
         if build_cache.listening(compiler_env):
             raise RuntimeError("Dedicated CI compiler-cache endpoint is already occupied")
         # Persist server ownership before startup so interrupted jobs recover.
-        (state / "job.json").write_text(json.dumps({
-            "id": job_id, "workspace": str(workspace), "compiler_env": compiler_env,
-        }))
+        job["compiler_env"] = compiler_env
+        build_cache.write_json(state / "job.json", job)
         build_cache.start(compiler_env)
         env.update(compiler_env)
+    if config.get("metrics"):
+        job["metrics"] = True
+        build_cache.write_json(state / "job.json", job)
+        runner_metrics.start(config, job)
     with Path(os.environ["GITHUB_ENV"]).open("a") as stream:
         stream.writelines(f"{key}={value}\n" for key, value in env.items())
     with Path(os.environ["GITHUB_PATH"]).open("a") as stream:

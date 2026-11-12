@@ -1,0 +1,497 @@
+{
+  "schema": 1,
+  "generated_at": "2026-11-09T17:40:00Z",
+  "run": {
+    "title": "Retry failed webhook deliveries with exponential backoff",
+    "outcome": "Webhook deliveries that fail transiently are retried with backoff and dead-lettered after the last attempt.",
+    "context": {
+      "objective": "Reliable outbound notifications",
+      "plan_step": "3 of 5"
+    },
+    "non_goals": [
+      "No schema migrations",
+      "No per-endpoint rate limiting"
+    ],
+    "repo": {
+      "name": "example-owner/relay",
+      "base": "main",
+      "branch": "feat/webhook-retry",
+      "base_sha": "c02ae6c8e34b82bf94af98d7fea006bb8f5095c5"
+    },
+    "head_sha": "7c31518aa5ff9a4e05edc0f3c232d70291c855ae",
+    "pr": {
+      "draft": true,
+      "head_sha": "7c31518aa5ff9a4e05edc0f3c232d70291c855ae",
+      "number": 142,
+      "title": "Retry failed webhook deliveries with exponential backoff",
+      "url": "https://github.com/example-owner/relay/pull/142",
+      "seq": 29,
+      "updated_seq": 34
+    },
+    "status": "ready_to_merge",
+    "close_note": "",
+    "started_at": "2026-11-09T14:00:00Z",
+    "ended_at": "2026-11-09T17:36:00Z",
+    "elapsed_min": 216.0,
+    "workers": {
+      "coder": {
+        "effort": "xhigh",
+        "model": "claude-opus-5-5",
+        "runtime": "claude-code"
+      },
+      "critic": {
+        "effort": "xhigh",
+        "model": "claude-opus-5-5",
+        "runtime": "claude-code"
+      }
+    },
+    "events": 39
+  },
+  "narrative": {
+    "summary": "The pair delivered backoff-based retries for failed webhooks. The critic raised four points; the lead ruled on where to keep idempotency keys (C17). Project review found one blocking gap, which the pair fixed, and one follow-up now filed as an issue.",
+    "next_steps": [
+      "Merge after a human review of C04 and C17"
+    ]
+  },
+  "acceptance": [
+    {
+      "id": "A1",
+      "text": "Retries 5xx and timeouts; never 4xx except 429",
+      "status": "met",
+      "evidence": "test_policy::test_retryable_statuses"
+    },
+    {
+      "id": "A2",
+      "text": "Backoff doubles from 2 s, capped at 10 min, with full jitter",
+      "status": "met",
+      "evidence": "test_policy::test_schedule_bounds"
+    }
+  ],
+  "counts": {
+    "critic_turns": 4,
+    "reviews": 2,
+    "rebuttals": 2,
+    "checkpoints": 1,
+    "worker_turns": 8,
+    "interventions": 1,
+    "fix_rounds": 1
+  },
+  "items": {
+    "total": 4,
+    "by_decision": {
+      "accepted": 1,
+      "partial": 1,
+      "rejected": 1,
+      "withdrawn": 1,
+      "open": 0
+    },
+    "by_severity": {
+      "blocking": 2,
+      "should_fix": 1,
+      "consider": 1
+    },
+    "by_lens": {
+      "concurrency": {
+        "accepted": 0,
+        "partial": 1,
+        "rejected": 0,
+        "withdrawn": 0,
+        "open": 0
+      },
+      "correctness": {
+        "accepted": 1,
+        "partial": 0,
+        "rejected": 0,
+        "withdrawn": 0,
+        "open": 0
+      },
+      "modularity": {
+        "accepted": 0,
+        "partial": 0,
+        "rejected": 0,
+        "withdrawn": 1,
+        "open": 0
+      },
+      "scalability": {
+        "accepted": 0,
+        "partial": 0,
+        "rejected": 1,
+        "withdrawn": 0,
+        "open": 0
+      }
+    },
+    "accepted_share": 0.25,
+    "reraised": 0,
+    "lead_rulings": 1
+  },
+  "rounds": [
+    {
+      "key": "plan",
+      "label": "Plan",
+      "start_min": 0.0,
+      "end_min": 27.0,
+      "coder": {
+        "kind": "plan",
+        "summary": "One RetryPolicy, a scheduler hook and a dead-letter path; 6 units; 5 checkpoints.",
+        "units": [
+          "RetryPolicy",
+          "schedule_retry()",
+          "BackoffCalculator",
+          "DeliveryWorker.on_failure",
+          "dead_letter()",
+          "retry metrics"
+        ],
+        "checkpoints": [
+          "Backoff schedule tests",
+          "RetryPolicy and schedule_retry()",
+          "Worker integration",
+          "Dead-letter and failure paths",
+          "Metrics and docs"
+        ]
+      },
+      "critic": {
+        "summary": "Sound plan; one blocker on duplicate delivery.",
+        "items": [
+          "C01",
+          "C04",
+          "C07"
+        ]
+      },
+      "rebuttals": 1,
+      "interventions": []
+    },
+    {
+      "key": "cp3",
+      "label": "Checkpoint 3",
+      "start_min": 98.0,
+      "end_min": 114.0,
+      "coder": {
+        "kind": "checkpoint",
+        "title": "Delivery worker integration",
+        "notes": "",
+        "tests": {
+          "failed": 0,
+          "passed": 30
+        },
+        "deviations": [],
+        "git": {
+          "adds": 121,
+          "branch": "feat/webhook-retry",
+          "commits": 1,
+          "dels": 0,
+          "files": 2,
+          "from": "a6993e896a82ca7686c70d9d3d689ee690e1ed95",
+          "head": "02242b9ee434164a410057fa5616140595241282",
+          "patch": "diffs/cp3.patch"
+        }
+      },
+      "critic": {
+        "summary": "Integration works; two blockers.",
+        "items": [
+          "C17"
+        ]
+      },
+      "rebuttals": 1,
+      "interventions": [
+        17
+      ]
+    }
+  ],
+  "item_list": [
+    {
+      "id": "C01",
+      "round": "plan",
+      "lens": "correctness",
+      "severity": "blocking",
+      "confidence": "verified",
+      "title": "A slow acknowledgement can cause a second delivery",
+      "detail": "",
+      "where": "plan: schedule_retry()",
+      "suggestion": "Send an idempotency key and keep it across attempts.",
+      "rationale": "",
+      "final_rationale": null,
+      "reraises": null,
+      "rebuttal": null,
+      "ruling": null,
+      "decided_by": "coder",
+      "first_decision": "accept",
+      "outcome": "accepted",
+      "matched_by_review": []
+    },
+    {
+      "id": "C04",
+      "round": "plan",
+      "lens": "scalability",
+      "severity": "should_fix",
+      "confidence": "likely",
+      "title": "One slow receiver can starve the retry queue",
+      "detail": "",
+      "where": "",
+      "suggestion": "Add a token bucket per endpoint.",
+      "rationale": "Out of scope (non-goal 2); the queue is partitioned by endpoint and max_in_flight=4 bounds starvation.",
+      "final_rationale": "Kept out of scope; logged for plan step 4 (per-endpoint limits).",
+      "reraises": null,
+      "rebuttal": {
+        "argument": "Four slow in-flight requests from one endpoint still delay every retry.",
+        "item": "C04",
+        "position": "maintain"
+      },
+      "ruling": null,
+      "decided_by": "coder",
+      "first_decision": "reject",
+      "outcome": "rejected",
+      "matched_by_review": [
+        "F2"
+      ]
+    },
+    {
+      "id": "C07",
+      "round": "plan",
+      "lens": "modularity",
+      "severity": "consider",
+      "confidence": "likely",
+      "title": "Move backoff math to a shared utility",
+      "detail": "",
+      "where": "",
+      "suggestion": "",
+      "rationale": "Single consumer; keep it local.",
+      "final_rationale": null,
+      "reraises": null,
+      "rebuttal": {
+        "item": "C07",
+        "position": "withdraw"
+      },
+      "ruling": null,
+      "decided_by": "coder",
+      "first_decision": "reject",
+      "outcome": "withdrawn",
+      "matched_by_review": []
+    },
+    {
+      "id": "C17",
+      "round": "cp3",
+      "lens": "concurrency",
+      "severity": "blocking",
+      "confidence": "likely",
+      "title": "Idempotency keys kept in memory are lost on restart",
+      "detail": "",
+      "where": "",
+      "suggestion": "",
+      "rationale": "Keep the in-memory cache; a new table needs a migration the brief excludes.",
+      "final_rationale": null,
+      "reraises": null,
+      "rebuttal": {
+        "argument": "After a restart the cache is empty and a slow acknowledgement is delivered twice.",
+        "item": "C17",
+        "position": "maintain"
+      },
+      "ruling": {
+        "decision": "partial",
+        "item": "C17",
+        "rationale": "Store the key in the existing attempt_token column."
+      },
+      "decided_by": "lead",
+      "first_decision": "partial",
+      "outcome": "partial",
+      "matched_by_review": []
+    }
+  ],
+  "interventions": [
+    {
+      "seq": 17,
+      "at_min": 114.0,
+      "round": "cp3",
+      "actions": [],
+      "reason": "blocker_dispute",
+      "rulings": [
+        {
+          "decision": "partial",
+          "item": "C17",
+          "rationale": "Store the key in the existing attempt_token column."
+        }
+      ],
+      "summary": "Reuse deliveries.attempt_token: it survives restarts and needs no migration."
+    }
+  ],
+  "timeline": {
+    "total_min": 216.0,
+    "spans": [
+      {
+        "lane": "coder",
+        "start": 0.0,
+        "end": 6.0,
+        "label": "plan"
+      },
+      {
+        "lane": "critic",
+        "start": 6.0,
+        "end": 14.0,
+        "label": "review"
+      },
+      {
+        "lane": "coder",
+        "start": 14.0,
+        "end": 19.0,
+        "label": "response"
+      },
+      {
+        "lane": "critic",
+        "start": 19.0,
+        "end": 24.0,
+        "label": "rebuttal"
+      },
+      {
+        "lane": "critic",
+        "start": 98.0,
+        "end": 104.0,
+        "label": "review"
+      },
+      {
+        "lane": "critic",
+        "start": 106.0,
+        "end": 110.0,
+        "label": "rebuttal"
+      },
+      {
+        "lane": "lead",
+        "start": 110.0,
+        "end": 114.0,
+        "label": "intervention"
+      },
+      {
+        "lane": "review",
+        "start": 162.0,
+        "end": 180.0,
+        "label": "review_result"
+      },
+      {
+        "lane": "lead",
+        "start": 180.0,
+        "end": 182.0,
+        "label": "fix_request"
+      }
+    ],
+    "marks": [
+      {
+        "at": 6.0,
+        "label": "plan"
+      },
+      {
+        "at": 98.0,
+        "label": "cp3"
+      }
+    ],
+    "phases": [
+      {
+        "label": "Plan",
+        "start": 0.0,
+        "end": 27.0
+      },
+      {
+        "label": "Build",
+        "start": 27.0,
+        "end": 162.0
+      },
+      {
+        "label": "Review",
+        "start": 162.0,
+        "end": 216.0
+      }
+    ]
+  },
+  "diff": {
+    "adds": 303,
+    "dels": 120,
+    "files": 3,
+    "commits": 8,
+    "by_kind": {
+      "source": {
+        "adds": 121,
+        "dels": 120,
+        "files": 1
+      },
+      "tests": {
+        "adds": 148,
+        "dels": 0,
+        "files": 1
+      },
+      "docs": {
+        "adds": 34,
+        "dels": 0,
+        "files": 1
+      }
+    },
+    "files_list": [
+      {
+        "path": "src/relay/delivery/worker.py",
+        "adds": 121,
+        "dels": 120,
+        "binary": false,
+        "kind": "source"
+      },
+      {
+        "path": "tests/retry/test_policy.py",
+        "adds": 148,
+        "dels": 0,
+        "binary": false,
+        "kind": "tests"
+      },
+      {
+        "path": "docs/retries.md",
+        "adds": 34,
+        "dels": 0,
+        "binary": false,
+        "kind": "docs"
+      }
+    ]
+  },
+  "tests": {
+    "failed": 0,
+    "passed": 43,
+    "reported_by": "coder"
+  },
+  "review": {
+    "findings": [
+      {
+        "confidence": "verified",
+        "direction": "",
+        "id": "F1",
+        "scenario": "The final attempt fails during a 2-second database failover.",
+        "severity": "blocking",
+        "title": "A dead-letter write is lost while the database is briefly unavailable",
+        "where": "src/relay/delivery/dead_letter.py:41",
+        "status": "fixed",
+        "fix_round": 1,
+        "evidence": "test_dead_letter_survives_failover passes; write retried 3 times.",
+        "rechecked": true
+      },
+      {
+        "confidence": "likely",
+        "direction": "",
+        "id": "F2",
+        "matches_item": "C04",
+        "scenario": "",
+        "severity": "should_fix",
+        "title": "One slow endpoint delays retries for every other endpoint",
+        "where": "",
+        "status": "issue_filed",
+        "issue_url": "https://github.com/example-owner/relay/issues/143"
+      }
+    ],
+    "guide": "pull-requests",
+    "ran": true,
+    "reviewers": [
+      "General reviewer",
+      "Evidence auditor"
+    ],
+    "skipped": [],
+    "verdict": "approve_with_changes",
+    "by_severity": {
+      "blocking": 1,
+      "should_fix": 1,
+      "consider": 0
+    },
+    "matched_items": 1
+  },
+  "warnings": []
+}

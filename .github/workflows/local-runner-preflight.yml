@@ -13,7 +13,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: [self-hosted, Linux, X64, ua-build, ua-linux]
+          - runner: [self-hosted, Linux, X64, ua-heavy, ua-linux]
+            shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+          - runner: [self-hosted, Linux, X64, ua-test, ua-linux]
+            shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
+          - runner: [self-hosted, Linux, X64, ua-light, ua-linux]
             shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}
           - runner: [self-hosted, macOS, ARM64, ua-build, ua-macos]
             shell: rtk proxy bash --noprofile --norc -e -o pipefail {0}

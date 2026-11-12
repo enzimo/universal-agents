@@ -948,6 +948,18 @@ claim semantic/LLM analysis; it fails closed on partial files, unexpected
 disabled analyzers, failures, exclusions, malformed output, timeout, or a
 score outside the safe band.
 
+Optional built-in semantic assessment uses the task's already configured model
+with no executable tools. The report says whether it ran, names the model, and
+shows its findings separately from the required SkillSpector scan. If no model
+assessment is configured, local checks still finish and the lead offers setup.
+A selected model's failed or incomplete assessment does not count as a pass:
+no installation is proposed, and the lead tells you the reason and how to fix
+it. A selected review runs only inside the task that staged the skill, with
+that task's model.
+The exact input, both reports and semantic settings stay bound to the install
+plan, and a change requires a new plan. See the
+[skill-installation configuration](configuration.md).
+
 Team skills belong to the team. You approve each install, replacement or
 removal in the Inbox, unless an administrator let Team Architect manage team
 skills (full access to `fn:team_skills`); then it applies them itself and
@@ -1147,10 +1159,11 @@ transport, and credential guard remain enforced.
 
 For content that benefits from a browser layout, ask the agent to create a
 generated site. Sites can be articles, comparisons, procedural how-tos, or
-interactive apps with browser-local progress tracking. Every type can include
-an embedded chat panel that continues the task from the browser for the person
-the page was made for, signed in to Web Chat. Pages are kept in `sites/` of that
-person's folder.
+interactive apps with browser-local progress tracking. Each of these can
+include an embedded chat panel that continues the task from the browser for the
+person the page was made for, signed in to Web Chat. A coder-critic-team run
+can also publish its work report, which keeps its own design and has no chat.
+Pages are kept in `sites/` of that person's folder.
 
 Good requests include:
 

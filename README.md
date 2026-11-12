@@ -4,7 +4,7 @@
 
 # 🌐 Universal Agents (beta)
 
-Current public version: **0.9.10** · Licensed under the [Apache License 2.0](LICENSE).
+Current public version: **0.9.11** · Licensed under the [Apache License 2.0](LICENSE).
 
 ## 🧱 Chapter 1: The Foundation
 
@@ -28,7 +28,7 @@ decisions, but durable routing, memory, credentials, user delivery, and operatio
 - 📦 **Smart Context Offloading:** Some tools can produce undesired amounts of junk output (e.g. fetching a JavaScript-heavy website), so deterministic processes write large or binary results to task-scoped artifacts instead of directly populating context. The agent sees a compact summary and uses bounded artifact-inspection actions to retrieve only relevant pieces, mitigating context-window pressure.
 - 📡 **Observability:** All agent communication happens via a tiny efficient messaging broker thus making it publicly observable. If something isn’t going right, you can see the exact agent / team interactions and debug issues. More importantly, you can have 3rd party tools / agents observe swarm behavior and flag suspicious activity.
 - 🛡️ **Deterministic Authorization:** An industrial-grade, deny-by-default framework built on Cedar ([the access control framework powering AWS](https://aws.amazon.com/about-aws/whats-new/2023/05/cedar-open-source-language-access-control/)) checks every agent operation. Every tool, shell command, MCP operation, and broker action has an access level (read, write, or full), and each call is checked against the access of both the agent and the person it works for. When an agent lacks access, its request waits in your Inbox and its task pauses. The request is announced once, in the conversation where you can decide it or otherwise in your default delivery chat; Telegram and Discord add decision buttons. Blocks stop an agent's access at once.
-- 🔎 **Approval-Driven Agent Actions:** Agents ask for the access they need and stage exact platform changes, e.g. installing a skill from a public repo, for a person to approve. Installation invokes a mixture of deterministic processes (e.g. NVIDIA SkillSpector) and intelligent actions that enforce strict boundaries on execution.
+- 🔎 **Approval-Driven Agent Actions:** Agents ask for the access they need and stage exact platform changes, e.g. installing a skill from a public repo, for a person to approve. Installation requires NVIDIA SkillSpector checks and can add a tool-free assessment through the task's configured model, with results bound to the reviewed files.
 - 🕸️ **Build Your Own Team Topology:** Every agent is an independent entity tied to the team through a deterministic team identity. Create full teams with special communication rules or independent agents that freely talk to each other. (wip)
 - ♻️ **Long Horizon Work:** Often, working toward a goal may take days, weeks, months or even years rather than a few turns. That means that the team must be able to devise and track hierarchical plans with work that might happen periodically or opportunistically with pauses or gaps in between. Jobs are assigned by agent type, tracked by objective and persisted to database so that the work can resume when appropriate and can survive long periods of inactivity or abrupt adverse events (such as agent or system crashes).
 - ⚙️ **Deterministic Code Execution:** Agents can promote Python or single-file Rust into immutable revisions, run them once or on interval/cron schedules, and manage restart-surviving Kubernetes services. SSH uses pinned, brokered PTY sessions instead of exposing keys or arbitrary connection targets.
@@ -47,7 +47,7 @@ Features:
 - 🔐 Integrated encrypted credentials store
 - 🤖 OpenAI API, OpenAI Codex and xAI Oauth support
 - 🎙️ Voice input / output support
-- 🗺️ Custom-generated articles, comparisons, how-to sites, and interactive apps
+- 🗺️ Custom-generated articles, comparisons, how-to sites, interactive apps, and coder-critic work reports
 - 📲 Integration with Telegram, WhatsApp, Discord, Signal CLI, iMessage, and Web Chat
 - 🛡️ Fully integrated permissions boundaries for agent actions
 - ♻️ Internal self-improvement loops
@@ -71,7 +71,7 @@ The Web UI is designed to be lightweight so don't expect it to have all the bell
 
 ### Custom Website Generation
 
-In terms of usability, Markdown is downright awkward. For ease of use, Universal Agents can generate browser-ready articles, side-by-side comparisons, procedural how-to pages, and interactive apps with browser-local progress tracking. Ask for the format that fits the content—for example, a car comparison, a repair walkthrough, or a workout tracker. Generated sites are automatically saved and can be revisited at any time. Each page also has a quick chat interface for follow-up questions.
+In terms of usability, Markdown is downright awkward. For ease of use, Universal Agents can generate browser-ready articles, side-by-side comparisons, procedural how-to pages, and interactive apps with browser-local progress tracking. Ask for the format that fits the content—for example, a car comparison, a repair walkthrough, or a workout tracker. Generated sites are automatically saved and can be revisited at any time. Each page also has a quick chat interface for follow-up questions. A coder-critic-team run can publish its work report the same way, in the report's own design and without chat.
 
 ## 🧠 Chapter 3: The Intelligence Stack
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -167,6 +168,87 @@ def test_docs_bootstraps_rtk_before_any_shell_step() -> None:
     first_shell = next(step for step in steps if "run" in step)
     assert steps.index(bootstrap) < steps.index(first_shell)
     assert first_shell["run"] == "rtk --version"
+
+
+@pytest.mark.parametrize(
+    ("responses", "corrupt", "expected_error", "delays"),
+    [
+        ([504, 200], False, None, [1000]),
+        (["network", 200], False, None, [1000]),
+        (["timeout", 200], False, None, [1000]),
+        (["body", 200], False, None, [1000]),
+        ([504, 504, 504, 504], False, "RTK download failed: HTTP 504", [1000, 2000, 4000]),
+        ([404], False, "RTK download failed: HTTP 404", []),
+        ([200], True, "RTK archive checksum mismatch", []),
+    ],
+)
+def test_rtk_bootstrap_retries_downloads_and_only_extracts_verified_bytes(
+    tmp_path: Path, responses: list, corrupt: bool, expected_error: str | None, delays: list[int]
+) -> None:
+    """Execute the action's actual script with controlled transport failures."""
+
+    bootstrap = next(
+        step for step in _workflow()["jobs"]["build"]["steps"]
+        if step.get("name") == "Install pinned RTK"
+    )
+    archive = b"verified RTK archive fixture"
+    pinned_digest = "5028d3b19a8f0990d30fec9fbb07e32782bc5698e618fb1861aad8a9ccba4eb5"
+    script = bootstrap["with"]["script"]
+    assert script.count(pinned_digest) == 1
+    # Substitute only the expected digest so the real SHA-256 check can verify
+    # a small fixture instead of downloading an upstream release during tests.
+    script = script.replace(pinned_digest, hashlib.sha256(archive).hexdigest())
+    harness = r"""
+        const assert = require('node:assert/strict');
+        const input = JSON.parse(process.argv[1]);
+        const result = {calls: 0, delays: [], warnings: [], extracted: 0, added: 0, error: null};
+        const signal = new AbortController().signal;
+        const fetch = async (url, options) => {
+          assert.equal(options.signal, signal);
+          const response = input.responses[result.calls++];
+          if (response === 'network') throw new TypeError('fetch failed');
+          if (response === 'timeout') throw new DOMException('download timed out', 'TimeoutError');
+          return {
+            ok: response === 200 || response === 'body', status: response,
+            body: {cancel: async () => {}},
+            arrayBuffer: async () => {
+              if (response === 'body') throw new TypeError('connection closed during download');
+              return Buffer.from(input.corrupt ? 'corrupt archive' : input.archive);
+            },
+          };
+        };
+        const core = {
+          warning: message => result.warnings.push(message),
+          addPath: () => result.added++,
+        };
+        const exec = {exec: async command => {assert.equal(command, 'tar'); result.extracted++;}};
+        const wait = (resolve, delay) => {result.delays.push(delay); resolve();};
+        const abort = {timeout: ms => {assert.equal(ms, 30000); return signal;}};
+        const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
+        const run = new AsyncFunction('require', 'fetch', 'core', 'exec', 'process', 'setTimeout', 'AbortSignal', input.script);
+        run(require, fetch, core, exec, {env: {RUNNER_TEMP: input.directory}}, wait, abort)
+          .catch(error => {result.error = error.message;})
+          .then(() => process.stdout.write(JSON.stringify(result)));
+    """
+    completed = subprocess.run(
+        ["node", "--eval", harness, json.dumps({
+            "script": script, "responses": responses, "corrupt": corrupt,
+            "archive": archive.decode(), "directory": str(tmp_path),
+        })],
+        check=True, capture_output=True, text=True,
+    )
+    result = json.loads(completed.stdout)
+    assert result["error"] == expected_error
+    assert result["calls"] == len(responses)
+    assert result["delays"] == delays
+    assert len(result["warnings"]) == len(delays)
+    filename = tmp_path / "rtk" / "rtk.tar.gz"
+    if expected_error is None:
+        assert filename.read_bytes() == archive
+        assert result["extracted"] == result["added"] == 1
+    else:
+        assert not filename.exists()
+        assert result["extracted"] == result["added"] == 0
 
 
 def _tag_starts_docs(tag: str, patterns: list[str]) -> bool:

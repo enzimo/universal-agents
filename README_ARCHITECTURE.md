@@ -120,6 +120,40 @@ and the broadcast subject were removed in step 7d.
 
 ## Work, scheduling, and recovery
 
+### When the lead delegates
+
+TeamArchitect delegates substantive questions and execution by default,
+including research, comparisons, explanations, investigation, and code work.
+One focused question normally needs one suitable specialist, without a formal
+plan just to delegate. Independent work is dispatched together; dependent work
+waits for its inputs. Concurrent tasks have distinct ownership of edits.
+The lead handles clarification, coordination, protected lead-only controls,
+brief replies supported by current context, and final synthesis. It respects
+requests to answer directly or limit agents, and explains when no suitable
+specialist can take the work.
+
+This policy lives in `ua_definitions/agent_definitions/prompts/team_architect.md`.
+The shared action instructions in `custom_agents/agent_instructions.py` allow
+several independent delegation actions in one turn. The action outbox publishes
+them sequentially, while workers can run them in parallel. Delegation keeps the
+lead focused on coordination; it does not require duplicating specialists'
+work for validation. The lead checks returned evidence, follows up on specific
+gaps, and waits for required results before answering. More delegation can use
+more model calls and add latency to a focused request. Existing access checks,
+pool limits, and provider-limit handling still decide what can run.
+
+Verify policy changes with real-model decision scenarios covering a substantive
+question, independent questions dispatched together, and direct-reply exceptions.
+Catalog and context tests verify instruction loading; real NATS tests verify
+dispatch, waiting, results, and worker startup. Fake model outputs in transport
+tests cannot prove that a model chooses to delegate more often.
+The decision scenarios are in `tests/test_live_litellm_provider_smoke.py`, selected
+with `-k manager_chooses_delegation` and enabled by
+`RUN_LIVE_LITELLM_PROVIDER_SMOKE=1`. They use the existing live-provider config
+and model-key lookup, with harmless research, shell, and notification tools;
+they never dispatch the proposed tasks. A rejected key or unavailable endpoint
+leaves model behavior unverified even when the transport tests pass.
+
 ### Worker pools and parallel work
 
 TeamArchitect can hand out dozens of tasks at once, one `delegate_task` action
@@ -518,6 +552,12 @@ move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
 A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Exact-agent targets keep the same durable run receipts as agent-type targets:
+admission checks the configured target and the worker's actual task custody.
+Superseding a run closes its receipt and any same-worker occurrences merged
+into it in one transaction, so those occurrences cannot keep an exhausted
+schedule after its work stops. Merged occurrences retain their coalesced state
+to record that they never ran separately.
 Admitting a job's last run does not remove the schedule's identity or access
 (2026-10-30). A worker's run proves whom it works for with the schedule's
 permit, checked live against the row (`access_control.task_identity`), and its
@@ -1531,6 +1571,29 @@ change control files only through typed services (settings, roster,
 provisioning, reviewed skill installation). Team skills are the one readable
 exception, because agents must read a skill's files and run its scripts; they
 are never writable, and new or changed skills go through reviewed installation.
+The required SkillSpector scan stays local and credential-free. Optional
+`workspace.skill_installation.semantic_review` (`mode: "task_model"`) adds a
+tool-free Strands assessment with the model of the running turn that staged
+the skill: the person's own model when the turn uses one, else the turn's
+model (`custom_agents.skill_semantic_review`). The review runs on that turn's
+own event loop (`custom_agents.turn_registry.run_on_turn_loop`) as owned work
+that the turn's stop cancels. Why: a sync tool's worker thread would otherwise
+start a new event loop for each model call, while a provider client that keeps
+pooled connections (the native Anthropic client) is bound to the loop that
+opened them; on the turn's loop the review keeps the turn's exact model
+object, provider settings and per-call key binding, with no second client and
+no key handling of its own. A selected review fails closed: without a running
+turn or a model, after a stop, and for every incomplete answer it writes an
+`incomplete` report with one reason code (`AssessmentReason`); only
+`mode: "off"` lets the local checks decide alone. Staging and apply check the
+report with the same `validate_report`, bound to the review settings in force,
+so a settings change invalidates a pending plan. The staging refusal names the
+reason and who fixes it, and the staging log line
+(`event=skill_semantic_review_refused` or `event=skill_semantic_review_finished`)
+carries the change id, skill name, artifact digest, reason and model, never
+file contents, provider error text or keys. Complete file coverage and both
+reports bind to the installation plan. This is part of trusted installation
+code, not another agent-writable installer.
 Startup refuses an instance still in the old single-`workspace/` layout and
 prints the move commands rather than moving files itself.
 
@@ -1555,11 +1618,16 @@ never control files, runtime records, another person's unshared folder or a
 sensitive name), asks the access service for a folder
 decision when authorization is on, and then opens that real location through
 `access_control/safe_open.py`. `safe_open` walks from a trusted root one
-component at a time with `O_NOFOLLOW`, accepts only regular files with one
-link, and creates files with `O_EXCL`, so a link planted beforehand or swapped
+component at a time with `O_NOFOLLOW`, refuses multiply linked regular files,
+and creates files with `O_EXCL`, so a link planted beforehand or swapped
 in after the check makes the open fail. A write that replaces a file writes a
 new temporary file in the same folder and renames it over the old one, keeping
-its mode and owner. A person's parallel threads can write one file at the same
+its mode and owner. If restoring the owner or group is denied, replacement
+fails and leaves the original file and its metadata intact. An already-open
+regular-file descriptor may have zero links after a concurrent atomic
+replacement; it still reads the complete old file and is allowed to finish.
+This exception applies only to opened read descriptors, never to pathname
+checks for replacement. A person's parallel threads can write one file at the same
 time, and the rename is atomic: readers see the old content or the new, never a
 half-written file, the last writer to finish wins with its whole content, and a
 write that fails part way leaves the file unchanged. Writes that only ever
@@ -1589,8 +1657,9 @@ available"), so the file delivered is the file that was checked. The Photon
 sidecar reads a path, so it gets a private 0600 copy under `state/` that is
 removed after the call.
 
-Published pages (how-tos, articles, apps from `publish_single_page_site`) are
-deliverables too, so they are written into the person's folder
+Published pages (how-tos, articles, apps and work reports from
+`publish_single_page_site`) are deliverables too, so they are written into the
+person's folder
 (`users/<person>/sites/<site_id>/`) rather than `state/`. The tool also writes a
 trusted record, `state/published_sites/<site_id>.json`, naming the page's
 folder, the person it was made for, and the SHA-256 of each file
@@ -1600,6 +1669,59 @@ what the Web Chat origin serves. Anyone with a page link can open it, which is
 why site ids end with a random part; the `/docs/sites/` index lists only the
 signed-in person's pages, and a page's chat works only in the page owner's
 signed-in Web Chat session and sends each message as that person.
+
+The `report` kind publishes the work report of a coder-critic-team run. Its
+spec is the `stats.json` the skill's `cct.py stats` wrote, and the page keeps
+the report's own design instead of the runtime theme, with no embedded chat.
+That design lives once, in the canonical skill in `../ua-skills`
+(`skills/coder-critic-team/references/report-design.md`), so every runtime
+shows the same report. `custom_tools/work_report/` therefore holds
+byte-identical copies of the skill's `scripts/render_report.py` and
+`assets/report.css`, and the tool passes the stylesheet in explicitly.
+`scripts/sync_work_report_renderer.py` copies them; with `--check` it fails on
+a stale copy or a missing canonical skill. A test runs that check when
+`../ua-skills` is checked out beside this repository and is skipped otherwise,
+because CI checks out only this repository; another test checks the script's
+own refusals without the sibling. The copied renderer validates every field it
+reads, so the tool refuses malformed statistics (`invalid_report_stats`)
+before writing anything; publishing, the record and updates are the same as
+for the other kinds. The site host adds no Content-Security-Policy to
+`/docs/sites/<site_id>/`, so the report's inline stylesheet applies; a CSP
+added there later must allow inline styles (`style-src 'unsafe-inline'`) or the
+report loses its design.
+
+A real run's `stats.json` is about 170 KB, too large for a model to repeat as
+a tool argument, so an agent passes `site_kind="report"` with the file's path
+in `site_spec_path` instead of its text in `site_spec_json`; the text form
+remains for small statistics, and the tool takes exactly one of the two. The
+tool reads the file through `custom_tools.file_access`, so the task's folders,
+the person from the signed context, the access service, link handling and a
+2 MB cap (`REPORT_STATS_MAX_BYTES`) apply as for `file_read` and `notify_user`
+attachments, and every refusal keeps the file tools' reason code
+(`failure_stage` `read_spec_file`). The file's text then takes the same path
+as `site_spec_json`, so both give the same page. `site_spec_path` is refused
+for the other kinds before anything is read. To publish any page again in
+place, the agent names it in the `update_site_id` parameter (its id or URL).
+The spec's update keys still work for `site_spec_json`, and a parameter and a
+spec key that name different pages are refused. A statistics file that carries
+them is refused (`update_key_in_spec_file`): nobody sees what a 170 KB file
+says, editing it would be undone by the next `cct.py stats` run, and a file in
+a shared folder must not choose which of the person's pages is replaced.
+
+The renderer draws a round's critiques and lead notes once per mention, a
+review stage's findings once per review of that stage, a round's label once
+per critique in that round and per finding addressed in it, and a lens-grid
+cell once per round with its key, so statistics that repeated a mention could
+multiply the page: a 1 MB file could ask for hundreds of MB of HTML. `cct.py`
+gives each round its own key, names each critique and intervention in one
+round, writes one review per stage and short round labels, so the tool
+refuses statistics that repeat one, or whose critiques and findings would
+repeat more than 64 Ki characters of round labels (`invalid_report_stats`),
+before rendering. The renderer is a
+checked copy, so this check lives in the tool. Any page larger than the site
+host serves (`MAX_SITE_FILE_BYTES`, 16 MB) is refused (`page_too_large`)
+before anything is written, so neither a new page nor the page being updated
+is replaced by one the host would not serve.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
@@ -3185,8 +3307,19 @@ of response waits. A timeout, gateway restart or credential form therefore
 does not make a later message new work. The later message is saved as guidance
 for that request before publication. A final reply ends the running state,
 including when quiet hours delay showing the reply. A stopped request gets one
-too: its stopped turn sends it, or, when no turn of it was running (it still
-waited its turn), the stop itself does (`custom_agents.control_runtime.stop_task_execution`).
+too: the explicit stop owns the reply for both running and queued
+requests (`custom_agents.control_runtime.stop_task_execution`). It marks that
+ownership with the task's stop reason before cancelling its turn; the interrupted
+handler consumes the reason and cleans up without sending its own reply. Prompt
+handler cleanup keeps the queue from treating the task as orphaned when its turn
+ends. A temporary per-agent, per-root asyncio lock serializes local cleanup;
+the second caller checks the live task again and skips cleanup already done.
+These locks are weakly held in the control runtime, outside detached task records
+and persisted snapshots. The stop retains the root task's routing before
+interruption. Its reply is sent even if child cleanup exceeds the stop grace
+period or the handler resumes
+after the task was archived, without a second reply from that handler.
+An interruption without an explicit stop still uses the handler's cancellation path.
 Before, a stop that found no running turn sent none, so its thread stayed
 busy and every later message there was held as guidance for the cancelled
 request. Held guidance that its
@@ -4233,7 +4366,15 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   identifies persisted payload models and their owning sections. Frozen
   fingerprints in `data/schemas/team-transfer/section-contracts.json` detect
   payload changes even after schema regeneration: append a new version and
-  converter rather than replacing an existing fingerprint. A version
+  converter rather than replacing an existing fingerprint. When `main` and the
+  development branch (such as `release/0.10`) both change one section, the
+  number `main` gave it keeps `main`'s meaning, because `main` ships first:
+  each merge of `main` into the development branch keeps `main`'s fingerprint
+  for that number (the development branch's own fingerprint for it is
+  replaced), gives the development branch's section the next number above it,
+  and reads `main`'s version through one conversion step. That merge also tests
+  the development branch's own earlier shape of the number with a real import,
+  since its pre-release exports may still exist. A version
   imports its own section versions and the ones the previous release exported,
   through one conversion step per section that changed since
   (`team_transfer.sections.SECTION_UPGRADES`). Steps are pruned by release:
@@ -5091,8 +5232,9 @@ through versioned upgrade steps, so the running code reads only the current form
 instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
 (`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
 old file), a current file that still names it is refused by name like other removed
-settings, and the team transfer's settings section (version 9) drops it from older exports
-(`RETIRED_PRESENCE_SETTING`, the one name for the path). The settings export reads the file
+settings, and the team transfer's settings section (version 10) drops it from older
+exports, main's version 9 included (`RETIRED_PRESENCE_SETTING`, the one name for the
+path). The settings export reads the file
 through the upgrade steps (`read_upgraded_instance_config`), so an export taken after the
 code upgrade but before the launcher rewrote the file carries only what this version reads.
 The operational subject now carries only
