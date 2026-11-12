@@ -15,13 +15,14 @@ import yaml
 from internal_credentials import parse_env_file
 from team_transfer.container import TransferReader
 from team_transfer.crypto import new_key_derivation
-from team_transfer.sections import ExportSource, RecordOutcome, SectionExport, SectionFiles
+from team_transfer.sections import SECTION_UPGRADES, ExportSource, RecordOutcome, SectionExport, SectionFiles
 from team_transfer.service import TransferError, export_source, export_team, import_team
 from team_transfer.settings import INSTANCE_ROOT_TOKEN, SettingsSection, SettingV1
 from tests.pinned_memory_support import new_instance
 
 PASSPHRASE = "correct horse battery staple"
 FAST_KEYS = {"opslimit": 1, "memlimit": 8192}
+SEMANTIC_REVIEW = ("workspace", "skill_installation", "semantic_review")
 
 
 def _old_instance(tmp_path: Path, change=None) -> tuple[Path, Any]:
@@ -150,15 +151,20 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9, 10])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
     """Older choices survive while settings an export predates use defaults.
 
-    Version 8 is what the releases before message contract step 7d export; it carries the
-    presence stream's setting, which this version no longer has: the conversion drops it,
-    so nothing is refused.
+    Versions 8 and 9 are what the releases before message contract step 7d export (9 is
+    main's, from the 0.9 releases that added the skill semantic-review settings). They carry
+    the presence stream's setting, which this version no longer has: the conversion drops
+    it, so nothing is refused. Version 8 predates the semantic-review settings, so its
+    import keeps the review turned off beside the team's other skill installation choices.
+    Version 10 is this branch's pre-release export after step 7d. Every earlier version
+    may still carry the ignored agent.max_concurrent_top_level_tasks, which version 11
+    removed, so the conversion drops it too.
     """
 
     from assistant_gateway.config import GatewayInstanceConfig
@@ -175,7 +181,12 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
                 records.append(SettingV1(path=("tool_policy", "output_retention_days"), value=0))
             if exported_version >= 8:
                 records.append(SettingV1(path=("gateway", "storage_warnings", "person_step_gb"), value=7))
+                records.append(SettingV1(path=("workspace", "skill_installation", "safe_max_score"), value=10))
+            if exported_version in (8, 9):
                 records.append(SettingV1(path=("transport", "presence_max_age_seconds"), value=900.0))
+            if exported_version >= 9:
+                records.append(SettingV1(path=SEMANTIC_REVIEW + ("mode",), value="task_model"))
+                records.append(SettingV1(path=SEMANTIC_REVIEW + ("max_input_bytes",), value=524288))
             records.append(SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
@@ -200,6 +211,86 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
         "person_step_gb": 7 if exported_version >= 8 else 5,
         "nearing_limit_percent": 80,
         "nearly_full_percent": 95,
+    }
+    skill_installation = imported.workspace.skill_installation
+    assert skill_installation.safe_max_score == (10 if exported_version >= 8 else 20)
+    assert skill_installation.semantic_review.model_dump() == (
+        {"mode": "task_model", "max_input_bytes": 524288}
+        if exported_version >= 9
+        else {"mode": "off", "max_input_bytes": 262144}
+    )
+
+
+def test_a_selected_skill_semantic_review_moves_with_the_team(tmp_path: Path) -> None:
+    """This version's export carries the skill semantic-review choice and its input limit."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    def selected_review(config: Any) -> None:
+        config.workspace.skill_installation.semantic_review.mode = "task_model"
+        config.workspace.skill_installation.semantic_review.max_input_bytes = 524288
+
+    path, _config = _old_instance(tmp_path, selected_review)
+    out = _export(tmp_path, path)
+    assert {record.dotted: record.value for record in _records(out)} == {
+        "workspace.skill_installation.semantic_review.mode": "task_model",
+        "workspace.skill_installation.semantic_review.max_input_bytes": 524288,
+    }
+    target = tmp_path / "new"
+
+    plan = _import(out, target, dry_run=False)
+
+    assert {(r.key, r.outcome) for r in plan.records} == {
+        ("workspace.skill_installation.semantic_review.mode", RecordOutcome.IMPORT),
+        ("workspace.skill_installation.semantic_review.max_input_bytes", RecordOutcome.IMPORT),
+    }
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.workspace.skill_installation.semantic_review.model_dump() == {
+        "mode": "task_model",
+        "max_input_bytes": 524288,
+    }
+
+
+def test_this_branchs_pre_release_settings_version_9_imports_unchanged(tmp_path: Path) -> None:
+    """Pre-releases of this branch exported their own settings version 9.
+
+    It had neither the presence setting nor the skill semantic-review settings that main's
+    version 9 carries, so the one step from 9 reads it without changing a record.
+    """
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    records = [
+        SettingV1(path=("heartbeat", "enabled"), value=False),
+        SettingV1(path=("tool_policy", "output_retention_days"), value=0),
+        SettingV1(path=("gateway", "storage_warnings", "person_step_gb"), value=7),
+    ]
+
+    class ExportedAsPreRelease(SettingsSection):
+        schema_version = 9
+
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            return SectionExport(records=[record.model_dump(mode="json") for record in records])
+
+    dumped = [record.model_dump(mode="json") for record in records]
+    assert SECTION_UPGRADES[(SettingsSection.name, 9, SettingsSection.schema_version)](dumped) == dumped
+    path, _config = _old_instance(tmp_path)
+    target = tmp_path / "new"
+
+    plan = _import(_export(tmp_path, path, ExportedAsPreRelease()), target, dry_run=False)
+
+    assert {(r.key, r.outcome) for r in plan.records} == {
+        ("heartbeat.enabled", RecordOutcome.IMPORT),
+        ("tool_policy.output_retention_days", RecordOutcome.IMPORT),
+        ("gateway.storage_warnings.person_step_gb", RecordOutcome.IMPORT),
+    }
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.heartbeat.enabled is False
+    assert imported.tool_policy.output_retention_days == 0
+    assert imported.gateway.storage_warnings.person_step_gb == 7
+    assert imported.workspace.skill_installation.semantic_review.model_dump() == {
+        "mode": "off",
+        "max_input_bytes": 262144,
     }
 
 

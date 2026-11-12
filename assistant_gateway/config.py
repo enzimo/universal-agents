@@ -748,6 +748,8 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "workspace.skill_installation.safe_max_score": "Maximum SkillSpector score accepted as SAFE; cannot exceed 20.",
     "workspace.skill_installation.plan_ttl_seconds": "Lifetime of an immutable scanned installation plan.",
     "workspace.skill_installation.max_repository_bytes": "Maximum quarantined Git repository size.",
+    "workspace.skill_installation.semantic_review.mode": "Optional semantic assessment: off, or task_model to use the calling task's selected model and existing broker-managed authentication.",
+    "workspace.skill_installation.semantic_review.max_input_bytes": "Maximum complete UTF-8 semantic assessment input. Oversized or unreadable input blocks the selected review rather than being truncated.",
     "workspace.external_skill_repositories": "Public GitHub repositories containing skills directories at any depth that can be refreshed before agent startup.",
     "workspace.refresh_external_skills_on_start": "Refresh configured external skill repositories before agents start.",
     "assistant": "Assistant-facing profile defaults.",

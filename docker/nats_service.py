@@ -24,7 +24,6 @@ from pathlib import Path
 import re
 import secrets
 import shutil
-import socket
 import subprocess
 import time
 from typing import Mapping, MutableMapping
@@ -40,6 +39,8 @@ NATS_USER_ENV = "NATS_USER"
 NATS_PASSWORD_ENV = "NATS_PASSWORD"
 GENERATED_NATS_USER = "ua-runtime"
 _AUTH_DIR_NAME = "auth"
+# The JetStream store directory under the service root, passed to nats-server as ``-sd``.
+_STORE_DIR_NAME = "data"
 # The message contract's server requirements (transport.yaml "server" and "limits"),
 # which the bundled server's generated configuration applies.
 CONTRACT_TRANSPORT_PATH = Path(__file__).resolve().parents[1] / "contracts" / "messages" / "v1" / "generated" / "transport.json"
@@ -99,28 +100,138 @@ def nats_log_tail(service_root: Path, *, max_files: int = 3, max_lines_per_file:
     return "\n".join(sections)
 
 
+_LISTENING = "Listening for client connections on"
+_READY = "Server is ready"
+_PORT_TAKEN = re.compile(r"listen tcp (\S+): bind: address already in use")
+
+
+def _startup_output(startup_log_path: Path, offset: int, pid: int) -> str:
+    """The lines the server of this start wrote to the startup log every start appends to.
+
+    The offset drops what earlier starts wrote. A start of the same instance that overlaps
+    this one appends to the file at the same time, so its server's ready or "address
+    already in use" lines can follow the offset too. nats-server begins every log line
+    with ``[<pid>] ``, so only the lines of this start's server count. Lines without the
+    prefix (an error printed before the server's logger starts) matter only once the
+    server has exited, and that message carries the whole log tail.
+    """
+
+    prefix = f"[{pid}] "
+    with startup_log_path.open("rb") as log:
+        log.seek(offset)
+        text = log.read().decode("utf-8", errors="replace")
+    return "\n".join(line for line in text.splitlines() if line.startswith(prefix))
+
+
+def _port_taken_message(address: str, store_dir: Path) -> str:
+    """The refusal when this start's server found its address taken, with advice that is safe to follow.
+
+    The ports are fixed, so the holder can be this team's own server (the team is still
+    running, or a start ended abruptly and left it), or the server or program of another
+    team or service on the same machine. Only this team's own server can safely be
+    stopped, and only when the team is not running; its command line carries this team's
+    store directory (``-sd``), which tells the cases apart. This start never stops or
+    adopts the holder itself.
+    """
+
+    return (
+        f"The local NATS server cannot start: {address} is already in use. Run `ps -ef | grep nats-server` "
+        f"to list the running nats-server processes. One started with `-sd {store_dir}` belongs to this team. "
+        "If this team is running, stop the team first, and do not stop that nats-server by hand; a command that "
+        "starts its own NATS server, such as the consumer reconciler with --start-local-nats, runs only while the "
+        "team is stopped. If nothing of this team is running, that nats-server was left over from a start that "
+        "ended abruptly: stop it, then start again. If no nats-server shows that directory, another team or "
+        "program holds the address, so do not stop it from here: free the port deliberately, or set "
+        "TEAM_LOCAL_NATS_ENABLED=false and configure NATS_URL/NATS_SERVERS for this team's own external NATS server."
+    )
+
+
 def _wait_for_nats_ready(
     process: subprocess.Popen[bytes],
     *,
     logger: logging.Logger,
     service_root: Path,
+    startup_log_path: Path,
+    offset: int,
     timeout_seconds: float = 30.0,
 ) -> None:
+    """Return once the server this start launched says it listens and is ready, while it still runs.
+
+    Another server answering on the port is not readiness. The server runs in its own
+    session, so one left over from an earlier start (a launcher that crashed, or a team
+    still running) can keep the port, and so can another team's server on the same
+    machine; this start's server then stops with "address already in use", and the start
+    must refuse with the address its server reported (``_port_taken_message``) instead of
+    going on with the old one. Both the ready lines and the "address already in use" line
+    count only when this start's server wrote them (``_startup_output``).
+    """
+
     deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+    while True:
         code = process.poll()
+        output = _startup_output(startup_log_path, offset, process.pid)
         if code is not None:
+            taken = _PORT_TAKEN.search(output)
+            if taken is not None:
+                raise RuntimeError(_port_taken_message(taken.group(1), service_root / _STORE_DIR_NAME))
             raise RuntimeError(
-                f"NATS process exited before becoming ready with code {code}.\n"
-                f"{nats_log_tail(service_root)}"
+                f"NATS process exited before becoming ready with code {code}.\n{nats_log_tail(service_root)}"
             )
-        try:
-            with socket.create_connection((INTERNAL_NATS_HOST, INTERNAL_NATS_PORT), timeout=1.0):
-                return
-        except OSError:
-            time.sleep(0.25)
-    logger.warning("NATS did not become ready before timeout; diagnostics follow.\n%s", nats_log_tail(service_root))
-    raise RuntimeError("Timed out waiting for NATS to become ready.")
+        if _LISTENING in output and _READY in output and process.poll() is None:
+            return
+        if time.time() >= deadline:
+            logger.warning(
+                "NATS did not become ready before timeout; diagnostics follow.\n%s", nats_log_tail(service_root)
+            )
+            raise RuntimeError(
+                f"The local NATS server did not say it was ready within {timeout_seconds:g} seconds."
+            )
+        time.sleep(0.25)
+
+
+def stop_local_nats(
+    process: subprocess.Popen[bytes],
+    *,
+    logger: logging.Logger,
+    terminate_seconds: float = 10.0,
+    kill_seconds: float = 5.0,
+) -> None:
+    """Stop and reap a local NATS server this process started; a slow stop is logged, never raised.
+
+    SIGTERM lets the server finish its JetStream writes; one still running after
+    ``terminate_seconds`` is killed. A server that has not exited even ``kill_seconds``
+    after SIGKILL is logged as an error with its pid instead of raising: callers stop it
+    on their way out of another error (a failed start, a failed maintenance run), and
+    that error is the one the operator needs to see. Only the given child process is
+    signalled, never a pid read from a log or found on a port, so a port holder this
+    process did not start is never stopped here.
+    """
+
+    if process.poll() is not None:
+        return
+    logger.info("Stopping the local NATS server. event=local_nats_stop pid=%s", process.pid)
+    # Popen skips the signal when the process has exited meanwhile, so a reused pid is never signalled.
+    process.terminate()
+    try:
+        process.wait(timeout=terminate_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "The local NATS server did not stop within %g seconds of SIGTERM; killing it. "
+            "event=local_nats_stop_killed pid=%s",
+            terminate_seconds,
+            process.pid,
+        )
+    process.kill()
+    try:
+        process.wait(timeout=kill_seconds)
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "The local NATS server did not exit within %g seconds of SIGKILL and may still hold its ports. "
+            "event=local_nats_stop_failed pid=%s",
+            kill_seconds,
+            process.pid,
+        )
 
 
 def _write_private_file(path: Path, content: str) -> None:
@@ -265,6 +376,12 @@ def start_local_nats(
 
     ``env`` gains NATS_USER/NATS_PASSWORD when they were unset, so callers must
     pass the same mapping they later give to runtime processes.
+
+    A start that fails after launching the server (it timed out, its startup log
+    could not be read, or it was interrupted) stops and reaps that server before
+    raising. The caller never receives the process when the start fails, and the
+    server runs in its own session, so nothing else would stop it: it would keep the
+    ports, and the next start would be refused with "already in use".
     """
     if shutil.which("nats-server") is None:
         raise RuntimeError(
@@ -273,7 +390,7 @@ def start_local_nats(
             "and configure NATS_URL/NATS_SERVERS for an external server."
         )
     root = service_root or resolve_nats_service_root(env)
-    data_dir = root / "data"
+    data_dir = root / _STORE_DIR_NAME
     log_dir = root / "log"
     data_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +437,7 @@ def start_local_nats(
     startup_log_path = log_dir / "nats-server-startup.log"
     logger.info("Starting local NATS/JetStream: %s", " ".join(log_command))
     logger.info("Writing local NATS startup output to %s", startup_log_path)
+    offset = startup_log_path.stat().st_size if startup_log_path.exists() else 0
     startup_log = startup_log_path.open("ab")
     try:
         process = subprocess.Popen(
@@ -332,5 +450,18 @@ def start_local_nats(
         )
     finally:
         startup_log.close()
-    _wait_for_nats_ready(process, logger=logger, service_root=root)
+    try:
+        _wait_for_nats_ready(
+            process, logger=logger, service_root=root, startup_log_path=startup_log_path, offset=offset
+        )
+    except BaseException:
+        # BaseException: an interrupt (Ctrl-C in a maintenance run) must not leave the server running either.
+        if process.poll() is None:
+            logger.warning(
+                "The local NATS start failed; stopping the server it launched. "
+                "event=local_nats_start_cleanup pid=%s",
+                process.pid,
+            )
+            stop_local_nats(process, logger=logger)
+        raise
     return process

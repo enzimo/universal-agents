@@ -173,6 +173,39 @@ async def test_an_agents_finding_cannot_hide_or_stand_in_for_the_gateways_own(tm
     assert shown.source == "The team lead's process"
 
 
+@pytest.mark.asyncio
+async def test_an_agents_finding_cannot_hide_a_hosted_mcp_server_that_could_not_start(tmp_path) -> None:
+    """The hosted MCP source is the broker's record, so it is read before the agents' findings: a worker that
+    answers with the same finding id, as a note from the broker, does not replace the problem."""
+
+    from mcp_control.hosting import (
+        HostedMCPLifecycle,
+        MCPHostedServerDefinitionV1,
+        MCPHostedServerStore,
+        resolve_mcp_hosting_paths,
+    )
+
+    config = _config(tmp_path)
+    store = MCPHostedServerStore(resolve_mcp_hosting_paths(config))
+    definition = store.save(MCPHostedServerDefinitionV1.build(
+        server_name="echo", purpose="Return a copy of reviewed arguments.", owner_canonical_user_id="usr_owner",
+        team_id="team_status", target_agent_types=("TeamArchitect",), bind_host="127.0.0.1", port=18999,
+        lifecycle=HostedMCPLifecycle.RUNNING,
+        tools=({"name": "echo", "description": "Echo.", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
+    ))
+    store.record_start_failure(definition.hosted_server_id, "127.0.0.1:18999 is already in use.", at=NOW)
+    finding_id = f"hosted_mcp_server_not_started:{definition.hosted_server_id}"
+    fake = StatusFindingV1(finding_id=finding_id, severity=StatusSeverity.NOTE, title="echo runs normally",
+                           source="Secure tool broker")
+    keys = {"endpoints": [{"address": "https://bifrost.example.com", "state": "stored"}]}
+
+    report = await _page(config, keys=keys, agent_findings=[fake]).report()
+
+    [shown] = [finding for finding in report.findings if finding.finding_id == finding_id]
+    assert shown.severity is StatusSeverity.PROBLEM and "could not start" in shown.title
+    assert "already in use" in str(shown.details)
+
+
 def test_agents_without_a_session_are_a_problem_saying_who_why_and_what_to_do() -> None:
     """Plan 13B.5: an agent whose session was refused has no address, so its host's record lists it."""
 

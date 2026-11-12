@@ -20,9 +20,8 @@ import asyncio
 import errno
 import os
 import shutil
-import socket
-import subprocess
-import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +48,7 @@ from custom_transport.nats_adapter import JetStreamAccountUsage, NatsTransportAd
 from custom_transport.subjects import NatsSubjectMapper
 from storage.config import resolve_storage_settings
 from tests.knowledge_support import BACKENDS, knowledge_storage
+from tests.own_nats_server import own_nats_server
 
 START = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
 GB = 1_000_000_000
@@ -468,34 +468,16 @@ def _nats_server() -> str:
     return found
 
 
-def _free_port() -> int:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
+@contextmanager
+def _own_server(tmp_path: Path, account_jetstream: str) -> Iterator[str]:
+    """A server whose TEAM account has ``account_jetstream`` (own_nats_server sets address, port and store)."""
 
-
-def _start_server(tmp_path: Path, account_jetstream: str) -> tuple[subprocess.Popen, str]:
-    port = _free_port()
     config = tmp_path / "nats.conf"
     config.write_text(
-        f'host: "127.0.0.1"\nport: {port}\n'
-        f'jetstream {{ store_dir: "{tmp_path / "store"}" }}\n'
         f'accounts {{ TEAM {{ jetstream: {account_jetstream}, users:  [ {{ user: "team", password: "team-pass" }} ] }} }}\n'
     )
-    log = (tmp_path / "nats.log").open("w")
-    process = subprocess.Popen([_nats_server(), "-c", str(config)], stdout=log, stderr=log)
-    deadline = time.monotonic() + 5
-    while True:
-        if process.poll() is not None:
-            pytest.fail(f"NATS exited during startup: {(tmp_path / 'nats.log').read_text()}")
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                return process, f"nats://127.0.0.1:{port}"
-        except OSError:
-            if time.monotonic() >= deadline:
-                process.kill()
-                pytest.fail("NATS did not start within five seconds")
-            time.sleep(0.02)
+    with own_nats_server(_nats_server(), tmp_path, "-c", str(config)) as url:
+        yield url
 
 
 @pytest.mark.integration
@@ -509,9 +491,7 @@ def _start_server(tmp_path: Path, account_jetstream: str) -> tuple[subprocess.Po
 def test_the_account_reports_its_stored_messages_and_its_limit_when_it_has_one(
     tmp_path: Path, account_jetstream: str, expected_limit: int | None
 ) -> None:
-    process, url = _start_server(tmp_path, account_jetstream)
-
-    async def read() -> JetStreamAccountUsage | None:
+    async def read(url: str) -> JetStreamAccountUsage | None:
         adapter = NatsTransportAdapter(
             config=NatsTransportConfig(servers=[url], user="team", password="team-pass", storage="file"),
             mapper=NatsSubjectMapper(team_id="team_storage"),
@@ -523,11 +503,8 @@ def test_the_account_reports_its_stored_messages_and_its_limit_when_it_has_one(
         finally:
             await adapter.close()
 
-    try:
-        usage = asyncio.run(read())
-    finally:
-        process.terminate()
-        process.wait(timeout=5)
+    with _own_server(tmp_path, account_jetstream) as url:
+        usage = asyncio.run(read(url))
 
     assert usage is not None and usage.storage >= 4000
     assert usage.max_storage == expected_limit

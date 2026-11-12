@@ -187,6 +187,44 @@ def test_a_chat_message_that_fails_is_retried_with_the_same_key_and_no_second_in
     assert report(world) == []
 
 
+def test_a_hundred_failed_chat_deliveries_do_not_starve_a_later_notice(world):
+    run = start_final_run(world)
+    # Real terminal snapshots create 101 separately signed schedule problems.
+    for index in range(101):
+        meta = run.meta.model_copy(deep=True)
+        meta.gateway_context.schedule_run = None
+        meta.gateway_context.task_context = world.signer.issue(
+            team_id=TEAM, person_id=ANN, schedule_id=f"sched_{index:03d}",
+        )
+        task_id = f"task_failure_{index:03d}"
+        world.tasks.add_task(
+            Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="Check launches."),
+            run.header, meta, owner_person_id=ANN,
+        )
+        finish(world, task_id)
+        world.tasks._save_completed_task(task_id, ProgressState.FAILED)
+    manager = lead(world)
+    healthy = "task_failure_100"
+    attempts = []
+
+    async def send(*args, **kwargs):
+        message = kwargs["message"]
+        attempts.append(message)
+        if healthy not in message.msg_content.text:
+            raise RuntimeError("simulated persistent delivery failure")
+
+    manager.team_comms.send_message.side_effect = send
+    report(world, manager)
+    assert len(attempts) == 101
+    assert sum(healthy in message.msg_content.text for message in attempts) == 1
+    assert len(notices(world)) == 101
+    report(world, manager)
+    assert len(attempts) == 201
+    assert sum(healthy in message.msg_content.text for message in attempts) == 1
+    assert len(notices(world)) == 101
+    assert len(problems(world)) == 100
+
+
 def test_a_rolled_back_terminal_snapshot_records_no_problem(world, monkeypatch):
     run = start_final_run(world)
     original = ScheduledRunProblems.record_outcome

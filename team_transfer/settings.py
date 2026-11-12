@@ -93,9 +93,10 @@ class SettingsSection:
     # 6: agent.request_conflict_checks (checks between a person's separate requests) joined it.
     # 7: tool_policy.output_retention_days (how long saved tool outputs are kept) joined it.
     # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
-    # 9: transport.presence_max_age_seconds left it (the presence stream was removed, message contract step 7d).
-    # 10: remove the obsolete concurrency key that earlier loaders left in saved files.
-    schema_version: ClassVar[int] = 10
+    # 9: optional skill semantic-review settings joined workspace.skill_installation (0.9 releases, from main).
+    # 10: transport.presence_max_age_seconds left it (the presence stream was removed, message contract step 7d).
+    # 11: agent.max_concurrent_top_level_tasks left it (earlier loaders kept the ignored key in saved files).
+    schema_version: ClassVar[int] = 11
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -676,11 +677,17 @@ __all__ = [
 
 
 # V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
-# and V8 gateway.storage_warnings. Their records keep the same shape and carry
+# V8 gateway.storage_warnings and V9 workspace.skill_installation.semantic_review
+# (an older export leaves the review off). Their records keep the same shape and carry
 # only values that differ from defaults, so old choices pass on unchanged and
-# settings absent from an older export use the current defaults. V9 removed
+# settings absent from an older export use the current defaults. V10 removed
 # transport.presence_max_age_seconds (RETIRED_PRESENCE_SETTING): an older
-# export's value for it is dropped. V10 also removes the obsolete concurrency key.
+# export's value for it is dropped. Version 9 is main's (0.9 releases, which
+# still carry the presence setting); this branch's own pre-release version 9
+# had neither the presence setting nor the semantic-review settings, so the
+# same step reads it. V11 removed agent.max_concurrent_top_level_tasks
+# (RETIRED_CONCURRENCY_SETTING), which loaders before it ignored but left in saved
+# files, so any earlier export may carry it: the same step drops it.
 
 
 def _without_retired_settings(records: SectionRecords) -> SectionRecords:
@@ -688,5 +695,5 @@ def _without_retired_settings(records: SectionRecords) -> SectionRecords:
     return [record for record in records if tuple(record.get("path", ())) not in retired]
 
 
-for _source in (5, 6, 7, 8, 9):
+for _source in (5, 6, 7, 8, 9, 10):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _without_retired_settings

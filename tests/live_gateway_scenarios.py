@@ -7,7 +7,6 @@ import contextlib
 import json
 import logging
 import shutil
-import socket
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -39,6 +38,7 @@ from runtime_settings.interactive_apps import InteractiveAppPluginConfiguration
 from tests.application_test_doubles import (
     application_from as GatewayApplicationFacade,
 )
+from tests.live_website_support import gateway_with_website
 from assistant_gateway.gateway import GatewayDeliveryEvent, UserGateway
 from assistant_gateway.inbound_attachments import store_inbound_attachment_bytes
 from assistant_gateway.interactive_apps.base import BaseInteractiveApp
@@ -158,12 +158,6 @@ def _repo_python_executable() -> str:
     if repo_python.exists():
         return str(repo_python)
     return sys.executable
-
-
-def _available_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
 
 
 def _scenario_manager_db_path(test_number: int) -> str:
@@ -2824,7 +2818,6 @@ async def run_test_54(
         extra_env={"MEMORY_GRAPH_ENABLED": "false"},
         config_path=manager_config_path,
     )
-    bind_port = _available_loopback_port()
     auth_env_var = "UA_LIVE_GATEWAY_WEBSITE_TOKEN"
     auth_token = f"live-{uuid.uuid4().hex}"
     os.environ[auth_env_var] = auth_token
@@ -2842,24 +2835,34 @@ async def run_test_54(
     website_settings.web_chat_enabled = True
     website_settings.web_chat_token_env_var = auth_env_var
     website_settings.bind_host = "127.0.0.1"
-    website_settings.bind_port = bind_port
-    website_settings.public_port = bind_port
     config.network.public_origin = "http://127.0.0.1"
     _apply_manager_storage(config, 54)
     _apply_state_storage(config, result_dir, 54)
     bootstrap_instance(config)
 
-    app_manager = None
     try:
-        async with UserGateway(config, output_sink=None) as gateway:
-            await _wait_for_manager_route(gateway, manager)
-            app_manager = InteractiveAppManager(
-                config,
-                gateway.application,
-                include_apps=["website"],
-            )
-            await app_manager.start()
+        async with gateway_with_website(
+            config, ready=lambda gateway: _wait_for_manager_route(gateway, manager)
+        ) as (gateway, app_manager, bind_port):
             gateway.bind_event_sink(app_manager.handle_gateway_event)
+
+            base_url = f"http://127.0.0.1:{bind_port}"
+            # The gateway copied the Website address into these links when it was built; they
+            # must name the port the app serves on (the Web Chat link's settings are private
+            # to the gateway's identity service).
+            stored_links = {
+                "web_chat_url": gateway._identity_service._settings.web_chat_url,
+                "access_review_url": gateway.access_inbox.review_url(),
+            }
+            expected_links = {
+                "web_chat_url": f"{base_url}/webchat",
+                "access_review_url": f"{base_url}/webchat?view=inbox",
+            }
+            if stored_links != expected_links:
+                raise AssertionError(
+                    f"The gateway's Website links name another port: {stored_links!r}, "
+                    f"expected {expected_links!r}"
+                )
 
             website = app_manager.apps["website"]
             running_health = app_manager.plugin_health_for_channel("website")
@@ -2876,7 +2879,6 @@ async def run_test_54(
                     "Registry-created Website adapter retained a concrete gateway attribute."
                 )
 
-            base_url = f"http://127.0.0.1:{bind_port}"
             async with ClientSession(
                 cookie_jar=CookieJar(unsafe=True),
                 timeout=ClientTimeout(total=45),
@@ -2967,9 +2969,6 @@ async def run_test_54(
             )
     finally:
         os.environ.pop(auth_env_var, None)
-        if app_manager is not None and app_manager.has_running_apps:
-            with contextlib.suppress(Exception):
-                await app_manager.stop()
         cleanup: list[dict] = []
         with contextlib.suppress(Exception):
             returncode = await manager.stop()

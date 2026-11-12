@@ -134,18 +134,19 @@ system or Node trust.
 
 Generation retains existing versions where constraints permit. Pass `--upgrade`
 for an intentional dependency refresh. Do not hand-edit generated lockfiles.
-LiteLLM stays at 1.105.0 during the 2026-10-28 refresh at the owner's request.
-Its `filelock<4` dependency prevents installing the patched 4.x line. Pin
-filelock to 3.20.3: it includes the earlier
-[SoftFileLock fix](https://github.com/advisories/GHSA-qmgc-5h2g-mvrw) and predates
-the affected implementations in
-[GHSA-v4x8-3wr5-3wq8](https://github.com/advisories/GHSA-v4x8-3wr5-3wq8),
-[GHSA-9vhv-jxww-xfm5](https://github.com/advisories/GHSA-9vhv-jxww-xfm5), and
-[GHSA-567q-5qvw-pf92](https://github.com/advisories/GHSA-567q-5qvw-pf92).
-This is a deliberate downgrade from 3.32.7, within both LiteLLM's and Hugging
-Face's requirements, not an audit exception. Revisit it when LiteLLM supports
-the patched 4.x line. The model-provider major-version limits remain
-until their adapter contracts are deliberately updated and verified.
+LiteLLM is pinned to the audited 1.103.10 maintenance release so the runtime
+can install filelock 4.2.6. LiteLLM 1.104 through the current 1.106 releases
+cap filelock below 4; the older filelock 3.20.3 pin is affected by
+[Windows lock-file permissions](https://github.com/advisories/GHSA-8mx5-7m5m-r77g)
+and [Unix lock-path substitution](https://github.com/advisories/GHSA-69hj-f68j-2879)
+vulnerabilities fixed in 4.2.1. The 1.103.10 maintenance release has the
+security fixes missing from 1.103.0 and no filelock cap. This uses published,
+hash-locked packages without modifying package metadata or ignoring advisories.
+Revisit the LiteLLM pin when a newer audited release permits patched filelock.
+Before changing this pair, run the installed Strands/LiteLLM HTTP round-trip,
+startup and reasoning tests, the runtime-install check and the Python audits.
+The model-provider major-version limits remain until their adapter contracts
+are deliberately updated and verified.
 
 Strands 1.62 makes model-call middleware public. Context-debug capture uses
 `agent.add_middleware` with `strands.middleware.InvokeModelStage.Wrap`, not the
@@ -155,6 +156,12 @@ so diagnostic capture cannot silently disappear after an SDK change.
 scanner graph does not alter the agent runtime. Removing a development dependency
 from an existing environment requires recreating that environment; installing the
 runtime lock alone does not uninstall packages already present.
+The scanner environment requires langgraph-api 0.15.0 or newer to include the
+[custom-authentication Store access fix](https://github.com/advisories/GHSA-4hm6-w6qq-w73v).
+Its lock pins 0.17.0 and the required in-memory runtime without changing the
+scanner source release or the agent runtime. Verify `skillspector --version`
+and a local `skillspector scan --no-llm` after updating this isolated graph.
+
 SkillSpector itself is pinned by its source archive and SHA-256. `pip-audit`
 checks its registry dependencies, but skips the SkillSpector package because
 that source release is not on PyPI; a successful audit does not cover it.
@@ -287,6 +294,10 @@ It starts isolated Sealbox and broker services using `sealbox-server` and
 `SEALBOX_CLI_PATH`. It checks the first team and personal saves, onboarding
 handover consumption, signed lookup, owner isolation, restart persistence and
 damaged tenant refusal. Missing binaries are an explicit coverage gap.
+Each test's `sealbox-server` writes its output to a log file beside its token
+file; a start counts only when that log names the readiness check's
+`x-request-id`, so the binary must log request ids with
+`RUST_LOG=info,tower_http=debug`, as every Sealbox release so far does.
 Container acceptance must verify a real onboarding credential save and signed
 lookup before and after restart; service health alone does not prove storage
 works. Never include the key in logs or acceptance output.
@@ -313,6 +324,14 @@ same way from `docker/secret_env_vars.yaml`, the list of secret environment
 variables and the processes that receive them. After changing that list, run
 `.venv/bin/python scripts/export_secret_env_docs.py` (it also has `--check`).
 
+`custom_tools/work_report/render_report.py` and `report.css` are byte-identical
+copies of the `coder-critic-team` skill's renderer and stylesheet in the
+sibling `../ua-skills` checkout. Change them there, then run
+`.venv/bin/python -m scripts.sync_work_report_renderer` and repeat it with
+`--check`. The test that compares the copies runs only when `../ua-skills` is
+checked out beside this repository; CI checks out only this one, so run it
+locally after a renderer change.
+
 Live tests that accept either `config.yaml` or `instance_config.yaml` use
 `TEAM_NATS_LIVE_CONFIG` or `UA_LIVE_CONFIG`. The loader identifies the file by
 its required instance identity fields because the two schemas have independent
@@ -327,6 +346,55 @@ transport adapter. Otherwise the other connection can publish before the server
 has the subscription, and the test fails now and then. One `flush()` is not
 enough in nats-py 2.16.0; the helper's docstring explains why. Durable consumers
 and messages sent on the subscribing connection itself need no wait.
+
+Live tests share one long-lived NATS server, and a stream left there stays
+until someone deletes it (a shared test server once ran out of storage after
+about 1,500). Mark every test that creates streams, key-value buckets or object
+stores on it `nats`: a fixture in `tests/conftest.py` then deletes, when the test
+ends, passed or failed, each stream the test's own process created there. The
+server decides which streams those are: each create carries the test's random
+token in the stream's metadata, so a stream of the same name that another run
+created stays (`tests.live_nats_support.OwnedStreams` explains how). Give every
+name a random part, such as a random team id. The fixture does not delete:
+
+- names every run on the server shares by design (`shared_stream_names`), such
+  as `KV_UA1_HOSTS` or a subject prefix's streams; delete the keys your test
+  wrote in them yourself;
+- streams a child process created, such as a launched runtime's; delete those
+  by their exact name.
+
+A shared helper whose streams only the fixture deletes calls
+`require_stream_recorder`, so a test that uses it without the marker fails at
+once instead of leaving streams behind. The deletion logs in with the live
+settings, `credentials_file` included. When the server is down or does not
+answer, it gives up within 30 seconds and reports an error at the test's
+teardown that names the server and the streams.
+
+A test that needs a NATS server of its own uses
+`tests.own_nats_server.own_nats_server`: the server picks its own port, and the
+test reads it from that server's log, so it never talks to another test's
+server. A test that starts nats-server, the broker or `sealbox-server` stops it
+with a helper from `tests.owned_processes`. Each one resumes a paused process,
+and kills and reaps one that does not stop within its time limit:
+
+- `stopped_at_exit` wraps the server's lifetime in a `with` block;
+- `require_graceful_stop` stops it outside such a block, as in a restart or a
+  fixture's teardown;
+- `stop_owned_process` is only for a path that is already raising an error,
+  which stays the error the test reports.
+
+A server that had to be killed has a shutdown defect, and pytest shows the
+warning about it only for a failing test. So the first two fail a test that
+otherwise passed when its server had to be killed; `stopped_at_exit` keeps the
+test body's own error when the body failed.
+
+Until issue #117 is fixed, a failure late in a `tests/test_live_agent_hosts.py`
+test can leave its agent hosts running when pytest closes the event loop, and
+the run then hangs before pytest prints the failure. Stop such a run with SIGINT
+(Ctrl-C, or `timeout -s INT <seconds>` for a run nobody watches), which still
+prints the failure; SIGTERM or SIGKILL loses it. Adding
+`-o faulthandler_timeout=60` prints the stacks of a test that runs longer than a
+minute.
 
 The knowledge base privacy scenarios call the configured model many times, so
 they require `RUN_LIVE_KNOWLEDGE_PRIVACY=1`. The external and full profiles

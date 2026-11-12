@@ -759,6 +759,9 @@ workspace:
     safe_max_score: 20                          # Accept only LOW/SAFE reports at or below this score; values above 20 are rejected.
     plan_ttl_seconds: 86400                     # Lifetime of a scanned plan (60-86400 s); long enough for a person to approve it later.
     max_repository_bytes: 104857600             # Maximum size of a quarantined Git checkout (100 MiB).
+    semantic_review:
+      mode: "off"                              # off: local checks only; task_model: also assess with this task's selected model and broker-managed authentication.
+      max_input_bytes: 262144                   # Maximum complete UTF-8 assessment input; refuse rather than truncate (1 KiB-1 MiB).
   external_skill_repositories: []               # Public GitHub repositories containing one or more skills/ directories at any depth.
   refresh_external_skills_on_start: false       # Refresh and replace externally managed skills before agents start.
 

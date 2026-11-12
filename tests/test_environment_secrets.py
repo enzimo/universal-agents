@@ -10,6 +10,7 @@ loaders would refuse.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,11 @@ from aiohttp.test_utils import TestClient, TestServer
 from assistant_cli import GatewayOnboardingSeed, _onboard, _resolve_onboarding_seed, build_parser
 from assistant_gateway.config import GatewayInstanceConfig, LaunchSettings
 from assistant_gateway.instance_secrets import (
+    NATS_DECISION_ENV_NAMES,
     internal_credential_request,
     missing_secrets,
     required_secrets,
+    should_generate_internal_nats_credentials,
 )
 from assistant_gateway.onboarding_account_keys import read_handover
 from assistant_gateway.onboarding_engine import (
@@ -515,3 +518,31 @@ def test_internal_credential_request_is_shared_by_generation_and_requirements(tm
     # and the gog keyring password are always generated.
     assert {"SECURE_TOOL_BROKER_TOKEN", "GOG_KEYRING_PASSWORD"} <= set(internal_credential_names(request))
     assert request.include_nats_credentials, "the default NATS endpoint is local"
+
+
+class _RecordingEnvironment(Mapping[str, str]):
+    """An empty environment that remembers every name looked up in it."""
+
+    def __init__(self) -> None:
+        self.read: list[str] = []
+
+    def __getitem__(self, name: str) -> str:
+        self.read.append(name)
+        raise KeyError(name)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+
+def test_the_nats_decision_reads_only_the_names_the_team_export_compares(tmp_path: Path) -> None:
+    # The team export compares this decision between the instance's
+    # environment and its own command's by these names
+    # (team_transfer.operator_secrets); a variable the rule starts to read
+    # must join them.
+    environment = _RecordingEnvironment()
+    should_generate_internal_nats_credentials(_environment_config(tmp_path), environment)
+
+    assert set(environment.read) == set(NATS_DECISION_ENV_NAMES)

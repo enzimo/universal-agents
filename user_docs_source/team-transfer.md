@@ -42,7 +42,9 @@ same and can also bring more records from the same backup later
   page's current text; validation refuses links removed by destination edits.
 - **Credentials**: operator secrets from `team.env`, model keys, stored
   sign-ins, catalog entries, and password-manager sessions. The page shows
-  names and owners, never secret values.
+  names and owners, never secret values. An external NATS server's user and
+  password move, but the new instance needs settings that do not move to use
+  that server ([An external NATS server](#an-external-nats-server)).
 
 Agent-type grants and blocks keep their `<team>/<type>` IDs. Import checks the
 type against this release's agents and the specialist definitions selected for
@@ -217,6 +219,92 @@ fresh root and empty databases. For a failed later batch, restore the pre-batch
 root and database backups before retrying. Removing the marker does not repair
 partially written records.
 
+## An external NATS server
+
+The team's processes send their messages through NATS. Usually the container
+or native bundle runs its own NATS server and makes its own login, so the new
+instance needs nothing from the old one. If the old instance uses an external
+NATS server, its user and password (`NATS_USER` and `NATS_PASSWORD`) move with
+the other operator secrets. These do not move:
+
+- `TEAM_LOCAL_NATS_ENABLED=false`, which stops the image from starting its own
+  NATS server.
+- The server's address or credentials file, when `team.env` or the
+  container's environment sets it (`NATS_URL`, `NATS_SERVERS` or
+  `NATS_CREDENTIALS_FILE`). An address saved in `instance_config.yaml` moves
+  with the settings.
+- The credentials file itself. An instance that signs in with one has no user
+  and password to move.
+
+The export decides from the old instance's own settings: `instance_config.yaml`
+and its `team.env`, or its environment when it takes secrets from there. It
+moves the user and password only when those settings name an external server.
+It prints at most two lines about this, each starting with `NATS:` and naming
+variables, never their values:
+
+- Whenever those settings name an external server: the login that moved
+  (`NATS_USER`, `NATS_PASSWORD`, or none) and what to set on the new instance
+  before importing (the steps below).
+- With secrets in `team.env`, the export does not use NATS variables set only
+  in the container's environment or your shell, but the instance runs with the
+  container's values laid over `team.env`. When the instance would then use
+  NATS variables the export did not, a line names them: when they would decide
+  local or external otherwise, or, with an external server, when they set
+  another address, user or password. An address there that the export cannot
+  read, such as a mistyped `NATS_URL`, is named the same way; the export did
+  not use it.
+
+If the instance really runs with the variables that line names (for example
+from its container's environment in a compose file), put them in its
+`team.env` and export again: the server's address together with the
+`NATS_USER` and `NATS_PASSWORD` the instance runs with, in place of the lines
+onboarding wrote. When you give the user or password as a file (`NATS_USER_FILE`
+or `NATS_PASSWORD_FILE`), delete the plain `NATS_USER` or `NATS_PASSWORD` line:
+the export reads a plain value before its file, while the instance does the
+reverse, so the export would move onboarding's unused login. If the variables
+are left over from another setup, nothing was lost.
+
+Before importing, set these on the new instance:
+
+1. `TEAM_LOCAL_NATS_ENABLED=false`, in its `team.env` or its environment (for
+   Docker, the container's). Without it, the new instance starts its own NATS
+   server and stops using the external server. The import names this setting
+   only when it refuses the user and password; otherwise only the export does.
+2. If the old instance set the server's address or credentials file in
+   `team.env` or its environment, the same `NATS_URL`, `NATS_SERVERS` or
+   `NATS_CREDENTIALS_FILE` in the new `team.env`. Put the file
+   `NATS_CREDENTIALS_FILE` names at that path on the new instance too (for
+   Docker, the same secret mount). When the new instance takes its secrets
+   from the environment, set the variables in its environment instead, and
+   also in the environment the import runs in: the new container for
+   onboarding's Import, or your shell for the host command.
+
+The login keeps the rights the external server gives it. Since 0.10 it needs
+more of them; see [Message host trust](docker.md#message-host-trust) in the
+Docker guide.
+
+While the new instance's settings still name its own local server (the
+default), the import refuses `NATS_USER` and `NATS_PASSWORD`, says what to set
+and where, and a reviewed import stops. "Where" is the new `team.env`, or,
+when the new instance takes its secrets from the environment, the environment
+the import runs in: the new container for onboarding's Import, or your shell
+for the host command, where a value already set wins over one from `--env`.
+Set the values and choose **Validate selected records** again, or unselect
+the two records so that the new instance makes its own login.
+
+If the import cannot read `NATS_URL` or `NATS_SERVERS` in that same place, for
+example a mistyped address, it cannot tell whether the new instance's server
+is external. It then stops before writing anything, whichever records are
+selected, and names the variable and where it read it, never its value.
+Correct the value or unset the variable, then validate again.
+
+If the new instance already started without these settings, stop it and set
+them by hand in its `team.env` or environment: `TEAM_LOCAL_NATS_ENABLED=false`,
+the server's address or credentials file (and the file itself), and, if the
+import refused them, the old `NATS_USER` and `NATS_PASSWORD` in place of the
+ones it made. Later batches keep the values already in the new `team.env`, so
+they do not fix this.
+
 ## CLI and Docker
 
 The CLI also applies saved reviews. Writing imports now require `--review`;
@@ -242,6 +330,11 @@ docker exec -it <old-container> python -m assistant_cli team export \
 docker exec -it <new-container> python -m assistant_cli team import-credentials \
   --in /data/team.uatransfer --config /data/instance_config.yaml --review /review
 ```
+
+Run the export inside the old container, as shown. Its `team.env` may point
+`*_FILE` variables at secret files that exist only inside the container (for
+example under `/run/secrets`), and an export run on the host stops with an
+error naming the file it cannot read.
 
 For browser review on Linux, use a disposable container with host networking.
 Mount the destination and review folders at the **same absolute paths** used by

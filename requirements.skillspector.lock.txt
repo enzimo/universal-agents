@@ -830,10 +830,12 @@ langgraph==1.2.18 \
     #   langgraph-api
     #   langgraph-runtime-inmem
     #   skillspector
-langgraph-api==0.14.7 \
-    --hash=sha256:03fd01fc10a07936da0c1be47b39087374432581855947ebbd206dee4b6f249a \
-    --hash=sha256:594aa7a2d935ea65c459d30216ab4f3e1cd1d804f2ec9035bbae91411b78d769
-    # via langgraph-cli
+langgraph-api==0.17.0 \
+    --hash=sha256:1073ca6e61fe125763e11a8511192c4f9882d589474efa663a7443d802d079ae \
+    --hash=sha256:8de191fd516d7b148cca14198c400bd4ea2abcd18ab6adcd9750f5cf95ac0a7c
+    # via
+    #   -r requirements.skillspector.txt
+    #   langgraph-cli
 langgraph-checkpoint==4.3.1 \
     --hash=sha256:215a826935c8db4d9676e79fd95943e5b3847d78604390898e1d98581cc594e5 \
     --hash=sha256:625e7c78a72b33e7c47f7e87ca051060fb90aa66f5fd551c472c08376fb669cb
@@ -850,9 +852,9 @@ langgraph-prebuilt==1.1.1 \
     --hash=sha256:f1b1a4772e7f9f15ba736411aad3877183ad40cd9349748df76bd2b9f58a83c7 \
     --hash=sha256:fae17c22562e501940eb7aa052a15c58a431febbabf33f8ad172e1b44354a7e4
     # via langgraph
-langgraph-runtime-inmem==0.34.4 \
-    --hash=sha256:638afeafe3a3623f16e5651a1c2043df2387cccdc7d25ff2727131eea1b33cdb \
-    --hash=sha256:7cae3787bb3df59482f1c4e566df91c0b09cdc4f447af938b743edbd455804cf
+langgraph-runtime-inmem==0.37.0 \
+    --hash=sha256:036bef0cdc90b0e7ef7548f93e9a5c6cb67b528c30aaff6ac2a2e17dcb519069 \
+    --hash=sha256:f3061f560ef109ad40182ee15c2cb11cb58d5c763cc922d319ca19be1c9301d7
     # via
     #   langgraph-api
     #   langgraph-cli

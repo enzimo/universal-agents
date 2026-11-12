@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from tests.memory_support import SYSTEM_MEMORY_WRITER
 import asyncio
+import json
+import logging
 import shutil
 from pathlib import Path
 
@@ -19,6 +21,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from assistant_gateway.config import GatewayInstanceConfig
+from assistant_gateway.instance_secrets import NATS_CREDENTIAL_ENV_NAMES, NATS_DECISION_ENV_NAMES
 from assistant_gateway.onboarding_web.server import OnboardingWebService, OnboardingWebSettings
 from custom_agents.schedule_store import ScheduleStore
 from internal_credentials import parse_env_file
@@ -33,6 +36,7 @@ from team_transfer.errors import TransferError
 from team_transfer.people import PeopleSection
 from team_transfer.pinned_memory import PinnedMemorySection
 from team_transfer.schedules import SchedulesSection
+from team_transfer.sections import TransferSection
 from team_transfer.service import export_source, export_team
 from team_transfer.settings import SettingsSection
 from tests.broker_access_support import open_gate
@@ -62,7 +66,9 @@ async def _serving_broker(root_token: str, monkeypatch: pytest.MonkeyPatch) -> T
     return server
 
 
-async def _export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+async def _export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sections: tuple[TransferSection, ...] = SECTIONS
+) -> Path:
     from secure_tool_broker.credential_state_store import write_credential_state
 
     path, config = new_instance(tmp_path, "alpha", TEAM)
@@ -95,7 +101,7 @@ async def _export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             tmp_path / "exports" / "team.uatransfer",
             PASSPHRASE,
             owner_person_id="usr_ana",
-            sections=SECTIONS,
+            sections=sections,
             key_derivation=new_key_derivation(opslimit=1, memlimit=8192),
         )
     finally:
@@ -315,6 +321,45 @@ async def test_environment_secrets_are_listed_and_the_team_waits_for_them(
     assert saved.launch.secrets_from_environment
     # The credentials still wait for the first start, which follows once the secrets are added.
     assert saved.layout.team_import_credentials_path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_nats_address_in_the_new_container_stops_the_import_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """FIN-2: with secrets from the environment, the import decides NATS from the new container's environment.
+
+    The old instance used its own local server, so no NATS login travels; the
+    import still stops at validation, because after the write onboarding would
+    run the same decision again and fail with the host in its error.
+    """
+
+    from team_transfer.operator_secrets import OperatorSecretsSection
+
+    caplog.set_level(logging.INFO)
+    for name in (*NATS_DECISION_ENV_NAMES, *NATS_CREDENTIAL_ENV_NAMES):
+        monkeypatch.delenv(name, raising=False)
+    exported = await _export(tmp_path, monkeypatch, sections=(*SECTIONS, OperatorSecretsSection()))
+    root = tmp_path / "new"
+    (root / "import").mkdir(parents=True)
+    shutil.copy(exported, root / "import" / "team.uatransfer")
+    monkeypatch.setenv("NATS_URL", "nats://u:p@[nats.internal]:4222")
+    service = _onboarding(root)
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        body = {"file_name": "team.uatransfer", "passphrase": PASSPHRASE}
+        headers = {"X-Transfer-Token": (await (await client.post("/api/team-import/open", json=body)).json())["token"]}
+        review = await (await client.get("/api/team-import/review", headers=headers)).json()
+        await client.post("/api/team-import/destination", json={"secrets_source": "environment"}, headers=headers)
+        await _confirm_schedules(client, headers, review)
+        validation = await client.post("/api/team-import/validate", json={}, headers=headers)
+        answer = await validation.text()
+
+    assert validation.status == 400
+    error = json.loads(answer)["error"]
+    assert " in the environment this import runs in: NATS_URL. " in error, error
+    assert "nats.internal" not in answer + caplog.text and "u:p@" not in answer + caplog.text
+    assert not (root / "instance_config.yaml").exists(), "nothing is written"
 
 
 @pytest.mark.asyncio
