@@ -18,6 +18,7 @@ from runtime_settings.skill_assessment import SkillSemanticReviewSettings
 
 
 pytestmark = [
+    pytest.mark.live,
     pytest.mark.external,
     pytest.mark.skipif(
         os.environ.get("UA_LIVE_SKILL_ASSESSMENT") != "1", reason="Requires an authorized live model configuration"

@@ -43,6 +43,7 @@ from custom_agents.skill_repository import (
     SCANNER_TIMEOUT_SECONDS,
     SkillCandidate,
     SkillSelectionRequired,
+    SkillTreeManifest,
     build_skill_tree_manifest,
     clone_public_github_repository,
     copy_skill_to_quarantine,
@@ -657,7 +658,14 @@ class SkillInstallationService:
             shutil.rmtree(quarantine, ignore_errors=True)
             raise
 
-    def _assess_artifact(self, change_id, artifact, manifest, settings, paths) -> dict[str, Any]:
+    def _assess_artifact(
+        self,
+        change_id: str,
+        artifact: Path,
+        manifest: SkillTreeManifest,
+        settings: SkillInstallationSettings,
+        paths: SkillInstallationPaths,
+    ) -> dict[str, Any]:
         report = assess_skill(self.agent, artifact, manifest, settings.semantic_review)
         atomic_write_bytes(
             paths.reports / f"{change_id}.semantic.json",
@@ -678,7 +686,9 @@ class SkillInstallationService:
             )
 
     @staticmethod
-    def _assessment_evidence(change_id, report, paths) -> SkillSemanticReviewEvidence:
+    def _assessment_evidence(
+        change_id: str, report: dict[str, Any], paths: SkillInstallationPaths
+    ) -> SkillSemanticReviewEvidence:
         return SkillSemanticReviewEvidence(
             status=report["status"], configuration_sha256=report["configuration_sha256"],
             report_sha256=canonical_json_sha256(report),
