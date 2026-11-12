@@ -39,6 +39,7 @@ import pytest
 import pytest_asyncio
 
 from access_control.identity import ENV_VERIFY_KEYS
+from access_control.ownership import request_context_id
 from assistant_gateway.inbound_attachments import (
     InboundAttachmentStoragePolicy,
     store_inbound_attachment_bytes_with_policy,
@@ -107,13 +108,20 @@ def _lead(tmp_path: Path, layout: InstanceLayout):
 
 
 async def _admit(agent, *, task_id: str, text: str, attachments: list[UserTaskAttachment]) -> None:
-    # As the gateway signs a new request: naming its task and conversation vouches for its files.
+    task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=text, attachments=attachments)
+    # As the gateway signs a new request: naming its task and conversation, with
+    # an id bound to the request and its files, vouches for those files.
     signed = context_signer().issue(
-        team_id=TEAM, person_id=ANN, person_roles=("member",), root_task_id=task_id, conversation_id=CONVERSATION
+        team_id=TEAM,
+        person_id=ANN,
+        person_roles=("member",),
+        root_task_id=task_id,
+        conversation_id=CONVERSATION,
+        context_id=request_context_id(task),
     )
     await task_message_runtime._handle_task_request(
         agent,
-        Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=text, attachments=attachments),
+        task,
         MessageHeader(from_agent_id="gateway", response_routing_key="test_team_gateway_response"),
         MessageMeta(
             conversation_id=CONVERSATION,

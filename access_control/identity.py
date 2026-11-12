@@ -129,13 +129,21 @@ class ContextSigner:
         root_task_id: str | None = None,
         conversation_id: str | None = None,
         schedule_id: str | None = None,
+        context_id: str | None = None,
         lifetime: timedelta = DEFAULT_CONTEXT_LIFETIME,
         now: datetime | None = None,
     ) -> SignedTaskContextV1:
+        """A signed context with a new random id, or ``context_id`` for one bound to a single message.
+
+        The gateway binds the context of each message that brings a person's
+        files to that message and those files
+        (``access_control.ownership.request_context_id``, ``steering_context_id``).
+        """
+
         issued = now or datetime.now(timezone.utc)
         return self.sign(
             TaskContextV1(
-                context_id=new_id("task_context"),
+                context_id=context_id or new_id("task_context"),
                 issuer=self.issuer,
                 team_id=team_id,
                 person_id=person_id,

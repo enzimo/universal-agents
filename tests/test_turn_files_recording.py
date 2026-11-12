@@ -12,10 +12,12 @@ working for Ann (signed task context). Covers:
 - records pointing outside this host's upload folders are never saved;
 - a store error leaves the message unacknowledged, and the resend records
   each file once;
-- only files the gateway sent for this task are kept: a faulty agent process
-  holding a worker's copy of the task's signed context, or a context signed
-  for another request, gets none of its files onto the task, its turn or the
-  model's text, at admission and on guidance and answers;
+- only files the gateway sent with that message for this task are kept: a
+  faulty agent process holding a worker's copy of the task's signed context,
+  a context signed for another request, or a guidance's context that every
+  agent process received (sent again with other files, under a new key or
+  under the same key after a restart) gets none of its files onto the task,
+  its turn or the model's text, at admission and on guidance and answers;
 - a delegated task keeps no files from guidance, and the lead sends guidance
   on without files;
 - an answer refused as stale keeps none of its files.
@@ -36,8 +38,14 @@ from assistant_gateway.inbound_attachments import (
     InboundAttachmentStoragePolicy,
     store_inbound_attachment_bytes_with_policy,
 )
+from access_control.ownership import steering_context_id
 from custom_agents import task_message_runtime, task_steering_runtime
-from custom_agents.conversation_attachments import TASK_FILES_EVENT, TaskAttachments, task_files_details
+from custom_agents.conversation_attachments import (
+    TASK_FILES_EVENT,
+    TaskAttachments,
+    request_files_kept,
+    task_files_details,
+)
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import (
@@ -148,12 +156,18 @@ def _steering(kind: TaskSteeringType, attachments: list[UserTaskAttachment], key
 
 
 def _gateway_meta(
-    *, task_id: str = TASK, conversation_id: str | None = CONVERSATION, person: str = ANN
+    steering: TaskSteering, *, task_id: str = TASK, conversation_id: str | None = CONVERSATION, person: str = ANN
 ) -> MessageMeta:
-    """Message meta as the gateway sends a guidance or an answer: a fresh context naming the task and conversation."""
+    """Message meta as the gateway sends ``steering``: a fresh context naming the task and conversation,
+    with the id bound to this message and its files."""
 
     signed = context_signer().issue(
-        team_id=TEAM, person_id=person, person_roles=("member",), root_task_id=task_id, conversation_id=conversation_id
+        team_id=TEAM,
+        person_id=person,
+        person_roles=("member",),
+        root_task_id=task_id,
+        conversation_id=conversation_id,
+        context_id=steering_context_id(steering),
     )
     return MessageMeta(
         conversation_id=conversation_id,
@@ -165,7 +179,9 @@ def _gateway_meta(
 async def _send(agent, steering: TaskSteering, meta: MessageMeta | None = None) -> None:
     """Deliver ``steering`` as the gateway would, or with ``meta`` as another sender would."""
 
-    await handle_task_steering_message(agent, steering, MessageHeader(from_agent_id="gateway"), meta or _gateway_meta())
+    await handle_task_steering_message(
+        agent, steering, MessageHeader(from_agent_id="gateway"), meta or _gateway_meta(steering)
+    )
 
 
 def _turn_files(agent) -> list[str]:
@@ -412,14 +428,15 @@ def _copied_task_context(agent) -> MessageMeta:
 
 # Senders a faulty agent process could use, and why each is refused.
 _FORGED_SENDERS = {
-    "worker_copy_of_task_context": ("copied_task_context", _copied_task_context),
+    "worker_copy_of_task_context": ("context_not_for_message", lambda agent, _steering: _copied_task_context(agent)),
+    # Even bound to this very message: the gateway signed it for Ann's other request.
     "context_of_anns_other_request": (
         "another_task",
-        lambda _agent: _gateway_meta(task_id="task_other", conversation_id=OTHER_CONVERSATION),
+        lambda _agent, steering: _gateway_meta(steering, task_id="task_other", conversation_id=OTHER_CONVERSATION),
     ),
     "no_context": (
         "gateway_context_required",
-        lambda _agent: MessageMeta(conversation_id=CONVERSATION, is_response_requested=True),
+        lambda _agent, _steering: MessageMeta(conversation_id=CONVERSATION, is_response_requested=True),
     ),
 }
 
@@ -449,8 +466,9 @@ async def test_guidance_and_answers_keep_no_files_the_gateway_did_not_send_for_t
     foreign = _foreign_files(layout)
     before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
 
+    forged = _steering(kind, foreign, f"forged_{kind.value}", "Look at these.")
     with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
-        await _send(lead, _steering(kind, foreign, f"forged_{kind.value}", "Look at these."), meta_for(lead))
+        await _send(lead, forged, meta_for(lead, forged))
 
     # The text is still taken (as before this change); none of the files are.
     assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.ACCEPTED]
@@ -474,11 +492,70 @@ async def test_guidance_and_answers_keep_no_files_the_gateway_did_not_send_for_t
 async def test_files_the_gateway_sent_for_the_task_are_kept(lead, layout: InstanceLayout, statuses, kind) -> None:
     page = _upload(layout, "page two.png")
 
-    await _send(lead, _steering(kind, [page], f"gateway_{kind.value}", "Here it is."), _gateway_meta())
+    await _send(lead, _steering(kind, [page], f"gateway_{kind.value}", "Here it is."))
 
     assert page.attachment_id in _turn_files(lead)
     assert page.attachment_id in _own(lead.task_manager, lead._conversation_store)
     assert f"`{page.attachment_id}` page two.png" in await _model_text(lead, kind)
+
+
+def _assert_not_kept(agent, bobs: UserTaskAttachment, before_turn: list[str], before_own: list[str]) -> None:
+    assert _turn_files(agent) == before_turn
+    assert _own(agent.task_manager, agent._conversation_store) == before_own
+    found, unknown = TaskAttachments.load(agent.task_manager.get_task_info(TASK), agent._conversation_store).find(
+        [bobs.attachment_id]
+    )
+    assert (found, unknown) == ([], [bobs.attachment_id])
+
+
+@pytest.mark.parametrize("kind", [TaskSteeringType.PROACTIVE_GUIDANCE, TaskSteeringType.INTERRUPT_RESPONSE])
+@pytest.mark.asyncio
+async def test_a_guidance_context_every_agent_process_received_vouches_for_no_other_message(
+    lead, layout: InstanceLayout, statuses, caplog: pytest.LogCaptureFixture, kind: TaskSteeringType
+) -> None:
+    """The gateway sends guidance on the operational subject that every agent process of the team receives.
+    A faulty one sends the genuine guidance's meta again under a new key, with Bob's upload."""
+
+    page = _upload(layout, "page two.png")
+    genuine = _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [page], "genuine", "Here it is.")
+    overheard = _gateway_meta(genuine)
+    await _send(lead, genuine, overheard)
+    assert page.attachment_id in _turn_files(lead)
+    before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
+    bobs = _upload(layout, "bobs scan.png", session_key="web:bob-session", conversation_id="conv_bob")
+
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        await _send(lead, _steering(kind, [bobs], f"replayed_{kind.value}", "Look."), overheard.model_copy(deep=True))
+
+    _assert_not_kept(lead, bobs, before_turn, before_own)
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=context_not_for_message attachment_id={bobs.attachment_id} task_id={TASK}" in refused
+
+
+@pytest.mark.asyncio
+async def test_an_answer_sent_again_after_a_restart_with_another_file_keeps_none(
+    lead, layout: InstanceLayout, statuses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Answers' keys are not saved, so after a restart the lead does not know an answer's key.
+    The same key and context sent again with Bob's upload still vouch only for the answer's own file."""
+
+    photo = _upload(layout, "pan.png")
+    answer = _steering(TaskSteeringType.INTERRUPT_RESPONSE, [photo], "answer_once", "This pan.")
+    overheard = _gateway_meta(answer)
+    await _send(lead, answer, overheard)
+    assert photo.attachment_id in _turn_files(lead)
+    before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
+    lead._processed_task_steering_ids.clear()  # what a restarted lead remembers of answers' keys
+    bobs = _upload(layout, "bobs scan.png", session_key="web:bob-session", conversation_id="conv_bob")
+    replay = _steering(TaskSteeringType.INTERRUPT_RESPONSE, [bobs], "answer_once", "This pan.")
+
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        await _send(lead, replay, overheard.model_copy(deep=True))
+
+    assert statuses[-1][2] != "Duplicate steering event ignored."  # it reached the files check
+    _assert_not_kept(lead, bobs, before_turn, before_own)
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=context_not_for_message attachment_id={bobs.attachment_id} task_id={TASK}" in refused
 
 
 @pytest.mark.asyncio
@@ -522,6 +599,28 @@ async def test_a_request_keeps_only_files_the_gateway_sent_for_it(
     [refused] = _messages(caplog, "sent_file_refused")
     assert f"reason=another_task attachment_id={bobs.attachment_id} task_id=task_forged" in refused
     assert _messages(caplog, "incoming_task_files_entries_dropped")
+
+
+def test_a_copy_of_the_request_with_other_files_keeps_none(
+    lead, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A copy of TASK's own request under its own context, with Bob's upload instead of its files.
+
+    Admission drops a copy while TASK is held or finished; a lead taking over a task whose holder is
+    gone admits one, so the files check must hold for it too."""
+
+    bobs = _foreign_files(layout)[0]
+    admitted = lead.task_manager.get_task_info(TASK)
+    copy = admitted.task.model_copy(update={"attachments": [bobs]})
+
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        kept = request_files_kept(copy, _copied_task_context(lead), team_id=TEAM, person_id=ANN)
+        unchanged = request_files_kept(admitted.task, _copied_task_context(lead), team_id=TEAM, person_id=ANN)
+
+    assert kept.attachments == []
+    assert unchanged.attachments == admitted.task.attachments
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=context_not_for_message attachment_id={bobs.attachment_id} task_id={TASK}" in refused
 
 
 # --- A refused answer ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from access_control.ownership import request_context_id
 from assistant_gateway.application.local_responses import (
     GatewayLocalResponseFactory,
 )
@@ -544,6 +545,7 @@ class GatewayInteractiveSubmissionService:
                         # Vouches for the request's files (sent_files_access).
                         root_task_id=task.task_id,
                         conversation_id=thread.conversation_id,
+                        context_id=request_context_id(task),
                     ),
                 ),
                 msg_header=MessageHeader(

@@ -314,14 +314,18 @@ class GatewayRequestContextService:
         parallel_thread: bool = False,
         root_task_id: str | None = None,
         conversation_id: str | None = None,
+        context_id: str | None = None,
     ) -> GatewayContext:
         """The gateway context for one message to the team.
 
-        ``root_task_id`` and ``conversation_id`` go into the signed context
-        only for a message that brings a person's files to a request: the new
-        request itself and each guidance or answer sent to it. The lead keeps
-        those files only when the context names that request and its
-        conversation (``access_control.ownership.sent_files_access``).
+        ``root_task_id``, ``conversation_id`` and ``context_id`` go into the
+        signed context only for a message that brings a person's files to a
+        request: the new request itself and each guidance or answer sent to
+        it. ``context_id`` binds the context to that one message and its files
+        (``access_control.ownership.request_context_id``,
+        ``steering_context_id``). The lead keeps those files only when the
+        context names that request and its conversation and has that id
+        (``access_control.ownership.sent_files_access``).
         """
 
         canonical_user_id = self.canonical_user_id(route)
@@ -335,6 +339,7 @@ class GatewayRequestContextService:
                 root_task_id=root_task_id,
                 conversation_id=conversation_id,
                 schedule_id=scheduled_job_id,
+                context_id=context_id,
             )
             if self._context_signer is not None
             else None

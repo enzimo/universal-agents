@@ -3,10 +3,10 @@
 Files sent with a guidance or an answer (``TaskSteering.attachments``) are
 accepted before the message is acknowledged (``_accept_sent_files``), and
 only after the handler decided to take the message. They are kept only when
-the gateway vouches that it sent them for this task (``steering_files_check``:
-the message's own signed context names the task, its conversation and its
-person, and is not the task's own context its workers hold copies of); a
-delegated task keeps none. Records outside this host's upload folders are
+the gateway vouches that it sent them with this message for this task
+(``steering_files_check``: the message's own signed context names the task,
+its conversation and its person, and its id is bound to this message's key
+and these files); a delegated task keeps none. Records outside this host's upload folders are
 dropped too. The rest are added to the task's conversation turn and recorded
 in its history, and the model sees them by name and id with the guidance or
 answer text. They then stay usable by id after the guidance is read and after
@@ -465,7 +465,7 @@ async def _accept_sent_files(
         return steering
     task_id = task_info.task.task_id
     conversation_id = getattr(task_info.meta, "conversation_id", None)
-    decision = steering_files_check(task_info, msg_meta, team_id=str(getattr(agent, "team_id", "") or ""))
+    decision = steering_files_check(task_info, steering, msg_meta, team_id=str(getattr(agent, "team_id", "") or ""))
     if not decision.allowed:
         log_refused_files(steering.attachments, decision.reason, task_id=task_id, conversation_id=conversation_id)
         return steering.model_copy(update={"attachments": []})

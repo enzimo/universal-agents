@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from access_control.ownership import steering_context_id
 from assistant_gateway.application.gateway_application import GatewayDeliveryEvent
 from assistant_gateway.application.local_responses import GatewayLocalResponseFactory
 from assistant_gateway.application.manager_client import GatewayManagerClient
@@ -347,11 +348,12 @@ class GatewayThreadGuidance:
                     route=route,
                     manager_agent_id=manager_id,
                     # A fresh context naming the request's task and
-                    # conversation vouches for this message's files; the
-                    # lead refuses them under the task's own (copied)
-                    # context (access_control.ownership.sent_files_access).
+                    # conversation, with an id bound to this message's key
+                    # and files, vouches for exactly these files; the same
+                    # id on every resend (access_control.ownership.sent_files_access).
                     root_task_id=target.active_task_id,
                     conversation_id=held.conversation_id,
+                    context_id=steering_context_id(steering),
                 ),
             ),
             msg_header=MessageHeader(

@@ -39,8 +39,10 @@ works for the conversation's person.
 
 Which files become a task's and its conversation's in the first place is
 decided by ``sent_files_access``: only files the gateway vouches it sent for
-that task, in that conversation, for that person (see its docstring for why
-a worker holding a copy of the task's signed context cannot pass).
+that task, in that conversation, for that person, with a signed context
+bound to that one message and its files (``request_context_id``,
+``steering_context_id``; see its docstring for why a context another agent
+process holds or overheard cannot pass).
 
 Objectives are the team lead's records, all kept in its one durable scope, so
 its Objective tools ask ``objective_access`` which ones a task may reach: the
@@ -55,14 +57,18 @@ that reads another task's records, such as its execution digest.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from access_control.entities import AGENT_ROLE_SYSTEM
 from access_control.identity import ISSUER_GATEWAY
 from access_control.people import is_administrator, normalized_roles
-from custom_messages.contracts.access_v2 import TaskContextV1
+from custom_messages.contracts.access_v2 import MESSAGE_CONTEXT_ID_PREFIX, TaskContextV1
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_messages.contracts.task_v1 import Task, TaskSteering
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +100,10 @@ WORKSPACE_FILE_READ = "tool.file.read"  # the gateway's workspace browser
 _CREATABLE = frozenset(
     {RESOURCE_USER_MEMORY, RESOURCE_TEAM_MEMORY, RESOURCE_KNOWLEDGE_PERSONAL_PAGE, RESOURCE_KNOWLEDGE_TEAM_PAGE}
 )
+# The kinds of message a signed context can be bound to (``sent_files_access``);
+# a request's id never equals a guidance's or an answer's.
+_REQUEST_MESSAGE = "request"
+_STEERING_MESSAGE = "steering"
 
 
 @dataclass(frozen=True)
@@ -205,29 +215,37 @@ def sent_files_access(
     task_id: str,
     conversation_id: str | None,
     person_id: str | None,
-    task_context_id: str | None = None,
+    message_context_id: str,
 ) -> OwnershipDecision:
     """Whether files on a message to a top-level task may become that task's and its conversation's.
 
     Uploads are the person's private records, and the agent side cannot read
     the gateway's upload records, so it keeps a message's files only when the
-    gateway vouches that it sent them for this task: ``sender`` is the
-    message's own signed context, already verified by the caller (None when
-    missing, forged or expired). It must be the gateway's, name the person
-    the task verifiably works for (``person_id``, decided at admission), name
-    the task as ``root_task_id`` and name its conversation. The gateway signs
-    those two fields only on a new request's context and on the context of
-    each guidance or answer it sends to that request
-    (``assistant_gateway.application.request_context``).
+    gateway vouches that it sent exactly those files with this message, for
+    this task: ``sender`` is the message's own signed context, already
+    verified by the caller (None when missing, forged or expired). It must be
+    the gateway's, name the person the task verifiably works for
+    (``person_id``, decided at admission), name the task as ``root_task_id``,
+    name its conversation, and have the id the caller derived from the
+    message as it arrived (``message_context_id``: ``request_context_id`` or
+    ``steering_context_id``). The gateway signs ``root_task_id`` and
+    ``conversation_id``, and an id derived the same way, only on a new
+    request's context and on the context of each guidance or answer it sends
+    to that request (``assistant_gateway.application.request_context``).
 
-    ``task_context_id`` is the id of the task's own admitted context; pass it
-    for guidance and answers. Delegation copies that context into every
-    subtask, so each worker of the task holds a valid copy naming the task,
-    its conversation and its person. A guidance or an answer must carry a
-    context the gateway issued for that message, never the task's own. The
-    gateway's guidance contexts are never passed on (guidance forwarded to
-    workers carries none), and a context issued for another request names
-    another task.
+    Why the id: other agent processes hold or see valid gateway contexts for
+    the task. Delegation copies the request's admitted context into every
+    subtask, and guidance and answers travel on the operational subject that
+    every agent process of the team receives, so any of them can see each
+    guidance's context. Signed contexts are bearer proofs, so a process
+    could send one again with other files. The id names one message (the
+    request's task id, or the key the lead deduplicates guidance and answers
+    on) and digests its file records exactly as the gateway sent them. A
+    context reused on another message, or with any other file, has the wrong
+    id. Sent again on the same message with the same files, it brings only
+    files the gateway sent for the task, and recording them again adds
+    nothing. A request's own context has a request id, so a worker's copy
+    never passes for a guidance or an answer.
     """
 
     if sender is None:
@@ -240,11 +258,39 @@ def sent_files_access(
         reason = "another_task"
     elif not conversation_id or sender.conversation_id != conversation_id:
         reason = "another_conversation"
-    elif task_context_id is not None and sender.context_id == task_context_id:
-        reason = "copied_task_context"
+    elif sender.context_id != message_context_id:
+        reason = "context_not_for_message"
     else:
         return OwnershipDecision(True, "sent_by_gateway_for_task")
     return _denied(reason, person_id, RESOURCE_CONVERSATION, conversation_id or "", PRIVATE_UPDATE)
+
+
+def request_context_id(task: Task) -> str:
+    """The id of the signed context the gateway issues for the new request ``task`` (``sent_files_access``)."""
+
+    return _message_context_id(_REQUEST_MESSAGE, task.task_id, task.attachments)
+
+
+def steering_context_id(steering: TaskSteering) -> str:
+    """The id of the signed context the gateway issues for one guidance or answer (``sent_files_access``).
+
+    It names the message by the key the lead deduplicates it on
+    (``idempotency_key``, else ``steering_id``); the gateway keeps both
+    across resends of the same held message, so every resend gets the same id.
+    """
+
+    return _message_context_id(_STEERING_MESSAGE, steering.idempotency_key or steering.steering_id, steering.attachments)
+
+
+def _message_context_id(kind: str, message_key: str, attachments: Sequence[UserTaskAttachment]) -> str:
+    # Canonical JSON of what the message is and every field of each file
+    # record, in order; 80 characters, inside TaskContextV1.context_id's 120.
+    material = json.dumps(
+        {"kind": kind, "key": message_key, "files": [attachment.model_dump(mode="json") for attachment in attachments]},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{MESSAGE_CONTEXT_ID_PREFIX}_{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _person(person_id: str | None) -> str | None:
@@ -410,6 +456,8 @@ __all__ = [
     "named_task_access",
     "objective_access",
     "private_access",
+    "request_context_id",
     "sent_files_access",
+    "steering_context_id",
     "system_work_schedule_access",
 ]

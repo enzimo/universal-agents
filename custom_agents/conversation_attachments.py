@@ -15,13 +15,16 @@ prompt's file list and delegation all ask it.
 Which files are kept at all, before anything is saved:
 
 - A top-level task keeps the files on its request, guidance and answers only
-  when the gateway vouches that it sent them for this task, in this
-  conversation, for this person: the message's own signed context names all
-  three (``access_control.ownership.sent_files_access``, checked by
+  when the gateway vouches that it sent exactly those files with that
+  message for this task, in this conversation, for this person: the
+  message's own signed context names all three and has the id derived from
+  the message's key and its file records
+  (``access_control.ownership.sent_files_access``, checked by
   ``request_files_kept`` at admission and ``steering_files_check`` for
   guidance and answers). Other agent processes also send tasks and steering
-  messages, and every worker of a request holds a copy of its signed
-  context; the rule's docstring explains why such a copy does not pass.
+  messages, every worker of a request holds a copy of its signed context,
+  and every agent process receives each guidance's context; the rule's
+  docstring explains why none of them can vouch for other files.
   Refused files are dropped from the message itself and logged one by one.
 - A delegated task keeps no files from guidance or answers; its files are the
   ones its delegation named (``Task.attachments``). The lead sends guidance on
@@ -72,11 +75,17 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 from access_control.identity import IdentityRejected
-from access_control.ownership import OwnershipDecision, conversation_files_access, sent_files_access
+from access_control.ownership import (
+    OwnershipDecision,
+    conversation_files_access,
+    request_context_id,
+    sent_files_access,
+    steering_context_id,
+)
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.contracts.task_v1 import Task
+from custom_messages.contracts.task_v1 import Task, TaskSteering
 from custom_messages.enums import TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import TurnAttachment, attachment_summary
@@ -495,6 +504,7 @@ def request_files_kept(task: Task, meta: Any, *, team_id: str, person_id: Option
         task_id=task.task_id,
         conversation_id=conversation_id,
         person_id=person_id,
+        message_context_id=request_context_id(task),
     )
     if decision.allowed:
         return task
@@ -502,12 +512,12 @@ def request_files_kept(task: Task, meta: Any, *, team_id: str, person_id: Option
     return task.model_copy(update={"attachments": []})
 
 
-def steering_files_check(task_info: Any, meta: Any, *, team_id: str) -> OwnershipDecision:
-    """Whether the files on a guidance or an answer (message meta ``meta``) may become the task's.
+def steering_files_check(task_info: Any, steering: TaskSteering, meta: Any, *, team_id: str) -> OwnershipDecision:
+    """Whether the files on ``steering`` (a guidance or an answer, with message meta ``meta``) may become the task's.
 
     A delegated task keeps none (module docstring). For a top-level task the
-    message must carry a context the gateway signed for it, other than the
-    task's own context that its workers hold copies of.
+    message must carry a context the gateway signed for this message and
+    these files; ``steering`` is the message as it arrived.
     """
 
     task = task_info.task
@@ -518,7 +528,7 @@ def steering_files_check(task_info: Any, meta: Any, *, team_id: str) -> Ownershi
         task_id=task.task_id,
         conversation_id=_text(getattr(task_info.meta, "conversation_id", None)),
         person_id=getattr(task_info, "owner_person_id", None),
-        task_context_id=_context_id(task_info.meta),
+        message_context_id=steering_context_id(steering),
     )
 
 
@@ -569,11 +579,6 @@ def _verified_sender(meta: Any, team_id: str) -> Optional[TaskContextV1]:
     except (IdentityRejected, ValueError) as exc:
         logger.info("A message's signed context was not accepted. event=sent_files_context_rejected error=%s", exc)
         return None
-
-
-def _context_id(meta: Any) -> Optional[str]:
-    signed = getattr(getattr(meta, "gateway_context", None), "task_context", None)
-    return getattr(getattr(signed, "context", None), "context_id", None)
 
 
 def _text(value: Any) -> Optional[str]:
