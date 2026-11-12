@@ -154,15 +154,13 @@ def test_waits_hold_check_back_times_and_last_progress(settings):
     wait = repository.get_wait("t", "p")
     assert wait.check_back_at_utc == at
     assert wait.last_progress_counts == {"queued": 2}
-    repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead", at=None)
-    assert repository.get_wait("t", "p").check_back_at_utc is None
 
 
 def test_waits_are_read_by_parent_whoever_set_them(settings):
     repository = DelegatedTaskRepository(settings)
     at = datetime.now(timezone.utc)
     repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead_before", at=at)
-    repository.set_check_back(team_id="t", parent_task_id="p2", requester_agent_id="lead_now", at=None)
+    repository.record_progress(team_id="t", parent_task_id="p2", requester_agent_id="lead_now", counts={}, at=at)
     repository.set_check_back(team_id="t", parent_task_id="not_mine", requester_agent_id="lead_now", at=at)
     waits = repository.waits_for_parents("t", {"p2", "p", "unknown"})
     assert [(w.parent_task_id, w.requester_agent_id, w.check_back_at_utc) for w in waits] == [

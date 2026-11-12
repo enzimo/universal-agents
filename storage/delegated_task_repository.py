@@ -503,8 +503,10 @@ class DelegatedTaskRepository:
         team_id: str,
         parent_task_id: str,
         requester_agent_id: str,
-        at: Optional[datetime],
+        at: datetime,
     ) -> DelegationWaitV1:
+        """Set when the requester looks at this parent again. Only ``take_due_check_back`` clears it."""
+
         return self._update_wait(
             team_id, parent_task_id, requester_agent_id, check_back_at_utc=at
         )
