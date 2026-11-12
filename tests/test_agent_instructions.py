@@ -1,7 +1,11 @@
+from pathlib import Path
+
+from assistant_gateway.config import DeliverySettings
 from custom_agents.agent_instructions import (
     ACCESS_PROMPT_RULE,
     shared_agent_base_prompt,
 )
+from custom_agents.instance_delivery_context import render_delivery_settings_context
 from custom_agents.strands_team import (
     RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR,
     SECURE_CREDENTIAL_WORKFLOWS_SKILL_DIR,
@@ -116,3 +120,33 @@ def test_shared_prompt_includes_multi_user_onboarding_recipe() -> None:
     assert "/docs/newuser/telegram" in shared_agent_base_prompt
     assert "/docs/newuser/photon" in shared_agent_base_prompt
     assert "/user disable <canonical_user_id>" in shared_agent_base_prompt
+
+
+def test_instructions_open_the_persons_files_by_id_and_say_what_a_delegation_passes() -> None:
+    """Every agent's prompt and the team lead's guidance name files by ``attachment_id``.
+
+    Files the person sent stay usable after their turn (``conversation_attachments``),
+    so no instruction may still say they are only ``Task.attachments`` or that the
+    media loader takes only a workspace path. A reply to an escalation carries no
+    files, so the team lead is told to delegate the work that needs them.
+    """
+
+    delivery = render_delivery_settings_context(DeliverySettings())
+    assert "open by attachment_id" in delivery
+    assert "with the attachment_id of a file the person sent or the path of a file in this task's folders" in delivery
+    assert "Task.attachments metadata" not in delivery
+
+    assert "use `inspect_user_attachment` with the `attachment_id`" in shared_agent_base_prompt
+    assert "with the `attachment_id` of a file the person sent, or with a `path`" in shared_agent_base_prompt
+    assert "choose which of the person's files a delegated task gets with `attachment_ids`" in shared_agent_base_prompt
+    assert "A reply to a specialist's escalation cannot carry files" in shared_agent_base_prompt
+
+    team_lead = (
+        Path(__file__).resolve().parents[1] / "ua_definitions/agent_definitions/prompts/team_architect.md"
+    ).read_text(encoding="utf-8")
+    assert "Choose the person's files the specialist needs with `attachment_ids`" in team_lead
+    assert "A reply to a specialist's escalation cannot carry files" in team_lead
+
+    skill = (RUNTIME_OPERATIONS_WORKFLOWS_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    assert "`attachment_ids` on `delegate_task`" in skill
+    assert "use `load_local_media_for_model_context` with the `attachment_id`" in skill

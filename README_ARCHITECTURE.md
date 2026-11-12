@@ -3504,8 +3504,9 @@ under the chat's session and removes the transfer copies
 (`adapter_host/gateway_application.py`). When the policy refuses a file, the
 person gets the reason in the chat, as in the chat apps the gateway runs, and
 nothing of the message is sent on. So a person's file is kept in one folder
-that agents open by id in later turns, and that the retention below, history
-clean-up and person departure cover. A message is handled once (a failure
+that agents open by id in later turns ("Files a person sent in a
+conversation" below), and that the retention below, history clean-up and
+person departure cover. A message is handled once (a failure
 marks it failed), so its transfer copies are removed even when its files are
 refused or a later file of it cannot be found. Files the gateway sends to a
 hosted chat are downloaded beside the client state and not removed yet.
@@ -3811,6 +3812,107 @@ after the provider actually rejects the request, and then after older ones.
 A result counts as read only after Strands returns a successful model response
 that its hooks accept. Failed, cancelled or retried calls leave the attempted
 results unread, including a successful response discarded by a retry hook.
+
+### Files a person sent in a conversation
+
+A person can come back to a file in a later message ("use the photo I sent
+earlier"), and the team lead can hand any of those files to a specialist.
+Before, a file was known only on the message it came with: a follow-up turn
+had no record of it, and files sent with guidance were lost once their turn
+ended.
+
+What is saved, and by whom. The gateway stores every upload in
+`state/uploads` and sends its record (`UserTaskAttachment`: id, name, type,
+size, digest and where it is stored) with the message. Trusted code in the
+team lead's process saves those records with the request's conversation turn
+(`conversation_task_links.attachments_json`, `storage/conversation_repository.py`):
+the request's own files when the task is admitted
+(`conversation_runtime.ensure_task_conversation_context`), and the files sent
+with guidance while it runs (`task_steering_runtime`) or with an answer to a
+question it asked (`TaskQuery.attachments`, set only by the gateway;
+`task_message_runtime`). Files that arrive while a plan step or recovery task
+runs go to the turn of the request it serves. A merge adds only ids the turn
+does not hold yet, in one write under the store's write lock (`BEGIN
+IMMEDIATE` on SQLite, its advisory transaction lock on PostgreSQL), so
+guidance and answers arriving together lose nothing. The save runs before the
+guidance or answer is recorded or acknowledged: when it fails, the gateway
+sends the guidance again or the answer is delivered again, and the merge
+makes the repeat harmless. The task's history keeps each guidance's and
+answer's files as well, so they survive the guidance queue being emptied and a
+restart. Files on guidance or an answer for a person's request are kept only
+when the message's signed context names the person the task works for, and
+answer files only on the answer to a question the task itself asked
+(`conversation_attachments.sent_files_refusal`, `answer_files_refusal`);
+otherwise the text is handled and the files are dropped with a warning.
+Rationale: any process on the team's NATS can address the team lead, and these
+files become part of the person's conversation. Turn records that the
+conversation tools show carry no storage location (`turn_attachment_summary`:
+id, name, type, kind, size); only the lookup below reads whole records. One
+column on the existing turn row, not a new table: departure and history
+clean-up already move or delete whole turns, so the file lists go with them.
+
+What a task may open (`custom_agents/conversation_attachments.py`,
+`AttachmentScope`). A task serves a request: itself, or for a plan step or an
+isolated recovery task the request it was made for, followed only through the
+task manager's own plan-step and recovery links, never through delegation.
+Every task may use its request's files, the files received while it ran, and
+its own. The team lead, working on a person's top-level request, may also use
+the files saved with that request's turn and with the conversation's earlier
+turns, and only when the person the task is verified to work for (its signed
+context or schedule run identity, never a message field) may read that
+conversation (`access_control.ownership`). Specialists, including a worker's
+scheduled run that continues its owner's conversation, never read a
+conversation: they get their own task's files and the ones the team lead
+chose for them. An id outside the scope is "not found", with no hint that it
+exists in another conversation, and ids must match a strict pattern, so a
+path is never taken as an id.
+
+Prompts. The current request's files that its message does not show are
+listed with the request (`Other Files For This Request`). The team lead's
+prompt lists the newest 20 files of earlier turns, newest first, each with its
+turn, in a section of its own (`Earlier Files In This Conversation`). The
+thread budget keeps room for that section, and it does not depend on how much
+of the conversation's history the prompt shows or on a context epoch. Images
+are not attached again; the model opens a file by id when it needs it. The
+conversation slice tools show each turn's file names and ids, not the files.
+
+Opening a file. `inspect_user_attachment` and
+`load_local_media_for_model_context` take an `attachment_id` and look it up in
+the task's scope; the media loader still takes a `path` for a file in the
+task's folders (exactly one of the two). A file whose upload is gone answers
+that it is no longer stored and that the person can send it again; a record
+with no copy on this machine answers `remote_copy_required`, for the team
+lead.
+
+Choosing files for a specialist. The team lead's `delegate_task` action takes
+optional `attachment_ids` in every schema variant its models use; the
+specialists' schemas leave the field out, and the outbox refuses it from any
+agent but the team lead. Left out, the new task gets the files of the
+request's own message: for a plan step or recovery task the request's, for a
+specialist's escalation the files it came with. A list gives exactly the files
+it names, `[]` none. The ids are looked up in the same scope right before the
+subtask is created (the outbox's `local_commit` phase), so an unknown, removed
+or excess id (more than 20) creates nothing and goes back to the model with
+the files it can pass, without storage locations
+(`delegation_runtime.selected_attachments`). The new task carries the stored
+records, never anything the model wrote. Rationale: the model names ids
+only, never paths, and a retry after the subtask exists never looks the ids
+up again.
+
+Limitations:
+
+- Turns saved before this release have no file list, so their files are
+  neither listed nor found by id; there is no backfill.
+- A file past the upload retention period cannot be opened; the person sends
+  it again. "No longer stored" means gone from this runtime's `state/uploads`,
+  which holds while the gateway and the team lead run on one machine.
+- A reply to a specialist's escalation carries no files, so the specialist
+  that escalated does not get the files the person sends with the answer. The
+  team lead hands them on by delegating the work that needs them from the
+  escalation with `attachment_ids`.
+- The interrupt answer path (`INTERRUPT_RESPONSE`) carries no files. No tool
+  interrupt reaches the chat today; one added later needs the same handling.
+- The team transfer carries no conversations, so it does not change.
 
 ### Model provider keys
 

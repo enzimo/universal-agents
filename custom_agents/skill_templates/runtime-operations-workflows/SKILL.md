@@ -1407,13 +1407,19 @@ not recopy or re-encode the image first.
 
 ## User-Provided Attachments
 
-User-uploaded files arrive on `Task.attachments` or `TaskSteering.attachments`
-as structured metadata references. Use `inspect_user_attachment` for bounded
-local inspection. If you have located an image or supported document file
-in this task's folders and need the model itself to directly examine it, use
-`load_local_media_for_model_context`; that tool inserts native content blocks
-into the next inner-loop LLM input and should be used only for direct
-model-visible inspection. Native image insertion requires
+User-uploaded files arrive as structured metadata references with a request
+(`Task.attachments`), with guidance (`TaskSteering.attachments`) or with an
+answer to a question. The prompt names each file with its `attachment_id`;
+the team lead's prompt also lists the newest 20 files sent earlier in the
+same conversation, and those stay usable in later turns. Use
+`inspect_user_attachment` with the `attachment_id` for bounded inspection. If
+the model itself needs to directly examine an image or supported document,
+use `load_local_media_for_model_context` with the `attachment_id` of a file
+the person sent, or with the `path` of a file in this task's folders; that
+tool inserts native content blocks into the next inner-loop LLM input and
+should be used only for direct model-visible inspection. A file that is no
+longer stored is past the team's file retention period; ask the person to
+send it again. Native image insertion requires
 `supports_image_input=true`; native document insertion requires
 `supports_file_input=true`. Text/Markdown files remain inspectable through file
 tools even when native file input is disabled. `supports_audio_input` records
@@ -1423,6 +1429,15 @@ purpose-built transcription or provider adapter. If `inspect_user_attachment` re
 coordinate a gateway-backed NATS Object Store mirror. Do not paste raw bytes,
 base64, or full binary content into task text, steering guidance, or user
 notifications.
+
+The team lead chooses which of the person's files a delegated task gets with
+`attachment_ids` on `delegate_task`. Left out, the task gets the files that
+came with the request's own message (for a specialist's escalation, the files
+it came with); a list passes exactly those files and `[]` passes none. An id
+the task cannot use creates nothing, and the team lead is shown the files it
+can pass. A reply to a specialist's escalation carries no files: when the
+person answers an escalation with files, the team lead delegates the work
+that needs them from the escalation with their ids.
 
 ## Whole-goal specialist and delegation scenarios
 
