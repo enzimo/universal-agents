@@ -21,6 +21,7 @@ import nats
 import pytest
 
 import docker.nats_service as nats_service
+from tests.owned_processes import stopped_at_exit
 
 
 _LISTENING = re.compile(r"Listening for client connections on 127\.0\.0\.1:(\d+)")
@@ -61,7 +62,7 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
         service_root=tmp_path / "nats",
     )
     jetstream, control_line, _minimum = nats_service.contract_server_settings()
-    try:
+    with stopped_at_exit(process, name="nats-server of the managed start"):
         cmdline = Path(f"/proc/{process.pid}/cmdline").read_bytes().decode()
         assert env["NATS_PASSWORD"] not in cmdline
 
@@ -102,6 +103,3 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
         credential_bytes = control_line - nats_service.CONNECT_LINE_ROOM_BYTES
         assert _connect_reply(port, env, padding=credential_bytes).startswith("PONG")
         assert "maximum control line exceeded" in _connect_reply(port, env, padding=control_line).lower()
-    finally:
-        process.terminate()
-        process.wait(timeout=10)

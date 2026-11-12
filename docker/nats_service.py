@@ -156,6 +156,51 @@ def _wait_for_nats_ready(
         time.sleep(0.25)
 
 
+def stop_local_nats(
+    process: subprocess.Popen[bytes],
+    *,
+    logger: logging.Logger,
+    terminate_seconds: float = 10.0,
+    kill_seconds: float = 5.0,
+) -> None:
+    """Stop and reap a local NATS server this process started; a slow stop is logged, never raised.
+
+    SIGTERM lets the server finish its JetStream writes; one still running after
+    ``terminate_seconds`` is killed. A server that has not exited even ``kill_seconds``
+    after SIGKILL is logged as an error with its pid instead of raising: callers stop it
+    on their way out of another error (a failed start, a failed maintenance run), and
+    that error is the one the operator needs to see. Only the given child process is
+    signalled, never a pid read from a log or found on a port, so a port holder this
+    process did not start is never stopped here.
+    """
+
+    if process.poll() is not None:
+        return
+    logger.info("Stopping the local NATS server. event=local_nats_stop pid=%s", process.pid)
+    # Popen skips the signal when the process has exited meanwhile, so a reused pid is never signalled.
+    process.terminate()
+    try:
+        process.wait(timeout=terminate_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "The local NATS server did not stop within %g seconds of SIGTERM; killing it. "
+            "event=local_nats_stop_killed pid=%s",
+            terminate_seconds,
+            process.pid,
+        )
+    process.kill()
+    try:
+        process.wait(timeout=kill_seconds)
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "The local NATS server did not exit within %g seconds of SIGKILL and may still hold its ports. "
+            "event=local_nats_stop_failed pid=%s",
+            kill_seconds,
+            process.pid,
+        )
+
+
 def _write_private_file(path: Path, content: str) -> None:
     """Atomically write a file readable only by the service owner."""
 
@@ -298,6 +343,12 @@ def start_local_nats(
 
     ``env`` gains NATS_USER/NATS_PASSWORD when they were unset, so callers must
     pass the same mapping they later give to runtime processes.
+
+    A start that fails after launching the server (it timed out, its startup log
+    could not be read, or it was interrupted) stops and reaps that server before
+    raising. The caller never receives the process when the start fails, and the
+    server runs in its own session, so nothing else would stop it: it would keep the
+    ports, and the next start would be refused with "already in use".
     """
     if shutil.which("nats-server") is None:
         raise RuntimeError(
@@ -366,7 +417,18 @@ def start_local_nats(
         )
     finally:
         startup_log.close()
-    _wait_for_nats_ready(
-        process, logger=logger, service_root=root, startup_log_path=startup_log_path, offset=offset
-    )
+    try:
+        _wait_for_nats_ready(
+            process, logger=logger, service_root=root, startup_log_path=startup_log_path, offset=offset
+        )
+    except BaseException:
+        # BaseException: an interrupt (Ctrl-C in a maintenance run) must not leave the server running either.
+        if process.poll() is None:
+            logger.warning(
+                "The local NATS start failed; stopping the server it launched. "
+                "event=local_nats_start_cleanup pid=%s",
+                process.pid,
+            )
+            stop_local_nats(process, logger=logger)
+        raise
     return process
