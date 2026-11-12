@@ -54,6 +54,7 @@ from custom_messages.enums import (
     TaskSteeringStatusCode,
     TaskSteeringType,
 )
+from custom_agents.conversation_attachments import render_attachment_lines, save_turn_attachments
 from custom_agents.steering_history_events import (
     GUIDANCE_ACCEPTED_EVENT,
     GUIDANCE_APPLIED_EVENT,
@@ -398,6 +399,31 @@ async def _send_steering_status_response(
         ),
     )
     await agent.team_comms.send_message(message=envelope, routing_key=routing_key)
+
+
+async def _save_guidance_files(agent: Any, task_id: str, steering: TaskSteering) -> None:
+    """Save the files sent with guidance with the turn of the request ``task_id`` serves.
+
+    Runs before the guidance is recorded or answered: a store error raises, so
+    nothing is recorded, the delivery is not acknowledged and the gateway sends
+    the held guidance again. The merge adds each file once, so the next attempt
+    saves only what is missing. A subtask's files stay in its own history
+    (``save_turn_attachments``).
+    """
+
+    if not steering.attachments:
+        return
+    task_manager = agent.task_manager
+    conversation_store = getattr(agent, "_conversation_store", None)
+
+    def save() -> Any:
+        # One lane operation: it reads the task's request links and writes the
+        # turn, in order with the request's own admission.
+        return save_turn_attachments(
+            task_id, steering.attachments, task_manager=task_manager, conversation_store=conversation_store
+        )
+
+    await task_manager.operations_runtime.run(save)
 
 
 async def _record_guidance_history(
@@ -826,8 +852,11 @@ async def handle_task_steering_message(
                 reason="Proactive guidance must include guidance_text.",
             )
             return
-        # Acknowledge only after the complete guidance is in the task's durable
-        # history. Restart reconstructs pending guidance and deduplication there.
+        # Its files first, so a failed save leaves the guidance unrecorded and
+        # unanswered, to be sent again. Acknowledge only after the complete
+        # guidance is in the task's durable history. Restart reconstructs
+        # pending guidance, its files and deduplication there.
+        await _save_guidance_files(agent, task_id, steering)
         if not await _record_guidance_history(agent, task_id, steering, applied=False):
             await _send_steering_status_response(
                 agent, steering, msg_header, msg_meta,
@@ -1449,12 +1478,19 @@ async def _guidance_block(
         if task_id:
             if not await _record_guidance_history(agent, task_id, item, applied=True):
                 raise RuntimeCustodyLost(agent.id, CustodyStore.TASK_RUNTIME)
-        lines.append(f"- {item.guidance_text}")
-        if item.replied_message is not None:
-            lines.extend(
-                f"  {line}"
-                for line in render_replied_message_lines(
-                    item.replied_message, subject="guidance"
-                )
-            )
+        lines.extend(_guidance_item_lines(item))
     return "\n".join(lines)
+
+
+def _guidance_item_lines(item: TaskSteering) -> list[str]:
+    """One guidance item for the model: its text, the message it replied to, and its files."""
+
+    lines = [f"- {item.guidance_text}"]
+    if item.replied_message is not None:
+        lines.extend(f"  {line}" for line in render_replied_message_lines(item.replied_message, subject="guidance"))
+    if item.attachments:
+        # Named with their ids so the model can open them after this
+        # guidance has been read (custom_agents.conversation_attachments).
+        lines.append("  Files sent with this guidance (open one by its attachment_id):")
+        lines.extend(f"  {line}" for line in render_attachment_lines(item.attachments))
+    return lines
