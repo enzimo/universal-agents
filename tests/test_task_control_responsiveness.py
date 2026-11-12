@@ -249,6 +249,12 @@ async def test_controls_remain_available_during_model_work_and_after_stop(
         if agent._pending_work_task is not None:
             await asyncio.wait_for(asyncio.shield(agent._pending_work_task), 3)
             assert not agent._pending_work_task.cancelled()
+        # The handler's own cleanup must not fail. With normal cleanup it calls
+        # the agent's cancel wrapper (#79 once passed it a keyword it lacked);
+        # with slow cleanup the stop has already archived the task and the
+        # handler skips the call. Checked in all four cases.
+        assert "event=pending_work_failed" not in caplog.text
+        assert "unexpected keyword argument" not in caplog.text
         # The stop owns the only reply (#79): once the handler has finished,
         # a late duplicate would still be waiting in the response queue.
         await relayed("list_tasks")

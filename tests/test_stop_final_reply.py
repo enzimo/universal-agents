@@ -2,12 +2,13 @@
 
 import asyncio
 import logging
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from custom_agents import control_runtime
+from custom_agents.strands_agent import UniversalAgent
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
@@ -26,11 +27,9 @@ def agent(tmp_path):
         _finalize_conversation_turn=AsyncMock(), named_agent_type_queue_map={}, _agent_id_by_name={},
     )
     agent._consume_stop_reason = lambda task_id: agent._stop_reasons_by_task_id.pop(task_id, None)
-
-    async def cancel(**kwargs):
-        return await control_runtime.cancel_task_tree_locally(agent, **kwargs)
-
-    agent._cancel_task_tree_locally = cancel
+    # The agent's real wrapper, not a stand-in that takes any keyword: the
+    # handler's keywords must match what the agent accepts (#79's send_response).
+    agent._cancel_task_tree_locally = MethodType(UniversalAgent._cancel_task_tree_locally, agent)
     assert manager.add_task(
         Task(task_id="request", task_type=MessageMetaType.REQUEST, problem_statement="work"),
         MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
@@ -97,6 +96,18 @@ async def test_explicit_stop_owns_the_reply_when_cleanup_is_late(agent, monkeypa
         assert message.msg_content.task_id == "request"
         assert message.msg_content.task_state[-1][0] == ProgressState.CANCELLED
         assert agent.team_comms.send_message.call_args.kwargs["routing_key"] == "gateway"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send_response", [True, False])
+async def test_agent_cancel_wrapper_passes_the_reply_choice_on(agent, send_response):
+    info = agent.task_manager.get_task_info("request")
+    result = await agent._cancel_task_tree_locally(
+        task_info=info, reason="stop", signal_pending_subtasks=False, send_response=send_response,
+    )
+    assert result["cancelled_task_count"] == 1
+    assert agent.task_manager.get_task_info("request") is None
+    assert agent.team_comms.send_message.await_count == int(send_response)
 
 
 @pytest.mark.asyncio
