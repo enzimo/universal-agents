@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,6 +17,14 @@ from assistant_gateway.application.manager_transitions import (
 
 
 def _transitions(waiting: tuple[str, ...]) -> tuple[GatewayManagerTransitionApplication, list[str]]:
+    return transition_service(SimpleNamespace(pending_response_ids=waiting))
+
+
+def transition_service(manager: Any) -> tuple[GatewayManagerTransitionApplication, list[str]]:
+    """A transition service over ``manager``'s waiting replies (``pending_response_ids``) and the replies it fails,
+    in order. Every failure is recorded, so a reply failed twice shows twice; also used by the lead follower's
+    tests (tests/test_gateway_team_view.py)."""
+
     failed: list[str] = []
 
     async def queue_manager_unavailable(correlation_id: str) -> None:
@@ -28,7 +37,7 @@ def _transitions(waiting: tuple[str, ...]) -> tuple[GatewayManagerTransitionAppl
             unavailable_message_fallback="unavailable", available_message_fallback="available",
             enabled_fallback_channels=(), telegram_pause_polling=False),
         sessions=SimpleNamespace(), targets=SimpleNamespace(), proactive_sessions=SimpleNamespace(),
-        maintenance=SimpleNamespace(ensure_all=AsyncMock()), manager=SimpleNamespace(pending_response_ids=waiting),
+        maintenance=SimpleNamespace(ensure_all=AsyncMock()), manager=manager,
         responses=SimpleNamespace(queue_manager_unavailable=queue_manager_unavailable),
         event_output=SimpleNamespace(), logger=logging.getLogger("test.gateway.manager_transitions"))
     return application, failed
@@ -71,16 +80,22 @@ async def test_a_failing_available_notice_still_runs_the_hook() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_lead_that_still_finishes_its_tasks_leaves_the_waiting_replies_alone() -> None:
-    """Review F16: a lead on another contract takes no new chats, but its answers to waiting people still come."""
+async def test_the_replies_a_lead_on_another_contract_still_answers_are_kept_and_the_others_failed(caplog) -> None:
+    """Review F16 and R1: a lead on another contract takes no new chats, but its answers to waiting people still come;
+    the notice and the hook still run, and every other waiting reply is failed."""
 
-    application, failed = _transitions(("corr_1",))
+    caplog.set_level(logging.INFO)
+    application, failed = _transitions(("corr_kept", "corr_other"))
+    application.enable_notices()
+    application._emit_notice = AsyncMock()
     paused: list[str] = []
     application.set_hooks(on_manager_unavailable=lambda: paused.append("pause"))
 
-    await application.handle_unavailable(GatewayManagerTransition(manager_id="lead_1", available=False,
-                                                                  source="agent_records", reason="another contract",
-                                                                  keep_waiting=True))
-    assert failed == [] and paused == ["pause"]
-    await application.fail_waiting(["corr_1"])
-    assert failed == ["corr_1"]
+    await application.handle_unavailable(GatewayManagerTransition(
+        manager_id="lead_1", available=False, source="agent_records", reason="another contract",
+        kept_replies=frozenset({"corr_kept", "corr_already_answered"})))
+    assert failed == ["corr_other"] and paused == ["pause"]
+    application._emit_notice.assert_awaited_once_with(available=False)
+    assert "event=gateway_manager_waits_kept manager_id=lead_1 kept=1 failed=1" in caplog.text
+    await application.fail_waiting(["corr_kept"])
+    assert failed == ["corr_other", "corr_kept"]

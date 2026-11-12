@@ -141,21 +141,23 @@ class GatewayManagerTransitionApplication:
 
     async def handle_unavailable(self, transition: GatewayManagerTransition) -> None:
         """The notice, the hook (pausing Telegram polling) and failing people's waiting replies, each on its own:
-        one that fails does not skip the others. A lead that still finishes the tasks it holds
-        (``keep_waiting``) leaves the waiting replies to arrive."""
+        one that fails does not skip the others. The replies a lead on another contract still answers
+        (``kept_replies``) are left to arrive; the lead follower fails them once that lead leaves."""
 
         if self._notices_enabled:
             await self._step("notice", transition, lambda: self._emit_notice(available=False))
         await self._step("hook", transition, lambda: self._run_hook(self._unavailable_hook, label="unavailable"))
-        if transition.keep_waiting:
+        waiting = self._manager.pending_response_ids
+        failing = tuple(correlation_id for correlation_id in waiting if correlation_id not in transition.kept_replies)
+        if len(failing) < len(waiting):
             self._logger.info(
-                "The team lead takes no new chats but still finishes its tasks; waiting replies are kept. "
-                "event=gateway_manager_waits_kept manager_id=%s waiting=%d",
+                "Replies a team lead on another contract still answers are kept; the others are failed. "
+                "event=gateway_manager_waits_kept manager_id=%s kept=%d failed=%d",
                 transition.manager_id,
-                len(self._manager.pending_response_ids),
+                len(waiting) - len(failing),
+                len(failing),
             )
-            return
-        await self.fail_waiting(self._manager.pending_response_ids, transition=transition)
+        await self.fail_waiting(failing, transition=transition)
 
     async def fail_waiting(
         self,

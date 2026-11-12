@@ -5253,8 +5253,9 @@ obsolete value had no effect.
 The watchdog, delegated-work progress notes and check-back timers find records by parents
 in the recovered task tree, rather than by the requester's earlier agent id. The watchdog
 prefers current task custody over an older worker claim. During a mixed-contract upgrade,
-the gateway tracks retained waiting replies separately for each departing lead, so one
-lead's disappearance fails only its own replies, even after another lead has drained.
+the gateway tracks retained waiting replies separately for each draining lead, and every
+unavailable transition leaves them out (`GatewayManagerTransition.kept_replies`), so a lead
+that leaves, whether it drained or left normally, fails only its own replies.
 The operational subject now carries only
 the gateway's task progress, parent-task probe and thread guidance, with their replies
 (plan decision 68). Every agent receives it, so an agent acts only on a command that names
@@ -5317,7 +5318,8 @@ the gateway acts on that view in four places.
   otherwise takes the one whose record changed last (a crashed run's lead has not changed
   since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
   whose process runs another contract takes no new chats but finishes the tasks it holds,
-  so the replies people wait for are kept, and failed only if that lead then leaves. A join
+  so the replies people wait for are kept as that lead's, and failed only if that lead then
+  leaves; a later lead that leaves fails only the replies that were waiting for it. A join
   the installation refused for good clears the route whenever it comes. The lead saying it
   leaves makes it unavailable at once; a lead whose host stopped reporting is unavailable
   at most 35 seconds after the host's last liveness write (its record's 30 seconds plus the

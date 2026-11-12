@@ -23,6 +23,7 @@ from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.wire.refusals import FrameRefused
 from custom_transport.protocol1.live import ServiceUnavailable
 from custom_transport.protocol1.team_agents import READER_STOPPED, TeamAgent
+from tests.test_gateway_manager_transitions import transition_service
 
 TEAM = "team_test"
 
@@ -581,8 +582,25 @@ class Following:
             await asyncio.wait_for(self.task, timeout=2)
         await self.running.__aexit__()
 
-    def transitions(self) -> list[tuple[str, str, bool]]:
-        return ([("unavailable", item.manager_id, item.keep_waiting) for item in self.unavailable]
+    def use_transition_service(self) -> list[str]:
+        """Hand the client's unavailable transitions, and the follower's own failures of kept replies, to a real
+        transition service, as the gateway does (``UserGateway``); returns the replies it fails, in order."""
+
+        service, failed = transition_service(self.client)
+
+        async def unavailable(transition) -> None:
+            self.unavailable.append(transition)
+            await service.handle_unavailable(transition)
+
+        self.client.bind_inbound_handlers(on_unsolicited=AsyncMock(), on_manager_available=self.available.append,
+                                          on_manager_unavailable=unavailable)
+        self.follower = TeamLeadFollower(self.view, self.client, service, check_seconds=0.02)
+        return failed
+
+    def transitions(self) -> list[tuple[str, str, Any]]:
+        """Unavailable transitions with the replies they keep, then available ones with ``became_available``."""
+
+        return ([("unavailable", item.manager_id, tuple(sorted(item.kept_replies))) for item in self.unavailable]
                 + [("available", item.manager_id, item.became_available) for item in self.available])
 
 
@@ -608,7 +626,7 @@ async def test_records_without_a_lead_at_the_start_limit_clear_the_saved_route_o
     reader = Reader()
     async with Following(monkeypatch, reader, saved="lead_from_last_run") as following:
         await following.follower.start(limit=0.1)
-        assert following.writes == [None] and following.transitions() == [("unavailable", "lead_from_last_run", False)]
+        assert following.writes == [None] and following.transitions() == [("unavailable", "lead_from_last_run", ())]
         following.follow()
         reader.publish(member("lead_1", lead=True))
         await until(lambda: following.client.manager_id == "lead_1")
@@ -630,7 +648,7 @@ async def test_records_read_after_the_start_limit_still_correct_a_dead_route(mon
         if lead is not None:
             reader.publish(member(lead, lead=True))
         reader.ready.set()  # the reader catches up late
-        expected = [("unavailable", "lead_from_last_run", False)] + ([("available", lead, True)] if lead else [])
+        expected = [("unavailable", "lead_from_last_run", ())] + ([("available", lead, True)] if lead else [])
         await until(lambda: following.transitions() == expected)
         await asyncio.sleep(0.1)
         assert following.transitions() == expected and following.client.manager_id == lead
@@ -696,7 +714,8 @@ async def test_a_lead_on_another_contract_keeps_the_waiting_replies_until_it_lea
 
         reader.publish(member("lead_1", lead=True, other_contract="2" * 64))
         await until(lambda: following.unavailable != [])
-        assert following.transitions() == [("unavailable", "lead_1", True), ("available", "lead_1", True)]
+        assert following.transitions() == [("unavailable", "lead_1", ("corr_answered", "corr_waiting")),
+                                           ("available", "lead_1", True)]
         assert following.client.manager_id is None
         await asyncio.sleep(0.1)
         assert following.waiting.failed == []
@@ -738,6 +757,37 @@ async def test_each_draining_lead_keeps_only_its_own_waiting_replies(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_a_lead_that_leaves_normally_fails_only_its_own_replies_while_another_still_drains(monkeypatch):
+    """Review R1 and critique C03, through the real transition service: lead_1 drains on another contract and keeps
+    reply_first; the routed lead_2 gets reply_second and leaves the records. reply_second is failed then, and
+    reply_first only when lead_1 leaves, each once."""
+
+    reader = Reader()
+    reader.publish(member("lead_1", lead=True))
+    async with Following(monkeypatch, reader) as following:
+        failed = following.use_transition_service()
+        await following.follower.start(limit=1)
+        following.follow()
+        following.client.register_response_channel("reply_first")
+        draining_first = member("lead_1", lead=True, other_contract="2" * 64)
+        reader.publish(draining_first, member("lead_2", lead=True))
+        await until(lambda: following.client.manager_id == "lead_2")
+        following.client.register_response_channel("reply_second")
+        assert failed == []
+
+        reader.publish(draining_first, reasons={"lead_2": "exiting"})
+        await until(lambda: failed != [])
+        await asyncio.sleep(0.1)
+        assert failed == ["reply_second"] and following.client.manager_id is None
+
+        reader.publish(reasons={"lead_1": "exiting"})
+        await until(lambda: len(failed) == 2)
+        await asyncio.sleep(0.1)
+        assert failed == ["reply_second", "reply_first"]
+        assert [item.manager_id for item in following.unavailable] == ["lead_1", "lead_2"]
+
+
+@pytest.mark.asyncio
 async def test_a_refused_join_clears_the_route_whenever_it_comes_until_the_host_joins_again(monkeypatch) -> None:
     """Review F4 and critique C02: a final refusal after the start limit still stops chats to a lead nobody sees."""
 
@@ -749,7 +799,7 @@ async def test_a_refused_join_clears_the_route_whenever_it_comes_until_the_host_
         assert following.client.manager_id == "lead_from_last_run"
         following.view.refuse("protocol_mismatch", "This gateway runs another message contract than the installation.")
         await until(lambda: following.client.manager_id is None)
-        assert following.transitions() == [("unavailable", "lead_from_last_run", False)]
+        assert following.transitions() == [("unavailable", "lead_from_last_run", ())]
 
         following.view.joining()
         reader.publish(member("lead_1", lead=True))
@@ -773,7 +823,7 @@ async def test_a_lead_that_leaves_while_the_reader_starts_again_is_seen_gone(mon
         reader.crash.set()
         await until(lambda: reader.runs == 2 and following.view.ready.is_set())
         await asyncio.sleep(0.1)
-        expected = [("available", "lead_1", True)] + ([] if lead_stays else [("unavailable", "lead_1", False)])
+        expected = [("available", "lead_1", True)] + ([] if lead_stays else [("unavailable", "lead_1", ())])
         assert sorted(following.transitions()) == sorted(expected)
 
 
