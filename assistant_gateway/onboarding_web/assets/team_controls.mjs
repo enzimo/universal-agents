@@ -426,7 +426,11 @@ export function createTeamControls({
     hostedServers.forEach(server => {
       const row = element(document, "tr");
       tableCell(document, row, "Server", server.server_name);
-      tableCell(document, row, "Status", server.lifecycle);
+      // The state people chose, or what actually happened to a server set to run.
+      tableCell(document, row, "Status", server.start_failure
+        ? `Set to run, but it could not start: ${text(server.start_failure.reason)} `
+          + `(last tried ${formatTime(server.start_failure.failed_at)})`
+        : server.lifecycle);
       tableCell(document, row, "Agents", list(server.target_agent_types).join(", ") || "None");
       tableCell(document, row, "Tools", list(server.tools).join(", ") || "None");
       tableCell(document, row, "Internal listener", `${text(server.bind_host)}:${text(server.port)}`);

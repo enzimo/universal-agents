@@ -21,9 +21,6 @@ Sources, each producing ``StatusFindingV1`` items:
   session, processes that run another message contract, and whether the gateway can see
   the team at all (its join refused, or the records not read). A gateway without a team
   view (command-line runs) does not judge the team;
-- the agents' own findings (``custom_agents.status_findings``), which the view asks them
-  for when the page is checked (``GatewayTeamView.agent_findings``). They come last, so an
-  agent's finding never hides or stands in for the gateway's own with the same id;
 - people's model settings in the access store (``access_control.person_settings``):
   active people whose work may not use the team's model keys and who have no
   model of their own yet (a warning: their requests do not run), and the
@@ -38,7 +35,14 @@ Sources, each producing ``StatusFindingV1`` items:
   server that sets no limit is a note;
 - people's stored-data totals that the manager stopped measuring
   (``assistant_gateway.storage_usage``), a warning: those people get no
-  storage notices meanwhile.
+  storage notices meanwhile;
+- hosted MCP servers set to run whose sidecar the broker could not start
+  (``mcp_control.hosting``, the failure the broker keeps beside each server's
+  running state), a problem: agents cannot use their tools;
+- the agents' own findings (``custom_agents.status_findings``), which the view asks them
+  for when the page is checked (``GatewayTeamView.agent_findings``). They come last, after
+  every source above, so an agent's finding never hides or stands in for the gateway's own
+  with the same id. Add a new source above this one.
 
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.
@@ -93,6 +97,7 @@ from custom_messages.contracts.status_v1 import (
     StatusReportV1,
     StatusSeverity,
 )
+from mcp_control.hosting import HostedMCPLifecycle, MCPHostedServerStore, resolve_mcp_hosting_paths
 from model_providers.endpoints import (
     EndpointKind,
     display_host,
@@ -115,6 +120,7 @@ GATEWAY_SOURCE = "gateway"
 MESSAGE_SERVER_SOURCE = "message server"
 STORAGE_SOURCE = "storage checks"
 PERSON_STORAGE_SOURCE = "stored-data totals"
+HOSTED_MCP_SOURCE = "hosted MCP servers"
 # The longest the page waits for the message server's account information.
 MESSAGE_SERVER_TIMEOUT_SECONDS = 10.0
 
@@ -178,6 +184,7 @@ class StatusPage:
         findings.extend(self._configuration_findings())
         findings.extend(await self._storage_findings(unavailable))
         findings.extend(await asyncio.to_thread(self._person_storage_findings, unavailable))
+        findings.extend(await asyncio.to_thread(self._hosted_mcp_findings, unavailable))
         # Last: ``_unique`` keeps the first finding per id, so an agent cannot hide the gateway's own (review F17).
         findings.extend(await self._agent_findings())
         return StatusReportV1(
@@ -316,6 +323,50 @@ class StatusPage:
             unavailable.append(ACCESS_STORE_SOURCE)
             return []
         return person_settings_findings(people, settings)
+
+    def _hosted_mcp_findings(self, unavailable: list[str]) -> list[StatusFindingV1]:
+        try:
+            store = MCPHostedServerStore(resolve_mcp_hosting_paths(self._config))
+            failed = [
+                (definition, failure)
+                for definition in store.list_definitions()
+                if definition.lifecycle == HostedMCPLifecycle.RUNNING
+                and (failure := store.start_failure(definition.hosted_server_id)) is not None
+            ]
+        except (OSError, ValidationError) as exc:
+            LOGGER.warning(
+                "The Status page could not read the hosted MCP servers. event=status_hosted_mcp_unreadable error=%s",
+                exc,
+            )
+            unavailable.append(HOSTED_MCP_SOURCE)
+            return []
+        # Agents retry it like a server that does not answer (custom_agents.mcp_server_tools), and a
+        # start is not a change their loader watches, so those that stopped trying need a restart.
+        # The action never says to stop and start it: the broker refuses a try while it is stopped,
+        # and an agent stops trying a server that refused it until the agent restarts.
+        minutes = self._config.mcp.load_retry_window_minutes
+        return [
+            StatusFindingV1(
+                finding_id=f"hosted_mcp_server_not_started:{definition.hosted_server_id}",
+                severity=StatusSeverity.PROBLEM,
+                title=f"The hosted MCP server {definition.server_name[:100]} is set to run but could not start",
+                summary=(
+                    "Agents cannot use its tools until it starts. The broker tries again when it starts and each "
+                    f"time an agent tries to load the server's tools; agents keep trying for {minutes} minutes "
+                    "(mcp.load_retry_window_minutes), then stop until they restart."
+                ),
+                action=(
+                    "Fix what the details name; for a port already in use, stop the process that holds it. Leave "
+                    "the server set to run: agents start it on their next try and load its tools. An agent that "
+                    "tries while the server is stopped, or that stopped trying, loads its tools only when it "
+                    "restarts, so restart the container if agents still lack them."
+                ),
+                source=BROKER_SOURCE,
+                since=failure.failed_at,
+                details=failure.reason[:2000],
+            )
+            for definition, failure in failed
+        ]
 
     def _receiver_findings(self) -> list[StatusFindingV1]:
         from custom_transport.dead_letters import stopped_receiver_finding

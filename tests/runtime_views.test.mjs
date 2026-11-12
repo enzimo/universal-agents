@@ -180,6 +180,22 @@ test("an old session cannot populate content or finish a new session's request",
   assert.equal(sharedState.objectivesRequestInFlight, false);
 });
 
+test("a hosted server set to run that could not start shows why beside its chosen state", () => {
+  const { views, sharedState } = fixture();
+  const server = {
+    hosted_server_id: "mcp_host_echo", definition_digest: "d".repeat(64), server_name: "echo", purpose: "Echo.",
+    lifecycle: "running", target_agent_types: [], tools: ["echo"], bind_host: "127.0.0.1", port: 41000,
+    available_actions: [],
+    start_failure: { reason: "127.0.0.1:41000 is already in use", failed_at: "2026-09-25T14:00:00Z" },
+  };
+  views.renderMcp({ mcp_connections: [], hosted_mcp_servers: [server, { ...server, hosted_server_id: "mcp_host_ok", start_failure: null }] });
+  const [blocked, running] = sharedState.objectivesContent.childNodes.map(textTree);
+  assert.match(blocked, /running/);
+  assert.match(blocked, /Set to run, but it could not start: 127\.0\.0\.1:41000 is already in use/);
+  assert.match(blocked, /Last tried 2026-09-25T14:00:00Z\./);
+  assert.doesNotMatch(running, /could not start/);
+});
+
 test("identical MCP refreshes preserve their controls", () => {
   const { sharedState, views } = fixture();
   views.renderMcp({ mcp_connections: [], hosted_mcp_servers: [] });

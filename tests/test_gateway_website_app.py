@@ -54,6 +54,7 @@ from assistant_gateway.inbound_attachments import (
 )
 from assistant_gateway.application.commands import tour_start_request_text
 from assistant_gateway.store import GatewayStateStore
+from mcp_control.hosting import HostedMCPStartError
 from assistant_gateway.runtime_ports import (
     OwnershipPrivateResourceAuthorizer,
     SystemGatewayIdentitySecrets,
@@ -1707,6 +1708,52 @@ async def test_web_chat_mcp_decision_is_csrf_protected_and_digest_bound(
             },
         )
     ]
+
+
+class _HostedStartFailsGateway(_MCPFakeGateway):
+    """The broker could not start the hosted server's sidecar (custom_agents.providers.mcp_hosting)."""
+
+    reason = "The hosted MCP server echo cannot start: 127.0.0.1:41000 is already in use."
+
+    async def control_web_chat_mcp_lifecycle(self, **request):
+        self.mcp_control_calls.append(request)
+        raise HostedMCPStartError(self.reason)
+
+
+@pytest.mark.asyncio
+async def test_web_chat_shows_why_a_hosted_server_did_not_start(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    gateway = _HostedStartFailsGateway(store)
+    app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
+    session_key = "website:web-chat:hosted-start"
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        auth_response = await client.post("/api/web-chat/auth", json={"token": "ua_user_token"})
+        auth_payload = await auth_response.json()
+        cookie = auth_response.cookies["ua_web_chat_session"].value
+        headers = {
+            "Cookie": f"ua_web_chat_session={cookie}",
+            "Origin": str(client.make_url("/")).rstrip("/"),
+            "Sec-Fetch-Site": "same-origin",
+            "X-UA-Permission-CSRF": auth_payload["permission_csrf_token"],
+        }
+        await client.post("/api/web-chat/session-context", headers=headers, json={"session_key": session_key})
+        response = await client.post(
+            "/api/web-chat/mcp/hosted_server/mcp_host_echo/control",
+            headers=headers,
+            json={
+                "session_key": session_key,
+                "action": "start",
+                "expected_digest": "e" * 64,
+                "expected_lifecycle": "stopped",
+            },
+        )
+        text = await response.text()
+
+    assert (response.status, text) == (409, _HostedStartFailsGateway.reason)
+    assert gateway.mcp_control_calls[-1]["action"] == "start"
 
 
 @pytest.mark.asyncio

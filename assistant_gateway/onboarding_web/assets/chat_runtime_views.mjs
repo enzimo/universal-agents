@@ -485,6 +485,21 @@ function mcpResourceCard(resourceKind, resource) {
     ));
     card.appendChild(header);
     card.appendChild(operations.uiElement("div", "objective-card-id", resourceId));
+    if (!connection && resource.start_failure) {
+      // The badge keeps the state people chose; this says what actually happened.
+      var failure = operations.uiElement("div", "warning-callout hosted-server-not-started");
+      var tried = operations.timestampElement(resource.start_failure.failed_at, "");
+      var failureText = operations.uiElement("div", "hosted-server-not-started-text");
+      failureText.appendChild(operations.uiElement(
+        "p", "", "Set to run, but it could not start: " + resource.start_failure.reason
+      ));
+      failureText.appendChild(operations.uiElement(
+        "p", "", "Last tried " + (tried ? tried.textContent : resource.start_failure.failed_at) + "."
+      ));
+      failure.appendChild(operations.uiElement("span", "warning-icon", "!"));
+      failure.appendChild(failureText);
+      card.appendChild(failure);
+    }
     var details = operations.uiElement("div", "runtime-resource-details");
     if (connection) {
       details.appendChild(operations.uiElement("span", "", "Transport: " + resource.transport));
