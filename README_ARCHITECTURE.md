@@ -5254,8 +5254,10 @@ The watchdog, delegated-work progress notes and check-back timers find records b
 in the recovered task tree, rather than by the requester's earlier agent id. The watchdog
 prefers current task custody over an older worker claim. During a mixed-contract upgrade,
 the gateway tracks retained waiting replies separately for each draining lead, and every
-unavailable transition leaves them out (`GatewayManagerTransition.kept_replies`), so a lead
-that leaves, whether it drained or left normally, fails only its own replies.
+unavailable transition except a refused join leaves them out
+(`GatewayManagerTransition.kept_replies`), so a lead that leaves, whether it drained or left
+normally, fails only its own replies. A refused join fails every waiting reply while a lead
+is routed, because the gateway can then hear no lead at all.
 The operational subject now carries only
 the gateway's task progress, parent-task probe and thread guidance, with their replies
 (plan decision 68). Every agent receives it, so an agent acts only on a command that names

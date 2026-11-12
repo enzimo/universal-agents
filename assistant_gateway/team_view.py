@@ -664,12 +664,14 @@ class TeamLeadFollower:
       replies waiting on a dead route are failed. While the records are not read it keeps
       the route: it cannot judge.
     - **A refused join**, whenever it comes, means nobody can see a lead: the route is cleared
-      (F4). It no longer holds once the host joins again.
+      (F4), and while a lead is routed every waiting reply is failed, kept ones too. With no
+      lead routed nothing changes. It no longer holds once the host joins again.
     - **A lead whose process runs another contract** takes no new chats, but finishes the
       tasks it holds (F16). The replies people were waiting for then are remembered as that
       lead's, and those still waiting when it leaves the records are failed then, with no
-      second notice (critique C01). Until then every unavailable transition names them as
-      ``kept_replies``, so a later lead that leaves fails only its own (review R1).
+      second notice (critique C01). Until then every unavailable transition except a refused
+      join names them as ``kept_replies``, so a later lead that leaves fails only its own
+      (review R1).
     """
 
     def __init__(self, view: GatewayTeamView, route: LeadRoute, waiting: WaitingReplies, *,
