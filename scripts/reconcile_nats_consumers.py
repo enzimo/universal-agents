@@ -10,7 +10,6 @@ from collections import Counter
 import logging
 import os
 from pathlib import Path
-import subprocess
 import sys
 from typing import Any, Sequence
 
@@ -56,6 +55,7 @@ from docker.nats_service import (  # noqa: E402
     ensure_local_nats_credentials,
     local_nats_enabled_from_env,
     start_local_nats,
+    stop_local_nats,
 )
 
 
@@ -249,15 +249,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _stop_local_nats(process: subprocess.Popen[bytes]) -> None:
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -314,7 +305,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     finally:
         if local_nats_process is not None:
-            _stop_local_nats(local_nats_process)
+            # Logs a stop that times out instead of raising, so the run's own error stays the one reported.
+            stop_local_nats(local_nats_process, logger=LOGGER)
 
     reason_counts = Counter(decision.reason for decision in result.decisions)
     LOGGER.info(
