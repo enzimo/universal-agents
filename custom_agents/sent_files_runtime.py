@@ -24,6 +24,20 @@ recovery links (``TaskManager.resolve_root_task_id``). Once the step's entry
 is written, they are merged into the root's conversation turn and written to
 the root's history as well, so the step's own turn, the request's later
 turns and follow-up requests can all name and open them.
+
+A worker that needs the person escalates to the team lead
+(``manager_escalation``); the lead holds the escalation as a delegated task
+of its own, and asks the person in that task. The person's answer names the
+escalation, whose execution root (through the delegation links) is the
+request. Its files are kept like a step's: on the escalation and on the
+request. A delegated task with no request held here (a worker's own task)
+keeps none. The lead's result for the escalation then carries the files of
+those answers, and only those (``result_with_answer_files``); the model
+never chooses them. The worker keeps the ones inside this host's upload
+folders as its escalating task's own (``keep_escalation_result_files``): it
+trusts the result as it trusts its task's ``Task.attachments``, because it
+comes from the agent that held the escalation, and it never reads the
+request's conversation.
 """
 
 from __future__ import annotations
@@ -34,14 +48,18 @@ from typing import Any, Optional
 
 from access_control.ownership import OwnershipDecision
 from custom_agents.conversation_attachments import (
+    DELEGATED_TASK_REASON,
+    ESCALATION_RESULT_MESSAGE_TYPE,
     UploadFolders,
+    answer_files,
     keep_upload_files,
     log_refused_files,
     task_files_details,
 )
 from custom_agents.conversation_runtime import record_turn_attachments
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.enums import TaskHistoryImportance, TaskHistoryType
+from custom_messages.contracts.task_v1 import Task
+from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
 
 
 async def keep_sent_files(
@@ -63,9 +81,11 @@ async def keep_sent_files(
     ``message_type`` name the message; ``subject`` names it in the entry's
     text, such as "a guidance"); when that entry is not written because the
     task has ended, nothing else is recorded and None is returned. Then they
-    are merged into the task's conversation turn. For a plan step or
-    recovery task, the turn is its request's, and the request's history gets
-    a files entry too (module docstring). A store error propagates: the
+    are merged into the task's conversation turn. For a plan step, a
+    recovery task or a worker's escalation, the turn is its request's, and
+    the request's history gets a files entry too (module docstring); any
+    other delegated task keeps none (logged with ``delegated_task``). A
+    store error propagates: the
     handler has acknowledged nothing yet, so the sender sends the message
     again; recording again adds no file twice and may repeat an entry, which
     the task's files read once per id.
@@ -78,6 +98,12 @@ async def keep_sent_files(
     if not decision.allowed:
         log_refused_files(attachments, decision.reason, task_id=task_id, conversation_id=conversation_id)
         return []
+    # Only read here; the request is written to after the task's own entry.
+    root_info = await _request_root(agent, task_info)
+    if root_info is None and task_info.task.parent_task_id is not None:
+        # A delegated task keeps files only for a request held here (module docstring).
+        log_refused_files(attachments, DELEGATED_TASK_REASON, task_id=task_id, conversation_id=conversation_id)
+        return []
     folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
     kept = keep_upload_files(attachments, folders, task_id=task_id, conversation_id=conversation_id)
     if not kept:
@@ -88,7 +114,6 @@ async def keep_sent_files(
     # takes neither the message nor its files, so nothing else is recorded.
     if await _files_entry(agent, task_id, f"Files sent with {subject} accepted: {names}", details) is None:
         return None
-    root_info = await _request_root(agent, task_info)
     # The turn is the request's: the root's when the task is a step of it.
     await asyncio.to_thread(
         record_turn_attachments,
@@ -100,10 +125,10 @@ async def keep_sent_files(
     if root_info is None:
         return kept
     root_id = root_info.task.task_id
-    if await _files_entry(agent, root_id, f"Files sent with {subject} in step {task_id} accepted: {names}", details) is None:
+    if await _files_entry(agent, root_id, f"Files sent with {subject} in task {task_id} accepted: {names}", details) is None:
         agent._logger.warning(
-            "A request ended while files sent to one of its steps were recorded. They are on its conversation "
-            "turn and among the step's files, but not among the request's own files. "
+            "A request ended while files sent to one of its steps or delegated tasks were recorded. They are on "
+            "its conversation turn and among that task's files, but not among the request's own files. "
             "event=sent_files_root_gone task_id=%s root_task_id=%s attachment_ids=%s",
             task_id,
             root_id,
@@ -127,14 +152,16 @@ async def _files_entry(agent: Any, task_id: str, summary: str, details: dict[str
 
 
 async def _request_root(agent: Any, task_info: Any) -> Optional[Any]:
-    """The request a plan step or recovery task runs for, when files sent to it are also the request's; else None.
+    """The request a step or delegated task runs for, when files sent to it are also the request's; else None.
 
-    None for a task that is its own request (no plan-step or recovery link).
-    The root is found only through the task manager's links, never from the
-    message. It must be a top-level task this agent holds, working for the
-    same person as the step (``owner_person_id``, recorded at admission from
-    verified identity); otherwise the files stay with the step and a warning
-    names both tasks.
+    None for a task that is its own request, and for a delegated task whose
+    parent this agent does not hold (a worker's). The root is found only
+    through the task manager's plan-step, recovery and delegation links,
+    never from the message. It must be a top-level task this agent holds,
+    working for the same person as the task (``owner_person_id``, recorded
+    at admission from verified identity); otherwise a warning names both
+    tasks, and the files stay with a step or are refused for a delegated
+    task (``keep_sent_files``).
     """
 
     task_manager = agent.task_manager
@@ -150,7 +177,7 @@ async def _request_root(agent: Any, task_info: Any) -> Optional[Any]:
     ):
         return root_info
     agent._logger.warning(
-        "Files sent to a step cannot be kept on its request, so they stay with the step. "
+        "Files sent to a step or delegated task cannot be kept on its request. "
         "event=sent_files_root_not_usable task_id=%s root_task_id=%s reason=%s",
         task_id,
         root_id,
@@ -159,8 +186,87 @@ async def _request_root(agent: Any, task_info: Any) -> Optional[Any]:
     return None
 
 
+async def result_with_answer_files(agent: Any, content: Any, incoming: Any) -> Any:
+    """``content`` with the files people's answers brought to the delegated task it is the result of.
+
+    Only for a ``Task`` response to a delegated task (``incoming`` has a
+    parent): the team lead's result for a worker's escalation carries the
+    files of the person's answers to its questions (``answer_files``), read
+    from the task's history when the result is sent, never chosen by the
+    model, and nothing else. Any other content is returned unchanged; a
+    request's own result goes to the gateway without files.
+    """
+
+    if not (
+        isinstance(content, Task)
+        and content.task_type == MessageMetaType.RESPONSE
+        and isinstance(incoming, Task)
+        and incoming.parent_task_id is not None
+    ):
+        return content
+    task_manager = agent.task_manager
+    task_info = await task_manager.operations_runtime.run(task_manager.get_task_info, incoming.task_id)
+    files = list(answer_files(task_info.task)) if task_info is not None else []
+    if not files:
+        return content
+    agent._logger.info(
+        "A delegated task's result carries the files a person sent with answers to its questions. "
+        "event=delegated_result_answer_files task_id=%s parent_task_id=%s attachment_ids=%s",
+        incoming.task_id,
+        incoming.parent_task_id,
+        _ids(files),
+    )
+    return content.model_copy(update={"attachments": files})
+
+
+async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Task) -> None:
+    """Keep the files the result of this agent's escalation brought as the escalating task's own.
+
+    ``subtask_info`` is the escalation as this agent recorded it when it
+    escalated (its parent is the task that waits) and ``result`` the result
+    its holder sent (``task_message_runtime._handle_task_response`` checked
+    the sender). Only an escalation's result brings files
+    (``result_with_answer_files``); records outside this host's upload
+    folders are dropped. The rest are written to the parent's history as one
+    files entry, so the parent's turn lists them and the attachment tools
+    open them by id. Each refused file is logged.
+    """
+
+    if not result.attachments:
+        return
+    parent_id = subtask_info.task.parent_task_id
+    conversation_id = getattr(subtask_info.meta, "conversation_id", None)
+    if getattr(subtask_info.meta, "manager_escalation", None) is None:
+        for attachment in result.attachments:
+            agent._logger.warning(
+                "A delegated task's result brought a file, but only an escalation's result may; it was not kept. "
+                "event=result_file_refused reason=not_an_escalation attachment_id=%s task_id=%s subtask_id=%s",
+                attachment.attachment_id,
+                parent_id,
+                subtask_info.task.task_id,
+            )
+        return
+    folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
+    kept = keep_upload_files(result.attachments, folders, task_id=parent_id, conversation_id=conversation_id)
+    if not kept:
+        return
+    names = ", ".join(attachment.filename for attachment in kept)
+    details = task_files_details(
+        kept, message_id=subtask_info.task.task_id, message_type=ESCALATION_RESULT_MESSAGE_TYPE
+    )
+    summary = f"Files sent with the result of escalation {subtask_info.task.task_id} accepted: {names}"
+    if await _files_entry(agent, parent_id, summary, details) is None:
+        agent._logger.warning(
+            "A task ended before the files its escalation's result brought were recorded. "
+            "event=escalation_result_files_task_gone task_id=%s escalation_task_id=%s attachment_ids=%s",
+            parent_id,
+            subtask_info.task.task_id,
+            _ids(kept),
+        )
+
+
 def _ids(attachments: Sequence[UserTaskAttachment]) -> str:
     return ",".join(attachment.attachment_id for attachment in attachments)
 
 
-__all__ = ["keep_sent_files"]
+__all__ = ["keep_escalation_result_files", "keep_sent_files", "result_with_answer_files"]

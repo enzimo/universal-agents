@@ -928,5 +928,5 @@ async def test_files_sent_to_a_step_whose_request_ends_meanwhile_stay_on_the_req
     assert _turn_files(agent) == [notes.attachment_id]
     assert _files_entries(manager) == []
     [warning] = _messages(caplog, "sent_files_root_gone")
-    assert "on its conversation turn and among the step's files, but not among the request's own files" in warning
+    assert "on its conversation turn and among that task's files, but not among the request's own files" in warning
     assert f"task_id={step_id} root_task_id={TASK} attachment_ids={notes.attachment_id}" in warning

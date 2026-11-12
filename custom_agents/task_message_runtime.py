@@ -37,7 +37,7 @@ from custom_agents.conversation_attachments import (
     request_files_kept,
     without_incoming_files_entries,
 )
-from custom_agents.sent_files_runtime import keep_sent_files
+from custom_agents.sent_files_runtime import keep_escalation_result_files, keep_sent_files
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
     ensure_task_conversation_context,
@@ -1846,6 +1846,9 @@ async def _handle_task_response(
             getattr(msg_header, "idempotency_key", None),
         )
         return
+    # The result of an escalation may bring the files the person sent the
+    # team lead for it; they become the waiting task's own before it resumes.
+    await keep_escalation_result_files(self, subtask_info, sub_task_response)
 
     if sub_task_response.task_state:
         next_state = sub_task_response.task_state[-1][0]

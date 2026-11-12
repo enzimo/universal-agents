@@ -28,10 +28,18 @@ Which files are kept at all, before anything is saved:
   and every agent process receives each guidance's context; the rule's
   docstring explains why none of them can vouch for other files.
   Refused files are dropped from the message itself and logged one by one.
-- A delegated task keeps no files from guidance or answers, and questions
-  an agent asks bring none; a delegated task's files are the ones its
-  delegation named (``Task.attachments``). The lead sends guidance on
-  to its workers without files.
+- A delegated task keeps no files from guidance, and questions an agent
+  asks bring none; a delegated task's files are the ones its delegation
+  named (``Task.attachments``). The lead sends guidance on to its workers
+  without files. One delegated task can ask the person: the team lead's
+  record of a worker's escalation (``manager_escalation``), whose question
+  the lead shows in the person's chat. The answer's files are kept, under
+  the same gateway rule, only when that task runs for a request the lead
+  holds for the same person, and then on that request too
+  (``sent_files_runtime.keep_sent_files``); a worker holds no request, so
+  its tasks keep none. The lead's result for the escalation carries them,
+  and only them (``answer_files``), to the worker, which keeps the ones in
+  the upload folders as its task's own (``ESCALATION_RESULT_MESSAGE_TYPE``).
 - Files history entries are written only by this runtime after admission, so
   any a task message arrives with are dropped (``without_incoming_files_entries``).
 - Both writers then drop records that point outside this host's upload
@@ -42,7 +50,8 @@ So every source ``TaskAttachments`` reads was written only after these checks.
 What a task may use (``TaskAttachments``):
 
 - its own files: ``Task.attachments`` plus the files of every guidance and
-  answer it accepted, read from its durable history, so they survive the
+  answer it accepted (and, for a worker, of its escalations' results), read
+  from its durable history, so they survive the
   guidance being read and a restart. Only entries this task's runtime wrote
   count: a lead's history also holds copies of its workers' important entries
   (``TaskManager.bubble_subtask_result`` keeps their details), and a worker
@@ -127,6 +136,11 @@ TASK_FILES_KEY = "task_files"
 # The ``message_type`` of a files entry for a person's answer to a question
 # (``TaskQuery``); guidance and interrupt answers use their steering type.
 QUESTION_ANSWER_MESSAGE_TYPE = "question_answer"
+# The ``message_type`` of a worker's files entry for the files the team lead's
+# result for its escalation brought (``sent_files_runtime.keep_escalation_result_files``).
+ESCALATION_RESULT_MESSAGE_TYPE = "escalation_result"
+# Why a delegated task keeps no files from a message (``log_refused_files``).
+DELEGATED_TASK_REASON = "delegated_task"
 # Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
 _BUBBLED_ENTRY_KEY = "bubbled_entry_id"
 
@@ -388,6 +402,24 @@ def _own_files(task: Any) -> tuple[UserTaskAttachment, ...]:
     unique: dict[str, UserTaskAttachment] = {}
     for attachment in collected:
         unique.setdefault(attachment.attachment_id, attachment)
+    return tuple(unique.values())
+
+
+def answer_files(task: Any) -> tuple[UserTaskAttachment, ...]:
+    """The files people's answers to the task's questions brought, as kept for it, one per id, in arrival order.
+
+    Read from the files entries this task's runtime wrote for answers
+    (``QUESTION_ANSWER_MESSAGE_TYPE``); never its request's files or a
+    guidance's. A delegated task's result carries exactly these to the agent
+    that delegated it (``sent_files_runtime.result_with_answer_files``).
+    """
+
+    unique: dict[str, UserTaskAttachment] = {}
+    for entry in list(task.execution_history or []):
+        details = getattr(entry, "details", None) or {}
+        if _written_by_this_task(entry, details) and details.get("message_type") == QUESTION_ANSWER_MESSAGE_TYPE:
+            for attachment in _recorded_files(task.task_id, details.get(TASK_FILES_KEY)):
+                unique.setdefault(attachment.attachment_id, attachment)
     return tuple(unique.values())
 
 
@@ -656,6 +688,8 @@ def steering_files_check(task_info: Any, steering: TaskSteering, meta: Any, *, t
     these files; ``steering`` is the message as it arrived.
     """
 
+    if task_info.task.parent_task_id is not None:
+        return OwnershipDecision(False, DELEGATED_TASK_REASON)
     return _sent_to_task_check(task_info, meta, team_id, steering_context_id(steering))
 
 
@@ -663,9 +697,13 @@ def answer_files_check(task_info: Any, answer: TaskQuery, meta: Any, *, team_id:
     """Whether the files on ``answer`` (a ``TaskQuery`` with message meta ``meta``) may become the task's.
 
     Only a person's answer to a question (a RESPONSE, which the gateway
-    sends) brings files; a question an agent asks keeps none. Otherwise the
-    rule of ``steering_files_check``, with the context id bound to the
-    question this message answers; ``answer`` is the message as it arrived.
+    sends) brings files; a question an agent asks keeps none. The message
+    must carry a context the gateway signed for this answer and these files,
+    naming the task the question was asked in (``answer`` is the message as
+    it arrived). That task may be delegated: the team lead's record of a
+    worker's escalation, whose question it asked the person. Such a task
+    keeps them only when it runs for a request this agent holds
+    (``sent_files_runtime.keep_sent_files``, module docstring).
     """
 
     if answer.query_type != MessageMetaType.RESPONSE:
@@ -675,8 +713,6 @@ def answer_files_check(task_info: Any, answer: TaskQuery, meta: Any, *, team_id:
 
 def _sent_to_task_check(task_info: Any, meta: Any, team_id: str, message_context_id: str) -> OwnershipDecision:
     task = task_info.task
-    if task.parent_task_id is not None:
-        return OwnershipDecision(False, "delegated_task")
     return sent_files_access(
         sender=_verified_sender(meta, team_id),
         task_id=task.task_id,
@@ -781,6 +817,8 @@ def _log_outside(
 __all__ = [
     "CONVERSATION_ATTACHMENTS_HEADING",
     "CONVERSATION_ATTACHMENTS_SECTION",
+    "DELEGATED_TASK_REASON",
+    "ESCALATION_RESULT_MESSAGE_TYPE",
     "INVENTORY_LIMIT",
     "QUESTION_ANSWER_MESSAGE_TYPE",
     "TASK_FILES_EVENT",
@@ -794,6 +832,7 @@ __all__ = [
     "TaskAttachments",
     "UnavailableUpload",
     "UploadFolders",
+    "answer_files",
     "answer_files_check",
     "describe_file",
     "inventory_text",
