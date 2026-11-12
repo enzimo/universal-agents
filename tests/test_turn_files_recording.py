@@ -293,7 +293,8 @@ async def test_a_store_error_leaves_the_guidance_unacknowledged_and_the_resend_r
 
     assert statuses == []
     assert "guide_retry" not in lead._processed_task_steering_ids
-    assert _files_entries(lead.task_manager) == []
+    # The task's files entry is written first and decides; the merge failed after it.
+    assert len(_files_entries(lead.task_manager)) == 1
     assert TASK not in lead._pending_proactive_task_steering
 
     # The gateway sends its held copy again.
@@ -302,8 +303,10 @@ async def test_a_store_error_leaves_the_guidance_unacknowledged_and_the_resend_r
 
     assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.ACCEPTED, TaskSteeringStatus.ACCEPTED]
     assert statuses[1][2] == "Duplicate steering event ignored."
-    assert len(_files_entries(lead.task_manager)) == 1
+    # The resend writes its entry again; the task's files and its turn have the file once.
+    assert len(_files_entries(lead.task_manager)) == 2
     lead._conversation_store = store
+    assert _own(lead.task_manager, store).count(page_two.attachment_id) == 1
     assert _turn_files(lead).count(page_two.attachment_id) == 1
 
 

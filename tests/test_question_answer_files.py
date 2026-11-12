@@ -776,34 +776,157 @@ async def test_an_answer_to_a_steps_question_keeps_its_files_on_the_request_too(
     assert opened["status"] == "success", opened
 
 
-@pytest.mark.asyncio
-async def test_files_sent_to_a_step_stay_with_it_when_its_request_works_for_someone_else(
-    tmp_path: Path, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    agent = _lead(tmp_path, layout)
-    await _admit(agent, task_id=TASK, text="Plan dinner in steps.", attachments=[])
-    step = _step_of_a_plan(agent)
-    manager = agent.task_manager
+def _point_root_at(manager: Any, step: Any, root_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolve = manager.resolve_root_task_id
+    monkeypatch.setattr(
+        manager, "resolve_root_task_id", lambda task_id: root_id if task_id == step.task.task_id else resolve(task_id)
+    )
+
+
+def _root_working_for_bob(manager: Any, step: Any, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Bob's request, named as the step's root by a patched lookup: a step always works for its request's person."""
+
     assert manager.add_task(
         Task(task_id="task_bob", task_type=MessageMetaType.REQUEST, problem_statement="Bob's request."),
         MessageHeader(from_agent_id="gateway"),
         MessageMeta(conversation_id="conv_bob"),
         owner_person_id="usr_bob",
     )
-    # Not reachable through the plan links (a step works for its request's person); the guard holds anyway.
-    resolve = manager.resolve_root_task_id
-    monkeypatch.setattr(
-        manager, "resolve_root_task_id", lambda task_id: "task_bob" if task_id == step.task.task_id else resolve(task_id)
+    _point_root_at(manager, step, "task_bob", monkeypatch)
+    return "task_bob"
+
+
+def _root_delegated(manager: Any, step: Any, monkeypatch: pytest.MonkeyPatch) -> str:
+    """A task delegated to this agent, named as the step's root by a patched lookup: plan links end at a request."""
+
+    assert manager.add_task(
+        Task(task_id="task_child", parent_task_id="task_parent", task_type=MessageMetaType.REQUEST, problem_statement="Parse it."),
+        MessageHeader(from_agent_id="other_lead"),
+        MessageMeta(conversation_id=CONVERSATION),
+        owner_person_id=ANN,
     )
+    _point_root_at(manager, step, "task_child", monkeypatch)
+    return "task_child"
+
+
+def _root_no_longer_held(manager: Any, step: Any, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The request itself, gone from the task manager while the step and its plan link remain."""
+
+    del manager.task_state.tasks[TASK]
+    assert manager.resolve_root_task_id(step.task.task_id) == TASK
+    return TASK
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root_of", "reason"),
+    [(_root_working_for_bob, "other_person"), (_root_delegated, "delegated"), (_root_no_longer_held, "not_held")],
+    ids=["other_person", "delegated", "not_held"],
+)
+async def test_files_sent_to_a_step_stay_with_it_when_its_request_cannot_keep_them(
+    root_of: Any,
+    reason: str,
+    tmp_path: Path,
+    layout: InstanceLayout,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent = _lead(tmp_path, layout)
+    await _admit(agent, task_id=TASK, text="Plan dinner in steps.", attachments=[])
+    step = _step_of_a_plan(agent)
+    manager = agent.task_manager
+    root_id = root_of(manager, step, monkeypatch)
     object.__setattr__(agent, "process_llm_interaction", _ModelTurns(agent))
     notes = _upload(layout, "list.png")
 
     with caplog.at_level(logging.WARNING):
         await _answer_the_question_of(agent, step, [notes])
 
+    # The step takes the answer with its file; no request gets it.
+    assert manager.get_task_queries(step.task.task_id)[-1].attachments == [notes]
     assert _own(manager, agent._conversation_store, step.task.task_id) == [notes.attachment_id]
-    assert _files_entries(manager, "task_bob") == []
-    assert _files_entries(manager) == []
+    held = [task_id for task_id in dict.fromkeys((root_id, TASK)) if manager.get_task_info(task_id) is not None]
+    assert all(_files_entries(manager, task_id) == [] for task_id in held)
     assert _turn_files(agent) == []
     [warning] = _messages(caplog, "sent_files_root_not_usable")
-    assert f"task_id={step.task.task_id} root_task_id=task_bob reason=other_person" in warning
+    assert f"task_id={step.task.task_id} root_task_id={root_id} reason={reason}" in warning
+
+
+def _entries_end_for(manager: Any, ended_task_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ended_task_id`` ends while files are recorded: its history entries are not written (None)."""
+
+    append = manager.append_history_entry
+    monkeypatch.setattr(
+        manager,
+        "append_history_entry",
+        lambda task_id, *args, **kwargs: None if task_id == ended_task_id else append(task_id, *args, **kwargs),
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_answer_to_a_request_that_ends_while_its_files_are_recorded_leaves_them_off_its_turn(
+    asking_lead, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    notes = _upload(layout, "list.png")
+    answer = _answer_to([notes])
+    _entries_end_for(asking_lead.task_manager, TASK, monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        await _deliver(asking_lead, answer, _answer_meta(answer))
+
+    # The request does not take the answer, so its conversation turn does not get the file.
+    assert _messages(caplog, "task_query_task_gone")
+    assert _turn_files(asking_lead) == []
+    assert _own(asking_lead.task_manager, asking_lead._conversation_store) == []
+
+
+@pytest.mark.asyncio
+async def test_an_answer_to_a_step_that_ends_while_its_files_are_recorded_leaves_them_nowhere(
+    tmp_path: Path, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = _lead(tmp_path, layout)
+    await _admit(agent, task_id=TASK, text="Plan dinner in steps.", attachments=[])
+    step = _step_of_a_plan(agent)
+    manager, store = agent.task_manager, agent._conversation_store
+    object.__setattr__(agent, "process_llm_interaction", _ModelTurns(agent))
+    notes = _upload(layout, "list.png")
+    _entries_end_for(manager, step.task.task_id, monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        await _answer_the_question_of(agent, step, [notes])
+
+    # The step does not take the answer, so its request keeps none of its files either.
+    assert _messages(caplog, "task_query_task_gone")
+    answers = [query for query in manager.get_task_queries(step.task.task_id) if query.query_type == MessageMetaType.RESPONSE]
+    assert answers == []
+    assert _own(manager, store, step.task.task_id) == []
+    assert _files_entries(manager) == []
+    assert _own(manager, store) == []
+    assert _turn_files(agent) == []
+
+
+@pytest.mark.asyncio
+async def test_files_sent_to_a_step_whose_request_ends_meanwhile_stay_on_the_requests_turn(
+    tmp_path: Path, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = _lead(tmp_path, layout)
+    await _admit(agent, task_id=TASK, text="Plan dinner in steps.", attachments=[])
+    step = _step_of_a_plan(agent)
+    step_id = step.task.task_id
+    manager, store = agent.task_manager, agent._conversation_store
+    object.__setattr__(agent, "process_llm_interaction", _ModelTurns(agent))
+    notes = _upload(layout, "list.png")
+    _entries_end_for(manager, TASK, monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        await _answer_the_question_of(agent, step, [notes])
+
+    # The step takes the answer with its file, and follow-up requests find it on the
+    # request's conversation turn; the request's own files do not have it.
+    assert manager.get_task_queries(step_id)[-1].attachments == [notes]
+    assert _own(manager, store, step_id) == [notes.attachment_id]
+    assert _turn_files(agent) == [notes.attachment_id]
+    assert _files_entries(manager) == []
+    [warning] = _messages(caplog, "sent_files_root_gone")
+    assert "on its conversation turn and among the step's files, but not among the request's own files" in warning
+    assert f"task_id={step_id} root_task_id={TASK} attachment_ids={notes.attachment_id}" in warning
