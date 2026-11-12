@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import urllib.request
@@ -20,12 +21,10 @@ import nats
 import pytest
 
 import docker.nats_service as nats_service
+from tests.owned_processes import stopped_at_exit
 
 
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+_LISTENING = re.compile(r"Listening for client connections on 127\.0\.0\.1:(\d+)")
 
 
 def _connect_reply(port: int, env: dict[str, str], *, padding: int) -> str:
@@ -49,10 +48,11 @@ def _connect_reply(port: int, env: dict[str, str], *, padding: int) -> str:
 
 @pytest.mark.skipif(shutil.which("nats-server") is None, reason="nats-server binary is not installed")
 def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatch) -> None:
-    port = _free_port()
-    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", port)
-    monitor_port = _free_port()
-    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", monitor_port)
+    # The server picks both its ports itself: a port the test picked and closed first could be
+    # taken by another test's server. The start waits until this server says it is ready, and
+    # its startup log names the port it listens on.
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", -1)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", -1)
     # Like the launcher, pass a full environment without NATS credentials.
     env = {key: value for key, value in os.environ.items() if not key.startswith("NATS_")}
     process = nats_service.start_local_nats(
@@ -62,12 +62,20 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
         service_root=tmp_path / "nats",
     )
     jetstream, control_line, _minimum = nats_service.contract_server_settings()
-    try:
+    with stopped_at_exit(process, name="nats-server of the managed start"):
         cmdline = Path(f"/proc/{process.pid}/cmdline").read_bytes().decode()
         assert env["NATS_PASSWORD"] not in cmdline
 
+        startup_log = (tmp_path / "nats" / "log" / "nats-server-startup.log").read_text()
+        listening = _LISTENING.search(startup_log)
+        assert listening is not None
+        port = int(listening.group(1))
+        monitoring = re.search(r"Starting http monitor on 127\.0\.0\.1:(\d+)", startup_log)
+        assert monitoring is not None
+        monitor_port = int(monitoring.group(1))
+        url = f"nats://127.0.0.1:{port}"
+
         async def probe() -> None:
-            url = f"nats://127.0.0.1:{port}"
             with pytest.raises(Exception) as denied:
                 await nats.connect(url, connect_timeout=2, max_reconnect_attempts=0, allow_reconnect=False)
             assert "authorization" in str(denied.value).lower()
@@ -95,6 +103,3 @@ def test_managed_nats_rejects_unauthenticated_clients(tmp_path: Path, monkeypatc
         credential_bytes = control_line - nats_service.CONNECT_LINE_ROOM_BYTES
         assert _connect_reply(port, env, padding=credential_bytes).startswith("PONG")
         assert "maximum control line exceeded" in _connect_reply(port, env, padding=control_line).lower()
-    finally:
-        process.terminate()
-        process.wait(timeout=10)

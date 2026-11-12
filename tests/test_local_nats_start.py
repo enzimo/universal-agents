@@ -1,0 +1,362 @@
+"""The managed local NATS server is ready only when the server this start launched says so.
+
+The server runs in its own session, so one left over from an earlier start (a launcher that
+crashed, or a team still running) can keep the port. The start used to wait until anything
+answered on the port: the new server stopped with "address already in use" and the start went
+on with the old one, which may hold another store or other credentials. The refusal names the
+address the server reported and this team's store directory, which tells this team's own server
+apart from another team's.
+
+A start that fails after launching its server stops and reaps that server: the caller never
+gets the process, so a server left running would keep the ports and refuse the next start.
+
+Every start appends to one startup log. Only lines written after this start began, and with
+this start's server's ``[<pid>] `` prefix, count; a start that overlaps it writes its own.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+import docker.nats_service as nats_service
+import scripts.reconcile_nats_consumers as reconciler
+from tests.own_nats_server import own_nats_server_process
+from tests.owned_processes import record_started_processes, stop_owned_process, stopped_at_exit
+
+_LOGGER = logging.getLogger("test_local_nats_start")
+_LISTENING = re.compile(r"Listening for client connections on 127\.0\.0\.1:(\d+)")
+_MONITORING = re.compile(r"Starting http monitor on 127\.0\.0\.1:(\d+)")
+needs_nats_server = pytest.mark.skipif(shutil.which("nats-server") is None, reason="nats-server binary is not installed")
+
+
+def _start(tmp_path: Path) -> subprocess.Popen[bytes]:
+    # Like the launcher, pass a full environment without NATS credentials.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("NATS_")}
+    return nats_service.start_local_nats(env=env, logger=_LOGGER, cwd=tmp_path, service_root=tmp_path / "nats")
+
+
+def _refusal(tmp_path: Path) -> str:
+    """Start, expecting a refusal; a server that starts anyway is stopped before the test fails."""
+
+    with pytest.raises(RuntimeError) as refused:
+        stop_owned_process(_start(tmp_path), name="nats-server the start should have refused")
+    return str(refused.value)
+
+
+def _store_argument(tmp_path: Path) -> str:
+    """How this team's server's command line, and so ``ps``, shows its store directory."""
+
+    return f"-sd {tmp_path / 'nats' / 'data'}"
+
+
+def _reported_ports(tmp_path: Path) -> tuple[int, int]:
+    """The client and monitoring ports the first server in the startup log reported."""
+
+    output = (tmp_path / "nats" / "log" / "nats-server-startup.log").read_text()
+    client, monitoring = _LISTENING.search(output), _MONITORING.search(output)
+    assert client is not None and monitoring is not None, output
+    return int(client.group(1)), int(monitoring.group(1))
+
+
+def _launched_server(started: list[subprocess.Popen]) -> subprocess.Popen:
+    """The nats-server the start launched, not its ``nats-server --version`` check."""
+
+    [server] = [process for process in started if "-sd" in process.args]
+    return server
+
+
+@pytest.fixture
+def other_server(tmp_path: Path) -> Iterator[tuple[int, subprocess.Popen[bytes]]]:
+    """A nats-server with a store of its own, like another team's, holding a client port."""
+
+    folder = tmp_path / "other"
+    folder.mkdir()
+    with own_nats_server_process(shutil.which("nats-server") or "nats-server", folder) as (url, process):
+        yield int(url.rsplit(":", 1)[1]), process
+
+
+@needs_nats_server
+def test_another_servers_hold_on_the_client_port_stops_the_start_and_is_not_to_be_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_server: tuple[int, subprocess.Popen[bytes]]
+) -> None:
+    port, holder = other_server
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", port)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", -1)
+
+    message = _refusal(tmp_path)
+
+    assert f"127.0.0.1:{port} is already in use" in message, message
+    # The holder's command line does not show this team's store, so the advice leaves it alone.
+    assert _store_argument(tmp_path) in message, message
+    assert _store_argument(tmp_path) not in " ".join(holder.args)
+    assert "do not stop it from here" in message, message
+    assert holder.poll() is None, "the start leaves the holder alone"
+
+
+@needs_nats_server
+def test_a_taken_monitoring_port_is_named_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen()
+        port = holder.getsockname()[1]
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", -1)
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", port)
+
+        message = _refusal(tmp_path)
+
+    assert f"127.0.0.1:{port} is already in use" in message, message
+    assert _store_argument(tmp_path) in message, message
+
+
+@needs_nats_server
+def test_a_full_leftover_of_this_team_is_named_by_its_monitoring_port_and_its_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", -1)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", -1)
+    with stopped_at_exit(_start(tmp_path), name="nats-server left over from an earlier start") as earlier:
+        client, monitoring = _reported_ports(tmp_path)
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", client)
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", monitoring)
+
+        with record_started_processes() as started:
+            message = _refusal(tmp_path)
+            # Checked inside the block: only the start's own poll() sets returncode.
+            assert _launched_server(started).returncode is not None, "the refused start left its server running"
+
+        # nats-server opens its monitoring port before its client port, so a full leftover is named by that one.
+        assert f"127.0.0.1:{monitoring} is already in use" in message, message
+        # The advice tells this team's own server apart by its store, which its command line shows.
+        assert _store_argument(tmp_path) in message, message
+        assert _store_argument(tmp_path) in " ".join(earlier.args)
+        assert "If this team is running, stop the team first" in message, message
+        assert earlier.poll() is None, "the start leaves the leftover alone"
+
+
+@needs_nats_server
+def test_a_start_that_times_out_stops_its_server_and_a_retry_on_its_ports_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", -1)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", -1)
+    with monkeypatch.context() as patched, record_started_processes() as started:
+        # The server says it is ready, but not in the words this start waits for.
+        patched.setattr(nats_service, "_READY", "a ready line nats-server never writes")
+        patched.setattr(
+            nats_service,
+            "_wait_for_nats_ready",
+            functools.partial(nats_service._wait_for_nats_ready, timeout_seconds=1.0),
+        )
+        with pytest.raises(RuntimeError, match="did not say it was ready"):
+            _start(tmp_path)
+        server = _launched_server(started)
+        # Checked inside the block: when it ends, the recording kills whatever still runs.
+        # Only the start's own poll() or wait() sets returncode, and nats-server exits with 0
+        # after SIGTERM, so 0 here means the start stopped it gracefully.
+        assert server.returncode == 0, f"the start left its server running or killed it: {server.returncode}"
+    assert f"event=local_nats_start_cleanup pid={server.pid}" in caplog.text
+    assert "event=local_nats_stop_killed" not in caplog.text
+
+    # The ports the timed-out server held are free again: a retry on exactly them starts.
+    client, monitoring = _reported_ports(tmp_path)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", client)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", monitoring)
+    with stopped_at_exit(_start(tmp_path), name="nats-server of the retry") as retry:
+        assert retry.poll() is None
+
+
+@needs_nats_server
+def test_an_interrupted_start_stops_its_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", -1)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", -1)
+    wait_until_ready = nats_service._wait_for_nats_ready
+
+    def interrupted_once_ready(process: subprocess.Popen[bytes], **kwargs: object) -> None:
+        wait_until_ready(process, **kwargs)  # type: ignore[arg-type]
+        raise KeyboardInterrupt  # Ctrl-C in a maintenance run, after the server came up
+
+    monkeypatch.setattr(nats_service, "_wait_for_nats_ready", interrupted_once_ready)
+    with record_started_processes() as started:
+        with pytest.raises(KeyboardInterrupt):
+            _start(tmp_path)
+        server = _launched_server(started)
+        assert server.returncode == 0, f"the start left its server running or killed it: {server.returncode}"
+
+
+def test_a_server_that_ignores_sigterm_is_killed_and_reaped(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    ignores_sigterm = (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ignoring', flush=True); "
+        "time.sleep(60)"
+    )
+    with (
+        subprocess.Popen([sys.executable, "-c", ignores_sigterm], stdout=subprocess.PIPE) as child,
+        stopped_at_exit(child, name="child that ignores SIGTERM"),
+    ):
+        assert child.stdout is not None and child.stdout.readline() == b"ignoring\n"  # its handler is set
+
+        nats_service.stop_local_nats(child, logger=_LOGGER, terminate_seconds=0.2)
+
+        assert child.returncode == -signal.SIGKILL
+    [killed] = [record for record in caplog.records if "event=local_nats_stop_killed" in record.getMessage()]
+    assert killed.levelno == logging.WARNING and f"pid={child.pid}" in killed.getMessage()
+
+
+class _Unreapable:
+    pid = 4242
+
+    def __init__(self) -> None:
+        self.signals: list[str] = []
+
+    def poll(self) -> int | None:
+        return None
+
+    def terminate(self) -> None:
+        self.signals.append("SIGTERM")
+
+    def kill(self) -> None:
+        self.signals.append("SIGKILL")
+
+    def wait(self, timeout: float) -> int:
+        raise subprocess.TimeoutExpired("nats-server", timeout)
+
+
+def test_a_server_that_cannot_be_reaped_is_logged_and_does_not_raise(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    server = _Unreapable()
+
+    nats_service.stop_local_nats(server, logger=_LOGGER, terminate_seconds=0, kill_seconds=0)  # type: ignore[arg-type]
+
+    assert server.signals == ["SIGTERM", "SIGKILL"]
+    [failed] = [record for record in caplog.records if "event=local_nats_stop_failed" in record.getMessage()]
+    assert failed.levelno == logging.ERROR and "pid=4242" in failed.getMessage()
+
+
+def test_the_consumer_check_stops_its_local_server_when_the_check_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=reconciler.LOGGER.name)
+    # main() writes these into os.environ; setting them first makes the test's end restore them.
+    for key in ("NATS_URL", "NATS_SERVERS", "NATS_JETSTREAM_ENABLED", "NATS_USER", "NATS_PASSWORD"):
+        monkeypatch.setenv(key, "")
+    with (
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"]) as server,
+        stopped_at_exit(server, name="stand-in for the check's local nats-server"),
+    ):
+
+        def start_local_nats(*, env: dict[str, str], **_kwargs: object) -> subprocess.Popen[bytes]:
+            env.update({"NATS_USER": "check", "NATS_PASSWORD": "secret"})
+            return server
+
+        async def failing_check(**_kwargs: object) -> None:
+            raise RuntimeError("the consumer check failed")
+
+        monkeypatch.setattr(reconciler, "start_local_nats", start_local_nats)
+        monkeypatch.setattr(reconciler, "reconcile_nats_consumers", failing_check)
+
+        assert reconciler.main(["--start-local-nats"]) == 1
+        # Stopped and reaped by main(); this test never polls it.
+        assert server.returncode == -signal.SIGTERM
+    assert "event=nats_consumer_reconciliation_failed" in caplog.text
+    assert f"event=local_nats_stop pid={server.pid}" in caplog.text
+
+
+class _FakeServer:
+    """A server process as the readiness wait sees it: its pid and whether it has exited."""
+
+    def __init__(self, pid: int, returncode: int | None = None) -> None:
+        self.pid = pid
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+_LISTENING_LINE = "Listening for client connections on 127.0.0.1:4222"
+_READY_LINE = "Server is ready"
+_MONITOR_TAKEN_LINE = (
+    "Can't start monitoring: can't listen to the monitor port: "
+    "listen tcp 127.0.0.1:8222: bind: address already in use"
+)
+
+
+def _line(pid: int, text: str) -> str:
+    """A startup log line as nats-server writes it: every line begins with ``[<pid>] ``."""
+
+    return f"[{pid}] 2026/11/12 01:46:30.900694 [INF] {text}\n"
+
+
+def _says_ready(server: _FakeServer, log_path: Path, offset: int = 0) -> bool:
+    """One readiness check of the startup log, with no timeout to wait through."""
+
+    try:
+        nats_service._wait_for_nats_ready(
+            server,  # type: ignore[arg-type]
+            logger=_LOGGER,
+            service_root=log_path.parent,
+            startup_log_path=log_path,
+            offset=offset,
+            timeout_seconds=0,
+        )
+    except RuntimeError as not_ready:
+        if "did not say it was ready" not in str(not_ready):
+            raise
+        return False
+    return True
+
+
+def test_an_earlier_starts_ready_lines_in_the_startup_log_do_not_count(tmp_path: Path) -> None:
+    # An earlier server with the pid this start's server now has: only the offset leaves its lines out.
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(111, _LISTENING_LINE) + _line(111, _READY_LINE))
+
+    assert not _says_ready(_FakeServer(111), log_path, offset=log_path.stat().st_size)
+    assert _says_ready(_FakeServer(111), log_path, offset=0)
+
+
+def test_an_overlapping_starts_ready_lines_after_the_offset_do_not_count(tmp_path: Path) -> None:
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(222, _LISTENING_LINE) + _line(222, _READY_LINE))
+
+    assert not _says_ready(_FakeServer(111), log_path)
+
+
+def test_interleaved_lines_count_only_when_one_server_wrote_both(tmp_path: Path) -> None:
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(111, _LISTENING_LINE) + _line(222, _READY_LINE))
+
+    assert not _says_ready(_FakeServer(111), log_path)
+    assert not _says_ready(_FakeServer(222), log_path)
+
+    with log_path.open("a") as log:
+        log.write(_line(111, _READY_LINE))
+    assert _says_ready(_FakeServer(111), log_path)
+    assert not _says_ready(_FakeServer(222), log_path)
+
+
+def test_an_overlapping_starts_port_error_is_not_reported_as_this_starts(tmp_path: Path) -> None:
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(222, _MONITOR_TAKEN_LINE))
+
+    with pytest.raises(RuntimeError) as exited:
+        _says_ready(_FakeServer(111, returncode=1), log_path)
+    assert str(exited.value).startswith("NATS process exited before becoming ready with code 1")
+
+    # The same line from this start's own server is its refusal, naming the address it reported.
+    with log_path.open("a") as log:
+        log.write(_line(111, _MONITOR_TAKEN_LINE))
+    with pytest.raises(RuntimeError, match=r"cannot start: 127\.0\.0\.1:8222 is already in use"):
+        _says_ready(_FakeServer(111, returncode=1), log_path)
