@@ -148,9 +148,8 @@ def test_a_take_keeps_a_later_check_back_saved_after_its_read(settings):
 
     outcome = _race(settings, pause_after="_read_wait", first=_take(due), second=_set_check_back(later))
 
-    assert outcome.second_waited
-    assert outcome.first is True
-    assert repository.get_wait(TEAM, PARENT).check_back_at_utc == later
+    saved = repository.get_wait(TEAM, PARENT).check_back_at_utc
+    assert (outcome.first, saved, outcome.second_waited) == (True, later, True)
 
 
 def test_two_callers_taking_the_same_due_time_take_it_once(settings):
@@ -162,9 +161,8 @@ def test_two_callers_taking_the_same_due_time_take_it_once(settings):
 
     outcome = _race(settings, pause_after="_read_wait", first=_take(due), second=_take(due))
 
-    assert outcome.second_waited
-    assert (outcome.first, outcome.second) == (True, False)
-    assert repository.get_wait(TEAM, PARENT).check_back_at_utc is None
+    saved = repository.get_wait(TEAM, PARENT).check_back_at_utc
+    assert (outcome.first, outcome.second, saved, outcome.second_waited) == (True, False, None, True)
 
 
 def test_progress_recorded_during_a_take_is_kept(settings):
@@ -181,14 +179,12 @@ def test_progress_recorded_during_a_take_is_kept(settings):
         second=_record_progress({"running": 1}, noted, requester="requester_after_recovery"),
     )
 
-    assert outcome.second_waited
-    assert outcome.first is True
     wait = repository.get_wait(TEAM, PARENT)
-    assert (wait.check_back_at_utc, wait.last_progress_at_utc, wait.last_progress_counts) == (
-        None, noted, {"running": 1}
-    )
     # A setter never renames the wait's requester; the wait is found by parent.
-    assert wait.requester_agent_id == REQUESTER
+    assert (
+        outcome.first, wait.check_back_at_utc, wait.last_progress_at_utc, wait.last_progress_counts,
+        wait.requester_agent_id, outcome.second_waited,
+    ) == (True, None, noted, {"running": 1}, REQUESTER, True)
 
 
 @pytest.mark.parametrize("progress_first", [True, False], ids=["progress_then_check_back", "check_back_then_progress"])
@@ -201,9 +197,8 @@ def test_two_setters_creating_one_wait_keep_both_fields(settings, progress_first
 
     outcome = _race(settings, pause_after="_read_wait", first=first, second=second)
 
-    assert outcome.second_waited
     wait = _repository(settings, "delegated_check").get_wait(TEAM, PARENT)
-    assert (wait.check_back_at_utc, wait.last_progress_counts) == (at, {"queued": 1})
+    assert (wait.check_back_at_utc, wait.last_progress_counts, outcome.second_waited) == (at, {"queued": 1}, True)
 
 
 def test_a_claim_read_before_a_close_never_reopens_the_task(settings):
@@ -234,7 +229,7 @@ def test_a_claim_read_before_a_close_never_reopens_the_task(settings):
         second=lambda store: store.mark_closed(team_id=TEAM, task_id="task_a", status=DELEGATED_FINISHED),
     )
 
-    assert outcome.second_waited
-    assert outcome.first.record.status == DELEGATED_RUNNING
     record = repository.get(TEAM, "task_a")
-    assert (record.status, record.holder_agent_id) == (DELEGATED_FINISHED, "worker_a")
+    assert (outcome.first.record.status, record.status, record.holder_agent_id, outcome.second_waited) == (
+        DELEGATED_RUNNING, DELEGATED_FINISHED, "worker_a", True
+    )
