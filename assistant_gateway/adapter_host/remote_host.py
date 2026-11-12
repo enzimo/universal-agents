@@ -81,14 +81,57 @@ class RemoteChannelBridge:
         *,
         plugin_id: str,
         adapter_instance_id: str,
+        inbound_files_dir: Path,
     ) -> None:
         self._runtime_supplier = runtime_supplier
         self._plugin_id = plugin_id
         self._adapter_instance_id = adapter_instance_id
+        # Where the plugin's own attachment store saves each file a person
+        # sends (``runtime.attachments``), before this bridge uploads it.
+        self._inbound_files_dir = Path(os.path.realpath(inbound_files_dir))
 
     async def handle_inbound(
         self, inbound: ChannelInboundMessage
     ) -> list[ChannelOutboundMessage]:
+        try:
+            return await self._submit(inbound)
+        finally:
+            # The gateway keeps the file (state/uploads) under its retention,
+            # history clean-up and person departure; no plugin reads its own
+            # copy again, and a message is never submitted twice.
+            for attachment in inbound.attachments:
+                self._remove_inbound_copy(attachment)
+
+    def _remove_inbound_copy(self, attachment: UserTaskAttachment) -> None:
+        """Remove the file the plugin's attachment store saved for one attachment of a message.
+
+        Only that store's own file is removed,
+        ``<inbound_files_dir>/<session folder>/<attachment_id><suffix>``
+        (``inbound_attachments.store_inbound_attachment_bytes_with_policy``),
+        never a file the channel itself keeps elsewhere, such as signal-cli's.
+        """
+
+        local_path = attachment.local_path()
+        if not local_path:
+            return
+        path = Path(local_path)
+        if (
+            Path(os.path.realpath(path.parent)).parent != self._inbound_files_dir
+            or path.stem != attachment.attachment_id
+        ):
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            LOGGER.warning(
+                "A file a person sent was passed to the gateway, but the adapter host's own copy could not be "
+                "removed. event=adapter_host_inbound_copy_not_removed plugin_id=%s attachment_id=%s error=%s",
+                self._plugin_id,
+                attachment.attachment_id,
+                type(exc).__name__,
+            )
+
+    async def _submit(self, inbound: ChannelInboundMessage) -> list[ChannelOutboundMessage]:
         runtime = self._runtime_supplier()
         attachments = []
         for attachment in inbound.attachments:
@@ -413,6 +456,7 @@ def build_python_adapter_host_runtime(
             runtime_supplier,
             plugin_id=descriptor.plugin_id,
             adapter_instance_id=adapter_instance_id,
+            inbound_files_dir=local_attachment_dir,
         )
         runtime_context = InteractiveAppRuntimeContext(
             request_timeout_seconds=config.manager.request_timeout_seconds,

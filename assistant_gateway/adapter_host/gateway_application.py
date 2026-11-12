@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from assistant_gateway.adapter_host.service import (
     AdapterHostApplicationService,
     AdapterHostRequestHandler,
 )
+from assistant_gateway.inbound_attachments import AttachmentValidationError
 from assistant_gateway.interactive_apps.host_ports import InteractiveAppAttachmentStore
 from assistant_gateway.application.gateway_application import (
     GatewayApplication,
@@ -67,33 +69,41 @@ class GatewayAdapterRequestHandler(AdapterHostRequestHandler):
             chat_id=message.chat_id,
             thread_id=message.thread_id,
         )
-        service = self._service_resolver()
-        uploads = [
-            service.resolve_upload_reference(
-                plugin_id=message.plugin_id,
-                adapter_instance_id=message.adapter_instance_id,
-                session_epoch=message.session_epoch,
-                storage_reference=attachment.storage_reference,
-            )
-            for attachment in message.attachments
-        ]
-        attachments = self._save_uploads(
-            uploads, session=session, origin=_attachment_origin(message.channel_name)
+        inbound = ChannelInboundMessage(
+            channel_name=message.channel_name,
+            user_id=message.external_user_id,
+            chat_id=message.chat_id,
+            thread_id=message.thread_id,
+            text=message.text,
+            message_id=message.external_message_id,
+            reply_to_message_id=message.reply_to_external_message_id,
+            replied_message=replied_message_from_wire(message.replied_message),
+            session_key=session.session_key,
         )
-        outbound = await self._bridge.handle_inbound(
-            ChannelInboundMessage(
-                channel_name=message.channel_name,
-                user_id=message.external_user_id,
-                chat_id=message.chat_id,
-                thread_id=message.thread_id,
-                text=message.text,
-                message_id=message.external_message_id,
-                reply_to_message_id=message.reply_to_external_message_id,
-                replied_message=replied_message_from_wire(message.replied_message),
-                session_key=session.session_key,
-                attachments=attachments,
+        try:
+            attachments = self._save_uploads(message, session=session)
+        except AttachmentValidationError as exc:
+            # Like the chat apps the gateway runs itself: the person is told
+            # why, and nothing of the message is sent on.
+            LOGGER.info(
+                "A hosted chat's message was not sent on: the upload rules refused one of its files. "
+                "event=adapter_inbound_files_refused plugin_id=%s session_key=%s file_count=%d",
+                message.plugin_id,
+                session.session_key,
+                len(message.attachments),
             )
-        )
+            outbound = [
+                self._bridge.translator.render_outbound(
+                    inbound=inbound,
+                    text=str(exc),
+                    session_key=session.session_key,
+                    conversation_id=session.conversation_id,
+                )
+            ]
+        else:
+            outbound = await self._bridge.handle_inbound(
+                replace(inbound, attachments=attachments)
+            )
         return tuple(
             _channel_outbound_to_wire(
                 item,
@@ -106,10 +116,9 @@ class GatewayAdapterRequestHandler(AdapterHostRequestHandler):
 
     def _save_uploads(
         self,
-        uploads: Sequence[AdapterUploadRecord],
+        message: ChannelInboundMessageV1,
         *,
         session: GatewaySession,
-        origin: AttachmentOrigin,
     ) -> list[UserTaskAttachment]:
         """Save a hosted chat's files where in-process chats save theirs, then drop the transfer copies.
 
@@ -119,18 +128,31 @@ class GatewayAdapterRequestHandler(AdapterHostRequestHandler):
         ``state/uploads`` (``self._attachments``), so agents open it by id in
         later turns and the upload retention, history clean-up and person
         departure cover it. Every file is checked before any is saved, so a
-        refused file leaves none behind. An inbound message is handled once
-        (``AdapterHostApplicationService._process_record`` marks it failed
-        rather than trying again), so its transfer copies are removed whether
-        or not its files were saved: nothing reads them again.
+        refused file (``AttachmentValidationError``) leaves none behind. An
+        inbound message is handled once (``AdapterHostApplicationService._process_record``
+        marks it failed rather than trying again), so the transfer copies of
+        every reference resolved are removed whether or not its files were
+        saved: nothing reads them again.
         """
 
+        service = self._service_resolver()
+        uploads: list[AdapterUploadRecord] = []
         try:
+            for attachment in message.attachments:
+                uploads.append(
+                    service.resolve_upload_reference(
+                        plugin_id=message.plugin_id,
+                        adapter_instance_id=message.adapter_instance_id,
+                        session_epoch=message.session_epoch,
+                        storage_reference=attachment.storage_reference,
+                    )
+                )
             received = [(upload, _transfer_bytes(upload)) for upload in uploads]
             for upload, data in received:
                 self._attachments.check_bytes(
                     data=data, filename=upload.filename, content_type=upload.content_type
                 )
+            origin = _attachment_origin(message.channel_name)
             return [
                 self._attachments.store_bytes(
                     data=data,

@@ -3349,17 +3349,24 @@ a stray until the cleanup below, and in another person's conversation it would
 count as theirs.
 
 Chat apps the operator runs in the adapter host (`execution: adapter_host`)
-send each file into the adapter host's transfer folder
-(`interactive_apps.adapter_host.upload_dir`) and then the message naming it.
-The gateway checks those files with the same upload policy as the chat apps
-it runs itself (`inbound_attachments.gateway_inbound_attachment_policy`; all
-files of a message before any is saved), saves them in `state/uploads` under
-the chat's session and removes the transfer copies
-(`adapter_host/gateway_application.py`). So every chat's files are in one
-folder that agents open by id in later turns, and that the retention below,
-history clean-up and person departure cover. A message is handled once (a
-failure marks it failed), so its transfer copies are removed even when its
-files are refused.
+save each file a person sends with their own attachment store (in
+`adapter-host-attachments` beside the adapter host's client state), send it
+into the adapter host's transfer folder
+(`interactive_apps.adapter_host.upload_dir`) and then send the message naming
+it. The adapter host then removes its own copy, also when sending failed
+(`adapter_host/remote_host.py`, `RemoteChannelBridge`); a message is never
+sent twice. The gateway checks those files with the same upload policy as the
+chat apps it runs itself (`inbound_attachments.gateway_inbound_attachment_policy`;
+all files of a message before any is saved), saves them in `state/uploads`
+under the chat's session and removes the transfer copies
+(`adapter_host/gateway_application.py`). When the policy refuses a file, the
+person gets the reason in the chat, as in the chat apps the gateway runs, and
+nothing of the message is sent on. So a person's file is kept in one folder
+that agents open by id in later turns, and that the retention below, history
+clean-up and person departure cover. A message is handled once (a failure
+marks it failed), so its transfer copies are removed even when its files are
+refused or a later file of it cannot be found. Files the gateway sends to a
+hosted chat are downloaded beside the client state and not removed yet.
 
 The gateway deletes uploads older than the internal website's
 `attachments.retention_days` (90 by default, 0 keeps them) when it starts and

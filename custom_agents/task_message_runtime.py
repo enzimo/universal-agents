@@ -39,7 +39,7 @@ from custom_agents.history_cleanup import followup_conversation_deleted
 from custom_agents.conversation_attachments import (
     answer_files_refusal,
     render_attachment_lines,
-    save_sent_files,
+    save_answer_files,
 )
 from custom_agents.message_routing import (
     build_outgoing_meta,
@@ -779,10 +779,11 @@ async def _with_the_persons_answer_files_only(
 ) -> TaskQuery:
     """The question or answer as received, or without its files when they are not the person's answer.
 
-    Kept files are saved with the request's conversation turn and offered in
-    later turns, so they must be the person's answer to this task's own
-    question (``conversation_attachments.answer_files_refusal``). Otherwise
-    the text is handled as usual and the files are kept nowhere.
+    Kept files are saved with the task's history and its request's
+    conversation turn and offered in later turns, so they must be the person's
+    answer to this task's own question, also when the task has a parent (a
+    specialist's escalation; ``conversation_attachments.answer_files_refusal``).
+    Otherwise the text is handled as usual and the files are kept nowhere.
     """
 
     if not task_query_msg.attachments:
@@ -892,9 +893,10 @@ async def _handle_task_query_for_parent(
     task_query_msg = await _with_the_persons_answer_files_only(
         self, parent_task_info, task_query_msg, incoming_msg_header, incoming_msg_meta
     )
-    # An answer's files first: a failed save records nothing, and the answer
-    # comes again (redelivered, or drained again from the runtime mailbox).
-    await save_sent_files(self, parent_task_id, task_query_msg.attachments)
+    # An answer's files first, with the turn of the request the asking task
+    # serves: a failed save records nothing, and the answer comes again
+    # (redelivered, or drained again from the runtime mailbox).
+    await save_answer_files(self, parent_task_id, task_query_msg.attachments)
     # Update task with new query information and preserve provenance.
     await self.task_manager.operations_runtime.run(
         self.task_manager.add_task_query,

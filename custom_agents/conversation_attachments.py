@@ -35,8 +35,11 @@ Any process on the team's NATS can address a message to the team lead, and
 these files are saved with the person's conversation and offered for later
 turns and delegation, so a message without that person's signed context
 keeps its text and loses its files. Files with a question's answer are kept
-only on the answer to a question the top-level task itself asked
-(``answer_files_refusal``): only the gateway sends them, for the person.
+only on the answer to a question the task itself asked, signed for the person
+the task works for (``answer_files_refusal``): only the gateway sends them.
+That holds for a task with a parent too, such as a specialist's escalation the
+team lead asks the person about; its answer's files are saved with the turn of
+the request the work serves (``answer_turn_task_id``).
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Optional
 
 from pydantic import ValidationError
 
@@ -85,7 +88,6 @@ SENDER_OTHER_PERSON = "other_person"
 SENDER_NOT_VERIFIED = _NO_VERIFIED_PERSON
 # Why files on a question's answer are not kept (``answer_files_refusal``).
 ANSWER_NOT_A_RESPONSE = "not_an_answer"
-ANSWER_FOR_SUBTASK = "subtask"
 ANSWER_TO_NO_QUESTION = "no_question"
 
 UploadState = Literal["available", "deleted", "remote"]
@@ -153,33 +155,43 @@ def received_attachments(task: Any) -> list[UserTaskAttachment]:
     return found
 
 
-async def sent_files_refusal(agent: Any, task_info: Any, msg_meta: Any) -> Optional[str]:
-    """Why files a message carries for this task are not kept as its person's; None when they are.
+async def _sender_refusal(agent: Any, person_id: Optional[str], msg_meta: Any) -> Optional[str]:
+    """Why a message is not verified to come for ``person_id``; None when it is.
 
-    For a top-level task (a request, a plan step, a recovery task, a job
-    run), whose files are saved with its conversation turn, the message must
-    be verified to work for the person the task works for: its signed task
-    context or schedule run identity (``access_runtime.verified_meta_person_id``)
-    names ``TaskInfo.owner_person_id``, recorded at admission (plan steps and
-    recovery tasks keep their request's). The gateway signs every guidance
-    message and answer it sends for a person. ``SENDER_NOT_VERIFIED`` when
-    nothing valid names a person (also for work for nobody),
-    ``SENDER_OTHER_PERSON`` for someone else.
-
-    A delegated subtask is not checked: its files never reach a conversation
-    (``save_turn_attachments``), and the copies of guidance the team lead
-    passes on to its workers carry no signed context.
+    The message's signed task context or schedule run identity
+    (``access_runtime.verified_meta_person_id``) must name the person.
+    ``SENDER_NOT_VERIFIED`` when nothing valid names a person (also for work
+    for nobody), ``SENDER_OTHER_PERSON`` for someone else.
     """
 
-    if getattr(task_info.task, "parent_task_id", None) is not None:
-        return None
     # Reading a schedule run identity may touch storage, so off the event loop.
     sender = await asyncio.to_thread(verified_meta_person_id, agent, msg_meta)
     if not sender:
         return SENDER_NOT_VERIFIED
-    if sender != task_info.owner_person_id:
+    if sender != person_id:
         return SENDER_OTHER_PERSON
     return None
+
+
+async def sent_files_refusal(agent: Any, task_info: Any, msg_meta: Any) -> Optional[str]:
+    """Why files guidance carries for this task are not kept as its person's; None when they are.
+
+    For a top-level task (a request, a plan step, a recovery task, a job
+    run), whose files are saved with its conversation turn, the message must
+    be verified to work for the person the task works for
+    (``TaskInfo.owner_person_id``, recorded at admission; plan steps and
+    recovery tasks keep their request's). The gateway signs every guidance
+    message it sends for a person.
+
+    A delegated subtask is not checked: guidance files for it never reach a
+    conversation (``save_turn_attachments`` saves only a top-level request's),
+    and the copies of guidance the team lead passes on to its workers carry no
+    signed context.
+    """
+
+    if getattr(task_info.task, "parent_task_id", None) is not None:
+        return None
+    return await _sender_refusal(agent, task_info.owner_person_id, msg_meta)
 
 
 async def answer_files_refusal(
@@ -189,21 +201,24 @@ async def answer_files_refusal(
 
     Files come only with the person's answer (``RESPONSE``) to a question
     the task itself asked (its ``REQUEST`` is in the task's question list:
-    ``asked_by_task``), on a top-level task, sent for the person the task works
-    for (``sent_files_refusal``). Only the gateway sends such answers: models
-    cannot set files on a question or an answer (``ModelTaskQueryPayload``),
-    and nothing passes an answer's files on to a worker. So files on a
-    question, on an answer for a subtask or on an answer to no question asked
-    are not the person's.
+    ``asked_by_task``), signed for the person the task works for
+    (``TaskInfo.owner_person_id``). That holds for a task with a parent as
+    well: a specialist's escalation (the specialists' way to ask the person,
+    ``agent_instructions``) is a task the team lead holds with the specialist's
+    task as its parent, its question goes to the person's chat
+    (``message_routing.requester_bound_primary_route``), and the delegated
+    task carries its request's signed context, so it works for that person.
+    Only the gateway sends such answers: models cannot set files on a question
+    or an answer (``ModelTaskQueryPayload``). So files on a question, on an
+    answer to no question asked, or on an answer not signed for the task's
+    person are not the person's.
     """
 
     if query.query_type != MessageMetaType.RESPONSE:
         return ANSWER_NOT_A_RESPONSE
-    if getattr(task_info.task, "parent_task_id", None) is not None:
-        return ANSWER_FOR_SUBTASK
     if not asked_by_task:
         return ANSWER_TO_NO_QUESTION
-    return await sent_files_refusal(agent, task_info, msg_meta)
+    return await _sender_refusal(agent, task_info.owner_person_id, msg_meta)
 
 
 def _request_chain(task_manager: Any, task_id: str) -> list[str]:
@@ -588,17 +603,44 @@ def save_turn_attachments(
     return merged
 
 
-async def save_sent_files(agent: Any, task_id: str, attachments: Iterable[Any]) -> None:
-    """Save files the person sent with guidance or an answer, in the agent's task-manager lane.
+def answer_turn_task_id(task_manager: Any, task_id: str) -> str:
+    """The task whose request's conversation turn keeps the files of an answer given on ``task_id``.
 
-    Runs before the message is recorded or answered: a store error raises,
-    so nothing is recorded and the message comes again (the gateway resends
-    held guidance; an answer is redelivered or drained again from the runtime
-    mailbox). The merge adds each file once, so the next attempt saves only
-    what is missing. One lane operation reads the task's request links and
-    writes the turn, in order with the request's own admission.
+    The person answers the team lead's question in the chat of the request
+    the asking task serves, so the files go with that request's turn and a
+    later turn can open them. The request is reached through this task
+    manager's own links (``TaskManager.resolve_root_task_id``: plan-step,
+    recovery and parent links between tasks it holds), for example a
+    specialist's escalation, then the task the team lead delegated to that
+    specialist, then the person's request. The escalation names its parent
+    itself, so the request is used only when it works for the same person as
+    the asking task, whom the answer was verified for
+    (``answer_files_refusal``). Otherwise, and when the asking task serves no
+    request this agent holds (a specialist's own scheduled run), the files
+    stay with the asking task's history only. Read in the task-manager lane.
     """
 
+    request_id = task_manager.resolve_root_task_id(task_id) or task_id
+    if request_id == task_id:
+        return task_id
+    asking = task_manager.get_task_info(task_id)
+    request = task_manager.get_task_info(request_id)
+    if asking is None or request is None:
+        # A request no longer held is reported where the files are saved
+        # (``request_files``, event=attachment_request_missing).
+        return task_id
+    if request.owner_person_id == asking.owner_person_id:
+        return request_id
+    logger.warning(
+        "An answer's files are kept with the task that asked, not with its request's turn: the request does not "
+        "work for the same person. event=answer_files_request_other_person task_id=%s request_task_id=%s",
+        task_id,
+        request_id,
+    )
+    return task_id
+
+
+async def _save_in_lane(agent: Any, attachments: Iterable[Any], turn_task_id: Callable[[Any], str]) -> None:
     files = list(attachments)
     if not files:
         return
@@ -606,6 +648,32 @@ async def save_sent_files(agent: Any, task_id: str, attachments: Iterable[Any]) 
     conversation_store = getattr(agent, "_conversation_store", None)
 
     def save() -> Any:
-        return save_turn_attachments(task_id, files, task_manager=task_manager, conversation_store=conversation_store)
+        return save_turn_attachments(
+            turn_task_id(task_manager), files, task_manager=task_manager, conversation_store=conversation_store
+        )
 
     await task_manager.operations_runtime.run(save)
+
+
+async def save_sent_files(agent: Any, task_id: str, attachments: Iterable[Any]) -> None:
+    """Save files the person sent with guidance for ``task_id``, in the agent's task-manager lane.
+
+    Runs before the message is recorded or answered: a store error raises,
+    so nothing is recorded and the message comes again (the gateway resends
+    held guidance). The merge adds each file once, so the next attempt saves
+    only what is missing. One lane operation reads the task's request links
+    and writes the turn, in order with the request's own admission.
+    """
+
+    await _save_in_lane(agent, attachments, lambda _task_manager: task_id)
+
+
+async def save_answer_files(agent: Any, task_id: str, attachments: Iterable[Any]) -> None:
+    """Save the files of the person's answer to a question asked on ``task_id`` (``answer_turn_task_id``).
+
+    Like ``save_sent_files``: before the answer is recorded, so a store error
+    leaves nothing recorded and the answer is redelivered or drained again
+    from the runtime mailbox.
+    """
+
+    await _save_in_lane(agent, attachments, lambda task_manager: answer_turn_task_id(task_manager, task_id))

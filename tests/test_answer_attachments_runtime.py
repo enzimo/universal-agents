@@ -6,9 +6,10 @@ and conversation store (SQLite, and PostgreSQL when ``LIVE_TEST_POSTGRES_DSN``
 is set), with real Ed25519 task contexts. An answer's files are saved with
 the request's conversation turn before the answer is recorded, named with
 their ids in the question history the model reads and in the turn, and found
-by id after a restart and in the next turn; a plan step's or recovery task's
-answer goes to its request's turn. Files are kept only on the person's answer
-to the task's own question: anything else keeps its text and loses its files.
+by id after a restart and in the next turn; a plan step's, recovery task's
+or specialist's escalation's answer goes to its request's turn. Files are kept
+only on the person's answer to the task's own question: anything else keeps
+its text and loses its files.
 """
 
 from __future__ import annotations
@@ -102,14 +103,35 @@ class _Lead:
         assert self.manager.add_task(task, header, meta, owner_person_id=PERSON)
         return str(meta.conversation_id)
 
-    def task(self, task_id: str, *, parent_task_id: str | None = None, conversation_id: str | None = None) -> None:
+    def task(
+        self,
+        task_id: str,
+        *,
+        parent_task_id: str | None = None,
+        conversation_id: str | None = None,
+        sender: str = LEAD,
+        owner: str = PERSON,
+    ) -> None:
         assert self.manager.add_task(
             Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=f"Work {task_id}",
                  parent_task_id=parent_task_id),
-            MessageHeader(from_agent_id=LEAD, response_routing_key=LEAD),
+            MessageHeader(from_agent_id=sender, response_routing_key=sender),
             MessageMeta(conversation_id=conversation_id),
-            owner_person_id=PERSON,
+            owner_person_id=owner,
         )
+
+    def escalation(self, *, owner: str = PERSON) -> str:
+        """A specialist's escalation, as the lead holds it, under the task the lead delegated to it.
+
+        The lead delegated ``task_S`` for ``ROOT``; the specialist's
+        ``manager_escalation`` is a delegation to the lead whose parent is the
+        specialist's task (``delegation_runtime``), admitted for the person its
+        signed context names (``owner``).
+        """
+
+        self.task("task_S", parent_task_id=ROOT)
+        self.task("task_E", parent_task_id="task_S", sender="worker_1", owner=owner)
+        return "task_E"
 
     def plan_step(self, step_task_id: str) -> None:
         # A plan step is a new top-level task with a fresh conversation id and no files.
@@ -257,6 +279,60 @@ async def test_a_plan_steps_or_recovery_tasks_answer_files_go_to_its_requests_tu
 
 
 @pytest.mark.asyncio
+async def test_the_persons_answer_on_a_specialists_escalation_keeps_its_files_for_the_lead_and_the_request(
+    lead: _Lead,
+) -> None:
+    escalation = lead.escalation()
+    # The lead asks the person while it works on the escalation; the question
+    # goes to the person's chat (test_message_routing).
+    question = lead.ask(escalation)
+
+    await lead.receive(lead.answer(question, lead.file("att_contract", "contract.pdf")))
+
+    # Recorded with the answer on the escalation and named in its question
+    # history, so the lead's resumed turn on it names the file by id.
+    [recorded] = lead.answers_recorded(escalation)
+    assert _ids(recorded.attachments) == ["att_contract"]
+    assert lead.answer_history_files(escalation) == [["att_contract"]]
+    assert "contract.pdf (attachment_id att_contract" in lead.manager.render_task_query_history_markdown(escalation)
+    lead.agent.process_llm_interaction.assert_awaited_once()
+    # Saved with the turn of the request the escalation serves (through the
+    # task the lead delegated), so the request and later turns find it.
+    assert lead.turn_file_ids() == ["att_receipt", "att_contract"]
+    for _ in range(2):
+        # The lead opens it on the escalation (the files it may hand to the
+        # specialist), and on the request; again after a restart.
+        assert _ids(request_files(lead.manager, escalation).files) == ["att_contract"]
+        assert lead.scope(escalation).find("att_contract").attachment.filename == "contract.pdf"
+        assert _ids(lead.scope().files().current) == ["att_receipt", "att_contract"]
+        lead.restart()
+    lead.admit("task_turn_2", [], lead.conversation_id)
+    assert _ids(lead.scope("task_turn_2").files().earlier) == ["att_contract", "att_receipt"]
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_for_another_persons_request_keeps_its_answers_files_with_the_escalation_only(
+    lead: _Lead, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The escalation names a parent whose request works for someone else.
+    escalation = lead.escalation(owner=OTHER_PERSON)
+    question = lead.ask(escalation)
+
+    with caplog.at_level(logging.WARNING):
+        await lead.receive(lead.answer(question, lead.file("att_contract", "contract.pdf")), signed_for=OTHER_PERSON)
+
+    # The answer is that person's own, for their escalation: kept there, but
+    # never saved with the other person's conversation turn.
+    assert lead.answer_history_files(escalation) == [["att_contract"]]
+    assert _ids(request_files(lead.manager, escalation).files) == ["att_contract"]
+    assert lead.turn_file_ids() == ["att_receipt"]
+    assert lead.scope().find("att_contract") is None
+    assert (
+        f"event=answer_files_request_other_person task_id={escalation} request_task_id={ROOT}"
+    ) in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_a_failed_save_records_nothing_and_the_answer_sent_again_is_recorded_once(
     lead: _Lead, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -300,17 +376,15 @@ async def test_a_failed_save_records_nothing_and_the_answer_sent_again_is_record
         ("answer", "worker_1", OTHER_PERSON, "other_person"),
         # A question (not an answer) never carries the person's files.
         ("question", "worker_1", PERSON, "not_an_answer"),
-        # A delegated subtask's answer comes from the team lead, never with files.
-        ("subtask", GATEWAY, PERSON, "subtask"),
+        # On a specialist's escalation the same rules hold.
+        ("escalation_unsigned", "worker_1", None, "no_verified_person"),
+        ("escalation_other_person", GATEWAY, OTHER_PERSON, "other_person"),
     ],
 )
 async def test_files_that_are_not_the_persons_answer_to_the_tasks_own_question_are_kept_nowhere(
     lead: _Lead, caplog: pytest.LogCaptureFixture, case: str, sender: str, signed_for: str | None, reason: str
 ) -> None:
-    task_id = ROOT
-    if case == "subtask":
-        task_id = "task_child"
-        lead.task(task_id, parent_task_id=ROOT)
+    task_id = lead.escalation() if case.startswith("escalation") else ROOT
     question = lead.ask(task_id)
     query = lead.answer(question, lead.file("att_forged", "passport.jpg"), text="Text still counts.")
     if case == "no_question":
@@ -331,7 +405,7 @@ async def test_files_that_are_not_the_persons_answer_to_the_tasks_own_question_a
     assert (recorded.message, recorded.attachments) == ("Text still counts.", [])
     assert all(files == [] for files in lead.answer_history_files(task_id))
     assert lead.turn_file_ids() == ["att_receipt"]
-    assert _ids(request_files(lead.manager, task_id).files) == ([] if case == "subtask" else ["att_receipt"])
+    assert _ids(request_files(lead.manager, task_id).files) == ([] if task_id != ROOT else ["att_receipt"])
     assert lead.scope().find("att_forged") is None
     assert "att_forged" not in lead.manager.render_task_query_history_markdown(task_id)
     assert (
