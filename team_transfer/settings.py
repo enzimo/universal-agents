@@ -92,7 +92,8 @@ class SettingsSection:
     # 6: agent.request_conflict_checks (checks between a person's separate requests) joined it.
     # 7: tool_policy.output_retention_days (how long saved tool outputs are kept) joined it.
     # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
-    schema_version: ClassVar[int] = 8
+    # 9: optional skill semantic-review settings joined workspace.skill_installation.
+    schema_version: ClassVar[int] = 9
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -675,9 +676,11 @@ __all__ = [
 
 
 # V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
-# and V8 gateway.storage_warnings. Their records keep the same shape and carry
+# V8 gateway.storage_warnings and V9 workspace.skill_installation.semantic_review
+# (an older export leaves the review off). Their records keep the same shape and carry
 # only values that differ from defaults, so old choices pass on unchanged and
 # settings absent from an older export use the current defaults.
 SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records
 SECTION_UPGRADES[(SettingsSection.name, 6, SettingsSection.schema_version)] = lambda records: records
 SECTION_UPGRADES[(SettingsSection.name, 7, SettingsSection.schema_version)] = lambda records: records
+SECTION_UPGRADES[(SettingsSection.name, 8, SettingsSection.schema_version)] = lambda records: records

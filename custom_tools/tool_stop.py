@@ -21,6 +21,10 @@ clears:
   supervisor (``custom_tools.shell_execution``) gets the stop event, refuses to
   start a command once it is set and stops a running one. A call that starts
   after the stop does nothing.
+- Asynchronous work a sync tool runs on its turn's loop, such as a skill's
+  model review (``custom_agents.turn_registry.run_on_turn_loop``), is counted
+  the same way while the tool thread waits for it, so the stopped turn waits
+  until that work was cancelled.
 - Each command's process group is recorded (also when the command already
   exited: its leader is then a zombie the supervisor has not collected yet). A
   command can leave processes running in its group after it returns
