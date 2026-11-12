@@ -247,6 +247,37 @@ async def test_an_id_the_task_may_not_use_is_not_found_and_lists_the_files_it_ma
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("signed_for", [OTHER_PERSON, None])
+async def test_a_request_not_signed_for_the_conversations_person_cannot_open_its_earlier_files(
+    instance: _Instance, signed_for: str | None
+) -> None:
+    """The person comes from the signed task context, never from the gateway context's ``canonical_user_id``."""
+
+    current = instance.file("att_new", "new.png")
+    instance.turn("task_turn_3", [current])
+    signed = context_signer().issue(team_id=TEAM, person_id=signed_for, person_roles=("member",)) if signed_for else None
+    meta = MessageMeta(
+        conversation_id=CONVERSATION,
+        requester_type=RequesterType.USER_REQUESTER,
+        gateway_context=GatewayContext(canonical_user_id=PERSON, task_context=signed),
+    )
+    task = Task(task_id="task_turn_3", task_type=MessageMetaType.REQUEST, problem_statement="Again.", attachments=[current])
+    header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway", agent_signature="")
+    assert instance.manager.add_task(task, header, meta, owner_person_id=signed_for)
+    instance.use("task_turn_3")
+
+    for tool in (inspect_user_attachment, load_local_media_for_model_context):
+        status, payload, blocks = await _call(tool, {"attachment_id": "att_photo"})
+
+        assert (status, blocks) == ("error", [])
+        assert payload["error"].startswith("No file with this attachment_id was sent")
+        # Only the request's own file: the conversation's earlier files are not offered.
+        assert _ids(payload["available_attachments"]) == ["att_new"]
+    status, _payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_new"})
+    assert status == "success"
+
+
+@pytest.mark.asyncio
 async def test_the_files_offered_when_an_id_is_not_found_are_bounded(instance: _Instance) -> None:
     # A newer turn of the conversation (another request) with 25 files.
     instance.turn("task_turn_3", [instance.file(f"att_new_{index:02d}", f"new_{index}.png") for index in range(25)])

@@ -31,10 +31,12 @@ from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserT
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import PlanStepTaskLink, RecoveryTaskLink
 from custom_messages.contracts.task_v1 import Task, TaskQuery
-from custom_messages.enums import MessageMetaType, RequesterType, TaskHistoryType
+from custom_agents.structured_llm_messages import ModelAgentTurnDecision
+from custom_messages.enums import MessageMetaType, ProgressState, RequesterType, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from tests.broker_access_support import context_verify_keys, forget_task_context_keys, signed_task_context
 from tests.knowledge_support import BACKENDS, knowledge_storage
+from tests.task_work_support import bind_task
 from tests.test_turn_action_outbox import _make_agent
 
 TEAM = "test_team"
@@ -71,6 +73,7 @@ class _Lead:
     def start_agent(self) -> Any:
         agent = _make_agent(self.tmp_path, task_manager=self.manager)
         agent._conversation_store = self.store
+        agent.instance_root = str(self.layout.root)
         # The resumed model turn is not what these tests check.
         object.__setattr__(agent, "process_llm_interaction", AsyncMock(return_value=None))
         return agent
@@ -308,6 +311,42 @@ async def test_the_persons_answer_on_a_specialists_escalation_keeps_its_files_fo
         lead.restart()
     lead.admit("task_turn_2", [], lead.conversation_id)
     assert _ids(lead.scope("task_turn_2").files().earlier) == ["att_contract", "att_receipt"]
+
+
+@pytest.mark.asyncio
+async def test_the_lead_passes_a_file_sent_with_an_escalations_answer_to_a_specialist(lead: _Lead) -> None:
+    """A reply to an escalation carries no files, so the lead delegates the work that needs them.
+
+    The specialist that escalated cannot open the answer's file (its task
+    holds only its own files); the lead, handling the escalation, hands the
+    file to a specialist by naming it in ``attachment_ids``.
+    """
+
+    escalation = lead.escalation()
+    question = lead.ask(escalation)
+    await lead.receive(lead.answer(question, lead.file("att_contract", "contract.pdf")))
+    assert lead.manager.update_main_task_state(escalation, ProgressState.IN_PROGRESS, "2026-11-12T10:00:00+00:00")
+    bind_task(escalation)
+    info = lead.manager.get_task_info(escalation)
+
+    async def delegate(**choice: Any) -> Task:
+        action = {"action_type": "delegate_task", "task": {"problem_statement": "Check the signed contract."},
+                  "target_named_agent_type": "WebResearchAgent", **choice}
+        decision = lead.agent._turn_decision_from_structured_output(
+            ModelAgentTurnDecision.model_validate({"actions": [action]})
+        )
+        return await lead.agent._execute_turn_decision_outbox(
+            decision=decision, incoming_content=info.task, incoming_header=info.header, incoming_meta=info.meta
+        )
+
+    # Left out, the new task gets the escalation's own message files: not the answer's.
+    assert _ids((await delegate()).attachments) == []
+    chosen = await delegate(attachment_ids=["att_contract"])
+
+    assert _ids(chosen.attachments) == ["att_contract"]
+    sent = lead.agent.team_comms.send_message.await_args.kwargs["message"].msg_content
+    assert (sent.task_id, _ids(sent.attachments)) == (chosen.task_id, ["att_contract"])
+    assert sent.attachments[0].storage_refs[0].path == str(lead.layout.uploads_dir / "session_alice" / "att_contract")
 
 
 @pytest.mark.asyncio

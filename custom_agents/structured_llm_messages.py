@@ -148,6 +148,14 @@ def _turn_decision_force_prompt(
         '  `actions[].escalation.escalation_type="needs_user_input"`. Describe what\n'
         '  setup is needed without secrets, then wait for TeamArchitect\'s reply.'
     )
+    # Only the team lead chooses which of the person's files a delegated task gets.
+    delegation_files_guidance = (
+        "\n  The task gets the files of the person's current message. To pass other\n"
+        "  files the person sent (with guidance, with an answer, or earlier in the\n"
+        "  conversation), list their ids in `actions[].attachment_ids`; `[]` passes none."
+        if is_team_lead
+        else ""
+    )
     prompt = f"""
 Call the `{tool_name}` structured-output tool now.
 Do not answer in prose, Markdown, JSON text, or any other top-level text.
@@ -175,7 +183,7 @@ Choose exactly the action that matches the turn:
 - To answer an inbound TaskQuery, use `action_type="task_query"` with
   `query_type="response"` and put the answer in `actions[].task_query.message`.
 - For delegated work, use `action_type="delegate_task"` with
-  `actions[].task.problem_statement` and the exact specialist target on the action.
+  `actions[].task.problem_statement` and the exact specialist target on the action.{delegation_files_guidance}
 - If you are a specialist or worker and need user input or another specialist,
   use `action_type="manager_escalation"` with a task for TeamArchitect and an
   `escalation` payload. Then wait for TeamArchitect's reply instead of
@@ -647,6 +655,18 @@ class StructuredLLMResponse(BaseModel):
         )
 
 
+# The team lead's choice of files for a delegated task: ids only, never records
+# or paths. Trusted code finds each id among the files the delegating task may
+# use (``custom_agents.conversation_attachments.select_attachments``) and gives
+# the new task those records. Specialists' schemas leave the field out
+# (``ModelWorkerDelegateTaskAction``, ``CompatibleWorkerTurnAction``).
+DELEGATION_ATTACHMENT_IDS_DESCRIPTION = (
+    "Optional. The attachment_id of each file the person sent that the delegated task needs: "
+    "files of this request, files sent with guidance or an answer, or earlier files of this "
+    "conversation. Leave out to send the files of the person's current message; [] sends none."
+)
+
+
 class ModelDelegateTaskAction(BaseModel):
     """Slim model-facing runtime action for delegated Task requests."""
 
@@ -666,6 +686,7 @@ class ModelDelegateTaskAction(BaseModel):
         default=None,
         description="Optional worker-origin metadata when delegating to TeamArchitect.",
     )
+    attachment_ids: Optional[List[str]] = Field(default=None, description=DELEGATION_ATTACHMENT_IDS_DESCRIPTION)
 
     def to_runtime_action(self) -> "DelegateTaskAction":
         target_named_agent_type = self.target_named_agent_type
@@ -677,7 +698,17 @@ class ModelDelegateTaskAction(BaseModel):
             target_agent_name=self.target_agent_name,
             check_back_after_minutes=self.check_back_after_minutes,
             manager_escalation=self.manager_escalation,
+            attachment_ids=self.attachment_ids,
         )
+
+
+class ModelWorkerDelegateTaskAction(ModelDelegateTaskAction):
+    """Slim model-facing runtime action for a specialist's delegated Task request to TeamArchitect."""
+
+    # Only TeamArchitect chooses which of the person's files a task gets: the
+    # field accepts only None and is left out of the schema (the docstring is
+    # the schema's description, so it does not name the field either).
+    attachment_ids: SkipJsonSchema[None] = None
 
 
 class ModelManagerEscalationAction(BaseModel):
@@ -889,7 +920,7 @@ WORKER_EXCLUDED_ACTION_TYPES = frozenset(
 
 ModelWorkerTurnAction = Annotated[
     Union[
-        ModelDelegateTaskAction,
+        ModelWorkerDelegateTaskAction,
         ModelManagerEscalationAction,
         ModelTaskResponseAction,
         ModelTaskQueryAction,
@@ -901,7 +932,7 @@ ModelWorkerTurnAction = Annotated[
 
 
 class ModelWorkerTurnDecision(ModelAgentTurnDecision):
-    """``ModelAgentTurnDecision`` for specialists: no credential-form or signup actions."""
+    """``ModelAgentTurnDecision`` for specialists: no credential-form or signup actions, no file choice."""
 
     actions: List[ModelWorkerTurnAction] = Field(  # type: ignore[assignment]
         min_length=1,
@@ -1007,6 +1038,9 @@ class FireworksModelTurnAction(BaseModel):
         description="Optional minutes after which to look at delegated work again before all of it ends.",
     )
     manager_escalation: Optional[Dict[str, Any]] = Field(default=None, description="Optional manager escalation metadata.")
+    attachment_ids: Optional[List[str]] = Field(
+        default=None, description=f"For delegate_task only. {DELEGATION_ATTACHMENT_IDS_DESCRIPTION}"
+    )
     escalation: Optional[Dict[str, Any]] = Field(default=None, description="Manager escalation payload.")
     suppress_outbound_dispatch: Optional[bool] = Field(default=None, description="Suppress eligible timer reply delivery.")
     after_action_report: Optional[Dict[str, Any]] = Field(default=None, description="Optional follow-up report payload.")
@@ -1158,6 +1192,8 @@ class CompatibleWorkerTurnAction(CompatibleModelTurnAction):
     )
     secure_credential_collection_request: SkipJsonSchema[None] = None  # type: ignore[assignment]
     signup_automation_request: SkipJsonSchema[None] = None  # type: ignore[assignment]
+    # The same for the files a delegated task gets (ModelWorkerDelegateTaskAction).
+    attachment_ids: SkipJsonSchema[None] = None
 
 
 class CompatibleWorkerTurnDecision(CompatibleModelAgentTurnDecision):
@@ -1186,6 +1222,10 @@ class DelegateTaskAction(BaseModel):
         default=None,
         description="Optional worker-origin metadata for manager-mediated escalations.",
     )
+    # None (left out; also every action saved before this field existed)
+    # passes the delegating task's own files, as before; a list, [] included,
+    # passes exactly the files it names (``delegation_runtime.selected_attachments``).
+    attachment_ids: Optional[List[str]] = Field(default=None, description=DELEGATION_ATTACHMENT_IDS_DESCRIPTION)
 
     @model_validator(mode="after")
     def validate_delegate_task(self) -> "DelegateTaskAction":
