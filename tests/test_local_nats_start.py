@@ -3,7 +3,9 @@
 The server runs in its own session, so one left over from an earlier start (a launcher that
 crashed, or a team still running) can keep the port. The start used to wait until anything
 answered on the port: the new server stopped with "address already in use" and the start went
-on with the old one, which may hold another store or other credentials.
+on with the old one, which may hold another store or other credentials. The refusal names the
+address the server reported and this team's store directory, which tells this team's own server
+apart from another team's.
 
 A start that fails after launching its server stops and reaps that server: the caller never
 gets the process, so a server left running would keep the ports and refuse the next start.
@@ -53,6 +55,21 @@ def _refusal(tmp_path: Path) -> str:
     return str(refused.value)
 
 
+def _store_argument(tmp_path: Path) -> str:
+    """How this team's server's command line, and so ``ps``, shows its store directory."""
+
+    return f"-sd {tmp_path / 'nats' / 'data'}"
+
+
+def _reported_ports(tmp_path: Path) -> tuple[int, int]:
+    """The client and monitoring ports the first server in the startup log reported."""
+
+    output = (tmp_path / "nats" / "log" / "nats-server-startup.log").read_text()
+    client, monitoring = _LISTENING.search(output), _MONITORING.search(output)
+    assert client is not None and monitoring is not None, output
+    return int(client.group(1)), int(monitoring.group(1))
+
+
 def _launched_server(started: list[subprocess.Popen]) -> subprocess.Popen:
     """The nats-server the start launched, not its ``nats-server --version`` check."""
 
@@ -61,28 +78,31 @@ def _launched_server(started: list[subprocess.Popen]) -> subprocess.Popen:
 
 
 @pytest.fixture
-def leftover(tmp_path: Path) -> Iterator[tuple[int, subprocess.Popen[bytes]]]:
-    """A nats-server from an earlier start, still holding its port."""
+def other_server(tmp_path: Path) -> Iterator[tuple[int, subprocess.Popen[bytes]]]:
+    """A nats-server with a store of its own, like another team's, holding a client port."""
 
-    folder = tmp_path / "leftover"
+    folder = tmp_path / "other"
     folder.mkdir()
     with own_nats_server_process(shutil.which("nats-server") or "nats-server", folder) as (url, process):
         yield int(url.rsplit(":", 1)[1]), process
 
 
 @needs_nats_server
-def test_a_leftover_server_on_the_port_stops_the_start_and_says_what_to_do(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leftover: tuple[int, subprocess.Popen[bytes]]
+def test_another_servers_hold_on_the_client_port_stops_the_start_and_is_not_to_be_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_server: tuple[int, subprocess.Popen[bytes]]
 ) -> None:
-    port, old_server = leftover
+    port, holder = other_server
     monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", port)
     monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", -1)
 
     message = _refusal(tmp_path)
 
     assert f"127.0.0.1:{port} is already in use" in message, message
-    assert "Stop that nats-server" in message, message
-    assert old_server.poll() is None, "the leftover server is left alone"
+    # The holder's command line does not show this team's store, so the advice leaves it alone.
+    assert _store_argument(tmp_path) in message, message
+    assert _store_argument(tmp_path) not in " ".join(holder.args)
+    assert "do not stop it from here" in message, message
+    assert holder.poll() is None, "the start leaves the holder alone"
 
 
 @needs_nats_server
@@ -94,7 +114,35 @@ def test_a_taken_monitoring_port_is_named_too(tmp_path: Path, monkeypatch: pytes
         monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", -1)
         monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", port)
 
-        assert f"127.0.0.1:{port} is already in use" in _refusal(tmp_path)
+        message = _refusal(tmp_path)
+
+    assert f"127.0.0.1:{port} is already in use" in message, message
+    assert _store_argument(tmp_path) in message, message
+
+
+@needs_nats_server
+def test_a_full_leftover_of_this_team_is_named_by_its_monitoring_port_and_its_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", -1)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", -1)
+    with stopped_at_exit(_start(tmp_path), name="nats-server left over from an earlier start") as earlier:
+        client, monitoring = _reported_ports(tmp_path)
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", client)
+        monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", monitoring)
+
+        with record_started_processes() as started:
+            message = _refusal(tmp_path)
+            # Checked inside the block: only the start's own poll() sets returncode.
+            assert _launched_server(started).returncode is not None, "the refused start left its server running"
+
+        # nats-server opens its monitoring port before its client port, so a full leftover is named by that one.
+        assert f"127.0.0.1:{monitoring} is already in use" in message, message
+        # The advice tells this team's own server apart by its store, which its command line shows.
+        assert _store_argument(tmp_path) in message, message
+        assert _store_argument(tmp_path) in " ".join(earlier.args)
+        assert "If this team is running, stop the team first" in message, message
+        assert earlier.poll() is None, "the start leaves the leftover alone"
 
 
 @needs_nats_server
@@ -123,11 +171,9 @@ def test_a_start_that_times_out_stops_its_server_and_a_retry_on_its_ports_starts
     assert "event=local_nats_stop_killed" not in caplog.text
 
     # The ports the timed-out server held are free again: a retry on exactly them starts.
-    output = (tmp_path / "nats" / "log" / "nats-server-startup.log").read_text()
-    client, monitoring = _LISTENING.search(output), _MONITORING.search(output)
-    assert client is not None and monitoring is not None, output
-    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", int(client.group(1)))
-    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", int(monitoring.group(1)))
+    client, monitoring = _reported_ports(tmp_path)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_PORT", client)
+    monkeypatch.setattr(nats_service, "INTERNAL_NATS_MONITOR_PORT", monitoring)
     with stopped_at_exit(_start(tmp_path), name="nats-server of the retry") as retry:
         assert retry.poll() is None
 

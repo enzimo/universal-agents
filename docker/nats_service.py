@@ -39,6 +39,8 @@ NATS_USER_ENV = "NATS_USER"
 NATS_PASSWORD_ENV = "NATS_PASSWORD"
 GENERATED_NATS_USER = "ua-runtime"
 _AUTH_DIR_NAME = "auth"
+# The JetStream store directory under the service root, passed to nats-server as ``-sd``.
+_STORE_DIR_NAME = "data"
 # The message contract's server requirements (transport.yaml "server" and "limits"),
 # which the bundled server's generated configuration applies.
 CONTRACT_TRANSPORT_PATH = Path(__file__).resolve().parents[1] / "contracts" / "messages" / "v1" / "generated" / "transport.json"
@@ -121,6 +123,29 @@ def _startup_output(startup_log_path: Path, offset: int, pid: int) -> str:
     return "\n".join(line for line in text.splitlines() if line.startswith(prefix))
 
 
+def _port_taken_message(address: str, store_dir: Path) -> str:
+    """The refusal when this start's server found its address taken, with advice that is safe to follow.
+
+    The ports are fixed, so the holder can be this team's own server (the team is still
+    running, or a start ended abruptly and left it), or the server or program of another
+    team or service on the same machine. Only this team's own server can safely be
+    stopped, and only when the team is not running; its command line carries this team's
+    store directory (``-sd``), which tells the cases apart. This start never stops or
+    adopts the holder itself.
+    """
+
+    return (
+        f"The local NATS server cannot start: {address} is already in use. Run `ps -ef | grep nats-server` "
+        f"to list the running nats-server processes. One started with `-sd {store_dir}` belongs to this team. "
+        "If this team is running, stop the team first, and do not stop that nats-server by hand; a command that "
+        "starts its own NATS server, such as the consumer reconciler with --start-local-nats, runs only while the "
+        "team is stopped. If nothing of this team is running, that nats-server was left over from a start that "
+        "ended abruptly: stop it, then start again. If no nats-server shows that directory, another team or "
+        "program holds the address, so do not stop it from here: free the port deliberately, or set "
+        "TEAM_LOCAL_NATS_ENABLED=false and configure NATS_URL/NATS_SERVERS for this team's own external NATS server."
+    )
+
+
 def _wait_for_nats_ready(
     process: subprocess.Popen[bytes],
     *,
@@ -134,10 +159,11 @@ def _wait_for_nats_ready(
 
     Another server answering on the port is not readiness. The server runs in its own
     session, so one left over from an earlier start (a launcher that crashed, or a team
-    still running) can keep the port; this start's server then stops with "address
-    already in use", and the start must say so instead of going on with the old one.
-    Both the ready lines and the "address already in use" line count only when this
-    start's server wrote them (``_startup_output``).
+    still running) can keep the port, and so can another team's server on the same
+    machine; this start's server then stops with "address already in use", and the start
+    must refuse with the address its server reported (``_port_taken_message``) instead of
+    going on with the old one. Both the ready lines and the "address already in use" line
+    count only when this start's server wrote them (``_startup_output``).
     """
 
     deadline = time.time() + timeout_seconds
@@ -147,12 +173,7 @@ def _wait_for_nats_ready(
         if code is not None:
             taken = _PORT_TAKEN.search(output)
             if taken is not None:
-                raise RuntimeError(
-                    f"The local NATS server cannot start: {taken.group(1)} is already in use, most "
-                    "likely by a nats-server that is still running from an earlier start or from a team "
-                    "that is still running. Stop that nats-server (`ps -ef | grep nats-server` shows "
-                    "it), then start again."
-                )
+                raise RuntimeError(_port_taken_message(taken.group(1), service_root / _STORE_DIR_NAME))
             raise RuntimeError(
                 f"NATS process exited before becoming ready with code {code}.\n{nats_log_tail(service_root)}"
             )
@@ -369,7 +390,7 @@ def start_local_nats(
             "and configure NATS_URL/NATS_SERVERS for an external server."
         )
     root = service_root or resolve_nats_service_root(env)
-    data_dir = root / "data"
+    data_dir = root / _STORE_DIR_NAME
     log_dir = root / "log"
     data_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
