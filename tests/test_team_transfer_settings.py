@@ -129,6 +129,7 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
                 SettingV1(path=("heartbeat", "interval_seconds"), value="not a number"),
                 SettingV1(path=("llm", "model_id", "nested"), value="x"),
             ]
+            records.append(SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
@@ -139,7 +140,8 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
 
     outcomes = {record.key: record for record in plan.records}
     assert outcomes["heartbeat.enabled"].outcome is RecordOutcome.IMPORT
-    for refused in ("agent.setting_removed_long_ago", "heartbeat.interval_seconds", "llm.model_id.nested"):
+    for refused in ("agent.setting_removed_long_ago", "heartbeat.interval_seconds", "llm.model_id.nested",
+                    "agent.max_concurrent_top_level_tasks"):
         assert outcomes[refused].outcome is RecordOutcome.REFUSED, refused
     assert "no setting group llm.model_id" in outcomes["llm.model_id.nested"].reason
     imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
@@ -149,7 +151,7 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9, 10])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
@@ -160,6 +162,9 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     the presence stream's setting, which this version no longer has: the conversion drops
     it, so nothing is refused. Version 8 predates the semantic-review settings, so its
     import keeps the review turned off beside the team's other skill installation choices.
+    Version 10 is this branch's pre-release export after step 7d. Every earlier version
+    may still carry the ignored agent.max_concurrent_top_level_tasks, which version 11
+    removed, so the conversion drops it too.
     """
 
     from assistant_gateway.config import GatewayInstanceConfig
@@ -176,11 +181,13 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
                 records.append(SettingV1(path=("tool_policy", "output_retention_days"), value=0))
             if exported_version >= 8:
                 records.append(SettingV1(path=("gateway", "storage_warnings", "person_step_gb"), value=7))
-                records.append(SettingV1(path=("transport", "presence_max_age_seconds"), value=900.0))
                 records.append(SettingV1(path=("workspace", "skill_installation", "safe_max_score"), value=10))
-            if exported_version == 9:
+            if exported_version in (8, 9):
+                records.append(SettingV1(path=("transport", "presence_max_age_seconds"), value=900.0))
+            if exported_version >= 9:
                 records.append(SettingV1(path=SEMANTIC_REVIEW + ("mode",), value="task_model"))
                 records.append(SettingV1(path=SEMANTIC_REVIEW + ("max_input_bytes",), value=524288))
+            records.append(SettingV1(path=("agent", "max_concurrent_top_level_tasks"), value=4))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
@@ -193,6 +200,7 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     assert outcomes["heartbeat.enabled"].outcome is RecordOutcome.IMPORT
     assert outcomes["agent.max_queued_top_level_tasks"].outcome is RecordOutcome.IMPORT
     assert "transport.presence_max_age_seconds" not in outcomes
+    assert "agent.max_concurrent_top_level_tasks" not in outcomes
     assert not plan.by_outcome(RecordOutcome.REFUSED)
     imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
     assert imported.heartbeat.enabled is False
@@ -208,7 +216,7 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     assert skill_installation.safe_max_score == (10 if exported_version >= 8 else 20)
     assert skill_installation.semantic_review.model_dump() == (
         {"mode": "task_model", "max_input_bytes": 524288}
-        if exported_version == 9
+        if exported_version >= 9
         else {"mode": "off", "max_input_bytes": 262144}
     )
 
@@ -397,7 +405,8 @@ def test_choosing_environment_secrets_writes_no_team_env(tmp_path: Path) -> None
 def test_a_0_9_instance_exports_no_retired_setting_and_a_reviewed_import_refuses_nothing(
     tmp_path: Path, upgraded_first: bool
 ) -> None:
-    """A 0.9 instance holds transport.presence_max_age_seconds (message contract step 7d removed it).
+    """A 0.9 instance holds transport.presence_max_age_seconds (message contract step 7d removed it)
+    and agent.max_concurrent_top_level_tasks (0.9.4 onboarding wrote it; 0.10 removed it).
 
     Upgraded first: the launcher rewrote the file at its first start. Not upgraded: the export
     ran after the code was upgraded, before any start; the export reads the file as this

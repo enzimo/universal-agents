@@ -62,6 +62,7 @@ from storage.delegated_task_repository import (
     DELEGATED_QUEUED,
     DelegatedTaskRecordV1,
     DelegatedTaskRepository,
+    DelegationWaitV1,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,28 @@ def delegation_holder(agent: Any, subtask_id: str) -> Optional[str]:
 
     record = delegated_tasks(agent).get(str(agent.team_id), subtask_id)
     return record.holder_agent_id if record is not None else None
+
+
+def pending_delegation_parents(agent: Any) -> set[str]:
+    """Parents this runtime still waits for, independent of its agent id before recovery. Task lane."""
+
+    manager = agent.task_manager
+    return {
+        parent for subtask in manager.get_pending_subtasks()
+        if (parent := manager.get_parent_task_id(subtask.task.task_id))
+    }
+
+
+def open_delegations_for_owned_parents(agent: Any) -> tuple[DelegatedTaskRecordV1, ...]:
+    """Read the current runtime's pending work by parent, never by a previous requester's id. Task lane."""
+
+    return delegated_tasks(agent).list_open_for_parents(str(agent.team_id), pending_delegation_parents(agent))
+
+
+def waits_for_owned_parents(agent: Any) -> tuple[DelegationWaitV1, ...]:
+    """The waits (check-back times, last progress) of the parents this runtime waits for. Task lane."""
+
+    return delegated_tasks(agent).waits_for_parents(str(agent.team_id), pending_delegation_parents(agent))
 
 
 def current_holders(agent: Any, parent_task_id: str, subtask_ids: Sequence[str]) -> dict[str, str]:

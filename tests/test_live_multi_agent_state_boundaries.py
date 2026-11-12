@@ -84,6 +84,7 @@ from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id, new_id_suffix
 from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
+from tests.test_live_team_services import broker  # noqa: F401 - isolated NATS fixture
 
 
 pytestmark = [
@@ -3232,11 +3233,18 @@ def _launched_lead_lookup(team_id: str):
             patch("custom_agents.agent_requests.team_view", return_value=view))
 
 
-async def test_live_turn_action_delegation_aborts_before_publish_when_target_unavailable() -> (
-    None
-):
+@pytest.mark.parametrize("hostless", [False, True], ids=["worker-unavailable", "lead-without-host"])
+async def test_live_turn_action_delegation_aborts_before_publish_when_target_unavailable(
+    hostless: bool, broker: str, monkeypatch: pytest.MonkeyPatch,  # noqa: F811 - shared fixture
+) -> None:
     """An exact agent has no shared queue, so it must answer a live probe;
     a worker type's queue always takes the task (ADR-019)."""
+    from runtime_settings.transport import TransportSettings
+    from custom_transport.nats_adapter import NatsTransportConfig
+
+    transport = TransportSettings(nats_url=broker, nats_servers=[broker])
+    monkeypatch.setitem(globals(), "resolve_live_transport_settings", lambda: transport)
+    monkeypatch.setitem(globals(), "nats_transport_config_from_env", lambda **_: NatsTransportConfig(servers=[broker]))
     team_id = new_id("team_ob_advice")
     root_task_id = new_id("root_ob_advice")
     manager_id = new_id("manager")
@@ -3256,7 +3264,9 @@ async def test_live_turn_action_delegation_aborts_before_publish_when_target_una
             )
         )
 
-        lookup_can_ask, lookup_view = _launched_lead_lookup(team_id)
+        lookup_can_ask, lookup_view = (
+            (contextlib.nullcontext(), contextlib.nullcontext()) if hostless else _launched_lead_lookup(team_id)
+        )
         with (
             patch("custom_agents.strands_agent.Agent", return_value=manager_llm),
             patch(
@@ -3265,6 +3275,7 @@ async def test_live_turn_action_delegation_aborts_before_publish_when_target_una
             ),
             lookup_can_ask,
             lookup_view,
+            patch("custom_agents.agent_requests._PROCESS_HOST", None),
             # By name, the lead first waits a bounded time for a just-started worker to appear
             # (custom_agents.team_directory); nobody starts here, so a short wait is enough.
             patch("custom_agents.team_directory.NAMED_AGENT_START_SECONDS", 0.5),
@@ -3329,7 +3340,7 @@ async def test_live_turn_action_delegation_aborts_before_publish_when_target_una
                 await _wait_for(
                     lambda: any(
                         entry.details.get("final_failure_phase")
-                        == "availability_verification_failed"
+                        == ("requester_cannot_ask" if hostless else "availability_verification_failed")
                         for entry in manager.task_manager.get_task_history_entries(
                             root_task_id, limit=None
                         )

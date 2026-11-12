@@ -413,16 +413,12 @@ voice: {{}}
 def test_a_leftover_concurrency_setting_loads_and_the_next_save_drops_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """agent.max_concurrent_top_level_tasks was removed without a refusing check.
-
-    Onboarding wrote it into every instance_config.yaml. Values above 1 never
-    had an effect, so startup ignores the leftover line and the next save of
-    the file leaves it out.
-    """
+    """The configuration upgrade removes the unused key before validation and export."""
 
     _clear_runtime_config_env(monkeypatch)
     config_path = _make_config(tmp_path).save()
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    saved["schema_version"] = 13
     saved["agent"]["max_concurrent_top_level_tasks"] = 4
     config_path.write_text(dump_instance_config_yaml(saved), encoding="utf-8")
 

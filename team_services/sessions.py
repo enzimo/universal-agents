@@ -8,7 +8,13 @@ team services decide:
   and move only by a handover, decision 51), else ``already_placed`` names that host. The
   placement is written with compare-and-set, and the session, with the placement's
   revision, is signed into ``UA1_CERTS`` for every receiver to read. Only the team lead's
-  type (``TeamArchitect``) on a lead host gets the ``lead`` role.
+  type (``TeamArchitect``) on a lead host gets the ``lead`` role. At most one
+  unended lead session exists per team. A second lead is refused; reopening the
+  same agent ends its earlier lead sessions before a replacement is signed. A stored
+  session record that does not verify may be a lead's, so a lead's open is answered
+  ``runtime_error`` naming the first such key and how many more until each verifies or an
+  operator deletes it (``event=lead_session_record_unreadable``, one line per key); workers
+  still open.
 - ``sessions.renew``: a session that places the agent on the asking host, re-signed for
   another 7 days. Only one that has not ended and whose placement is still the agent's
   current one: a session closed earlier must not come back because its agent was placed
@@ -51,8 +57,9 @@ read there only when it verifies: signed by a team services host (the registry's
 roles, which the reader checks) and stored under its own key. One that does not verify,
 or a key that holds no record at all, counts as absent and is logged with its key and
 the refusal (``event=team_services_record_refused``); its revision still lets the next
-placement replace it. A renewal or close re-signs the session the team services hold,
-never what another process wrote.
+placement replace it. The one exception is a lead's open, above: there an unverified
+session record blocks instead. A renewal or close re-signs the session the team services
+hold, never what another process wrote.
 """
 
 from __future__ import annotations
@@ -81,6 +88,8 @@ PLACEMENT, AGENT_SESSION = "placement", "agent_session"
 HANDED_OVER = "handed_over"
 # One placement of an agent later than the one before it, so ``placed_at`` names each placement.
 _PLACED_STEP = timedelta(milliseconds=1)
+# The contract's short text (``ShortText``): every reply message fits it.
+_MESSAGE_MAX = 500
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -90,6 +99,26 @@ def placement_key(team: str, agent: str) -> str:
 
 def session_key(installation: str, team: str, session: str) -> str:
     return f"session.{installation}.{team}.{session}"
+
+
+def _unreadable_refusal(unreadable: list[str]) -> str:
+    """A lead's refusal for stored session records that do not verify, within ``_MESSAGE_MAX`` characters.
+
+    A reply longer than the contract allows is never sent: the host would get
+    ``handler_failed`` and retry with no reason shown. Damage seldom hits one record alone
+    (a bad script, a wrong restore), so the refusal names the first record and counts the
+    rest; the team services log each on its own line (``event=lead_session_record_unreadable``).
+    A key is whatever another process wrote under the team's prefix, not a checked id, so
+    the named one is cut to the room left.
+    """
+
+    more = len(unreadable) - 1
+    others = f" and {more} more, each logged as event=lead_session_record_unreadable" if more else ""
+    text = ("Stored session records do not verify: {first}{others}. The team services cannot rule out another lead, "
+            "so the lead opens once each verifies or an operator deletes it from the UA1_CERTS bucket.")
+    room = _MESSAGE_MAX - len(text.format(first="", others=others))
+    first = unreadable[0] if len(unreadable[0]) <= room else unreadable[0][: room - 1] + "…"
+    return text.format(first=first, others=others)
 
 
 def _places(placement: Optional[VerifiedRecord], session: AgentSession) -> bool:
@@ -200,6 +229,13 @@ class SessionService:
         if previous is None and len(await self._host_placements(team, certificate.runtime)) >= certificate.session_limit:
             return self._refusal("sessions.open", "limit_reached",
                                  "This host already runs as many agents as its certificate allows.", asked)
+        role = LEAD_ROLE if agent_type == MANAGER_AGENT_TYPE and "lead_host" in certificate.roles else WORKER_ROLE
+        earlier_leads, unreadable = await self._lead_sessions(team) if role == LEAD_ROLE else ([], [])
+        if unreadable:
+            return self._refusal("sessions.open", "runtime_error", _unreadable_refusal(unreadable), asked)
+        if any(session.agent != agent or session.runtime != certificate.runtime for session in earlier_leads):
+            return self._refusal("sessions.open", "not_allowed",
+                                 "This team already has a lead session; close it before starting another lead.", asked)
         now = parse_timestamp(format_timestamp(self.clock()))  # the protocol's millisecond precision
         if previous is not None and parse_timestamp(previous.body.placed_at) >= now:
             # Each placement of an agent later than the one before, so its placed_at names it (module docstring).
@@ -216,7 +252,12 @@ class SessionService:
             # Another open for this agent won; the asking host may ask again and learn where it went.
             return self._refusal("sessions.open", "runtime_error", "The placement changed at the same time; ask again.",
                                  asked)
-        role = LEAD_ROLE if agent_type == MANAGER_AGENT_TYPE and "lead_host" in certificate.roles else WORKER_ROLE
+        # Reopening the same agent may replace a lost open reply or a refused renewal.
+        # End its old authority before signing the replacement; never two lead sessions.
+        for earlier in earlier_leads:
+            await self._store_session(team, earlier.session, self._signed_again(earlier, now, now))
+            self.logger.info("Ended the earlier session before reopening the lead. "
+                             "event=lead_session_replaced team=%s agent=%s session=%s", team, agent, earlier.session)
         session = f"s-{agent}-{revision}"
         record = self.records.signed(AGENT_SESSION, session_key(self.installation, team, session), {
             "session": session, "installation": self.installation, "team": team, "agent": agent,
@@ -228,21 +269,51 @@ class SessionService:
                          "session=%s role=%s", team, agent, certificate.runtime, session, role)
         return {"outcome": "ok", "session": record}
 
+    async def _lead_sessions(self, team: str) -> tuple[list[AgentSession], list[str]]:
+        """All unended lead sessions, and each retained session record that does not verify, by key and code.
+
+        Runs under the same mutation lock as open and close. Read retained signed records,
+        so a team-services restart cannot forget the lead. A restarting lead host closes its
+        earlier sessions before opening a new one (AgentProcessHost._close_earlier_sessions);
+        silence alone is not a close. A record that does not verify may be a lead's, so the
+        caller refuses the lead instead of counting it as absent (module docstring).
+        """
+
+        prefix = f"session.{self.installation}.{team}."
+        sessions, unreadable = [], []
+        for key in await self.records.keys(AGENT_SESSION, prefix):
+            try:
+                session = await self._session(team, key[len(prefix):], require_readable=True)
+            except FrameRefused as refused:
+                self.logger.error("A stored session record does not verify, so no team lead opens until it verifies or "
+                                  "an operator deletes it. event=lead_session_record_unreadable team=%s key=%s code=%s "
+                                  "at=%s", team, key, refused.code, refused.at)
+                unreadable.append(f"{key} ({refused.code})")
+                continue
+            if session is not None and session.agent_role == LEAD_ROLE and session.ends_at > self.clock():
+                sessions.append(session)
+        return sessions, unreadable
+
     async def _store_session(self, team: str, session: str, record: dict[str, Any]) -> None:
         await self.records.put(AGENT_SESSION, session_key(self.installation, team, session), record)
         self.trust.add(json.dumps(record).encode(), now=self.clock())
 
-    async def _session(self, team: str, session: str) -> Optional[AgentSession]:
+    async def _session(self, team: str, session: str, *, require_readable: bool = False) -> Optional[AgentSession]:
         """The session as the team services' trust store holds it, after taking the bucket's record when it verifies.
 
         A newer record in ``UA1_CERTS`` that verifies is taken; one that does not is
         logged, and the one held stays (none after a restart: the session counts as absent).
+        Opening a lead requires every retained session to be readable, so that check
+        (``require_readable``) raises instead, for ``_lead_sessions`` to report: unreadable
+        evidence never authorizes a second lead.
         """
 
         key = session_key(self.installation, team, session)
         try:
             await self.records.take_trust_record(AGENT_SESSION, key, now=self.clock())
         except FrameRefused as refused:
+            if require_readable:
+                raise  # it blocks the lead's open, not counted as absent; _lead_sessions logs it
             self._refused(AGENT_SESSION, key, refused)
         return self.trust.store.agent_session(self.installation, team, session)
 

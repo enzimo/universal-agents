@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Iterator
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
+from runtime_settings.retired_concurrency import RETIRED_CONCURRENCY_SETTING
 from runtime_settings.transport import RETIRED_PRESENCE_SETTING
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
@@ -94,7 +95,8 @@ class SettingsSection:
     # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
     # 9: optional skill semantic-review settings joined workspace.skill_installation (0.9 releases, from main).
     # 10: transport.presence_max_age_seconds left it (the presence stream was removed, message contract step 7d).
-    schema_version: ClassVar[int] = 10
+    # 11: agent.max_concurrent_top_level_tasks left it (earlier loaders kept the ignored key in saved files).
+    schema_version: ClassVar[int] = 11
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -308,6 +310,9 @@ def _applied(
         _set_path(candidate, path, value)
     for setting in settings:
         if setting.dotted in refused or setting.path in destination:
+            continue
+        if setting.path in {RETIRED_CONCURRENCY_SETTING, RETIRED_PRESENCE_SETTING}:
+            refused[setting.dotted] = "this version no longer has this setting"
             continue
         problem = _later_storage_problem(setting, base, context) or _set_path(
             candidate, setting.path, _under_root(setting.value, root)
@@ -680,12 +685,15 @@ __all__ = [
 # export's value for it is dropped. Version 9 is main's (0.9 releases, which
 # still carry the presence setting); this branch's own pre-release version 9
 # had neither the presence setting nor the semantic-review settings, so the
-# same step reads it.
+# same step reads it. V11 removed agent.max_concurrent_top_level_tasks
+# (RETIRED_CONCURRENCY_SETTING), which loaders before it ignored but left in saved
+# files, so any earlier export may carry it: the same step drops it.
 
 
 def _without_retired_settings(records: SectionRecords) -> SectionRecords:
-    return [record for record in records if tuple(record.get("path", ())) != RETIRED_PRESENCE_SETTING]
+    retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
+    return [record for record in records if tuple(record.get("path", ())) not in retired]
 
 
-for _source in (5, 6, 7, 8, 9):
+for _source in (5, 6, 7, 8, 9, 10):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _without_retired_settings

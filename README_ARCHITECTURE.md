@@ -937,14 +937,18 @@ delivered (a crashed process loses nothing either way). So:
 A store whose writes read before they write takes turns between writers on
 both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
 PostgreSQL the default READ COMMITTED isolation lets two transactions read the
-same rows before either writes, so the access store and the knowledge store
-take their own transaction-level advisory lock in `begin_write`
-(`storage/postgres_connection.py`, one key per store, so unrelated stores never
-wait for each other); other stores lock the rows they change (`SELECT ... FOR
-UPDATE`). An advisory lock key covers the whole PostgreSQL database, so
-instances or teams that share one database in different schemas also wait for
-each other's writes to that store. Reads and writes a thread makes while it
-holds an open write transaction of the access store (a grant plan, a whole
+same rows before either writes, so the access store, the knowledge store,
+pinned memory, the conversation store's thread tags and stored command
+refusals, and the delegated-task store take their own transaction-level
+advisory lock in `begin_write` (`storage/postgres_connection.py`, one key per
+store, so unrelated stores never wait for each other); other stores lock the
+rows they change (`SELECT ... FOR UPDATE`). A row lock cannot cover a row
+that does not exist yet, so the delegated-task store, whose first check-back
+time and first progress note for a parent both create the parent's wait, uses
+the advisory lock. An advisory lock key covers the whole PostgreSQL database,
+so instances or teams that share one database in different schemas also wait
+for each other's writes to that store. Reads and writes a thread makes while
+it holds an open write transaction of the access store (a grant plan, a whole
 decision) join that transaction, so no second connection is opened while the
 lock is held. Moving rows between tables uses `DELETE ... RETURNING` so exactly the
 rows deleted are the rows kept elsewhere (a removed person's held records,
@@ -952,6 +956,11 @@ rows deleted are the rows kept elsewhere (a removed person's held records,
 concurrency audit found that on PostgreSQL an approved change could be claimed
 twice, two edits to one person's model settings lost one, and holding a
 person's records could delete a row written meanwhile without holding it.
+The delegated-task store takes its lock because a later review of recovered
+requesters found that, on PostgreSQL, an earlier requester runtime still
+running beside its recovered replacement could erase a later check-back time,
+take one due check-back twice, or reopen a closed task
+(`tests/test_delegated_task_store_postgres.py`).
 
 Opening a store takes turns too. Each store creates its tables and indexes
 and adds missing columns when it opens, and the launcher starts the manager,
@@ -4507,9 +4516,9 @@ discovery of the lead are gone ("The end of presence and fan-out" below). Upgrad
 place from 0.9: the launcher creates the trust folder and keys, and the installation
 authority creates the `UA1_*` key-value buckets, which NATS lists as streams named
 `KV_UA1_*` (the authority's list below). The contract's work and dead-letter streams come
-in phase 3. The first start also deletes the team's old presence stream when the NATS
-login may delete streams (step 7d). What an external NATS server needs is in the user
-docs: the server version and settings in the configuration guide's "Surviving a power
+in phase 3. Startup leaves the team's old presence stream alone and needs no right to
+it: nothing uses the stream any more, so it can stay ("The end of presence and fan-out"
+below). What an external NATS server needs is in the user docs: the server version and settings in the configuration guide's "Surviving a power
 loss", and what the NATS login needs in the Docker guide's "Message host trust".
 
 `custom_transport.protocol1` is what a running host needs to sign and check messages:
@@ -5188,6 +5197,15 @@ several agents at once under one deadline and keeps each answer or error apart.
   the sender it claims (`event=agent_control_instruction_dropped`). Nor can the lead start
   another TeamArchitect (`manager_launch_forbidden`, for every kind of start): on the lead's
   host its session would carry the lead role, and it could pause or stop the real lead.
+  The team services enforce this too: only one unended lead session per team, read from
+  signed retained records under the session mutation lock, including after a service
+  restart. Reopening the same lead ends its previous sessions before signing a replacement.
+  A restarting lead host closes its earlier sessions before asking for its new lead's session;
+  an unavailable host alone never authorizes a second lead. Nor does a stored session record
+  that does not verify: a lead's open is answered `runtime_error` naming the first such key
+  and how many more, within the reply's 500 characters, and the team services log each key
+  (`event=lead_session_record_unreadable`) until it verifies or an operator deletes it
+  (user docs, Docker, "Message host trust"); other agents still open.
   It waits the request's whole lifetime (30 s), says nothing changed only when nothing can
   have run, and says the outcome is unknown after a lost reply, `handler_failed` or an
   unreadable answer.
@@ -5200,7 +5218,12 @@ several agents at once under one deadline and keeps each answer or error apart.
   task's type, and only a worker that knows the task counts. One target's error counts as no
   answer from it and never ends the probe or the scheduler pass. Any agent may delegate, so
   worker hosts may send `task.probe` too, and every topology lets a task's requester ask its
-  holder (`requester_kinds` in `team-topologies.yaml`, plan decision 70). When this process
+  holder (`requester_kinds` in `team-topologies.yaml`, plan decision 70). Receivers enforce
+  that rule: only the signed lead session, the team services without an agent session,
+  or the current holder of the parent task may probe. Parent ownership comes from durable
+  task custody, not the agent id recorded when work was delegated, so a recovered requester
+  keeps access while its previous identity and unrelated workers receive `wrong_sender`.
+  No task state is included in that refusal. When this process
   cannot ask yet for a reason that clears, the watchdog waits, up to one more timeout past a
   subtask's deadline, rather than fail work that still runs.
 - The managed skill hint is the `skills.changed` team event, which every agent process
@@ -5219,15 +5242,12 @@ agent refreshes its own `agent_states` row and checks its skill catalog every 20
 the row is the heartbeat the liveness rules read, and the check picks up a missed
 `skills.changed`. The presence stream, the broadcast subject, `TeamComms.broadcast_message`,
 the publish options for them and the JetStream push listener that only presence used are
-removed, so nothing on JetStream is pushed. The topology owner looks for an existing
-`<PREFIX>_PRESENCE` stream at start and deletes it (`event=nats_retired_stream_deleted`),
-which also removes the gateway's old durable consumer on it; a fresh install sends no delete
-(`NatsStreamTopology._delete_retired_streams`). Deleting is a one-time clean-up, not a
-condition for starting: a NATS login without the right to delete streams (an external
-server's login may only create and update them) logs `event=nats_retired_stream_not_deleted`
-with the stream and the manual step, and the start goes on. When per-host permissions apply
-(phase 3) the topology owner needs INFO and DELETE on retired stream names, or the clean-up
-goes. `transport.presence_max_age_seconds` is retired
+removed, so nothing on JetStream is pushed. Startup reconciles current streams only and
+never inspects or deletes the retired `<PREFIX>_PRESENCE` stream, which keeps obsolete
+stream access out of phase 3's per-host runtime permissions. Nothing reads or writes the
+stream, so an upgraded installation may keep it; an operator with an administrator login
+on an external NATS server may remove it, and its old consumer, when convenient.
+`transport.presence_max_age_seconds` is retired
 through versioned upgrade steps, so the running code reads only the current format: the
 instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
 (`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
@@ -5237,6 +5257,25 @@ exports, main's version 9 included (`RETIRED_PRESENCE_SETTING`, the one name for
 path). The settings export reads the file
 through the upgrade steps (`read_upgraded_instance_config`), so an export taken after the
 code upgrade but before the launcher rewrote the file carries only what this version reads.
+The same rule now removes the ignored `agent.max_concurrent_top_level_tasks` setting:
+instance configuration 13 -> 14 and `config.yaml` 11 -> 12 drop it before validation or
+export, current-format files refuse it by name, and settings section version 11 removes it
+from older transfers (`RETIRED_CONCURRENCY_SETTING`). Worker pools control concurrency; the
+obsolete value had no effect.
+
+The watchdog, delegated-work progress notes and check-back timers find records by parents
+in the recovered task tree, rather than by the requester's earlier agent id. The check-back
+pass reads those waits once, but each wake runs its request's turn before the next, so it
+clears a time only if the time is still due when the pass reaches that request
+(`DelegatedTaskRepository.take_due_check_back`); a later time the request's own turn set
+meanwhile is kept. The read and the clear run under the store's write lock on both
+backends, so a time set by another runtime after the read is kept too, and of two passes
+taking the same due time only one wakes the request. The watchdog prefers current task custody over an older worker claim. During a mixed-contract upgrade,
+the gateway tracks retained waiting replies separately for each draining lead, and every
+unavailable transition except a refused join leaves them out
+(`GatewayManagerTransition.kept_replies`), so a lead that leaves, whether it drained or left
+normally, fails only its own replies. A refused join fails every waiting reply while a lead
+is routed, because the gateway can then hear no lead at all.
 The operational subject now carries only
 the gateway's task progress, parent-task probe and thread guidance, with their replies
 (plan decision 68). Every agent receives it, so an agent acts only on a command that names
@@ -5299,7 +5338,8 @@ the gateway acts on that view in four places.
   otherwise takes the one whose record changed last (a crashed run's lead has not changed
   since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
   whose process runs another contract takes no new chats but finishes the tasks it holds,
-  so the replies people wait for are kept, and failed only if that lead then leaves. A join
+  so the replies people wait for are kept as that lead's, and failed only if that lead then
+  leaves; a later lead that leaves fails only the replies that were waiting for it. A join
   the installation refused for good clears the route whenever it comes. The lead saying it
   leaves makes it unavailable at once; a lead whose host stopped reporting is unavailable
   at most 35 seconds after the host's last liveness write (its record's 30 seconds plus the

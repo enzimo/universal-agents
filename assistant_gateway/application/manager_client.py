@@ -57,9 +57,10 @@ class GatewayManagerTransition:
     source: str
     reason: str
     became_available: bool = False
-    # An unavailable lead that still finishes the tasks it holds (its process runs another message contract):
-    # people's waiting replies are left to arrive (assistant_gateway.team_view.TeamLeadFollower).
-    keep_waiting: bool = False
+    # Waiting replies this unavailable transition must not fail: a lead whose process runs another message
+    # contract still finishes the tasks it holds, and these are its people's replies. The lead follower
+    # (assistant_gateway.team_view.TeamLeadFollower) names them and fails them once that lead leaves the records.
+    kept_replies: frozenset[str] = frozenset()
 
 
 class GatewayManagerClient:
@@ -523,12 +524,12 @@ class GatewayManagerClient:
         expected_manager_id: str | None = None,
         reason: str,
         source: str = "liveness",
-        keep_waiting: bool = False,
+        kept_replies: frozenset[str] = frozenset(),
     ) -> None:
         """Clear the current route and emit one unavailable transition.
 
-        ``keep_waiting``: the lead still finishes the tasks it holds, so people's waiting
-        replies are not failed (``GatewayManagerTransition.keep_waiting``).
+        ``kept_replies``: waiting replies a lead on another contract still answers, so this
+        transition does not fail them (``GatewayManagerTransition.kept_replies``).
         """
 
         async with self._manager_status_lock:
@@ -551,11 +552,11 @@ class GatewayManagerClient:
 
         self._logger.warning(
             "The gateway marked the team lead unavailable. event=gateway_manager_unavailable manager_id=%s "
-            "reason=%s source=%s keep_waiting=%s",
+            "reason=%s source=%s kept_replies=%d",
             current_manager_id,
             reason,
             source,
-            keep_waiting,
+            len(kept_replies),
         )
         await self._run_transition_handler(
             self._on_manager_unavailable,
@@ -564,7 +565,7 @@ class GatewayManagerClient:
                 available=False,
                 source=source,
                 reason=reason,
-                keep_waiting=keep_waiting,
+                kept_replies=kept_replies,
             ),
         )
 

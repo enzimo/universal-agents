@@ -22,6 +22,10 @@ KNOWLEDGE_WRITE_LOCK_KEY = 7_302_211_551
 ACCESS_STORE_WRITE_LOCK_KEY = 7_302_211_552
 # Team and personal memory facts (storage.pinned_memory_repository).
 PINNED_MEMORY_WRITE_LOCK_KEY = 7_302_211_554
+# Delegated-task records and the waits on them, check-back times included
+# (storage.delegated_task_repository). 7_302_211_553 stays unused: the change
+# ledger's schema setup once used it.
+DELEGATED_TASKS_WRITE_LOCK_KEY = 7_302_211_555
 
 
 def ensure_storage_parent_dir(path: Optional[str]) -> None:

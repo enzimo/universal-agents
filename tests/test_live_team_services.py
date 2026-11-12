@@ -875,6 +875,58 @@ async def test_only_the_team_leads_type_on_a_lead_host_gets_the_lead_role(broker
 
 
 @pytest.mark.asyncio
+async def test_a_team_has_one_lead_session_even_after_services_restart(broker: str, tmp_path: Path):
+    layout = InstanceLayout.at(tmp_path / "instance")
+    other_profile = HostProfile("other-lead-host", (TEAM,), LEAD.roles, LEAD.agent_types, LEAD.session_limit)
+    async with AsyncExitStack() as stack:
+        await installation(stack, broker, layout, team_services_profile(TEAM), LEAD, other_profile)
+        stop = asyncio.Event()
+        serving = await team_services(stack, broker, layout, stop)
+        lead = await host(stack, broker, layout, LEAD)
+        first, second = await asyncio.gather(open_session(lead, "lead-1", "TeamArchitect"),
+                                             open_session(lead, "lead-2", "TeamArchitect"))
+        assert sorted([first["outcome"], second["outcome"]]) == ["not_allowed", "ok"]
+        winner = first if first["outcome"] == "ok" else second
+        session = winner["session"]["body"]["session"]
+        other = await host(stack, broker, layout, other_profile)
+        assert (await open_session(other, "other-lead", "TeamArchitect"))["outcome"] == "not_allowed"
+        # Reopening one lead ends its earlier session before the replacement
+        # is signed. A delayed renewal cannot revive the old authority.
+        replacement = await lead.live.request("sessions.open", {
+            "request_id": "reopen-lead", "agent": winner["session"]["body"]["agent"],
+            "agent_type": "TeamArchitect", "definition_sha256": DEFINITION,
+        }, audience(lead), team=TEAM)
+        assert replacement.raw["body"]["outcome"] == "ok"
+        assert (await renew_session(lead, session))["outcome"] == "not_allowed"
+        session = replacement.raw["body"]["session"]["body"]["session"]
+        stop.set()
+        await asyncio.wait_for(serving, timeout=10)
+        stop = asyncio.Event()
+        serving = await team_services(stack, broker, layout, stop)
+        try:
+            assert (await open_session(lead, "lead-3", "TeamArchitect"))["outcome"] == "not_allowed"
+            assert (await renew_session(lead, session))["outcome"] == "ok"
+            bucket = await lead.nc.jetstream().key_value("UA1_CERTS")
+            key = f"session.{lead.identity.installation}.{TEAM}.{session}"
+            saved = await bucket.get(key)
+            await bucket.put(key, b"{}")
+            try:
+                # An unverified session record may be a lead's: a lead's open is answered, naming
+                # the key, and refused; a worker's open does not depend on it.
+                refused = await open_session(other, "lead-with-unreadable-records", "TeamArchitect")
+                assert refused["outcome"] == "runtime_error"
+                assert f"{key} (invalid_body)" in refused["message"]
+                assert (await open_session(other, "researcher-beside-bad-record"))["outcome"] == "ok"
+            finally:
+                await bucket.put(key, saved.value)
+            assert (await close_session(lead, session))["outcome"] == "ok"
+            assert (await open_session(lead, "lead-4", "TeamArchitect"))["outcome"] == "ok"
+        finally:
+            stop.set()
+            await asyncio.wait_for(serving, timeout=10)
+
+
+@pytest.mark.asyncio
 async def test_every_refused_session_request_is_logged(broker: str, tmp_path: Path, caplog) -> None:
     """Plan 13B.12: a session request its certificate does not allow is refused, and the refusal is logged."""
 
