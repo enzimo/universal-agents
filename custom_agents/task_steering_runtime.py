@@ -54,12 +54,16 @@ from custom_messages.enums import (
     TaskSteeringStatusCode,
     TaskSteeringType,
 )
+from custom_agents.steering_history_events import (
+    GUIDANCE_ACCEPTED_EVENT,
+    GUIDANCE_APPLIED_EVENT,
+    GUIDANCE_STEERING_KEY,
+    HISTORY_EVENT_KEY,
+)
 from id_generation import new_id
 from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
 
 logger = logging.getLogger(__name__)
-GUIDANCE_ACCEPTED_EVENT = "task_steering_proactive_guidance_accepted"
-GUIDANCE_APPLIED_EVENT = "task_steering_proactive_guidance_applied"
 
 
 @dataclass
@@ -412,13 +416,13 @@ async def _record_guidance_history(
         entry_type=TaskHistoryType.TASK_EVENT,
         importance=TaskHistoryImportance.HIGH,
         details={
-            "event": GUIDANCE_APPLIED_EVENT
+            HISTORY_EVENT_KEY: GUIDANCE_APPLIED_EVENT
             if applied
             else GUIDANCE_ACCEPTED_EVENT,
             "steering_id": steering.steering_id,
             "conversation_id": steering.conversation_id,
             "dedupe_key": steering.idempotency_key or steering.steering_id,
-            **({"steering": steering.model_dump(mode="json")} if not applied else {}),
+            **({GUIDANCE_STEERING_KEY: steering.model_dump(mode="json")} if not applied else {}),
         },
     )
     return entry is not None
@@ -1345,7 +1349,7 @@ def _saved_proactive_guidance(
     read_by_turn: set[str] = set()
     for entry in getattr(getattr(task_info, "task", None), "execution_history", []) or []:
         details = entry.details or {}
-        event = details.get("event")
+        event = details.get(HISTORY_EVENT_KEY)
         if event == "turn_action_batch_prepared" and batch_exists(details.get("batch_id", "")):
             for key in read_by_turn:
                 pending.pop(key, None)
@@ -1359,8 +1363,8 @@ def _saved_proactive_guidance(
         seen.add(key)
         if event == GUIDANCE_APPLIED_EVENT:
             read_by_turn.add(key)
-        elif "steering" in details:
-            pending[key] = TaskSteering.model_validate(details["steering"])
+        elif GUIDANCE_STEERING_KEY in details:
+            pending[key] = TaskSteering.model_validate(details[GUIDANCE_STEERING_KEY])
     return pending, seen
 
 

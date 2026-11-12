@@ -150,6 +150,7 @@ class ConversationStore:
         task_status: str = "accepted",
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        attachments: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         return self._repository.append_turn(
             conversation_id=conversation_id,
@@ -168,7 +169,24 @@ class ConversationStore:
             task_status=task_status,
             memory_review_status=memory_review_status,
             owner_canonical_user_id=owner_canonical_user_id,
+            attachments=attachments,
         )
+
+    # The files people sent with each turn. Only trusted runtime code calls
+    # these (custom_agents.conversation_attachments); turn records themselves
+    # show files without their storage (storage.conversation_repository).
+    def merge_turn_attachments(
+        self, *, conversation_id: str, task_id: str, attachments: list[dict[str, Any]]
+    ) -> Optional[list[dict[str, Any]]]:
+        return self._repository.merge_turn_attachments(
+            conversation_id=conversation_id, task_id=task_id, attachments=attachments
+        )
+
+    def list_conversation_attachments(self, conversation_id: str, *, limit: int) -> list[dict[str, Any]]:
+        return self._repository.list_conversation_attachments(conversation_id, limit=limit)
+
+    def find_conversation_attachment(self, conversation_id: str, attachment_id: str) -> Optional[dict[str, Any]]:
+        return self._repository.find_conversation_attachment(conversation_id, attachment_id)
 
     def append_clarification(
         self,

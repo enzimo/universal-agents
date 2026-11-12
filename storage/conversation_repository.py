@@ -47,6 +47,12 @@ _ATTACHMENT_ID_KEY = "attachment_id"
 # Where a listed or found file was sent: added to the stored record when read.
 ATTACHMENT_TURN_INDEX_KEY = "turn_index"
 ATTACHMENT_TASK_ID_KEY = "task_id"
+# The fields of a saved file that turn records show. Turns reach agents through
+# the conversation tools (custom_tools.providers.context_memory), so they never
+# carry where the bytes are stored or their digest; only the trusted lookups
+# (list_conversation_attachments, find_conversation_attachment) return whole
+# records.
+TURN_ATTACHMENT_FIELDS = ("attachment_id", "filename", "content_type", "kind", "size_bytes")
 
 
 def utc_now_iso() -> str:
@@ -139,6 +145,12 @@ def _merged_attachments(
             seen.add(attachment_id)
             merged.append(dict(item))
     return merged
+
+
+def turn_attachment_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """A saved file as turn records show it: name, type and size, never its storage."""
+
+    return {field: record[field] for field in TURN_ATTACHMENT_FIELDS if field in record}
 
 
 def _like_contains(value: str) -> str:
@@ -1046,7 +1058,7 @@ class _RelationalConversationRepository:
             "summary_generated_at": row["summary_generated_at"],
             "tool_artifact_manifest": manifest,
             "gateway_context": gateway_context if isinstance(gateway_context, dict) else {},
-            "attachments": self._stored_attachments(row["attachments_json"], task_id=row["task_id"]),
+            "attachments": self._shown_attachments(row["attachments_json"], task_id=row["task_id"]),
             "memory_review_status": row["memory_review_status"] or TURN_MEMORY_REVIEW_UNREVIEWED,
             "memory_review_job_id": row["memory_review_job_id"],
             "memory_review_queued_at_utc": row["memory_review_queued_at_utc"],
@@ -1194,6 +1206,11 @@ class _RelationalConversationRepository:
         )
         return []
 
+    def _shown_attachments(self, raw_value: Any, *, task_id: Any) -> list[dict[str, Any]]:
+        """A turn's saved files as turn records show them (``turn_attachment_summary``)."""
+
+        return [turn_attachment_summary(item) for item in self._stored_attachments(raw_value, task_id=task_id)]
+
     def merge_turn_attachments(
         self, *, conversation_id: str, task_id: str, attachments: list[dict[str, Any]]
     ) -> Optional[list[dict[str, Any]]]:
@@ -1297,7 +1314,9 @@ class _RelationalConversationRepository:
         merged = self.merge_turn_attachments(
             conversation_id=existing["conversation_id"], task_id=existing["task_id"], attachments=attachments
         )
-        return {**existing, "attachments": merged if merged is not None else existing["attachments"]}
+        if merged is None:
+            return existing
+        return {**existing, "attachments": [turn_attachment_summary(item) for item in merged]}
 
     def append_clarification(
         self,

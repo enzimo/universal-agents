@@ -16,7 +16,11 @@ from pathlib import Path
 import pytest
 
 from storage.config import resolve_storage_settings
-from storage.conversation_repository import CONVERSATION_ATTACHMENT_LIST_LIMIT, create_conversation_repository
+from storage.conversation_repository import (
+    CONVERSATION_ATTACHMENT_LIST_LIMIT,
+    TURN_ATTACHMENT_FIELDS,
+    create_conversation_repository,
+)
 from tests.conversation_attachment_records import (
     OWNER,
     add_turn,
@@ -34,6 +38,10 @@ def _open(db_path: Path):
     return create_conversation_repository(settings, logger=LOGGER, artifacts_dir=db_path.parent / "artifacts")
 
 
+def _shown(record: dict) -> dict:
+    return {key: record[key] for key in TURN_ATTACHMENT_FIELDS}
+
+
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
     return tmp_path / "task_history.db"
@@ -47,9 +55,15 @@ def test_a_turns_files_are_saved_with_it_and_read_back_after_reopening(db_path: 
 
     reopened = _open(db_path)
     assert ids(turn["attachments"]) == ["att_photo", "att_notes"]
-    assert reopened.get_turn_by_task_id("task_1")["attachments"] == [photo, notes]
-    assert reopened.get_conversation_turns(conversation_id="conv_1")[0]["attachments"] == [photo, notes]
-    assert reopened.get_recent_turns("conv_1")[0]["attachments"] == [photo, notes]
+    # Turn records show each file's name, type and size; the whole record
+    # (with where the bytes are stored) comes only from the trusted lookups.
+    shown = [_shown(photo), _shown(notes)]
+    assert reopened.get_turn_by_task_id("task_1")["attachments"] == shown
+    assert reopened.get_conversation_turns(conversation_id="conv_1")[0]["attachments"] == shown
+    assert reopened.get_recent_turns("conv_1")[0]["attachments"] == shown
+    assert {key for item in shown for key in item} == set(TURN_ATTACHMENT_FIELDS)
+    assert reopened.find_conversation_attachment("conv_1", "att_photo")["storage_refs"] == photo["storage_refs"]
+    assert reopened.list_conversation_attachments("conv_1")[0]["sha256"] == notes["sha256"]
     # A turn without files reads as an empty list.
     assert add_turn(reopened, "conv_1", "task_2")["attachments"] == []
     # The saved list counts toward the person's stored conversation text.
