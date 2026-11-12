@@ -482,10 +482,16 @@ def test_upgrading_a_0_9_instance_config_file_removes_the_retired_settings_and_k
     assert "max_concurrent_top_level_tasks" not in loaded.agent.model_dump()
 
 
-def test_upgrading_a_config_yaml_removes_the_setting_and_keeps_a_backup(tmp_path: Path) -> None:
+def test_upgrading_a_config_yaml_removes_the_retired_settings_and_keeps_a_backup(tmp_path: Path) -> None:
+    """Schema 10 is what 0.9 releases write; their config.example.yaml also holds the concurrency setting."""
+
     path = tmp_path / "config.yaml"
     path.write_text(
-        yaml.safe_dump({"schema_version": 10, "transport": {"presence_max_age_seconds": 600.0, "max_deliver": 5}}),
+        yaml.safe_dump({
+            "schema_version": 10,
+            "transport": {"presence_max_age_seconds": 600.0, "max_deliver": 5},
+            "agent": {"max_concurrent_top_level_tasks": 1, "max_queued_top_level_tasks": 22},
+        }),
         encoding="utf-8",
     )
 
@@ -493,8 +499,16 @@ def test_upgrading_a_config_yaml_removes_the_setting_and_keeps_a_backup(tmp_path
 
     assert (result.original_version, result.migrated_version) == (10, CONFIG_SCHEMA_VERSION)
     assert "10 -> 11: the presence stream was removed; transport.presence_max_age_seconds removed" in result.applied_steps
-    assert yaml.safe_load(path.read_text(encoding="utf-8"))["transport"] == {"max_deliver": 5}
-    assert yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["transport"]["presence_max_age_seconds"] == 600.0
+    assert (
+        "11 -> 12: remove the obsolete per-agent concurrency setting; agent.max_concurrent_top_level_tasks removed"
+        in result.applied_steps
+    )
+    upgraded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    backup = yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))
+    assert upgraded["transport"] == {"max_deliver": 5}
+    assert upgraded["agent"] == {"max_queued_top_level_tasks": 22}
+    assert backup["transport"]["presence_max_age_seconds"] == 600.0
+    assert backup["agent"]["max_concurrent_top_level_tasks"] == 1
 
 
 def test_the_upgrade_step_without_the_setting_only_advances_the_version(tmp_path: Path) -> None:
