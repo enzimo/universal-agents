@@ -22,6 +22,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from access_control.ownership import request_context_id, sent_files_access, steering_context_id
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.enums import RoutingType
+from custom_messages.transport_codec import decode_envelope, encode_envelope
 from tests.broker_access_support import forget_task_context_keys, use_gateway_key
 from tests.test_gateway_parallel_threads import _gateway, _send, _web_chat_thread
 from tests.test_gateway_task_steering import RUN_STATE_RUNNING
@@ -85,6 +86,11 @@ async def test_a_request_and_its_guidance_carry_contexts_naming_the_task_and_con
     assert guidance_context.context_id == steering_context_id(guidance.msg_content)
     assert resent_context.context_id == guidance_context.context_id
     assert resent.msg_meta.gateway_context.task_context.signature != guidance.msg_meta.gateway_context.task_context.signature
+    # The lead derives the same ids from the messages as NATS delivers them.
+    request = decode_envelope(encode_envelope(request))
+    guidance = decode_envelope(encode_envelope(guidance))
+    assert request_context_id(request.msg_content) == request_context.context_id
+    assert steering_context_id(guidance.msg_content) == guidance_context.context_id
 
     # What the team lead decides for each message's files, from the message as it arrives.
     person = request_context.person_id
