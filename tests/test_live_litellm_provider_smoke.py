@@ -39,6 +39,7 @@ from custom_agents.runtime_guardrails import RuntimeGuardrailsPlugin
 from custom_agents.model_keys import ModelKeyError, ModelKeys
 from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
 from custom_agents.strands_team import AGENT_TYPE_MAP, build_system_prompt
+from custom_agents.conversation_attachments import ScopeFiles, SentFile, render_earlier_files
 from custom_agents.structured_llm_messages import (
     CompatibleModelAgentTurnDecision,
     DelegateTaskAction,
@@ -46,6 +47,7 @@ from custom_agents.structured_llm_messages import (
     ModelAgentTurnDecision,
     TaskResponseAction,
 )
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.enums import MessageMetaType
 from custom_tools.providers.runtime_settings import plan_runtime_settings_change
 from model_providers.endpoints import openai_compatible_endpoint
@@ -239,7 +241,7 @@ def _manager_system_prompt() -> str:
 
 
 def _turn_decision_output_model(
-    settings: dict[str, Any] | None = None,
+    settings: dict[str, Any] | None = None, *, is_team_lead: bool | None = None
 ) -> type[ModelAgentTurnDecision] | type[CompatibleModelAgentTurnDecision]:
     settings = settings or _runtime_settings()
     return turn_executor_for(
@@ -247,17 +249,19 @@ def _turn_decision_output_model(
             model_provider=settings["model_provider"],
             model_id=settings["model_id"],
             litellm_api_base=settings["litellm_api_base"],
+            is_team_lead=is_team_lead,
         )
     )._turn_decision_structured_output_model()
 
 
-def _turn_decision_output_prompt(settings: dict[str, Any] | None = None) -> str:
+def _turn_decision_output_prompt(settings: dict[str, Any] | None = None, *, is_team_lead: bool | None = None) -> str:
     settings = settings or _runtime_settings()
     return turn_executor_for(
         SimpleNamespace(
             model_provider=settings["model_provider"],
             model_id=settings["model_id"],
             litellm_api_base=settings["litellm_api_base"],
+            is_team_lead=is_team_lead,
         )
     )._turn_decision_structured_output_prompt()
 
@@ -543,6 +547,49 @@ def test_live_litellm_model_agent_turn_decision_structured_output_works(stream: 
     )
 
     _assert_turn_decision_answer(result, "READY")
+
+
+def test_live_litellm_team_lead_passes_an_earlier_file_to_a_specialist_by_id() -> None:
+    """The team lead names a file from its earlier-files list in ``attachment_ids``.
+
+    The team lead's system prompt and turn schema, and the earlier-files section
+    as its prompt shows it (``render_earlier_files``): the photo came with an
+    earlier turn, so leaving ``attachment_ids`` out would pass no file. This
+    checks that the provider carries the field through structured output and
+    that the model uses it; the runtime's lookup is tested without a model
+    (``tests/test_delegation_attachment_selection.py``).
+    """
+
+    settings = _runtime_settings()
+    earlier = [
+        UserTaskAttachment(
+            attachment_id=attachment_id, filename=filename, content_type=content_type, kind=kind, size_bytes=2048,
+            sha256="ab" * 32,
+        )
+        for attachment_id, filename, content_type, kind in (
+            ("att_photo_1", "photo.png", "image/png", "image"),
+            ("att_notes_1", "notes.txt", "text/plain", "document"),
+        )
+    ]
+    files_section = render_earlier_files(
+        ScopeFiles(current=(), earlier=tuple(SentFile(attachment, turn_index=1) for attachment in earlier))
+    )
+    agent = Agent(
+        system_prompt=_manager_system_prompt(),
+        model=_litellm_model(stream=None, max_tokens=1200, settings=settings),
+        tools=[],
+    )
+
+    result = agent(
+        "Current request (from the person): Have a specialist make a shopping list from the photo I sent "
+        f"earlier.\n\n{files_section}\n\nDelegate this to WebResearchAgent now with one delegate_task action.",
+        structured_output_model=_turn_decision_output_model(settings, is_team_lead=True),
+        structured_output_prompt=_turn_decision_output_prompt(settings, is_team_lead=True),
+    )
+
+    _assert_turn_decision_delegation(result, expected_target="WebResearchAgent")
+    [action] = getattr(result, "structured_output").to_runtime_decision().actions
+    assert action.attachment_ids == ["att_photo_1"]
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["non_streaming", "streaming"])
