@@ -8,6 +8,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -87,6 +88,24 @@ def nats_transport_config_from_env(
     return NatsTransportConfig(**values)
 
 
+def nats_connect_options(config: NatsTransportConfig) -> dict[str, Any]:
+    """``nats.connect`` arguments for ``config``'s servers and login, as the transport adapter passes them.
+
+    For a test helper's own plain connection to the live server. The credentials file counts
+    too: a server that accepts only that file refuses a connection without it.
+    """
+
+    options: dict[str, Any] = {"servers": list(config.servers)}
+    for option, value in (
+        ("user", config.user),
+        ("password", config.password),
+        ("user_credentials", config.credentials_file),
+    ):
+        if value:
+            options[option] = value
+    return options
+
+
 def response_route_for_team(team_id: str) -> str:
     return f"{team_id}_gateway_live_user_{new_id_suffix()}_response"
 
@@ -105,32 +124,6 @@ class LiveNatsQueue:
     async def purge(self) -> None:
         while not self._messages.empty():
             self._messages.get_nowait()
-
-
-async def delete_team_streams(team_id: str, *, transport: TransportSettings | None = None) -> None:
-    """Delete the streams named for a live test's own team (its work and dead letters) when it ends.
-
-    Each such test runs a team id of its own with a random part, so the streams whose names
-    start with that team's stream prefix are its own, also on a shared server, and another
-    run's are never touched. With a configured subject prefix every team shares one set of
-    streams, so nothing is deleted. Call it also when the test failed: a long-lived server
-    ran out of storage after about 1,500 streams that tests had left behind.
-    """
-
-    import nats
-
-    config = nats_transport_config_from_env(transport=transport)
-    if config.subject_prefix:
-        return
-    own = NatsSubjectMapper(team_id=team_id).work_stream_name().removesuffix("WORK")
-    connection = await nats.connect(servers=list(config.servers), user=config.user, password=config.password)
-    try:
-        jetstream = connection.jetstream()
-        for stream in await jetstream.streams_info():
-            if stream.config.name and stream.config.name.startswith(own):
-                await jetstream.delete_stream(stream.config.name)
-    finally:
-        await connection.close()
 
 
 class LiveNatsClient:

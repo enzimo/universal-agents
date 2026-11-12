@@ -287,6 +287,10 @@ It starts isolated Sealbox and broker services using `sealbox-server` and
 `SEALBOX_CLI_PATH`. It checks the first team and personal saves, onboarding
 handover consumption, signed lookup, owner isolation, restart persistence and
 damaged tenant refusal. Missing binaries are an explicit coverage gap.
+Each test's `sealbox-server` writes its output to a log file beside its token
+file; a start counts only when that log names the readiness check's
+`x-request-id`, so the binary must log request ids with
+`RUST_LOG=info,tower_http=debug`, as every Sealbox release so far does.
 Container acceptance must verify a real onboarding credential save and signed
 lookup before and after restart; service health alone does not prove storage
 works. Never include the key in logs or acceptance output.
@@ -327,6 +331,55 @@ transport adapter. Otherwise the other connection can publish before the server
 has the subscription, and the test fails now and then. One `flush()` is not
 enough in nats-py 2.16.0; the helper's docstring explains why. Durable consumers
 and messages sent on the subscribing connection itself need no wait.
+
+Live tests share one long-lived NATS server, and a stream left there stays
+until someone deletes it (a shared test server once ran out of storage after
+about 1,500). Mark every test that creates streams, key-value buckets or object
+stores on it `nats`: a fixture in `tests/conftest.py` then deletes, when the test
+ends, passed or failed, each stream the test's own process created there. The
+server decides which streams those are: each create carries the test's random
+token in the stream's metadata, so a stream of the same name that another run
+created stays (`tests.live_nats_support.OwnedStreams` explains how). Give every
+name a random part, such as a random team id. The fixture does not delete:
+
+- names every run on the server shares by design (`shared_stream_names`), such
+  as `KV_UA1_HOSTS` or a subject prefix's streams; delete the keys your test
+  wrote in them yourself;
+- streams a child process created, such as a launched runtime's; delete those
+  by their exact name.
+
+A shared helper whose streams only the fixture deletes calls
+`require_stream_recorder`, so a test that uses it without the marker fails at
+once instead of leaving streams behind. The deletion logs in with the live
+settings, `credentials_file` included. When the server is down or does not
+answer, it gives up within 30 seconds and reports an error at the test's
+teardown that names the server and the streams.
+
+A test that needs a NATS server of its own uses
+`tests.own_nats_server.own_nats_server`: the server picks its own port, and the
+test reads it from that server's log, so it never talks to another test's
+server. A test that starts nats-server, the broker or `sealbox-server` stops it
+with a helper from `tests.owned_processes`. Each one resumes a paused process,
+and kills and reaps one that does not stop within its time limit:
+
+- `stopped_at_exit` wraps the server's lifetime in a `with` block;
+- `require_graceful_stop` stops it outside such a block, as in a restart or a
+  fixture's teardown;
+- `stop_owned_process` is only for a path that is already raising an error,
+  which stays the error the test reports.
+
+A server that had to be killed has a shutdown defect, and pytest shows the
+warning about it only for a failing test. So the first two fail a test that
+otherwise passed when its server had to be killed; `stopped_at_exit` keeps the
+test body's own error when the body failed.
+
+Until issue #117 is fixed, a failure late in a `tests/test_live_agent_hosts.py`
+test can leave its agent hosts running when pytest closes the event loop, and
+the run then hangs before pytest prints the failure. Stop such a run with SIGINT
+(Ctrl-C, or `timeout -s INT <seconds>` for a run nobody watches), which still
+prints the failure; SIGTERM or SIGKILL loses it. Adding
+`-o faulthandler_timeout=60` prints the stacks of a test that runs longer than a
+minute.
 
 The knowledge base privacy scenarios call the configured model many times, so
 they require `RUN_LIVE_KNOWLEDGE_PRIVACY=1`. The external and full profiles

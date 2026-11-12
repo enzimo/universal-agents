@@ -12,13 +12,17 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+
+from tests.owned_processes import record_started_processes, stop_owned_process, stopped_at_exit
 
 REPO = Path(__file__).resolve().parents[1]
 BASE = REPO / "test_results" / "team_transfer_live"
@@ -45,24 +49,44 @@ def broker_env(config) -> dict[str, str]:
     return env
 
 
-def start_broker(config_path: Path, config, port: int) -> subprocess.Popen:
-    log = open(BASE / f"broker-{port}.log", "w")
-    proc = subprocess.Popen(
-        [PY, "-m", "assistant_cli", "run-secure-tool-broker", "--config", str(config_path),
-         "--env", str(config.layout.team_env_path), "--host", "127.0.0.1", "--port", str(port)],
-        cwd=REPO, env=broker_env(config), stdout=log, stderr=subprocess.STDOUT,
-    )
-    import httpx
-    for _ in range(120):
+def start_broker(config_path: Path, config) -> tuple[subprocess.Popen, int]:
+    """Start a broker and return it with its port, once its own log says it listens there.
+
+    The broker needs a fixed port, so the test picks a free one and closes it before the
+    broker binds it. Another test's server can take the port in between: the broker then
+    stops with "address already in use" while the other server answers on the port. The
+    broker counts as started only when its own log says it listens while it still runs;
+    when it could not bind, it starts again on another port. A broker this start began is
+    stopped however the wait ends (an error, Ctrl-C, the deadline), since no caller holds it yet.
+    """
+
+    for _attempt in range(3):
+        port = free_port()
+        log_path = BASE / f"broker-{port}.log"
+        with log_path.open("w") as log:
+            proc = subprocess.Popen(
+                [PY, "-m", "assistant_cli", "run-secure-tool-broker", "--config", str(config_path),
+                 "--env", str(config.layout.team_env_path), "--host", "127.0.0.1", "--port", str(port)],
+                cwd=REPO, env=broker_env(config), stdout=log, stderr=subprocess.STDOUT,
+            )
+        listening = f"Secure tool broker listening on http://127.0.0.1:{port} "
         try:
-            if httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code == 200:
-                return proc
-        except httpx.HTTPError:
-            pass
-        if proc.poll() is not None:
-            raise SystemExit(f"broker exited; see {log.name}")
-        time.sleep(0.5)
-    raise SystemExit("broker did not start")
+            deadline = time.monotonic() + 60
+            while True:
+                text = log_path.read_text()
+                if proc.poll() is not None:
+                    if "address already in use" in text:
+                        break
+                    raise SystemExit(f"broker exited; see {log_path}")
+                if listening in text:
+                    return proc, port
+                if time.monotonic() >= deadline:
+                    raise SystemExit(f"broker did not start; see {log_path}")
+                time.sleep(0.2)
+        except BaseException:
+            stop_owned_process(proc, name=f"broker on port {port}", timeout=10)
+            raise
+    raise SystemExit("every port the test picked was taken before the broker could listen on it")
 
 
 def cli(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -128,15 +152,11 @@ def run(base: Path) -> None:
     passfile = BASE / "passphrase"
     passfile.write_text(PASSPHRASE + "\n")
     out = BASE / "team.uatransfer"
-    port = free_port()
-    old_broker = start_broker(config_path, config, port)
+    old_broker, port = start_broker(config_path, config)
     cli_env = dict(os.environ, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port}")
-    try:
+    with stopped_at_exit(old_broker, name="old instance's broker", timeout=10):
         exported = cli("team", "export", "--config", str(config_path), "--owner", "usr_ana", "--out", str(out),
                        "--passphrase-file", str(passfile), env=cli_env)
-    finally:
-        old_broker.terminate()
-        old_broker.wait(10)
     assert exported.returncode == 0
     raw = out.read_bytes()
     for secret in (GITHUB, MODEL, "e2e-bot-token"):
@@ -157,17 +177,13 @@ def run(base: Path) -> None:
     assert (new_root / "instance_config.yaml").is_file()
 
     new_config = GatewayInstanceConfig.load(new_root / "instance_config.yaml")
-    port2 = free_port()
-    new_broker = start_broker(new_root / "instance_config.yaml", new_config, port2)
-    try:
+    new_broker, port2 = start_broker(new_root / "instance_config.yaml", new_config)
+    with stopped_at_exit(new_broker, name="new instance's broker", timeout=10):
         creds = cli("team", "import-credentials", "--in", str(out), "--config", str(new_root / "instance_config.yaml"),
                     "--review", str(review_dir), "--passphrase-file", str(passfile), env=dict(clean_env, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port2}"))
         repeated = cli("team", "import-credentials", "--in", str(out), "--config", str(new_root / "instance_config.yaml"),
                        "--review", str(review_dir), "--passphrase-file", str(passfile), env=dict(clean_env, SECURE_TOOL_BROKER_INTERNAL_BASE_URL=f"http://127.0.0.1:{port2}"))
         assert repeated.returncode == 0 and "Stored 0 of 0" in repeated.stdout
-    finally:
-        new_broker.terminate()
-        new_broker.wait(10)
     assert creds.returncode == 0
 
     for key in list(os.environ):
@@ -196,3 +212,74 @@ def run(base: Path) -> None:
 @pytest.mark.live
 def test_team_transfer_end_to_end_with_real_broker_processes(tmp_path: Path) -> None:
     run(tmp_path / "work")
+
+
+@pytest.mark.live
+def test_the_broker_start_skips_a_port_another_server_took_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import http.server
+    import threading
+
+    from assistant_gateway.bootstrap import bootstrap_instance
+    from assistant_gateway.config import GatewayInstanceConfig
+    from assistant_gateway.instance_secrets import ensure_internal_credential_env_file
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    # Another test's server takes the first port this start picks.
+    other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    threading.Thread(target=other.serve_forever, daemon=True).start()
+    taken = other.server_address[1]
+    ports = iter([taken])
+    picked = free_port
+    monkeypatch.setattr(sys.modules[__name__], "free_port", lambda: next(ports, None) or picked())
+    monkeypatch.setattr(sys.modules[__name__], "BASE", tmp_path)
+    config = GatewayInstanceConfig.create(instance_name="alpha", instance_root=str(tmp_path / "old"), team_id="team_e2e", timezone="UTC")
+    config.security_layer.credential_state_backend.mode = "files"
+    config.security_layer.sealbox.enabled = False
+    config_path = config.save(tmp_path / "old" / "instance_config.yaml")
+    bootstrap_instance(config)
+    ensure_internal_credential_env_file(config)
+    try:
+        broker, port = start_broker(config_path, config)
+        with stopped_at_exit(broker, name="broker", timeout=10):
+            assert port != taken and broker.poll() is None
+            assert "address already in use" in (tmp_path / f"broker-{taken}.log").read_text()
+    finally:
+        other.shutdown()
+
+
+def test_a_broker_the_start_began_is_stopped_when_the_wait_for_it_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    stand_in = tmp_path / "python"
+    stand_in.write_text("#!/bin/sh\nexec sleep 60\n")
+    stand_in.chmod(0o755)
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "PY", str(stand_in))
+    monkeypatch.setattr(module, "BASE", tmp_path)
+
+    def failing_wait(_seconds: float) -> None:
+        raise RuntimeError("the readiness check failed")
+
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=time.monotonic, sleep=failing_wait))
+    config = SimpleNamespace(
+        layout=SimpleNamespace(team_env_path=tmp_path / "team.env"),
+        broker_credentials_path=tmp_path / "credentials",
+        credential_catalog_database_path=tmp_path / "catalog.db",
+        instance_root_path=tmp_path,
+    )
+    with record_started_processes() as started:
+        with pytest.raises(RuntimeError, match="the readiness check failed"):
+            start_broker(tmp_path / "instance_config.yaml", config)
+        [broker] = started
+        assert broker.returncode == -signal.SIGTERM

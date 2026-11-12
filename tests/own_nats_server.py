@@ -12,7 +12,6 @@ log, once the server says it is ready, so a test only ever talks to its own serv
 from __future__ import annotations
 
 import re
-import signal
 import subprocess
 import time
 from contextlib import contextmanager
@@ -20,6 +19,8 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
+
+from tests.owned_processes import stopped_at_exit
 
 _LISTENING = re.compile(r"Listening for client connections on 127\.0\.0\.1:(\d+)")
 _READY = "Server is ready"
@@ -42,7 +43,10 @@ def own_nats_server_process(executable: str, folder: Path,
     with log_path.open("w") as log:
         process = subprocess.Popen([executable, "-js", "-sd", str(folder / "store"), "-a", "127.0.0.1", "-p", "-1",
                                     *arguments], stdout=log, stderr=log)
-        try:
+        # Resumes a paused server and kills one that does not stop in time, so a hung
+        # shutdown never leaves it running: the test's own error stays its error, and a
+        # test that passed fails, naming the server.
+        with stopped_at_exit(process, name=f"nats-server in {folder}"):
             deadline = time.monotonic() + 5
             while True:
                 text = log_path.read_text()
@@ -55,8 +59,3 @@ def own_nats_server_process(executable: str, folder: Path,
                     pytest.fail("NATS did not start within five seconds")
                 time.sleep(0.02)
             yield f"nats://127.0.0.1:{listening.group(1)}", process
-        finally:
-            if process.poll() is None:
-                process.send_signal(signal.SIGCONT)  # a test may have paused it
-            process.terminate()
-            process.wait(timeout=5)

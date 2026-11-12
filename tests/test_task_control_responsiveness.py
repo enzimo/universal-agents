@@ -27,7 +27,6 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from custom_tools.comms_tools import TeamComms
-from live_nats_client import delete_team_streams
 from test_live_nats_replacement_semantics import _adapter, _subscribe_queue, _team
 from test_turn_action_outbox import _make_agent
 from tests.pending_work_support import idle_runtime_coordinator
@@ -242,4 +241,3 @@ async def test_controls_remain_available_during_model_work_and_after_stop(tmp_pa
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
         await adapter.close()
-        await delete_team_streams(team)
