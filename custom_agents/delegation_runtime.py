@@ -638,17 +638,20 @@ async def _subtask_files(
 ) -> list[UserTaskAttachment]:
     """The files a new subtask of ``parent_task_info`` gets (``conversation_attachments.delegated_files``).
 
-    Left out or empty, only the parent's own records are read. Ids are looked
-    up among the files the parent may use: its own, then its conversation's,
-    or for a plan step or recovery task its request's (``step_request``, found
-    on the task manager's operation lane; the conversation store is read off
-    the event loop). Logs which case applied.
+    A plan step or recovery task finds its request (``step_request``, on the
+    task manager's operation lane): its own files include the request's, so
+    left out it sends them as a delegation from the request does. Left out,
+    only these records are read; ids are looked up among them, then the
+    parent's conversation's or its request's (the conversation store is read
+    off the event loop). An empty list reads nothing. Logs which case applied.
     """
 
-    if attachment_ids:
+    request_info = None
+    if attachment_ids is None or attachment_ids:
         task_manager = self.task_manager
         # Bound into the operation: the lane copies an operation's arguments.
         request_info = await task_manager.operations_runtime.run(partial(step_request, task_manager), parent_task_info)
+    if attachment_ids:
         scope = await asyncio.to_thread(
             TaskAttachments.load,
             parent_task_info,
@@ -656,7 +659,7 @@ async def _subtask_files(
             request_info=request_info,
         )
     else:
-        scope = TaskAttachments.load(parent_task_info, None)
+        scope = TaskAttachments.load(parent_task_info, None, request_info=request_info)
     files = delegated_files(scope, attachment_ids)
     self._logger.info(
         "A delegated task gets its files. event=delegated_task_files choice=%s parent_task_id=%s subtask_id=%s "

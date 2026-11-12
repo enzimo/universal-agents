@@ -39,6 +39,12 @@ is (``_delegated_task_keeps_files``):
   escalation runs for no task here. The files are kept on the escalation
   only; the run's conversation turn is in the worker, which keeps them there
   when the result arrives.
+- An escalation about work the lead delegated from such an escalation (a
+  specialist it asked for the run needs the person): the delegation links
+  end at the run's escalation, which is that work's request
+  (``_escalation_as_request``) when it works for the same person. The files
+  are kept on the specialist's escalation and on the run's, whose result
+  carries them to the run.
 - Any other delegated task keeps none: a worker's own tasks (only the team
   lead holds escalations, and answers go only to it), and an escalation
   linked to a task here that cannot take them, such as another person's
@@ -69,6 +75,7 @@ from access_control.ownership import OwnershipDecision
 from custom_agents.conversation_attachments import (
     DELEGATED_TASK_REASON,
     ESCALATION_RESULT_MESSAGE_TYPE,
+    ROOT_OTHER_PERSON,
     RequestLink,
     UploadFolders,
     answer_files,
@@ -104,11 +111,12 @@ async def keep_sent_files(
     task has ended, nothing else is recorded and None is returned. Then they
     are merged into the task's conversation turn. For a plan step, a
     recovery task or a worker's escalation, the turn is its request's, and
-    the request's history gets a files entry too; a delegated task with no
-    such request keeps them only when it is the team lead's escalation from
-    work it never held, and then on itself only (module docstring); any
-    other delegated task keeps none (logged with ``delegated_task``). A
-    store error propagates: the
+    the request's history gets a files entry too (the request may be the
+    team lead's escalation from work it never held, which has no turn here);
+    a delegated task with no such request keeps them only when it is the
+    team lead's escalation from work it never held, and then on itself only
+    (module docstring); any other delegated task keeps none (logged with
+    ``delegated_task``). A store error propagates: the
     handler has acknowledged nothing yet, so the sender sends the message
     again; recording again adds no file twice and may repeat an entry, which
     the task's files read once per id.
@@ -150,8 +158,9 @@ async def keep_sent_files(
     root_id = root_info.task.task_id
     if await _files_entry(agent, root_id, f"Files sent with {subject} in task {task_id} accepted: {names}", details) is None:
         agent._logger.warning(
-            "A request ended while files sent to one of its steps or delegated tasks were recorded. They are on "
-            "its conversation turn and among that task's files, but not among the request's own files. "
+            "A request ended while files sent to one of its steps or delegated tasks were recorded. They are "
+            "among that task's files and on the request's conversation turn when it has one here, but not among "
+            "the request's own files. "
             "event=sent_files_root_gone task_id=%s root_task_id=%s attachment_ids=%s",
             task_id,
             root_id,
@@ -179,15 +188,18 @@ async def _request_root(agent: Any, task_info: Any) -> RequestLink:
 
     Found by ``conversation_attachments.linked_request`` on the task
     manager's operation lane, only through its plan-step, recovery and
-    delegation links, never from the message. When the task runs for a task
-    here that may not share its files, a warning names both tasks and the
-    reason, and the files stay with a step or are refused for a delegated
-    task (``keep_sent_files``).
+    delegation links, never from the message. The team lead's escalation
+    from work it never held is the request of the work it runs
+    (``_escalation_as_request``). When the task runs for a task here that may
+    not share its files, a warning names both tasks and the reason, and the
+    files stay with a step or are refused for a delegated task
+    (``keep_sent_files``).
     """
 
     task_manager = agent.task_manager
     # Bound into the operation: the lane copies an operation's arguments.
     link: RequestLink = await task_manager.operations_runtime.run(partial(linked_request, task_manager), task_info)
+    link = _escalation_as_request(agent, task_info, link)
     if link.linked and link.info is None:
         agent._logger.warning(
             "Files sent to a step or delegated task cannot be kept on its request. "
@@ -199,14 +211,40 @@ async def _request_root(agent: Any, task_info: Any) -> RequestLink:
     return link
 
 
+def _escalation_as_request(agent: Any, task_info: Any, link: RequestLink) -> RequestLink:
+    """``link`` with the team lead's escalation from work it never held as the request, for the same person.
+
+    The links stop at a task whose parent this agent does not hold
+    (``ROOT_DELEGATED``). When that task is the team lead's record of a
+    worker's escalation (``_team_lead_escalation``), such as one from a
+    scheduled job run, the work the lead delegated from it runs for it as
+    work delegated from a request runs for that request: files a person
+    sends to that work (such as an answer to a specialist's escalation) are
+    kept on the escalation too, whose result carries them to the run
+    (``result_with_answer_files``). Only for the escalation's own person
+    (``owner_person_id``, recorded at admission from verified identity);
+    otherwise the reason becomes ``ROOT_OTHER_PERSON``. Any other link is
+    returned unchanged.
+    """
+
+    root = link.delegated_root
+    if root is None or not _team_lead_escalation(agent, root):
+        return link
+    if root.owner_person_id != task_info.owner_person_id:
+        return RequestLink(link.root_task_id, reason=ROOT_OTHER_PERSON)
+    return RequestLink(link.root_task_id, info=root)
+
+
 def _delegated_task_keeps_files(agent: Any, task_info: Any, request: RequestLink) -> bool:
     """Whether a delegated task keeps the files of an answer the gateway vouched for (module docstring).
 
     Yes when it runs for a request this agent holds for the same person
-    (``request``). Otherwise only the team lead's escalation from work it
-    never held (no link to any task here) keeps them, on itself. A task
-    linked to a task here that cannot take them keeps none: the link says
-    whose work it is, and that work is not the answer's person's.
+    (``request``; the team lead's escalation from work it never held counts,
+    ``_escalation_as_request``). Otherwise only the team lead's escalation
+    from work it never held (no link to any task here) keeps them, on
+    itself. A task linked to a task here that cannot take them keeps none:
+    the link says whose work it is, and that work is not the answer's
+    person's.
     """
 
     if request.info is not None:

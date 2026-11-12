@@ -21,8 +21,10 @@ file and a file sent with guidance. Each delegation goes through the outbox:
 - an unknown id: no subtask and nothing sent; the abort is recorded and the
   model's recovery shows the unknown id and the files it may use, without
   storage paths;
-- a plan step names its request's file and sends it (left out, a step sends
-  its own files: none);
+- a plan step or isolated recovery task names its request's file and an
+  earlier photo; left out, it sends its request's own files, as a delegation
+  from the request does, also when the request's turn has no file records;
+  a step whose request works for someone else sends none of them;
 - a worker can pass on only the files it was given, never its request's
   conversation.
 """
@@ -59,8 +61,11 @@ from custom_messages.enums import MessageMetaType, ProgressState, RequesterType,
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import INVENTORY_LIMIT
 from tests.task_work_support import use_agent
+from tests.test_conversation_attachment_prompt import _focused_task
+from tests.test_conversation_attachments import saved_before_upgrade
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, _admit, _answer, _lead
 from tests.test_escalation_answer_files import NOW, WORKER_TYPE, _last_sent, _sent, _worker
+from tests.test_question_answer_files import _answer_the_question_of, _ModelTurns, _root_working_for_bob
 from tests.test_turn_files_recording import (  # noqa: F401  (autouse fixtures)
     TASK,
     _gateway_meta,
@@ -305,27 +310,74 @@ async def test_an_unknown_id_fails_the_delegation_and_shows_the_files_it_may_use
     assert str(layout.uploads_dir) not in error and "storage_refs" not in error
 
 
+@pytest.mark.parametrize("flag", ["plan_step_task", "isolated_recovery_task"])
 @pytest.mark.asyncio
-async def test_a_plan_step_sends_its_requests_file_when_it_names_it(lead: tuple[Any, _Files]) -> None:
+async def test_a_plan_step_sends_its_requests_files_when_it_leaves_them_out_or_names_them(
+    lead: tuple[Any, _Files], layout: InstanceLayout, flag: str, caplog: pytest.LogCaptureFixture
+) -> None:
     agent, files = lead
-    manager = agent.task_manager
-    assert manager.activate_plan_execution(
-        TASK,
-        steps=[{"title": "Ask", "objective": "Ask the cook."}, {"title": "Answer", "objective": "Answer."}],
-        final_review=False,
-    )
-    [step] = [info for info in manager.task_state.tasks.values() if manager.is_plan_step_task(info.task.task_id)]
+    step = _focused_task(agent, flag, root_id=TASK)
     step_id = step.task.task_id
+    # The step asks Ann, and she answers with a file: the step's own, and its request's too.
+    object.__setattr__(agent, "process_llm_interaction", _ModelTurns(agent))
+    notes = _upload(layout, "step notes.png")
+    await _answer_the_question_of(agent, step, [notes])
 
     await _run_turn(agent, step_id, [_delegation([files.page.attachment_id, files.photo.attachment_id])])
     named = _last_sent(agent, Task).msg_content
-    await _run_turn(agent, step_id, [_delegation()])
+    with caplog.at_level(logging.INFO):
+        await _run_turn(agent, step_id, [_delegation()])
     left_out = _last_sent(agent, Task).msg_content
+    await _run_turn(agent, step_id, [_delegation([])])
+    empty = _last_sent(agent, Task).msg_content
 
     # The step names its request's file and an earlier turn's photo, found through the plan links.
     assert (named.parent_task_id, named.attachments) == (step_id, [files.page, files.photo])
-    # Left out, a step sends its own files: it has none.
+    # Left out, it sends its request's own files in the order they came (the request's file,
+    # the guidance's, the answer's), as a delegation from the request does; never the
+    # conversation's earlier photo.
+    assert (left_out.parent_task_id, left_out.attachments) == (step_id, [files.page, files.page_two, notes])
+    [logged] = _messages(caplog, "delegated_task_files")
+    assert f"choice=parent_files parent_task_id={step_id}" in logged
+    assert (empty.parent_task_id, empty.attachments) == (step_id, [])
+
+
+@pytest.mark.asyncio
+async def test_a_plan_step_sends_its_requests_files_when_the_requests_turn_has_no_records(
+    lead: tuple[Any, _Files],
+) -> None:
+    agent, files = lead
+    # The request was admitted before turns kept their files, and is still running.
+    saved_before_upgrade(agent._conversation_store, TASK)
+    step_id = _focused_task(agent, "plan_step_task", root_id=TASK).task.task_id
+
+    await _run_turn(agent, step_id, [_delegation()])
+    left_out = _last_sent(agent, Task).msg_content
+    await _run_turn(agent, step_id, [_delegation([files.page.attachment_id])])
+    named = _last_sent(agent, Task).msg_content
+
+    assert left_out.attachments == [files.page, files.page_two]
+    assert named.attachments == [files.page]
+
+
+@pytest.mark.asyncio
+async def test_a_step_whose_request_works_for_someone_else_sends_none_of_its_files(
+    lead: tuple[Any, _Files], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent, files = lead
+    step = _focused_task(agent, "plan_step_task", root_id=TASK)
+    step_id = step.task.task_id
+    # As if its request were Bob's: the step may not use that request's files.
+    bob = _root_working_for_bob(agent.task_manager, step, monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        await _run_turn(agent, step_id, [_delegation()])
+        left_out = _last_sent(agent, Task).msg_content
+        with pytest.raises(TurnActionRecoveryScheduled):
+            await _run_turn(agent, step_id, [_delegation([files.page.attachment_id])])
+
     assert (left_out.parent_task_id, left_out.attachments) == (step_id, [])
+    assert f"event=step_request_files_not_usable task_id={step_id} root_task_id={bob} reason=other_person" in caplog.text
 
 
 @pytest.mark.asyncio

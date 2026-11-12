@@ -27,10 +27,14 @@ An escalation from work the lead never held (a worker's scheduled job run or
 maintenance run, a top-level task in the worker) keeps the answer's file on
 the escalation; the result carries it, and the worker keeps it as the run's
 own and on the run's conversation turn, where the next run lists and opens it.
+When the lead delegates work from such an escalation and the specialist doing
+it needs the person, the answer's file is kept on the specialist's escalation
+and on the run's: the specialist and the run both get it.
 
-The other tests cover the refusals: an escalation whose request works for
-someone else, a result that is not for an escalation, records outside the
-upload folders, and which results carry files at all.
+The other tests cover the refusals: an escalation whose request, or whose
+run's escalation, works for someone else, a result that is not for an
+escalation, records outside the upload folders, and which results carry
+files at all.
 
 A worker's own question (a ``TaskQuery`` to the lead) never reaches the
 person: the lead's turn on it must answer it (``_validate_task_turn_llm_output``),
@@ -128,14 +132,14 @@ def layout(tmp_path: Path) -> InstanceLayout:
     return layout
 
 
-def _worker(tmp_path: Path, layout: InstanceLayout):
+def _worker(tmp_path: Path, layout: InstanceLayout, *, agent_id: str = WORKER_ID):
     """A worker of type ``WORKER_TYPE`` on the same host, with its own stores."""
 
     from custom_agents.strands_agent import UniversalAgent
 
-    db_path = str(tmp_path / "worker.db")
+    db_path = str(tmp_path / f"{agent_id}.db")
     tasks = TaskManager(db_path=db_path)
-    tasks.set_owner_identity(WORKER_ID, "Researcher", TEAM, WORKER_TYPE)
+    tasks.set_owner_identity(agent_id, "Researcher", TEAM, WORKER_TYPE)
     with (
         patch("custom_agents.strands_agent.Agent"),
         patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=MagicMock()),
@@ -147,12 +151,12 @@ def _worker(tmp_path: Path, layout: InstanceLayout):
             named_agent_type=WORKER_TYPE,
             is_team_lead=False,
             task_manager=tasks,
-            id=WORKER_ID,
+            id=agent_id,
             instance_root=str(layout.root),
         )
     sequences = itertools.count(1)
     agent.team_comms = SimpleNamespace(send_message=AsyncMock(side_effect=lambda **_kwargs: next(sequences)))
-    agent._conversation_store = ConversationStore(db_path, artifacts_dir=tmp_path / "worker_artifacts")
+    agent._conversation_store = ConversationStore(db_path, artifacts_dir=tmp_path / f"{agent_id}_artifacts")
     agent._create_context_engine()
     return agent
 
@@ -196,12 +200,12 @@ async def _turn(agent: Any, task_id: str, actions: list[Any]) -> Any:
     )
 
 
-def _escalate() -> Any:
+def _escalate(escalation_type: str = "needs_user_input") -> Any:
     return ModelManagerEscalationAction.model_validate(
         {
             "action_type": "manager_escalation",
             "task": {"problem_statement": "Ask the person which diet the recipe must suit."},
-            "escalation": {"escalation_type": "needs_user_input", "reason": QUESTION},
+            "escalation": {"escalation_type": escalation_type, "reason": QUESTION},
         }
     ).to_runtime_action()
 
@@ -356,7 +360,7 @@ class _WorkerTurns:
 
 def _restarted_worker(worker: Any, tmp_path: Path) -> TaskManager:
     manager = TaskManager(db_path=worker.task_manager._db_path)
-    manager.set_owner_identity(WORKER_ID, "Researcher", TEAM, WORKER_TYPE)
+    manager.set_owner_identity(worker.id, "Researcher", TEAM, WORKER_TYPE)
     assert manager.restore_runtime_state() is not None
     return manager
 
@@ -542,6 +546,134 @@ async def test_an_answer_to_a_job_runs_escalation_keeps_its_file_on_the_escalati
     assert inspect_user_attachment._tool_func(attachment_id=notes.attachment_id)["status"] == "success"
 
 
+@pytest.mark.asyncio
+async def test_an_answer_to_a_specialists_escalation_for_a_job_runs_escalation_reaches_the_specialist_and_the_run(
+    tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lead delegates work from a job run's escalation, and the specialist doing it needs the person.
+
+    The specialist's escalation is the lead's delegated task under the work it
+    delegated, under the run's escalation, whose parent (the run) the lead
+    never held: the task manager's links end at the run's escalation. That
+    escalation is the work's request, as the lead's own request is for work
+    delegated from it. Before this change the lead refused the answer's file
+    (``reason=delegated_task``, ``sent_files_root_not_usable reason=delegated``).
+    """
+
+    lead, runner = _lead(tmp_path, layout), _worker(tmp_path, layout)
+    specialist = _worker(tmp_path, layout, agent_id="worker_2")
+    lead_turns, specialist_turns = _LeadTurns(lead, specialist), _WorkerTurns(specialist)
+    object.__setattr__(lead, "process_llm_interaction", lead_turns)
+    object.__setattr__(specialist, "process_llm_interaction", specialist_turns)
+    manager = lead.task_manager
+    # Ann's job run asks the lead for a specialist.
+    await _admit(runner, task_id="task_run", text="Plan this week's dinners.", attachments=[])
+    await _turn(runner, "task_run", [_escalate("needs_specialist_support")])
+    sent = _last_sent(runner, Task)
+    run_escalation_id = sent.msg_content.task_id
+    await task_message_runtime._handle_task_request(lead, sent.msg_content, sent.msg_header, sent.msg_meta)
+    await _deliver_claims(lead, runner)
+    # The lead delegates the work to the specialist.
+    await _turn(
+        lead,
+        run_escalation_id,
+        [
+            DelegateTaskAction(
+                task=StructuredTaskPayload(task_type=MessageMetaType.REQUEST, problem_statement="Plan the dinners."),
+                target_named_agent_type=WORKER_TYPE,
+                requester_type=RequesterType.AGENT_REQUESTER,
+            )
+        ],
+    )
+    sent = _last_sent(lead, Task)
+    work_id = sent.msg_content.task_id
+    await task_message_runtime._handle_task_request(specialist, sent.msg_content, sent.msg_header, sent.msg_meta)
+    await _deliver_claims(specialist, lead)
+    # The specialist needs Ann.
+    await _turn(specialist, work_id, [_escalate()])
+    sent = _last_sent(specialist, Task)
+    escalation_id = sent.msg_content.task_id
+    await task_message_runtime._handle_task_request(lead, sent.msg_content, sent.msg_header, sent.msg_meta)
+    await _deliver_claims(lead, specialist)
+    held = manager.get_task_info(escalation_id)
+    assert (held.task.parent_task_id, held.owner_person_id) == (work_id, ANN)
+    assert held.meta.manager_escalation is not None
+    assert manager.resolve_root_task_id(escalation_id) == run_escalation_id
+    # The lead asks Ann in the specialist's escalation, and she answers with a file.
+    assert manager.get_next_task_to_process() == escalation_id
+    manager.update_main_task_state(escalation_id, ProgressState.IN_PROGRESS, NOW)
+    asked = TaskQuery(task_query_id="task_query_list", query_type=MessageMetaType.REQUEST, parent_task_id=escalation_id, message=QUESTION)
+    manager.add_task_query(escalation_id, asked, agent_name="Lead", agent_id=lead.id)
+    data = _upload(layout, "data.csv")
+    answer = _answer_to([data], task_id=escalation_id)
+
+    with caplog.at_level(logging.INFO):
+        await _deliver(lead, answer, _answer_meta(answer, task_id=escalation_id))
+
+    assert not _messages(caplog, "sent_file_refused")
+    assert not _messages(caplog, "sent_files_root_not_usable")
+    # Kept on the run's escalation, which still waits for the work, as an answer's files.
+    [run_entry] = _files_entries(manager, run_escalation_id)
+    assert (run_entry.details["message_id"], run_entry.details["message_type"]) == (
+        answer.task_query_id,
+        QUESTION_ANSWER_MESSAGE_TYPE,
+    )
+    assert escalation_id in run_entry.summary
+    # And on the specialist's escalation (which ends with the result it sends): its result carries
+    # the file of its answer files entry to the specialist, which keeps it as the work's own.
+    result = lead_turns.result.msg_content
+    assert (result.task_id, result.parent_task_id, result.attachments) == (escalation_id, work_id, [data])
+    assert data.attachment_id in _own(specialist.task_manager, None, work_id)
+    assert specialist_turns.opened[data.attachment_id]["status"] == "success"
+    # The run's escalation's result carries it to the run, which keeps it as its own and on its turn.
+    reply = await result_with_answer_files(
+        lead,
+        Task(task_id=run_escalation_id, parent_task_id="task_run", task_type=MessageMetaType.RESPONSE, answer="Planned."),
+        manager.get_task_info(run_escalation_id).task,
+    )
+    assert reply.attachments == [data]
+    await keep_escalation_result_files(runner, runner.task_manager.get_task_info(run_escalation_id), reply)
+    store = runner._conversation_store
+    assert data.attachment_id in _own(runner.task_manager, store, "task_run")
+    assert [item["attachment_id"] for item in store.get_turn_by_task_id("task_run")["attachments"]] == [data.attachment_id]
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_under_another_persons_run_escalation_keeps_no_files_from_the_answer(
+    tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    lead = _lead(tmp_path, layout)
+    manager = lead.task_manager
+    # Bob's run's escalation, work the lead delegated from it, and Ann's escalation under that work.
+    assert manager.add_task(
+        Task(task_id="task_run_escalation", parent_task_id="task_bobs_run", task_type=MessageMetaType.REQUEST, problem_statement="Need a researcher."),
+        MessageHeader(from_agent_id=WORKER_ID, response_routing_key=WORKER_ID),
+        MessageMeta(conversation_id="conv_bob", manager_escalation=ManagerEscalationContext(escalation_type="needs_specialist_support")),
+        owner_person_id="usr_bob",
+    )
+    assert manager.add_subtask(
+        "task_run_escalation",
+        Task(task_id="task_work", task_type=MessageMetaType.REQUEST, problem_statement="Research."),
+        MessageHeader(from_agent_id=lead.id, to_routing_path="worker_2"),
+        MessageMeta(conversation_id="conv_bob"),
+    )
+    escalation = _escalation_held_by_under(lead, "task_work")
+    assert manager.resolve_root_task_id(escalation.task.task_id) == "task_run_escalation"
+    object.__setattr__(lead, "process_llm_interaction", _ModelTurns(lead))
+    notes = _upload(layout, "list.png")
+    answer = _answer_to([notes], task_id="task_escalation")
+
+    with caplog.at_level(logging.WARNING):
+        await _deliver(lead, answer, _answer_meta(answer, task_id="task_escalation"))
+
+    assert lead.task_manager.get_task_queries("task_escalation")[-1].attachments == []
+    assert all(_files_entries(manager, task_id) == [] for task_id in ("task_escalation", "task_run_escalation"))
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=delegated_task attachment_id={notes.attachment_id} task_id=task_escalation" in refused
+    [warning] = _messages(caplog, "sent_files_root_not_usable")
+    assert "task_id=task_escalation root_task_id=task_run_escalation reason=other_person" in warning
+
+
 # --- Refusals -------------------------------------------------------------------------------------
 
 
@@ -556,10 +688,17 @@ def _escalation_held_by(agent: Any, *, escalation_id: str = "task_escalation") -
         MessageMeta(conversation_id=CONVERSATION),
     )
     assert work is not None
+    return _escalation_held_by_under(agent, "task_work", escalation_id=escalation_id)
+
+
+def _escalation_held_by_under(agent: Any, work_id: str, *, escalation_id: str = "task_escalation") -> Any:
+    """The lead's record of Ann's escalation from the worker doing ``work_id``, as admission keeps it."""
+
+    manager = agent.task_manager
     assert manager.add_task(
         Task(
             task_id=escalation_id,
-            parent_task_id="task_work",
+            parent_task_id=work_id,
             task_type=MessageMetaType.REQUEST,
             problem_statement="Ask which diet.",
         ),

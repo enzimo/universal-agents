@@ -59,18 +59,21 @@ What a task may use (``TaskAttachments``):
   guidance being read and a restart. Only entries this task's runtime wrote
   count: a lead's history also holds copies of its workers' important entries
   (``TaskManager.bubble_subtask_result`` keeps their details), and a worker
-  must not add files to its lead's task that way;
+  must not add files to its lead's task that way. A plan step's or isolated
+  recovery task's own files include its request's own files (below);
 - for a top-level task only, the files earlier turns of its own conversation
   received, while it works for the conversation's person
   (``access_control.ownership.conversation_files_access``, with the person
   recorded at admission from the signed task context). A plan step or an
   isolated recovery task is a task of its own, with a conversation id of its
-  own and no turn, working on its request: it uses its request's
-  conversation the same way (``step_request``), so its prompt lists and its
-  tools open the request's files and earlier turns' files. The request is
-  found only through the task manager's plan-step and recovery links
-  (``linked_request``), must be a top-level task held here, and must work
-  for the step's person; otherwise the step uses only its own files (logged).
+  own and no turn, working on its request: it uses its request's own files
+  and its request's conversation the same way (``step_request``), so its
+  prompt lists and its tools open the request's files and earlier turns'
+  files, even when the request's turn was saved before turns kept their
+  files. The request is found only through the task manager's plan-step and
+  recovery links (``linked_request``), must be a top-level task held here,
+  and must work for the step's person; otherwise the step uses only its own
+  files (logged).
   A delegated task (a worker's, or the team lead's record of an escalation)
   never reads conversation records: it uses only the files it was given.
   Turns saved before turns kept their files have no records; the prompt's
@@ -79,7 +82,9 @@ What a task may use (``TaskAttachments``):
 
 Which files a delegation sends (``delegated_files``): the model chooses with
 ``attachment_ids`` on its delegate_task action. Left out, the new task gets
-the delegating task's own files (above); an empty list sends none; ids send
+the delegating task's own files (above: a plan step's include its request's
+files, as a delegation from the request itself sends them); an empty list
+sends none; ids send
 exactly those files, from what the delegating task may use, and an id that
 is not one fails the delegation with the list of ids it may use. A worker can
 therefore pass on only files it was given.
@@ -162,6 +167,12 @@ ESCALATION_RESULT_MESSAGE_TYPE = "escalation_result"
 DELEGATED_TASK_REASON = "delegated_task"
 NOT_AN_ANSWER_REASON = "not_an_answer"
 TASK_NOT_FOUND_REASON = "task_not_found"
+# Why the task a step or delegated task runs for may not share its files
+# (``RequestLink.reason``): it is not held here, it is itself delegated work,
+# or it works for another person.
+ROOT_NOT_HELD = "not_held"
+ROOT_DELEGATED = "delegated"
+ROOT_OTHER_PERSON = "other_person"
 # What ``log_refused_files`` says for those reasons; any other reason is the
 # gateway's rule (``sent_files_access``) refusing the files.
 _REFUSAL_TEXT = {
@@ -265,12 +276,18 @@ class RequestLink:
     ``info`` is that task when it may share the task's files: a top-level
     task working for the same person (``owner_person_id``, recorded at
     admission from verified identity). Otherwise ``reason`` says why not:
-    ``not_held``, ``delegated`` or ``other_person``.
+    ``ROOT_NOT_HELD``, ``ROOT_DELEGATED`` or ``ROOT_OTHER_PERSON``. For
+    ``ROOT_DELEGATED``, ``delegated_root`` is that task as held here: the
+    links stop at a task whose parent this agent does not hold, so it is
+    work another agent delegated here, such as the team lead's record of an
+    escalation from a worker's own run, which the files a person sends are
+    kept on (``sent_files_runtime``). Reading never uses it.
     """
 
     root_task_id: Optional[str] = None
     info: Optional[Any] = None
     reason: Optional[str] = None
+    delegated_root: Optional[Any] = field(default=None, repr=False)
 
     @property
     def linked(self) -> bool:
@@ -292,11 +309,11 @@ def linked_request(task_manager: Any, task_info: Any) -> RequestLink:
         return RequestLink()
     root_info = task_manager.get_task_info(root_id)
     if root_info is None:
-        return RequestLink(root_id, reason="not_held")
+        return RequestLink(root_id, reason=ROOT_NOT_HELD)
     if root_info.task.parent_task_id is not None:
-        return RequestLink(root_id, reason="delegated")
+        return RequestLink(root_id, reason=ROOT_DELEGATED, delegated_root=root_info)
     if root_info.owner_person_id != task_info.owner_person_id:
-        return RequestLink(root_id, reason="other_person")
+        return RequestLink(root_id, reason=ROOT_OTHER_PERSON)
     return RequestLink(root_id, info=root_info)
 
 
@@ -305,10 +322,11 @@ def step_request(task_manager: Any, task_info: Any) -> Optional[Any]:
 
     A step or recovery task is a task of its own, with a conversation id of
     its own and no conversation turn; it works on its request, so it may use
-    the files of the request's conversation (``TaskAttachments.load``). A
-    delegated task never does: it uses only the files it was given. None
-    for a task that is its own request; a link to a task that may not share
-    its files (``RequestLink.reason``) is logged and gives None.
+    the request's own files and the files of the request's conversation
+    (``TaskAttachments.load``). A delegated task never does: it uses only
+    the files it was given. None for a task that is its own request; a link
+    to a task that may not share its files (``RequestLink.reason``) is
+    logged and gives None.
     """
 
     if task_info is None or task_manager is None or task_info.task.parent_task_id is not None:
@@ -330,11 +348,14 @@ class TaskAttachments:
     """The files one task may name: its own, and for a top-level task its conversation's.
 
     Build it with ``for_task`` (or ``load`` when the request is known).
-    ``conversation_id`` is set only when the task may use that
-    conversation's files (module docstring): its own conversation, or for a
-    plan step or recovery task its request's. ``turn_task_id`` is the task
-    whose conversation turn holds the request's own files: the task itself,
-    or the step's request.
+    ``own`` are the task's own files; a plan step's or recovery task's
+    include its request's own files, because it works on that request (what
+    a delegation that leaves ``attachment_ids`` out sends,
+    ``delegated_files``). ``conversation_id`` is set only when the task may
+    use that conversation's files (module docstring): its own conversation,
+    or for a plan step or recovery task its request's. ``turn_task_id`` is
+    the task whose conversation turn holds the request's own files: the task
+    itself, or the step's request; either way they are among ``own``.
     """
 
     task_id: str
@@ -359,8 +380,10 @@ class TaskAttachments:
         """The scope of the task in ``task_info`` (None gives an empty scope).
 
         ``request_info`` is the request a plan step or recovery task runs for
-        (``step_request``): the step then uses that request's conversation,
-        under the same person check, beside its own files.
+        (``step_request``): the step's own files then include the request's
+        own files (first, as they came first; each id once), which holds even
+        when the request's turn was saved before turns kept their files, and
+        the step uses the request's conversation under the same person check.
         """
 
         task = getattr(task_info, "task", None)
@@ -368,9 +391,12 @@ class TaskAttachments:
             return cls(task_id="")
         turn_info = request_info if request_info is not None else task_info
         conversation_id = _conversation_in_scope(turn_info, conversation_store)
+        own = _own_files(task)
+        if request_info is not None:
+            own = _unique((*_own_files(request_info.task), *own))
         return cls(
             task_id=task.task_id,
-            own=_own_files(task),
+            own=own,
             conversation_id=conversation_id,
             store=conversation_store if conversation_id else None,
             turn_task_id=turn_info.task.task_id,
@@ -481,7 +507,8 @@ def delegated_files(scope: TaskAttachments, attachment_ids: Optional[Sequence[st
 
     - None (left out): the delegating task's own files (``scope.own``:
       ``Task.attachments`` and the files of the guidance, answers and
-      escalation results it accepted), deduplicated in arrival order.
+      escalation results it accepted; for a plan step or recovery task,
+      its request's own files first), deduplicated in arrival order.
     - An empty list: none.
     - Ids: exactly those files, in the order named, each once, from the files
       the task may use (its own, then its or its request's conversation's).
@@ -550,8 +577,14 @@ def _own_files(task: Any) -> tuple[UserTaskAttachment, ...]:
         details = getattr(entry, "details", None) or {}
         if _written_by_this_task(entry, details):
             collected.extend(_recorded_files(task.task_id, details.get(TASK_FILES_KEY)))
+    return _unique(collected)
+
+
+def _unique(attachments: Iterable[UserTaskAttachment]) -> tuple[UserTaskAttachment, ...]:
+    """``attachments`` with each id once, where it first appears."""
+
     unique: dict[str, UserTaskAttachment] = {}
-    for attachment in collected:
+    for attachment in attachments:
         unique.setdefault(attachment.attachment_id, attachment)
     return tuple(unique.values())
 
@@ -975,6 +1008,9 @@ __all__ = [
     "INVENTORY_LIMIT",
     "NOT_AN_ANSWER_REASON",
     "QUESTION_ANSWER_MESSAGE_TYPE",
+    "ROOT_DELEGATED",
+    "ROOT_NOT_HELD",
+    "ROOT_OTHER_PERSON",
     "TASK_FILES_EVENT",
     "TASK_FILES_KEY",
     "TASK_NOT_FOUND_REASON",
