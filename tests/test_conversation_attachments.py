@@ -5,7 +5,8 @@ conversation store: a task's own files (its request, plus files recorded with
 accepted guidance and answers), the files of earlier turns of its own
 conversation for a top-level task that works for the conversation's person,
 nothing from the conversation for a delegated task, bounded lists without
-storage paths, and reading bytes only from this host's upload folders.
+storage paths, the note on turns saved before files were recorded, and
+reading bytes only from this host's upload folders.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from custom_agents.conversation_attachments import (
     UPLOAD_NO_LOCAL_COPY,
     UPLOAD_NOT_ON_THIS_HOST,
     UPLOAD_OUTSIDE_FOLDERS,
+    UNRECORDED_TURNS_NOTE,
     AttachmentSelectionError,
     LocatedUpload,
     TaskAttachments,
@@ -46,6 +48,7 @@ from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
 from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.interactive_apps import AdapterHostSettings
+from storage.sqlite_connection import connect_sqlite
 from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS
 
 ANN, BOB = "usr_ann", "usr_bob"
@@ -122,6 +125,15 @@ def _turn(
         owner_canonical_user_id=owner,
         attachments=attachments,
     )
+
+
+def saved_before_upgrade(store: ConversationStore, *task_ids: str) -> None:
+    """Make the turns of ``task_ids`` look saved before turns kept their files (no file record)."""
+
+    with connect_sqlite(store._db_path) as conn:
+        for task_id in task_ids:
+            conn.execute("UPDATE conversation_task_links SET attachments_json = NULL WHERE task_id = ?", (task_id,))
+        conn.commit()
 
 
 def _task_info(
@@ -334,6 +346,41 @@ def test_no_inventory_without_files_beyond_the_current_requests(layout, store) -
     delegated = TaskAttachments.load(_task_info(attachments=[given], parent_task_id="task_parent"), store)
     assert inventory_text(delegated, exclude_ids=["att_given"]) == ""
     assert inventory_text(TaskAttachments.load(_task_info(conversation_id=None), store)) == ""
+
+
+def test_the_inventory_says_up_to_which_turn_files_were_not_recorded(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_old_1", [])
+    _turn(store, "task_old_2", [])
+    _turn(store, "task_new", [_upload(layout.uploads_dir, "att_photo")])
+    # The current task started before the upgrade too; it holds its own request's files.
+    _turn(store, CURRENT, [])
+    saved_before_upgrade(store, "task_old_1", "task_old_2", CURRENT)
+    scope = TaskAttachments.load(_task_info(), store)
+
+    assert scope.last_unrecorded_turn() == 2
+    text = inventory_text(scope)
+    assert "- `att_photo` att_photo.png (image/png, image, 10 bytes; turn 3, task task_new)" in text
+    assert text.splitlines()[-1] == UNRECORDED_TURNS_NOTE.format(turn=2)
+    assert UNRECORDED_TURNS_NOTE.format(turn=2) == (
+        "Turns up to turn 2 were saved before files were recorded: files sent in them are not listed and "
+        "cannot be opened by id. If the person refers to one, ask them to send it again."
+    )
+
+
+def test_unrecorded_turns_are_noted_without_files_and_only_inside_the_conversation_scope(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_old", [])
+    saved_before_upgrade(store, "task_old")
+
+    # Nothing to list, but the person may refer to a file sent before the upgrade.
+    assert inventory_text(TaskAttachments.load(_task_info(), store)) == "\n".join(
+        [CONVERSATION_ATTACHMENTS_HEADING, UNRECORDED_TURNS_NOTE.format(turn=1)]
+    )
+    # Work for someone else and delegated work learn nothing about the conversation.
+    for outside in (_task_info(person=BOB), _task_info(parent_task_id="task_parent")):
+        scope = TaskAttachments.load(outside, store)
+        assert scope.last_unrecorded_turn() is None and inventory_text(scope) == ""
 
 
 def test_an_unknown_id_lists_at_most_twenty_choices_without_storage_paths(layout, store) -> None:

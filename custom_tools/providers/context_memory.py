@@ -143,6 +143,12 @@ def get_conversation_turns(
     `created_after` is an inclusive lower bound. `created_before` is an
     exclusive upper bound. Both accept ISO-8601 timestamps or `YYYY-MM-DD`
     dates interpreted in UTC.
+
+    Each turn lists its files in `attachments` (id, name, type and size); open
+    one with inspect_user_attachment by its attachment_id.
+    `attachments_recorded` is false on turns saved before files were
+    recorded: files sent in them are unknown and cannot be opened, so ask the
+    person to send them again.
     """
     agent = get_agent_ref()
     if agent is None:
@@ -193,6 +199,9 @@ def _conversation_turn_summary_payload(
     # The turn's files, descriptive fields only (the store's turn rows carry no
     # storage references); a model opens one by its attachment_id.
     attachments = turn.get("attachments") or []
+    # A turn saved before turns kept their files has no count: its files are
+    # unknown, not absent (storage.turn_attachments).
+    recorded = bool(turn.get("attachments_recorded"))
     return {
         "turn_index": turn.get("turn_index"),
         "task_id": turn.get("task_id"),
@@ -213,7 +222,8 @@ def _conversation_turn_summary_payload(
         "has_full_assistant_text": bool(turn.get("final_answer_text")),
         "artifact_count": len(artifacts) if isinstance(artifacts, list) else 0,
         "attachments": attachments[:INVENTORY_LIMIT],
-        "attachment_count": len(attachments),
+        "attachments_recorded": recorded,
+        "attachment_count": len(attachments) if recorded else None,
     }
 
 
@@ -454,7 +464,11 @@ def get_conversation_context_slice(
     including each turn's files (`attachments`: id, name, type and size, at
     most 20 per turn; `attachment_count`: how many it received). Open one with
     inspect_user_attachment by its attachment_id.
-    `mode="full"` returns the full stored turn rows. The limit is capped at 50.
+    `mode="full"` returns the full stored turn rows, with every file of each
+    turn. The limit is capped at 50.
+    `attachments_recorded` is false (and `attachment_count` null) on turns
+    saved before files were recorded: files sent in them are unknown and
+    cannot be opened, so ask the person to send them again.
     """
     agent = get_agent_ref()
     if agent is None:

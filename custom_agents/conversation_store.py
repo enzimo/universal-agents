@@ -199,6 +199,11 @@ class ConversationStore:
             limit=limit,
         )
 
+    def last_turn_without_file_records(
+        self, conversation_id: str, *, exclude_task_id: Optional[str] = None
+    ) -> Optional[int]:
+        return self._repository.last_turn_without_file_records(conversation_id, exclude_task_id=exclude_task_id)
+
     def append_clarification(
         self,
         *,

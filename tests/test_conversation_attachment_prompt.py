@@ -13,16 +13,19 @@ context). Covers:
   is sized, so the prompt stays within the soft limit;
 - the list is left out only when overflow recovery is told to drop it, which
   the default settings do not do, and focused turns (plan steps, recovery)
-  get no list;
+  get no list; a task without a record gets no list and a warning;
 - ``get_conversation_context_slice`` and ``get_conversation_turns`` show each
   turn's files (at most 20 per turn in the slice summary, with the count)
   without storage references;
+- a turn saved before files were recorded is marked as such in the prompt
+  and in slices, not shown as a turn without files;
 - no prompt or tool output shows where an upload is stored.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,7 @@ from custom_agents.conversation_attachments import (
     CONVERSATION_ATTACHMENTS_HEADING,
     CONVERSATION_ATTACHMENTS_SECTION,
     INVENTORY_LIMIT,
+    UNRECORDED_TURNS_NOTE,
 )
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import CommsMessage
@@ -44,6 +48,7 @@ from default_values import AGENT_DEFAULTS
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS
 from tests.task_work_support import use_agent
+from tests.test_conversation_attachments import saved_before_upgrade
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, _admit, _answer, _lead
 from tests.test_turn_files_recording import (  # noqa: F401  (autouse fixtures)
     _gateway_meta,
@@ -66,21 +71,25 @@ def layout(tmp_path: Path) -> InstanceLayout:
     return layout
 
 
+def _request(lead: Any, task_id: str = CURRENT, **flags: Any) -> ContextAssemblyRequest:
+    """The request the runtime makes for ``task_id``'s next turn."""
+
+    info = lead.task_manager.get_task_info(task_id)
+    return ContextAssemblyRequest(
+        incoming_content=info.task,
+        incoming_header=info.header,
+        incoming_meta=info.meta,
+        identity_meta=info.meta,
+        execution_task_id=task_id,
+        incoming_message_json=CommsMessage(msg_content=info.task, msg_meta=info.meta).model_dump_json(),
+        **flags,
+    )
+
+
 def _assemble(lead: Any, task_id: str = CURRENT, **flags: Any) -> Any:
     """The prompt the lead's engine builds for ``task_id``'s next turn."""
 
-    info = lead.task_manager.get_task_info(task_id)
-    return lead._context_engine.assemble(
-        ContextAssemblyRequest(
-            incoming_content=info.task,
-            incoming_header=info.header,
-            incoming_meta=info.meta,
-            identity_meta=info.meta,
-            execution_task_id=task_id,
-            incoming_message_json=CommsMessage(msg_content=info.task, msg_meta=info.meta).model_dump_json(),
-            **flags,
-        )
-    )
+    return lead._context_engine.assemble(_request(lead, task_id, **flags))
 
 
 class _CharacterCountingModel:
@@ -233,6 +242,48 @@ async def test_focused_turns_get_no_list(lead: Any, layout: InstanceLayout, flag
 
 
 @pytest.mark.asyncio
+async def test_a_task_without_a_record_gets_no_list_and_a_warning(
+    lead: Any, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _admit(lead, task_id=CURRENT, text="And the photo?", attachments=[])
+    request = _request(lead)
+    # As if the task's record were gone by the time its prompt is built.
+    monkeypatch.setattr(lead._context_engine.task_manager, "get_task_info", lambda task_id: None)
+
+    with caplog.at_level(logging.WARNING):
+        assembly = lead._context_engine.assemble(request)
+
+    assert CONVERSATION_ATTACHMENTS_HEADING not in assembly.prompt
+    # The rest of the prompt is still built.
+    assert "And the photo?" in _section(assembly, "current_request")
+    assert "Conversation Thread Context:" in assembly.prompt
+    assert f"event=conversation_attachments_task_missing task_id={CURRENT}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_turn_saved_before_files_were_recorded_is_not_shown_as_a_turn_without_files(
+    lead: Any, layout: InstanceLayout
+) -> None:
+    # Ann sent the photo in a turn saved before turns kept their files.
+    saved_before_upgrade(lead._conversation_store, FIRST)
+    await _admit(lead, task_id=CURRENT, text="Is the plant in my photo healthy?", attachments=[])
+    use_agent(lead, CURRENT)
+
+    listed = _section(_assemble(lead), CONVERSATION_ATTACHMENTS_SECTION)
+    assert listed == "\n".join([CONVERSATION_ATTACHMENTS_HEADING, UNRECORDED_TURNS_NOTE.format(turn=1)])
+
+    summary = json.loads(get_conversation_context_slice._tool_func(conversation_id=CONVERSATION, mode="summary"))
+    turns = {turn["task_id"]: turn for turn in summary["turns"]}
+    assert (turns[FIRST]["attachments_recorded"], turns[FIRST]["attachment_count"]) == (False, None)
+    assert (turns[CURRENT]["attachments_recorded"], turns[CURRENT]["attachment_count"]) == (True, 0)
+    full = json.loads(get_conversation_context_slice._tool_func(conversation_id=CONVERSATION, mode="full"))
+    listed_turns = json.loads(get_conversation_turns._tool_func(conversation_id=CONVERSATION))
+    for payload in (full, listed_turns):
+        recorded = {turn["task_id"]: turn["attachments_recorded"] for turn in payload["turns"]}
+        assert recorded == {FIRST: False, CURRENT: True}
+
+
+@pytest.mark.asyncio
 async def test_slices_and_turns_show_each_turns_files_without_storage(lead: Any, layout: InstanceLayout) -> None:
     many = _earlier_turn(lead, layout, 2, files=INVENTORY_LIMIT + 5)
     await _admit(lead, task_id=CURRENT, text="What did I send?", attachments=[])
@@ -250,6 +301,7 @@ async def test_slices_and_turns_show_each_turns_files_without_storage(lead: Any,
         attachment.attachment_id for attachment in many
     ][:INVENTORY_LIMIT]
     assert (turns[CURRENT]["attachment_count"], turns[CURRENT]["attachments"]) == (0, [])
+    assert all(turn["attachments_recorded"] is True for turn in summary["turns"])
 
     full = json.loads(get_conversation_context_slice._tool_func(conversation_id=CONVERSATION, mode="full"))
     listed = json.loads(get_conversation_turns._tool_func(conversation_id=CONVERSATION))

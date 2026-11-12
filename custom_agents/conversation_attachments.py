@@ -49,7 +49,9 @@ What a task may use (``TaskAttachments``):
   (``access_control.ownership.conversation_files_access``, with the person
   recorded at admission from the signed task context). A delegated task
   (a worker's) never reads conversation records: it uses only the files it
-  was given.
+  was given. Turns saved before turns kept their files have no records; the
+  prompt's list says up to which turn (``last_unrecorded_turn``), so the
+  person is asked to send such files again.
 
 Models name files by ``attachment_id`` only. Records hold where the bytes are
 stored, so they leave this module only as descriptive summaries
@@ -100,6 +102,12 @@ INVENTORY_LIMIT = 20
 # ``CONVERSATION_ATTACHMENTS_SECTION``.
 CONVERSATION_ATTACHMENTS_HEADING = "Conversation Attachments:"
 CONVERSATION_ATTACHMENTS_SECTION = "conversation_attachments"
+# The list's last line when earlier turns were saved before turns kept their
+# files, so a model does not read them as turns without files.
+UNRECORDED_TURNS_NOTE = (
+    "Turns up to turn {turn} were saved before files were recorded: files sent in them are not listed and "
+    "cannot be opened by id. If the person refers to one, ask them to send it again."
+)
 # The task-history event that records the files a task accepted with a
 # guidance or an answer, and the ``details`` key holding them (full
 # ``UserTaskAttachment`` dumps). Written only by ``task_files_details``.
@@ -295,22 +303,49 @@ class TaskAttachments:
 
         return self.inventory(limit=limit)[0]
 
+    def last_unrecorded_turn(self) -> Optional[int]:
+        """The latest earlier turn of its conversation saved before turns kept their files, or None.
+
+        Files sent in such a turn are unknown: they are not listed and cannot
+        be opened by id. Asked only within the conversation scope, and never
+        about the task's own turn, whose request files it holds itself.
+        """
+
+        if not self.conversation_id:
+            return None
+        latest: Optional[int] = self.store.last_turn_without_file_records(
+            self.conversation_id, exclude_task_id=self.task_id
+        )
+        return latest
+
 
 def inventory_text(scope: TaskAttachments, *, exclude_ids: Iterable[str] = ()) -> str:
-    """The prompt's list of earlier files the task may use, or "" when there are none.
+    """The prompt's list of earlier files the task may use, or "" when it has nothing to say.
 
     At most ``INVENTORY_LIMIT`` files, newest first, from ``scope.inventory``
     (``exclude_ids``: the files the prompt lists as the current request's).
     Built from stored records, so it does not depend on how much of the
     conversation's text the prompt keeps. Names files by id, name, type and
-    size only.
+    size only. Ends with ``UNRECORDED_TURNS_NOTE`` when earlier turns were
+    saved before turns kept their files, with or without files to list.
     """
 
     files, more = scope.inventory(exclude_ids=exclude_ids)
-    if not files:
+    unrecorded = scope.last_unrecorded_turn()
+    if not files and unrecorded is None:
         return ""
+    lines = [CONVERSATION_ATTACHMENTS_HEADING, *_file_list_lines(files, more)]
+    if unrecorded is not None:
+        lines.append(UNRECORDED_TURNS_NOTE.format(turn=unrecorded))
+    return "\n".join(lines)
+
+
+def _file_list_lines(files: Sequence[dict[str, Any]], more: bool) -> list[str]:
+    """The list's lines for ``files`` (none without files), and a note when more exist."""
+
+    if not files:
+        return []
     lines = [
-        CONVERSATION_ATTACHMENTS_HEADING,
         "Files sent earlier in this conversation or while this request ran, newest first. Open one by its "
         "attachment_id with inspect_user_attachment, or load_local_media_for_model_context to see an image or "
         "document.",
@@ -321,7 +356,7 @@ def inventory_text(scope: TaskAttachments, *, exclude_ids: Iterable[str] = ()) -
             f"Only the newest {INVENTORY_LIMIT} are listed. get_conversation_context_slice shows the files of "
             "each earlier turn."
         )
-    return "\n".join(lines)
+    return lines
 
 
 def _own_files(task: Any) -> tuple[UserTaskAttachment, ...]:

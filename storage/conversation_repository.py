@@ -269,6 +269,10 @@ class ConversationRepository(Protocol):
         limit: Optional[int] = None,
     ) -> list[TurnAttachment]: ...
 
+    def last_turn_without_file_records(
+        self, conversation_id: str, *, exclude_task_id: Optional[str] = None
+    ) -> Optional[int]: ...
+
     def append_clarification(
         self,
         *,
@@ -685,6 +689,17 @@ class _RelationalConversationRepository:
                 ON conversation_task_links(conversation_id, turn_index)
                 """
             )
+            # Only turns saved before turns kept their files (attachments_json
+            # NULL) are in it, so finding a conversation's latest such turn
+            # (last_turn_without_file_records, asked for every prompt) reads
+            # a few entries, and none in conversations started after the upgrade.
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_conversation_task_links_unrecorded_files
+                ON conversation_task_links(conversation_id, turn_index)
+                WHERE attachments_json IS NULL
+                """
+            )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_conversation_task_links_updated
@@ -989,6 +1004,9 @@ class _RelationalConversationRepository:
             "tool_artifact_manifest": manifest,
             "gateway_context": gateway_context if isinstance(gateway_context, dict) else {},
             "attachments": self._turn_attachment_summaries(row),
+            # False on turns saved before turns kept their files: their files
+            # are unknown, not absent (storage.turn_attachments).
+            "attachments_recorded": row["attachments_json"] is not None,
             "memory_review_status": row["memory_review_status"] or TURN_MEMORY_REVIEW_UNREVIEWED,
             "memory_review_job_id": row["memory_review_job_id"],
             "memory_review_queued_at_utc": row["memory_review_queued_at_utc"],
@@ -1233,6 +1251,32 @@ class _RelationalConversationRepository:
             params,
         ).fetchall()
         return rows
+
+    def last_turn_without_file_records(
+        self, conversation_id: str, *, exclude_task_id: Optional[str] = None
+    ) -> Optional[int]:
+        """The latest turn saved before turns kept their files, or None when every turn has its record.
+
+        Files sent in such turns (``attachments_json`` NULL) are not listed and
+        cannot be opened by id. ``exclude_task_id`` leaves one turn out, such
+        as that of the task asking, which holds its own request's files.
+        """
+
+        bind = self._dialect.bind
+        params: tuple[Any, ...] = (conversation_id,)
+        other_turns = ""
+        if exclude_task_id:
+            other_turns = f" AND task_id <> {bind}"
+            params += (exclude_task_id,)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT MAX(turn_index) FROM conversation_task_links
+                WHERE conversation_id = {bind} AND attachments_json IS NULL{other_turns}
+                """,
+                params,
+            ).fetchone()
+        return None if row is None or row[0] is None else int(row[0])
 
     def append_clarification(
         self,

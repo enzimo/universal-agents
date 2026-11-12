@@ -12,7 +12,10 @@ turn reads, which reach models through prompts and conversation tools, carry
 the descriptive fields only (``TURN_ATTACHMENT_SUMMARY_FIELDS``).
 
 A NULL column means the turn was saved before turns kept their files; ``[]``
-means it had none.
+means it had none. Models are told the difference, so they do not read an
+unrecorded turn as one without files: turn reads carry
+``attachments_recorded`` and the prompt's file list says up to which turn
+files were not recorded (``last_turn_without_file_records``).
 """
 
 from __future__ import annotations

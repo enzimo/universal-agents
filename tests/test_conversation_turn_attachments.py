@@ -277,23 +277,47 @@ def test_lookups_read_past_the_first_batch_of_turns(backend: _Backend) -> None:
     ]
 
 
-def test_turns_saved_before_the_upgrade_read_as_having_no_files(backend: _Backend) -> None:
+def test_turns_saved_before_the_upgrade_say_their_files_were_not_recorded(backend: _Backend) -> None:
     repo = backend.open()
     _thread(repo)
     _turn(repo, "task_old")
+    _turn(repo, "task_old_running")
     # The table as it was before turns kept their files.
+    backend.execute("DROP INDEX idx_conversation_task_links_unrecorded_files")
     backend.execute("ALTER TABLE conversation_task_links DROP COLUMN attachments_json")
 
     upgraded = backend.open()
 
-    assert upgraded.get_turn_by_task_id("task_old")["attachments"] == []
+    old = upgraded.get_turn_by_task_id("task_old")
+    # No files listed, and marked as unknown rather than none.
+    assert (old["attachments"], old["attachments_recorded"]) == ([], False)
     assert upgraded.list_turn_attachments(CONVERSATION) == []
+    assert upgraded.last_turn_without_file_records(CONVERSATION) == 2
+    assert upgraded.last_turn_without_file_records(CONVERSATION, exclude_task_id="task_old_running") == 1
+    assert upgraded.last_turn_without_file_records("conv_none") is None
     # A file sent while an old turn still runs is recorded on it.
     assert upgraded.merge_turn_attachments(
-        conversation_id=CONVERSATION, task_id="task_old", attachments=[_file("att_late")]
+        conversation_id=CONVERSATION, task_id="task_old_running", attachments=[_file("att_late")]
     ) == 1
+    assert upgraded.get_turn_by_task_id("task_old_running")["attachments_recorded"] is True
+    assert upgraded.last_turn_without_file_records(CONVERSATION) == 1
+    # New turns record their files, none included.
     _turn(upgraded, "task_new", (_file("att_new"),))
-    assert _listed(upgraded) == [(2, "task_new", "att_new"), (1, "task_old", "att_late")]
+    _turn(upgraded, "task_new_empty")
+    empty = upgraded.get_turn_by_task_id("task_new_empty")
+    assert (empty["attachments"], empty["attachments_recorded"]) == ([], True)
+    assert upgraded.last_turn_without_file_records(CONVERSATION) == 1
+    assert _listed(upgraded) == [(3, "task_new", "att_new"), (2, "task_old_running", "att_late")]
+
+
+def test_a_conversation_started_after_the_upgrade_has_no_unrecorded_turns(backend: _Backend) -> None:
+    repo = backend.open()
+    _thread(repo)
+    _turn(repo, "task_1", (_file("att_photo"),))
+    _turn(repo, "task_2")
+
+    assert repo.last_turn_without_file_records(CONVERSATION) is None
+    assert all(turn["attachments_recorded"] for turn in repo.get_conversation_turns(conversation_id=CONVERSATION))
 
 
 def test_unreadable_stored_files_are_logged_and_skipped(backend: _Backend, caplog: pytest.LogCaptureFixture) -> None:
