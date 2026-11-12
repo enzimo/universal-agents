@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from live_nats_client import LiveNatsClient, delete_team_streams, resolve_live_transport_settings
+from live_nats_client import LiveNatsClient, resolve_live_transport_settings
 
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
@@ -181,7 +181,6 @@ async def test_live_gateway_manager_controls_use_nats_and_separate_storage(tmp_p
         await _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id)
     finally:
         forget_task_context_keys()
-        await delete_team_streams(team_id, transport=live_transport)
 
 
 async def _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id: str) -> None:

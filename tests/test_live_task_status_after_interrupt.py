@@ -36,12 +36,11 @@ from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskStatus, TaskSteering
 from custom_messages.enums import MessageMetaType, ProgressState, RoutingType, TaskSteeringType
 from custom_transport.base import SubscriptionDelivery, TransportPublishOptions
-from custom_transport.nats_adapter import NatsTransportAdapter
+from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
 from custom_transport.subjects import NatsSubjectMapper
 from custom_transport.protocol1.host_runtime import MessageHost
 from runtime_settings.instance_layout import InstanceLayout
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_services_profile
-from tests.live_nats_client import nats_transport_config_from_env
 from tests.live_nats_support import flush_adapter_fully
 from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
 from tests.test_turn_action_outbox import _make_agent, _make_task_manager
@@ -105,10 +104,12 @@ async def test_status_reply_while_approval_resumes_a_long_turn(
 
         object.__setattr__(worker, "_resume_interrupted_task_turn", held_resume)
         # The operational subject: the worker reads it as an agent does; the gateway stand-in sends
-        # on it and keeps the worker's answers.
+        # on it and keeps the worker's answers. On this test's own server, like the rest: the
+        # team id is fixed, so on the shared server every run of this test would share its streams.
         operational: list[NatsTransportAdapter] = []
-        for _ in range(2):
-            adapter = NatsTransportAdapter(config=nats_transport_config_from_env(), mapper=NatsSubjectMapper(team_id=TEAM))
+        for name in ("worker", "gateway"):
+            adapter = NatsTransportAdapter(config=NatsTransportConfig(servers=[broker], name=f"operational-{name}"),
+                                           mapper=NatsSubjectMapper(team_id=TEAM))
             await adapter.connect(reconcile_topology=True)
             stack.push_async_callback(adapter.close)
             operational.append(adapter)

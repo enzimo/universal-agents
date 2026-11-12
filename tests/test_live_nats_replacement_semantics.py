@@ -38,7 +38,7 @@ from custom_transport.base import (
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from tests.live_nats_support import flush_adapter_fully
-from live_nats_client import delete_team_streams, nats_transport_config_from_env, resolve_live_transport_settings
+from live_nats_client import nats_transport_config_from_env, resolve_live_transport_settings
 from config_loader import CONFIG_SCHEMA_VERSION
 from id_generation import new_id, new_id_suffix
 from scripts.reconcile_nats_consumers import reconcile_nats_consumers
@@ -519,7 +519,6 @@ async def test_live_worker_pool_single_delivery() -> None:
     finally:
         for adapter in adapters:
             await adapter.close()
-        await delete_team_streams(team_id)
 
 
 @pytest.mark.parametrize(
@@ -572,7 +571,6 @@ async def test_live_task_steering_routes_to_active_agent(
             )
     finally:
         await adapter.close()
-        await delete_team_streams(team_id)
 
 
 async def test_live_multi_team_subjects_are_isolated_on_same_nats_server() -> None:
