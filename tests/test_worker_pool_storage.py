@@ -21,13 +21,13 @@ def settings(tmp_path):
     return resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "pools.db")}})
 
 
-def _publish(repository, task_id="a", parent="p", sequence=5):
+def _publish(repository, task_id="a", parent="p", sequence=5, requester="lead"):
     return repository.record_published(
         team_id="t",
         task_id=task_id,
         parent_task_id=parent,
         root_task_id="root",
-        requester_agent_id="lead",
+        requester_agent_id=requester,
         named_agent_type="WebResearchAgent",
         target_agent_name=None,
         publish_sequence=sequence,
@@ -105,7 +105,7 @@ def test_a_claim_for_an_unknown_task_returns_no_record(settings):
     assert _claim(DelegatedTaskRepository(settings), "w1", task_id="missing").record is None
 
 
-def test_listing_by_parent_root_and_requester(settings):
+def test_listing_by_parent_and_root(settings):
     repository = DelegatedTaskRepository(settings)
     for index in range(3):
         _publish(repository, task_id=f"t{index}")
@@ -113,7 +113,6 @@ def test_listing_by_parent_root_and_requester(settings):
     repository.mark_closed(team_id="t", task_id="t0", status="finished")
     assert [r.task_id for r in repository.list_for_parent("t", "p")] == ["t0", "t1", "t2"]
     assert len(repository.list_for_root("t", "root")) == 4
-    assert {r.task_id for r in repository.list_open("t", "lead")} == {"t1", "t2", "other"}
     assert status_counts(list(repository.list_for_parent("t", "p"))) == {
         "queued": 2,
         "running": 0,
@@ -121,6 +120,28 @@ def test_listing_by_parent_root_and_requester(settings):
         "failed": 0,
         "cancelled": 0,
     }
+
+
+def test_open_records_are_read_by_parent_whoever_requested_them(settings):
+    """After recovery a parent belongs to an agent with a new id; its records still
+    name the earlier requester and must be found by parent (review R2)."""
+
+    repository = DelegatedTaskRepository(settings)
+    _publish(repository, task_id="before_restart", parent="p", requester="lead_before")
+    _publish(repository, task_id="running", parent="p", requester="lead_now")
+    _claim(repository, "w1", task_id="running")
+    _publish(repository, task_id="done", parent="p")
+    repository.mark_closed(team_id="t", task_id="done", status="finished")
+    _publish(repository, task_id="second", parent="p2")
+    _publish(repository, task_id="not_mine", parent="someone_elses")
+    found = repository.list_open_for_parents("t", ["p2", "p", "p", "unknown"])
+    assert [(r.parent_task_id, r.task_id, r.status) for r in found] == [
+        ("p", "before_restart", "queued"),
+        ("p", "running", "running"),
+        ("p2", "second", "queued"),
+    ]
+    assert repository.list_open_for_parents("other_team", ["p"]) == ()
+    assert repository.list_open_for_parents("t", []) == ()
 
 
 def test_waits_hold_check_back_times_and_last_progress(settings):
@@ -134,7 +155,22 @@ def test_waits_hold_check_back_times_and_last_progress(settings):
     assert wait.check_back_at_utc == at
     assert wait.last_progress_counts == {"queued": 2}
     repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead", at=None)
-    assert repository.waits_for_requester("t", "lead")[0].check_back_at_utc is None
+    assert repository.get_wait("t", "p").check_back_at_utc is None
+
+
+def test_waits_are_read_by_parent_whoever_set_them(settings):
+    repository = DelegatedTaskRepository(settings)
+    at = datetime.now(timezone.utc)
+    repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead_before", at=at)
+    repository.set_check_back(team_id="t", parent_task_id="p2", requester_agent_id="lead_now", at=None)
+    repository.set_check_back(team_id="t", parent_task_id="not_mine", requester_agent_id="lead_now", at=at)
+    waits = repository.waits_for_parents("t", {"p2", "p", "unknown"})
+    assert [(w.parent_task_id, w.requester_agent_id, w.check_back_at_utc) for w in waits] == [
+        ("p", "lead_before", at),
+        ("p2", "lead_now", None),
+    ]
+    assert repository.waits_for_parents("other_team", ["p"]) == ()
+    assert repository.waits_for_parents("t", ()) == ()
 
 
 def test_prune_keeps_open_work(settings):

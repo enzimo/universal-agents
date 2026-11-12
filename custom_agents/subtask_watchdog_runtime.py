@@ -828,7 +828,7 @@ async def _delegated_holders(agent: Any) -> dict[str, Any]:
         records = open_delegations_for_owned_parents(agent)
         custody = agent.task_manager.runtime_state_store.get_task_custody(
             str(agent.team_id), [record.task_id for record in records])
-        result = {}
+        result: dict[str, Any] = {}
         for record in records:
             held = custody.get(record.task_id)
             # Custody can precede a worker's claim reply. It proves admission,
@@ -841,7 +841,7 @@ async def _delegated_holders(agent: Any) -> dict[str, Any]:
         return result
 
     try:
-        return await agent.task_manager.operations_runtime.run(read)
+        holders: dict[str, Any] = await agent.task_manager.operations_runtime.run(read)
     except Exception:
         agent._logger.exception(
             "Could not read delegated-task records; probing delegated tasks by type. "
@@ -849,6 +849,7 @@ async def _delegated_holders(agent: Any) -> dict[str, Any]:
             agent.id,
         )
         return {}
+    return holders
 
 
 def _holder(holders: dict[str, Any], subtask_info: TaskInfo) -> Optional[str]:

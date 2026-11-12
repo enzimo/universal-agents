@@ -16,6 +16,7 @@ The requester's runtime is the only writer for its own rows.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Collection
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
@@ -392,16 +393,27 @@ class DelegatedTaskRepository:
         records = [DelegatedTaskRecordV1.model_validate_json(row[0]) for row in rows]
         return tuple(sorted(records, key=lambda record: record.published_at_utc))
 
-    def list_open(self, team_id: str, requester_agent_id: str) -> tuple[DelegatedTaskRecordV1, ...]:
-        """Queued and running tasks this requester delegated."""
+    def list_open_for_parents(
+        self, team_id: str, parent_task_ids: Collection[str]
+    ) -> tuple[DelegatedTaskRecordV1, ...]:
+        """Queued and running tasks delegated by these parents, by parent then task id.
 
+        Keyed by parent, never by requester: after recovery a parent belongs to an
+        agent with a new id, while its records still name the earlier requester.
+        One query for all parents; a runtime waits on tens of parents, far below the
+        bound-value limits of SQLite and PostgreSQL.
+        """
+
+        parents = sorted(set(parent_task_ids))
+        if not parents:
+            return ()
         p = self.dialect.bind
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT payload_json FROM delegated_tasks "
-                f"WHERE team_id={p} AND requester_agent_id={p} AND status IN ({p},{p}) "
-                "ORDER BY parent_task_id, task_id",
-                (team_id, requester_agent_id, DELEGATED_QUEUED, DELEGATED_RUNNING),
+                f"WHERE team_id={p} AND parent_task_id IN ({','.join([p] * len(parents))}) "
+                f"AND status IN ({p},{p}) ORDER BY parent_task_id, task_id",
+                (team_id, *parents, DELEGATED_QUEUED, DELEGATED_RUNNING),
             ).fetchall()
         return tuple(DelegatedTaskRecordV1.model_validate_json(row[0]) for row in rows)
 
@@ -514,13 +526,19 @@ class DelegatedTaskRepository:
             last_progress_counts=dict(counts),
         )
 
-    def waits_for_requester(self, team_id: str, requester_agent_id: str) -> tuple[DelegationWaitV1, ...]:
+    def waits_for_parents(self, team_id: str, parent_task_ids: Collection[str]) -> tuple[DelegationWaitV1, ...]:
+        """The waits of these parents, by parent id; keyed by parent like ``list_open_for_parents``."""
+
+        parents = sorted(set(parent_task_ids))
+        if not parents:
+            return ()
         p = self.dialect.bind
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT payload_json FROM delegation_waits "
-                f"WHERE team_id={p} AND requester_agent_id={p} ORDER BY parent_task_id",
-                (team_id, requester_agent_id),
+                f"WHERE team_id={p} AND parent_task_id IN ({','.join([p] * len(parents))}) "
+                "ORDER BY parent_task_id",
+                (team_id, *parents),
             ).fetchall()
         return tuple(DelegationWaitV1.model_validate_json(row[0]) for row in rows)
 
