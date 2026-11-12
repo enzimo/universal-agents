@@ -1432,11 +1432,28 @@ provisioning, reviewed skill installation). Team skills are the one readable
 exception, because agents must read a skill's files and run its scripts; they
 are never writable, and new or changed skills go through reviewed installation.
 The required SkillSpector scan stays local and credential-free. Optional
-`workspace.skill_installation.semantic_review` adds a tool-free Strands
-assessment using the current task's already authenticated model, including
-personal-model selection. Complete file coverage and both reports bind to the
-installation plan; semantic settings changes invalidate a pending plan. This
-is part of trusted installation code, not another agent-writable installer.
+`workspace.skill_installation.semantic_review` (`mode: "task_model"`) adds a
+tool-free Strands assessment with the model of the running turn that staged
+the skill: the person's own model when the turn uses one, else the turn's
+model (`custom_agents.skill_semantic_review`). The review runs on that turn's
+own event loop (`custom_agents.turn_registry.run_on_turn_loop`) as owned work
+that the turn's stop cancels. Why: a sync tool's worker thread would otherwise
+start a new event loop for each model call, while a provider client that keeps
+pooled connections (the native Anthropic client) is bound to the loop that
+opened them; on the turn's loop the review keeps the turn's exact model
+object, provider settings and per-call key binding, with no second client and
+no key handling of its own. A selected review fails closed: without a running
+turn or a model, after a stop, and for every incomplete answer it writes an
+`incomplete` report with one reason code (`AssessmentReason`); only
+`mode: "off"` lets the local checks decide alone. Staging and apply check the
+report with the same `validate_report`, bound to the review settings in force,
+so a settings change invalidates a pending plan. The staging refusal names the
+reason and who fixes it, and the staging log line
+(`event=skill_semantic_review_refused` or `event=skill_semantic_review_finished`)
+carries the change id, skill name, artifact digest, reason and model, never
+file contents, provider error text or keys. Complete file coverage and both
+reports bind to the installation plan. This is part of trusted installation
+code, not another agent-writable installer.
 Startup refuses an instance still in the old single-`workspace/` layout and
 prints the move commands rather than moving files itself.
 

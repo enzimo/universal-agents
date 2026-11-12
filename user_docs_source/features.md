@@ -894,7 +894,10 @@ Optional built-in semantic assessment uses the task's already configured model
 with no executable tools. The report says whether it ran, names the model, and
 shows its findings separately from the required SkillSpector scan. If no model
 assessment is configured, local checks still finish and the lead offers setup.
-A selected model's failed or incomplete assessment does not count as a pass.
+A selected model's failed or incomplete assessment does not count as a pass:
+no installation is proposed, and the lead tells you the reason and how to fix
+it. A selected review runs only inside the task that staged the skill, with
+that task's model.
 The exact input, both reports and semantic settings stay bound to the install
 plan, and a change requires a new plan. See the
 [skill-installation configuration](configuration.md).

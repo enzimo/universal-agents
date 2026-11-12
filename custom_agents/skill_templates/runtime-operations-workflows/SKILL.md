@@ -423,6 +423,11 @@ skill with generic file, shell, GitHub, or Python tools.
     and no executable tools. Present its findings separately from SkillSpector.
     A selected review's failure, partial coverage, or MEDIUM+ finding blocks
     the installation proposal; do not downgrade it to a static-only pass.
+    When staging refuses this way, tell the user the refusal's reason code
+    and its fix as the refusal states them, and that the local checks passed.
+    Stage again only when the fix says to (from this running task); turning
+    the review off or raising its limits is an administrator's settings
+    change, not a retry.
 4. After presenting the report, call `apply_change(change_id, reason)`. Team
    skills are the team's: if an administrator let you manage them, the skill
    installs at once and administrators get a notice; otherwise your task
