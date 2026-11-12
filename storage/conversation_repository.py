@@ -37,6 +37,17 @@ from .table_columns import ensure_column
 # A stable signed-bigint PostgreSQL advisory lock, shared by every tag writer.
 CONVERSATION_TAG_WRITE_LOCK_KEY = int.from_bytes(b"uatopics", "big")
 
+# The files people sent with each turn (``attachments_json``): the newest this
+# many unique files are listed, from at most ``..._SCAN_TURNS`` of the newest
+# turns that have files, so one list costs one bounded indexed read however
+# long the conversation is (custom_agents.conversation_attachments).
+CONVERSATION_ATTACHMENT_LIST_LIMIT = 20
+CONVERSATION_ATTACHMENT_SCAN_TURNS = 200
+_ATTACHMENT_ID_KEY = "attachment_id"
+# Where a listed or found file was sent: added to the stored record when read.
+ATTACHMENT_TURN_INDEX_KEY = "turn_index"
+ATTACHMENT_TASK_ID_KEY = "task_id"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -113,6 +124,30 @@ def _is_memory_review_source_turn(turn: dict[str, Any]) -> bool:
     return True
 
 
+def _merged_attachments(
+    existing: list[dict[str, Any]], added: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """``existing`` then each file of ``added`` whose id is new: the first copy of a file wins, order kept."""
+
+    merged = list(existing)
+    seen = {str(item.get(_ATTACHMENT_ID_KEY) or "") for item in merged}
+    for item in added:
+        attachment_id = str(item.get(_ATTACHMENT_ID_KEY) or "")
+        if not attachment_id:
+            raise ValueError("A turn's attachment record needs an attachment_id.")
+        if attachment_id not in seen:
+            seen.add(attachment_id)
+            merged.append(dict(item))
+    return merged
+
+
+def _like_contains(value: str) -> str:
+    """A ``LIKE ... ESCAPE '\\'`` pattern matching text that contains ``value`` literally."""
+
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def default_synopsis() -> dict[str, Any]:
     return {
         "goals": [],
@@ -174,7 +209,7 @@ TURN_SELECT_COLUMNS = """
     execution_history_text, turn_summary_text, user_request_summary,
     assistant_response_summary, context_summary_text, artifact_summary_json,
     summary_generator, summary_generated_at, tool_artifact_manifest_json,
-    gateway_context_json,
+    gateway_context_json, attachments_json,
     memory_review_status, memory_review_job_id, memory_review_queued_at_utc,
     memory_reviewed_at_utc, memory_reviewed_by_agent_id,
     created_at, updated_at
@@ -237,7 +272,20 @@ class ConversationRepository(Protocol):
         task_status: str = "accepted",
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        attachments: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]: ...
+
+    def merge_turn_attachments(
+        self, *, conversation_id: str, task_id: str, attachments: list[dict[str, Any]]
+    ) -> Optional[list[dict[str, Any]]]: ...
+
+    def list_conversation_attachments(
+        self, conversation_id: str, *, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT
+    ) -> list[dict[str, Any]]: ...
+
+    def find_conversation_attachment(
+        self, conversation_id: str, attachment_id: str
+    ) -> Optional[dict[str, Any]]: ...
 
     def append_clarification(
         self,
@@ -468,6 +516,7 @@ _TASK_LINK_TEXT_COLUMNS = (
     "artifact_summary_json",
     "tool_artifact_manifest_json",
     "gateway_context_json",
+    "attachments_json",
 )
 _THREAD_TEXT_COLUMNS = ("subject_preview", "synopsis_json", "synopsis_markdown", "compaction_state_json")
 _CONTEXT_EPOCH_TEXT_COLUMNS = (
@@ -559,6 +608,7 @@ class _RelationalConversationRepository:
                     summary_generated_at TEXT,
                     tool_artifact_manifest_json TEXT,
                     gateway_context_json TEXT,
+                    attachments_json TEXT,
                     created_at TEXT,
                     updated_at TEXT,
                     memory_review_status TEXT NOT NULL DEFAULT '{TURN_MEMORY_REVIEW_UNREVIEWED}',
@@ -590,6 +640,9 @@ class _RelationalConversationRepository:
             ensure_column(conn, "conversation_task_links", "memory_review_queued_at_utc", "TEXT", logger=self._logger)
             ensure_column(conn, "conversation_task_links", "memory_reviewed_at_utc", "TEXT", logger=self._logger)
             ensure_column(conn, "conversation_task_links", "memory_reviewed_by_agent_id", "TEXT", logger=self._logger)
+            # The files the person sent with a turn (conversation attachments, 0.10);
+            # turns saved before have none (NULL reads as an empty list).
+            ensure_column(conn, "conversation_task_links", "attachments_json", "TEXT", logger=self._logger)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS conversation_artifacts (
@@ -993,6 +1046,7 @@ class _RelationalConversationRepository:
             "summary_generated_at": row["summary_generated_at"],
             "tool_artifact_manifest": manifest,
             "gateway_context": gateway_context if isinstance(gateway_context, dict) else {},
+            "attachments": self._stored_attachments(row["attachments_json"], task_id=row["task_id"]),
             "memory_review_status": row["memory_review_status"] or TURN_MEMORY_REVIEW_UNREVIEWED,
             "memory_review_job_id": row["memory_review_job_id"],
             "memory_review_queued_at_utc": row["memory_review_queued_at_utc"],
@@ -1021,10 +1075,18 @@ class _RelationalConversationRepository:
         task_status: str = "accepted",
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        attachments: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
+        """Add the task's turn; ``attachments`` are the files of the person's message.
+
+        A task admitted again (redelivered) keeps its turn: its files are
+        merged into it (``merge_turn_attachments``), so nothing is lost or
+        repeated.
+        """
+
         existing = self.get_turn_by_task_id(task_id)
         if existing:
-            return existing
+            return self._readmitted_turn(existing, attachments or [])
 
         initial_memory_review_status = _memory_review_initial_status(
             memory_review_status=memory_review_status,
@@ -1054,10 +1116,10 @@ class _RelationalConversationRepository:
                     execution_history_text, turn_summary_text, user_request_summary,
                     assistant_response_summary, context_summary_text, artifact_summary_json,
                     summary_generator, summary_generated_at, tool_artifact_manifest_json,
-                    gateway_context_json,
+                    gateway_context_json, attachments_json,
                     memory_review_status,
                     created_at, updated_at
-                ) VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                ) VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
                 """,
                 (
                     conversation_id,
@@ -1089,6 +1151,7 @@ class _RelationalConversationRepository:
                     None,
                     "[]",
                     json.dumps(gateway_context or {}),
+                    json.dumps(_merged_attachments([], attachments or [])),
                     initial_memory_review_status,
                     now_ts,
                     now_ts,
@@ -1108,6 +1171,133 @@ class _RelationalConversationRepository:
             )
             conn.commit()
         return self.get_turn_by_task_id(task_id) or {}
+
+    def _stored_attachments(self, raw_value: Any, *, task_id: Any) -> list[dict[str, Any]]:
+        """A turn's saved files; a turn saved before files were kept has none.
+
+        A value that is not a JSON list of records is reported and read as no
+        files, so one damaged row cannot stop the conversation being read.
+        """
+
+        if raw_value in (None, ""):
+            return []
+        try:
+            value = json.loads(raw_value)
+        except (TypeError, json.JSONDecodeError):
+            value = None
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            return value
+        self._logger.warning(
+            "A conversation turn's saved file list could not be read; it is treated as empty. "
+            "event=conversation_turn_attachments_unreadable task_id=%s",
+            task_id,
+        )
+        return []
+
+    def merge_turn_attachments(
+        self, *, conversation_id: str, task_id: str, attachments: list[dict[str, Any]]
+    ) -> Optional[list[dict[str, Any]]]:
+        """Add files to a turn's saved list in one write; returns the list, None when there is no such turn.
+
+        Files whose ``attachment_id`` the turn already has are left as they
+        are, so a resent answer or guidance adds nothing. The read and the
+        write happen under the store's write lock (``BEGIN IMMEDIATE`` on
+        SQLite, the store's advisory transaction lock on PostgreSQL), so two
+        processes adding files to the same turn at once both keep theirs.
+        """
+
+        p = self._dialect.bind
+        with self._write() as conn:
+            row = conn.execute(
+                f"SELECT attachments_json FROM conversation_task_links WHERE conversation_id = {p} AND task_id = {p}",
+                (conversation_id, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            existing = self._stored_attachments(row["attachments_json"], task_id=task_id)
+            merged = _merged_attachments(existing, attachments)
+            if len(merged) != len(existing):
+                conn.execute(
+                    f"UPDATE conversation_task_links SET attachments_json = {p}, updated_at = {p} "
+                    f"WHERE conversation_id = {p} AND task_id = {p}",
+                    (json.dumps(merged), utc_now_iso(), conversation_id, task_id),
+                )
+        return merged
+
+    def list_conversation_attachments(
+        self, conversation_id: str, *, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT
+    ) -> list[dict[str, Any]]:
+        """The newest ``limit`` files of a conversation, newest first, each once.
+
+        Each record gains the ``turn_index`` and ``task_id`` of the turn it
+        was sent with. Reads at most ``CONVERSATION_ATTACHMENT_SCAN_TURNS`` of
+        the newest turns that have files.
+        """
+
+        bounded = max(1, min(int(limit), CONVERSATION_ATTACHMENT_LIST_LIMIT))
+        p = self._dialect.bind
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT task_id, turn_index, attachments_json FROM conversation_task_links
+                WHERE conversation_id = {p} AND attachments_json IS NOT NULL AND attachments_json NOT IN ('', '[]')
+                ORDER BY turn_index DESC LIMIT {p}
+                """,
+                (conversation_id, CONVERSATION_ATTACHMENT_SCAN_TURNS),
+            ).fetchall()
+        listed: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            # A turn's later files arrived later (guidance, answers).
+            for item in reversed(self._stored_attachments(row["attachments_json"], task_id=row["task_id"])):
+                attachment_id = str(item.get(_ATTACHMENT_ID_KEY) or "")
+                if not attachment_id or attachment_id in seen:
+                    continue
+                seen.add(attachment_id)
+                listed.append(
+                    {**item, ATTACHMENT_TURN_INDEX_KEY: row["turn_index"], ATTACHMENT_TASK_ID_KEY: row["task_id"]}
+                )
+                if len(listed) >= bounded:
+                    return listed
+        return listed
+
+    def find_conversation_attachment(
+        self, conversation_id: str, attachment_id: str
+    ) -> Optional[dict[str, Any]]:
+        """The file with this exact id in this conversation (newest turn first), or None.
+
+        Only this conversation's turns are read: a ``LIKE`` on the saved
+        lists narrows them, then the id is compared exactly.
+        """
+
+        wanted = str(attachment_id or "")
+        if not wanted:
+            return None
+        p = self._dialect.bind
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT task_id, turn_index, attachments_json FROM conversation_task_links
+                WHERE conversation_id = {p} AND attachments_json LIKE {p} ESCAPE '\\'
+                ORDER BY turn_index DESC
+                """,
+                (conversation_id, _like_contains(wanted)),
+            ).fetchall()
+        for row in rows:
+            for item in self._stored_attachments(row["attachments_json"], task_id=row["task_id"]):
+                if str(item.get(_ATTACHMENT_ID_KEY) or "") == wanted:
+                    return {**item, ATTACHMENT_TURN_INDEX_KEY: row["turn_index"], ATTACHMENT_TASK_ID_KEY: row["task_id"]}
+        return None
+
+    def _readmitted_turn(self, existing: dict[str, Any], attachments: list[dict[str, Any]]) -> dict[str, Any]:
+        """The turn of a task admitted again, with its message's files merged in."""
+
+        if not attachments:
+            return existing
+        merged = self.merge_turn_attachments(
+            conversation_id=existing["conversation_id"], task_id=existing["task_id"], attachments=attachments
+        )
+        return {**existing, "attachments": merged if merged is not None else existing["attachments"]}
 
     def append_clarification(
         self,
