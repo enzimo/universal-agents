@@ -396,6 +396,13 @@ class StuckTasks:
         uploads_dir = agent_layout(self.agent).uploads_dir
         files_by_request: dict[str, dict[str, str]] = {}  # root task id -> attachment id -> file name
         for task in held.values():
+            root = self.root(held, task)
+            if root.record.task.parent_task_id:
+                # No agent holds this subtask's request any more: the request
+                # ended, and a stop may not have reached the subtask yet. The
+                # person has nothing left to send files again for, so nothing
+                # is reported (an open incident for the request closes silently).
+                continue
             try:
                 old = [
                     attachment
@@ -412,7 +419,7 @@ class StuckTasks:
                 )
                 continue
             if old:
-                files = files_by_request.setdefault(self.root(held, task).record.task_id, {})
+                files = files_by_request.setdefault(root.record.task_id, {})
                 for attachment in old:
                     files.setdefault(attachment.attachment_id, attachment.filename)
         for root_id, files in files_by_request.items():

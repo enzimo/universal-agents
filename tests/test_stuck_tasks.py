@@ -459,6 +459,27 @@ async def test_a_request_holding_files_sent_before_the_upgrade_tells_its_person_
 
 
 @pytest.mark.asyncio
+async def test_a_subtask_still_held_after_its_request_ended_sends_no_second_notice(lead):
+    old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, files=[old])])
+    save(lead, "worker-1", "WebResearchAgent", [record("child-a", parent="root", route="lead", files=[old])])
+    seen(lead, "worker-1")
+    now = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=now)
+    assert len(notices(lead)) == 1 and len(chats(lead)) == 1
+
+    # The person stopped the request; the stop has not reached the worker yet.
+    lead.task_manager.runtime_state_store.clear_task_runtime("lead")
+    await report_stuck_tasks(lead, now=now + timedelta(minutes=1))
+    assert len(notices(lead)) == 1 and len(chats(lead)) == 1 and not admin_notices(lead)
+    assert not open_incidents(lead)
+
+    lead.task_manager.runtime_state_store.clear_task_runtime("worker-1")
+    await report_stuck_tasks(lead, now=now + timedelta(minutes=2))
+    assert len(notices(lead)) == 1 and len(chats(lead)) == 1 and not open_incidents(lead)
+
+
+@pytest.mark.asyncio
 async def test_files_sent_before_the_upgrade_of_unverified_work_tell_administrators_no_names(lead):
     old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
     save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, signed=False, files=[old])])
