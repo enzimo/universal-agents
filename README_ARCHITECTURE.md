@@ -3986,10 +3986,11 @@ inspect | review | import | import-credentials | finish-import`; guide:
   development branch (such as `release/0.10`) both change one section, the
   number `main` gave it keeps `main`'s meaning, because `main` ships first:
   each merge of `main` into the development branch keeps `main`'s fingerprint
-  for that number, gives the development branch's section the next number
-  above it, and reads `main`'s version through one conversion step. That merge
-  also tests the development branch's own earlier shape of the number, since
-  its pre-release exports may still exist. A version
+  for that number (the development branch's own fingerprint for it is
+  replaced), gives the development branch's section the next number above it,
+  and reads `main`'s version through one conversion step. That merge also tests
+  the development branch's own earlier shape of the number with a real import,
+  since its pre-release exports may still exist. A version
   imports its own section versions and the ones the previous release exported,
   through one conversion step per section that changed since
   (`team_transfer.sections.SECTION_UPGRADES`). This is the one deliberate
