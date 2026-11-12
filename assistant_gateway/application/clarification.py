@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from assistant_gateway.application.local_responses import GatewayLocalResponseFactory
 from assistant_gateway.application.manager_client import GatewayManagerClient
@@ -42,6 +42,7 @@ from assistant_gateway.domain.request_state import (
     PendingQueryStatus,
 )
 from assistant_gateway.ports.repositories import SessionRepository
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
@@ -55,6 +56,11 @@ from custom_messages.enums import MessageMetaType, RequesterType
 
 # Shown after a refused answer when the next question is shown in its reply.
 NEXT_QUESTION_INTRO_TEXT = "This question is waiting for your answer:"
+# Added to a reply that did not send the person's answer when it had files:
+# the files reach the agent only with an answer it receives.
+ANSWER_FILES_NOT_SENT_TEXT = (
+    "The files you attached were not sent. Send them again with your next message if they are still needed."
+)
 
 
 @dataclass(frozen=True)
@@ -269,7 +275,14 @@ class GatewayClarificationCore:
         session_key: str,
         conversation_id: str | None,
         replied_message: RepliedMessage | None = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> None:
+        """Publish the person's answer to the lead, with the files they sent with it.
+
+        ``attachments`` are the gateway's own records of files it stored for
+        this chat; nothing else sets them on an answer.
+        """
+
         manager_id = self._manager.manager_id
         if manager_id is None:
             raise RuntimeError(self._settings.manager_unavailable_text)
@@ -291,6 +304,7 @@ class GatewayClarificationCore:
                 query_type=MessageMetaType.RESPONSE,
                 message=response_text,
                 replied_message=replied_message,
+                attachments=list(attachments),
                 parent_task_id=task_query.parent_task_id,
                 choice_mode=task_query.choice_mode,
                 choices=task_query.choices,
@@ -377,12 +391,49 @@ class GatewayClarificationApplication:
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> GatewayResponse:
+        """Answer the named question with the person's message and the files they sent with it.
+
+        When the answer is not sent (the question was not shown yet, is no
+        longer open, another message answered it, or the lead is unavailable),
+        a reply for a message with files says the files were not sent: they
+        reach the agent only with an answer.
+        """
+
         question = self._questions.get(task_query_id)
         if question is None or question.session_key != session_key:
             raise ValueError(
                 f"No question {task_query_id} waits in session_key={session_key}"
             )
+        response = await self._reply_without_answer(question, session_key)
+        if response is None:
+            if self._questions.claim_answer(task_query_id):
+                return await self._send_answer(
+                    question,
+                    session_key=session_key,
+                    response_text=response_text,
+                    replied_message=replied_message,
+                    attachments=attachments,
+                )
+            # Another message answered it, or it ended, since the check.
+            response = self._not_sent(self._questions.get(task_query_id) or question)
+        if not attachments:
+            return response
+        self._logger.info(
+            "A person's files were not sent: their message did not answer the question. "
+            "event=gateway_answer_files_not_sent task_query_id=%s session_key=%s attachment_ids=%s",
+            task_query_id,
+            session_key,
+            ",".join(attachment.attachment_id for attachment in attachments),
+        )
+        return replace(response, text=f"{response.text}\n\n{ANSWER_FILES_NOT_SENT_TEXT}")
+
+    async def _reply_without_answer(
+        self, question: PendingQueryRecord, session_key: str
+    ) -> GatewayResponse | None:
+        """The reply when this message cannot answer the question now; None when it can."""
+
         if not question.is_open:
             return self._not_sent(question)
         if not question.was_shown:
@@ -390,21 +441,31 @@ class GatewayClarificationApplication:
             # wrote), so their message cannot be its answer.
             self._questions.mark_shown(question)
             return self._show(question, intro=QUESTION_WAITING_INTRO_TEXT)
+        if self._manager.manager_id is not None:
+            return None
+        # Nothing is sent, so the question stays open for a later answer.
+        correlation_id = question.correlation_id
+        async with self._manager.response_channel(correlation_id, task_id=question.parent_task_id):
+            await self._responses.queue_manager_unavailable(correlation_id)
+            return await self._responses.await_terminal_response(
+                correlation_id=correlation_id,
+                session_key=session_key,
+                query_handler=None,
+                response_task_id=question.parent_task_id,
+            )
+
+    async def _send_answer(
+        self,
+        question: PendingQueryRecord,
+        *,
+        session_key: str,
+        response_text: str,
+        replied_message: RepliedMessage | None,
+        attachments: Sequence[UserTaskAttachment],
+    ) -> GatewayResponse:
+        """Publish the answer this message claimed, show the next question and wait for the reply."""
 
         correlation_id = question.correlation_id
-        if self._manager.manager_id is None:
-            # Nothing is sent, so the question stays open for a later answer.
-            async with self._manager.response_channel(correlation_id, task_id=question.parent_task_id):
-                await self._responses.queue_manager_unavailable(correlation_id)
-                return await self._responses.await_terminal_response(
-                    correlation_id=correlation_id,
-                    session_key=session_key,
-                    query_handler=None,
-                    response_task_id=question.parent_task_id,
-                )
-        if not self._questions.claim_answer(task_query_id):
-            # Another message answered it, or it ended, since the check.
-            return self._not_sent(self._questions.get(task_query_id) or question)
         published = False
         try:
             async with self._manager.response_channel(correlation_id, task_id=question.parent_task_id):
@@ -415,15 +476,17 @@ class GatewayClarificationApplication:
                     session_key=session_key,
                     conversation_id=question.conversation_id,
                     replied_message=replied_message,
+                    attachments=attachments,
                 )
                 published = True
                 self._logger.info(
                     "Sent a person's answer to its question. event=gateway_question_answered "
-                    "task_query_id=%s parent_task_id=%s correlation_id=%s session_key=%s",
-                    task_query_id,
+                    "task_query_id=%s parent_task_id=%s correlation_id=%s session_key=%s attachment_count=%d",
+                    question.task_query_id,
                     question.parent_task_id,
                     correlation_id,
                     session_key,
+                    len(attachments),
                 )
                 # Waiting or cancellation after publication cannot send the
                 # answer again. Different tasks sharing this correlation

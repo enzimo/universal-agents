@@ -73,14 +73,6 @@ class ChannelBridge:
             if resolved_session_key
             else None
         )
-        if inbound_attachments and waiting_question_id:
-            return [
-                self.translator.render_outbound(
-                    inbound=inbound,
-                    text="Attachments cannot be used as a reply to a pending question. Send a text answer first, then send the attachment.",
-                    session_key=resolved_session_key,
-                )
-            ]
         if inbound_attachments and inbound_text.startswith("/"):
             return [
                 self.translator.render_outbound(
@@ -140,12 +132,14 @@ class ChannelBridge:
             and waiting_question_id
         ):
             # The answer names the question found above, so a question shown
-            # after this message arrived is never answered by it.
+            # after this message arrived is never answered by it. Files sent
+            # with it (already stored by the chat adapter) go with the answer.
             response = await self.application.reply_to_pending_query(
                 session_key=resolved_session_key,
                 task_query_id=waiting_question_id,
                 response_text=action.text or "",
                 replied_message=inbound.replied_message,
+                attachments=tuple(inbound_attachments),
             )
             return [
                 self.translator.render_outbound(

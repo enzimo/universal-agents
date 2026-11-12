@@ -189,7 +189,8 @@ class _FakeGateway:
         return self.waiting_question if session_key == "pending_session" else None
 
     async def reply_to_pending_query(
-        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None
+        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None,
+        attachments=(),
     ):
         self.replies_to_pending.append(
             {
@@ -4240,20 +4241,14 @@ async def test_web_chat_separate_upload_and_retry_leave_the_original_question_un
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("form_fields", "waiting_for_answer", "status"),
+    ("form_fields", "status"),
     [
-        pytest.param({"message": "/help"}, False, 400, id="slash-command"),
-        pytest.param(
-            {"conversation_id": "conv_other"}, False, 409, id="other-conversation-id"
-        ),
-        pytest.param(
-            {"client_request_id": "not a request id"}, False, 400, id="bad-request-id"
-        ),
-        pytest.param({}, True, 400, id="assistant-waits-for-an-answer"),
+        pytest.param({"message": "/help"}, 400, id="slash-command"),
+        pytest.param({"conversation_id": "conv_other"}, 409, id="other-conversation-id"),
+        pytest.param({"client_request_id": "not a request id"}, 400, id="bad-request-id"),
         # The first file passes its checks, the second does not.
         pytest.param(
             {"files": (_NOTES_FILE, ("run.sh", b"echo hello", "text/x-shellscript"))},
-            False,
             400,
             id="a-later-file-is-refused",
         ),
@@ -4263,16 +4258,19 @@ async def test_web_chat_refused_upload_saves_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     form_fields: dict[str, Any],
-    waiting_for_answer: bool,
     status: int,
 ) -> None:
-    """Every refusal of a send with files comes before the files are saved."""
+    """Every refusal of a send with files comes before the files are saved.
+
+    Files sent while a question waits are an answer's files, saved and sent
+    with it (``tests.test_gateway_answer_attachments``).
+    """
 
     config = _config(tmp_path)
     _enable_web_chat(config, monkeypatch)
     database = tmp_path / "gateway.db"
     store = GatewayStateStore(str(database))
-    # The fake gateway has a question waiting only in "pending_session".
+    # The sender's own conversation; no question waits in it.
     store.create_session(
         session_key="pending_session",
         conversation_id="conv_pending",
@@ -4283,8 +4281,6 @@ async def test_web_chat_refused_upload_saves_nothing(
         owner_canonical_user_id=config.user.canonical_user_id,
     )
     gateway = _StatefulFakeGateway(store)
-    if waiting_for_answer:
-        gateway.waiting_question = "task_query_pending"
     app = InternalWebsiteInteractiveApp(
         config, gateway=gateway, bridge=SimpleNamespace()
     )

@@ -112,6 +112,26 @@ def test_model_task_query_payload_strips_message_whitespace() -> None:
     assert payload.message == "Which provider should I test first?"
 
 
+@pytest.mark.parametrize(
+    "decision_type", [ModelAgentTurnDecision, FireworksModelAgentTurnDecision, CompatibleModelAgentTurnDecision]
+)
+def test_a_model_cannot_put_files_on_a_question_or_answer(decision_type) -> None:
+    """Files on an answer come only from the gateway (``TaskQuery.attachments``); no model schema offers them."""
+
+    stored_file = {
+        "attachment_id": "att_other", "filename": "passport.jpg", "content_type": "image/jpeg", "kind": "image",
+        "size_bytes": 4, "sha256": "0" * 64, "storage_refs": [{"storage_type": "local", "path": "/tmp/passport.jpg"}],
+    }
+    action = {
+        "action_type": "task_query",
+        "task_query": {"query_type": "response", "message": "Here it is.", "attachments": [stored_file]},
+    }
+
+    with pytest.raises(ValidationError, match="attachments"):
+        decision_type.model_validate({"actions": [action], "summary_for_history": "Answered."})
+    assert "attachments" not in json.dumps(decision_type.model_json_schema())
+
+
 def test_model_agent_turn_decision_schema_is_smaller_than_runtime_schema() -> None:
     model_schema = json.dumps(ModelAgentTurnDecision.model_json_schema(), sort_keys=True)
     runtime_schema = json.dumps(StructuredAgentTurnDecision.model_json_schema(), sort_keys=True)

@@ -98,7 +98,8 @@ class FakeGatewayApplication:
         return None
 
     async def reply_to_pending_query(
-        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None
+        self, *, session_key: str, task_query_id: str, response_text: str, replied_message=None,
+        attachments=(),
     ):
         assert self.waiting_questions.pop(session_key) == task_query_id
         self.query_replies.append((session_key, response_text))

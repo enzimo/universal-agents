@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Protocol
 
 from assistant_gateway.application.clarification import GatewayClarificationApplication
@@ -292,6 +293,7 @@ class GatewayRuntimeApplication:
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> GatewayApplicationResponse:
         return gateway_response_view(
             await self._clarification.reply(
@@ -299,6 +301,7 @@ class GatewayRuntimeApplication:
                 task_query_id=task_query_id,
                 response_text=response_text,
                 replied_message=replied_message,
+                attachments=attachments,
             )
         )
 
