@@ -1284,7 +1284,12 @@ administrators get an Inbox notice naming the server, since when it has not
 answered, and the last error; there is one notice per server per day, however
 many agents gave up. Check that the server is running, then update or
 reinstall it in Settings; agents try again when it changes or when they
-restart. Agents see why a server's tools are missing (`load_status` in
+restart. A hosted MCP server set to run whose sidecar could not start, for
+example because another process holds its port, counts as a server that does
+not answer: agents keep trying it on this schedule, and the first try after
+the port is free starts the sidecar and loads its tools. Starting the server
+is not a change agents watch, so agents that already stopped trying load its
+tools only when they restart. Agents see why a server's tools are missing (`load_status` in
 `find_tools` and `mcp_connections(action="list")`) and can tell you. An `active`
 inventory record describes installation, not a successful connection. An
 OpenShell credential lease does not authorize MCP access. Removing the account

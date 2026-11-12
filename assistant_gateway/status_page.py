@@ -340,18 +340,23 @@ class StatusPage:
             )
             unavailable.append(HOSTED_MCP_SOURCE)
             return []
+        # Agents retry it like a server that does not answer (custom_agents.mcp_server_tools), and a
+        # start is not a change their loader watches, so those that stopped trying need a restart.
+        minutes = self._config.mcp.load_retry_window_minutes
         return [
             StatusFindingV1(
                 finding_id=f"hosted_mcp_server_not_started:{definition.hosted_server_id}",
                 severity=StatusSeverity.PROBLEM,
                 title=f"The hosted MCP server {definition.server_name[:100]} is set to run but could not start",
                 summary=(
-                    "Agents cannot use its tools until it starts. The broker tries again when it starts and when an "
-                    "agent uses the server's tools."
+                    "Agents cannot use its tools until it starts. The broker tries again when it starts and each "
+                    f"time an agent tries to load the server's tools; agents keep trying for {minutes} minutes "
+                    "(mcp.load_retry_window_minutes), then stop until they restart."
                 ),
                 action=(
                     "Fix what the details name; for a port already in use, stop the process that holds it. Then "
-                    "stop and start the server in Settings → Runtime, or restart the container."
+                    "stop and start the server in Settings → Runtime. Agents that stopped trying load its tools "
+                    "only when they restart, so restart the container if they still lack them."
                 ),
                 source=BROKER_SOURCE,
                 since=failure.failed_at,

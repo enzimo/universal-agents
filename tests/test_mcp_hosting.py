@@ -1017,9 +1017,13 @@ async def _broker_start(config: Any) -> None:
         await broker.close()
 
 
+def _restore_failures(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    return [record for record in caplog.records if "event=mcp_host_restore_failed" in record.getMessage()]
+
+
 @pytest.mark.asyncio
 async def test_a_server_set_to_run_whose_sidecar_cannot_start_stays_set_to_run_and_is_listed_with_why(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     config, _path = _hosting_config(tmp_path)
     with _port_held_by_a_leftover() as port:
@@ -1033,6 +1037,28 @@ async def test_a_server_set_to_run_whose_sidecar_cannot_start_stays_set_to_run_a
     assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
         HostedMCPLifecycle.RUNNING
     )
+    # Nothing in the broker failed: a warning with the reason, no traceback.
+    [logged] = _restore_failures(caplog)
+    assert logged.levelname == "WARNING" and logged.exc_info is None
+    assert "is already in use" in logged.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_defect_while_restoring_a_server_is_logged_with_its_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config, _path = _hosting_config(tmp_path)
+    _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+
+    async def defect(_self: MCPHostedProcessSupervisor, _definition: MCPHostedServerDefinitionV1) -> Any:
+        raise TypeError("a defect in the broker")
+
+    monkeypatch.setattr(MCPHostedProcessSupervisor, "_launch", defect)
+    await _broker_start(config)
+
+    [logged] = _restore_failures(caplog)
+    assert logged.levelname == "ERROR" and logged.exc_info is not None
+    assert isinstance(logged.exc_info[1], TypeError)
 
 
 @pytest.mark.asyncio
@@ -1100,6 +1126,10 @@ async def test_every_list_of_hosted_servers_says_why_a_server_set_to_run_is_not_
     assert finding.finding_id == f"hosted_mcp_server_not_started:{definition.hosted_server_id}"
     assert "echo" in finding.title and "already in use" in str(finding.details)
     assert "stop the process that holds it" in finding.action
+    # Review C01: a start does not bring back agents that stopped trying.
+    assert "agents keep trying for 60 minutes (mcp.load_retry_window_minutes)" in finding.summary
+    assert "then stop until they restart" in finding.summary
+    assert "load its tools only when they restart" in finding.action
 
     broker = MCPHostedProcessSupervisor(config)
     try:
