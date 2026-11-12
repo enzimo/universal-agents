@@ -10,7 +10,19 @@ and automatic retry read these rows without decoding runtime snapshots.
 an optional check-back time set by the requester's model and the last progress
 note sent to the person.
 
-The requester's runtime is the only writer for its own rows.
+The requester's runtime writes its own rows, and one runtime makes its storage
+calls one at a time. Writers still take turns, because two runtimes can write
+the same rows at once: an earlier requester runtime that is still alive after
+its recovered replacement took its tasks over (``custom_agents.custody_loss``),
+or several processes sharing one PostgreSQL database. Every write reads the
+current row, changes it and saves it whole, so without turns one writer's
+save erases what another committed after its read: a later check-back time,
+another setter's progress counts, or a task's close. Each write starts with
+``begin_write()``, which is ``BEGIN IMMEDIATE`` in SQLite and, in PostgreSQL,
+this store's transaction advisory lock (``DELEGATED_TASKS_WRITE_LOCK_KEY``)
+taken before the read and held until commit or rollback. A lock on the rows
+would not do: a wait that does not exist yet has no row to lock. Reads take
+no lock.
 """
 
 from __future__ import annotations
@@ -23,7 +35,11 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from storage.config import StorageSettings
-from storage.postgres_connection import connect_postgres, ensure_storage_parent_dir
+from storage.postgres_connection import (
+    DELEGATED_TASKS_WRITE_LOCK_KEY,
+    connect_postgres,
+    ensure_storage_parent_dir,
+)
 from storage.schema_setup import begin_schema_setup
 from storage.sql_dialect import POSTGRES, SQLITE
 from storage.sqlite_connection import connect_sqlite
@@ -137,7 +153,8 @@ class DelegatedTaskRepository:
 
     def _connect(self) -> Any:
         if self.settings.postgres_dsn:
-            return connect_postgres(self.settings.postgres_dsn)
+            # ``begin_write`` takes this store's advisory lock; reads take none.
+            return connect_postgres(self.settings.postgres_dsn, write_lock_key=DELEGATED_TASKS_WRITE_LOCK_KEY)
         return connect_sqlite(str(self.settings.sqlite_path), row_factory=sqlite3.Row)
 
     # -- delegated tasks ---------------------------------------------------------
@@ -430,10 +447,16 @@ class DelegatedTaskRepository:
         return tuple(DelegatedTaskRecordV1.model_validate_json(row[0]) for row in rows)
 
     def prune(self, team_id: str, *, before: datetime) -> int:
-        """Delete closed records and finished waits not updated since ``before``."""
+        """Delete closed records and finished waits not updated since ``before``.
+
+        It takes the write lock like every other write: the second delete reads
+        which parents still have open tasks, and a task published for a parent
+        after that read would otherwise lose its parent's wait.
+        """
 
         p = self.dialect.bind
         with self._connect() as conn:
+            conn.begin_write()
             cursor = conn.execute(
                 "DELETE FROM delegated_tasks "
                 f"WHERE team_id={p} AND status NOT IN ({p},{p}) AND updated_at<{p}",
@@ -517,8 +540,10 @@ class DelegatedTaskRepository:
         The scheduler pass reads every wait once and then wakes the due parents one by
         one, each running its model turn before the next, so its reading can be minutes
         old by the time it reaches a parent. That parent's own turn may meanwhile have set
-        a later time (``record_check_back``) or cleared it. Reading and clearing in one
-        write transaction takes only a time that is still due, and takes it once.
+        a later time (``record_check_back``) or cleared it. The read and the clear run
+        in one write transaction under the store's write lock on both backends (see the
+        module docstring), so a time set after the read is never cleared, and of two
+        callers taking the same time only one gets True.
         """
 
         with self._connect() as conn:

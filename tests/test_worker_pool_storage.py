@@ -1,4 +1,4 @@
-"""Delegated-task records, worker pool limits, incidents and events on real SQLite."""
+"""Delegated-task records on real SQLite and PostgreSQL; worker pool limits, incidents and events on real SQLite."""
 
 from __future__ import annotations
 
@@ -14,11 +14,18 @@ from storage.worker_pool_repository import (
     ProviderLimitEventV1,
     WorkerPoolRepository,
 )
+from tests.delegated_task_support import BACKENDS, delegated_task_storage
 
 
 @pytest.fixture()
 def settings(tmp_path):
     return resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "pools.db")}})
+
+
+@pytest.fixture(params=BACKENDS)
+def repository(tmp_path, request):
+    with delegated_task_storage(request.param, tmp_path) as storage:
+        yield DelegatedTaskRepository(storage)
 
 
 def _publish(repository, task_id="a", parent="p", sequence=5, requester="lead"):
@@ -44,8 +51,7 @@ def _claim(repository, worker, task_id="a"):
     )
 
 
-def test_a_delegated_task_is_queued_then_running_then_closed(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_a_delegated_task_is_queued_then_running_then_closed(repository):
     record = _publish(repository)
     assert (record.status, record.publish_sequence) == ("queued", 5)
     outcome = _claim(repository, "w1")
@@ -57,8 +63,7 @@ def test_a_delegated_task_is_queued_then_running_then_closed(settings):
     assert _claim(repository, "w2").already_closed
 
 
-def test_a_claim_from_another_worker_counts_one_move(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_a_claim_from_another_worker_counts_one_move(repository):
     _publish(repository)
     _claim(repository, "w1")
     # The same worker after its own restart is not a move.
@@ -73,12 +78,11 @@ def test_a_claim_from_another_worker_counts_one_move(settings):
     assert _claim(repository, "w3").record.interruptions == 2
 
 
-def test_recording_a_publication_never_undoes_a_claim(settings):
+def test_recording_a_publication_never_undoes_a_claim(repository):
     """Regression (2026-10-17): a worker's claim handled before the requester wrote
     the publication record (the claim handler creates it) was reset to "queued"
     with no holder when the record was written; stops then never reached the worker."""
 
-    repository = DelegatedTaskRepository(settings)
     _publish(repository, sequence=None)  # the claim handler's record for a claim that came first
     _claim(repository, "w1")
     again = _publish(repository, sequence=None)  # the outbox's own write, or an outbox retry
@@ -89,8 +93,7 @@ def test_recording_a_publication_never_undoes_a_claim(settings):
     assert _publish(repository).status == closed.status == "finished"
 
 
-def test_requeue_after_a_handback_keeps_a_newer_claim(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_requeue_after_a_handback_keeps_a_newer_claim(repository):
     _publish(repository)
     _claim(repository, "w1")
     requeued = repository.mark_requeued(team_id="t", task_id="a", publish_sequence=None, from_holder_agent_id="w1")
@@ -101,12 +104,11 @@ def test_requeue_after_a_handback_keeps_a_newer_claim(settings):
     assert repository.get("t", "a").holder_agent_id == "w2"
 
 
-def test_a_claim_for_an_unknown_task_returns_no_record(settings):
-    assert _claim(DelegatedTaskRepository(settings), "w1", task_id="missing").record is None
+def test_a_claim_for_an_unknown_task_returns_no_record(repository):
+    assert _claim(repository, "w1", task_id="missing").record is None
 
 
-def test_listing_by_parent_and_root(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_listing_by_parent_and_root(repository):
     for index in range(3):
         _publish(repository, task_id=f"t{index}")
     _publish(repository, task_id="other", parent="p2")
@@ -122,11 +124,10 @@ def test_listing_by_parent_and_root(settings):
     }
 
 
-def test_open_records_are_read_by_parent_whoever_requested_them(settings):
+def test_open_records_are_read_by_parent_whoever_requested_them(repository):
     """After recovery a parent belongs to an agent with a new id; its records still
     name the earlier requester and must be found by parent (review R2)."""
 
-    repository = DelegatedTaskRepository(settings)
     _publish(repository, task_id="before_restart", parent="p", requester="lead_before")
     _publish(repository, task_id="running", parent="p", requester="lead_now")
     _claim(repository, "w1", task_id="running")
@@ -144,8 +145,7 @@ def test_open_records_are_read_by_parent_whoever_requested_them(settings):
     assert repository.list_open_for_parents("t", []) == ()
 
 
-def test_waits_hold_check_back_times_and_last_progress(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_waits_hold_check_back_times_and_last_progress(repository):
     at = datetime.now(timezone.utc) + timedelta(minutes=5)
     repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead", at=at)
     repository.record_progress(
@@ -156,8 +156,7 @@ def test_waits_hold_check_back_times_and_last_progress(settings):
     assert wait.last_progress_counts == {"queued": 2}
 
 
-def test_waits_are_read_by_parent_whoever_set_them(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_waits_are_read_by_parent_whoever_set_them(repository):
     at = datetime.now(timezone.utc)
     repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead_before", at=at)
     repository.record_progress(team_id="t", parent_task_id="p2", requester_agent_id="lead_now", counts={}, at=at)
@@ -171,8 +170,7 @@ def test_waits_are_read_by_parent_whoever_set_them(settings):
     assert repository.waits_for_parents("t", ()) == ()
 
 
-def test_a_check_back_time_is_taken_only_while_due_and_only_once(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_a_check_back_time_is_taken_only_while_due_and_only_once(repository):
     at = datetime.now(timezone.utc)
     repository.set_check_back(team_id="t", parent_task_id="p", requester_agent_id="lead_before", at=at)
     repository.record_progress(team_id="t", parent_task_id="p", requester_agent_id="lead_before",
@@ -192,8 +190,7 @@ def test_a_check_back_time_is_taken_only_while_due_and_only_once(settings):
     assert repository.get_wait("t", "unknown") is None
 
 
-def test_prune_keeps_open_work(settings):
-    repository = DelegatedTaskRepository(settings)
+def test_prune_keeps_open_work(repository):
     _publish(repository, task_id="open")
     _publish(repository, task_id="done")
     repository.mark_closed(team_id="t", task_id="done", status="finished")
