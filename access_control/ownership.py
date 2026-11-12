@@ -33,7 +33,9 @@ that schedule (access plan 7c).
 A new task continues an existing conversation only when it works for the
 person the conversation belongs to, and work for no person only an ownerless
 one (``conversation_continuation``), because the earlier turns go into the
-task's prompt.
+task's prompt. The files earlier turns received follow the same rule
+(``conversation_files_access``): a task lists and opens them only while it
+works for the conversation's person.
 
 Objectives are the team lead's records, all kept in its one durable scope, so
 its Objective tools ask ``objective_access`` which ones a task may reach: the
@@ -169,11 +171,35 @@ def conversation_continuation(
     conversation's recorded owner.
     """
 
+    return _conversation_person(person_id, owner_id, conversation_id, PRIVATE_UPDATE)
+
+
+def conversation_files_access(
+    *, person_id: str | None, owner_id: str | None, conversation_id: str
+) -> OwnershipDecision:
+    """Whether a task may list and open the files earlier turns of its conversation received.
+
+    The same rule as ``conversation_continuation``: those files are part of the
+    conversation's history, so only a task working for the conversation's
+    person sees them, and work for no person only those of an ownerless
+    conversation. ``person_id`` is whom the task verifiably works for
+    (``TaskInfo.owner_person_id``, decided at admission from its signed
+    context); ``owner_id`` is the conversation's recorded owner. The caller
+    (``custom_agents.conversation_attachments``) asks only for the task's own
+    conversation.
+    """
+
+    return _conversation_person(person_id, owner_id, conversation_id, PRIVATE_READ)
+
+
+def _conversation_person(
+    person_id: str | None, owner_id: str | None, conversation_id: str, action: str
+) -> OwnershipDecision:
     person = str(person_id or "").strip() or None
     owner = str(owner_id or "").strip() or None
     if person == owner:
         return OwnershipDecision(True, "conversation_owner" if person else "no_person_conversation")
-    return _denied("conversation_owner_required", person, RESOURCE_CONVERSATION, conversation_id, PRIVATE_UPDATE)
+    return _denied("conversation_owner_required", person, RESOURCE_CONVERSATION, conversation_id, action)
 
 
 def objective_access(
@@ -321,6 +347,7 @@ __all__ = [
     "RESOURCE_USER_MEMORY",
     "WORKSPACE_FILE_READ",
     "conversation_continuation",
+    "conversation_files_access",
     "named_task_access",
     "objective_access",
     "private_access",

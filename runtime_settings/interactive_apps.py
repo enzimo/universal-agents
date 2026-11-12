@@ -782,6 +782,18 @@ class AdapterHostSettings(BaseModel):
             )
         return normalized
 
+    def resolved_upload_dir(self, instance_root: str | Path) -> Path:
+        """Where the gateway stores adapter-host uploads: ``upload_dir``, a relative one under the instance root.
+
+        The gateway writes them there (``assistant_gateway.adapter_host.composition``),
+        and agents open an upload by id only from this folder or ``state/uploads``
+        (``custom_agents.conversation_attachments.UploadFolders``), so both use
+        this one method and cannot disagree.
+        """
+
+        path = Path(self.upload_dir).expanduser()
+        return path.resolve() if path.is_absolute() else (Path(instance_root) / path).resolve()
+
     @field_validator(
         "unix_socket_path", "upload_dir", "client_state_path", mode="before"
     )

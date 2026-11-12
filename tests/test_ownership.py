@@ -15,6 +15,8 @@ from access_control.ownership import (
     RESOURCE_TEAM_MEMORY,
     RESOURCE_USER_MEMORY,
     WORKSPACE_FILE_READ,
+    conversation_continuation,
+    conversation_files_access,
     named_task_access,
     objective_access,
     private_access,
@@ -184,3 +186,21 @@ def test_a_task_names_only_tasks_that_work_for_the_same_person() -> None:
     for person, owner in (("usr_a", "usr_b"), ("usr_a", None), (None, "usr_a")):
         refused = named_task_access(person_id=person, owner_id=owner, task_id="task_1")
         assert (refused.allowed, refused.reason) == (False, "same_person_task_required")
+
+
+@pytest.mark.parametrize(
+    ("person", "owner", "allowed"),
+    [
+        ("usr_a", "usr_a", True),
+        (None, None, True),
+        (" ", None, True),  # blank is no person
+        ("usr_b", "usr_a", False),
+        (None, "usr_a", False),
+        ("usr_a", None, False),
+    ],
+)
+def test_a_conversations_files_follow_the_same_rule_as_continuing_it(person, owner, allowed) -> None:
+    files = conversation_files_access(person_id=person, owner_id=owner, conversation_id="c1")
+    continuation = conversation_continuation(person_id=person, owner_id=owner, conversation_id="c1")
+    assert (files.allowed, files.reason) == (continuation.allowed, continuation.reason)
+    assert files.allowed is allowed
