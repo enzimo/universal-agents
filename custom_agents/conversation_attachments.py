@@ -17,7 +17,8 @@ Which files a task may use (``request_files`` then ``attachment_scope``):
   manager's own plan-step and recovery links (never delegation links).
 - Always: that request's files, the files the person sent while it ran
   (guidance and answers, from the durable task history) and the task's own.
-- The files of earlier turns of the request's conversation only for the team
+- The files saved with the request's conversation turn (also those another of
+  its plan steps received) and the files of earlier turns only for the team
   lead, only for a top-level request, and only when the person the work is
   verified to be for may read that conversation (``access_control.ownership``).
   Specialists, including a worker's scheduled job run that continues its
@@ -47,7 +48,9 @@ from custom_agents.steering_history_events import (
     QUERY_ANSWER_FILES_KEY,
 )
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_messages.enums import TaskHistoryType
 from storage.conversation_repository import (
+    ATTACHMENT_TASK_ID_KEY,
     ATTACHMENT_TURN_INDEX_KEY,
     CONVERSATION_ATTACHMENT_LIST_LIMIT,
 )
@@ -108,19 +111,26 @@ def received_attachments(task: Any) -> list[UserTaskAttachment]:
     Accepted guidance keeps its whole ``TaskSteering`` and an answer to a
     question keeps its files (``custom_agents.steering_history_events``), so
     the files are found after the guidance is drained and after a restart.
+
+    Only the two kinds of entry this runtime records for the task itself are
+    read: a guidance acceptance (``TASK_EVENT``) and an answer to a question
+    (``QUERY_EVENT``). Entries copied from a subtask's result
+    (``SUBTASK_EVENT``, ``TaskManager.bubble_subtask_result``) keep the
+    details the worker that ran the subtask wrote, possibly in another
+    process, so their files never count as sent by the person.
     """
 
     task_id = str(getattr(task, "task_id", "") or "")
     found: list[UserTaskAttachment] = []
     for entry in list(getattr(task, "execution_history", None) or []):
+        entry_type = getattr(entry, "entry_type", None)
         details = getattr(entry, "details", None) or {}
-        if details.get(HISTORY_EVENT_KEY) == GUIDANCE_ACCEPTED_EVENT:
+        if entry_type == TaskHistoryType.TASK_EVENT and details.get(HISTORY_EVENT_KEY) == GUIDANCE_ACCEPTED_EVENT:
             steering = details.get(GUIDANCE_STEERING_KEY) or {}
             values = steering.get("attachments") if isinstance(steering, dict) else None
             found.extend(_validated(values or [], task_id=task_id, source="guidance"))
-        answer_files = details.get(QUERY_ANSWER_FILES_KEY)
-        if answer_files:
-            found.extend(_validated(answer_files, task_id=task_id, source="answer"))
+        elif entry_type == TaskHistoryType.QUERY_EVENT and details.get(QUERY_ANSWER_FILES_KEY):
+            found.extend(_validated(details[QUERY_ANSWER_FILES_KEY], task_id=task_id, source="answer"))
     return found
 
 
@@ -246,26 +256,47 @@ class AttachmentScope:
         record = self.store.find_conversation_attachment(self.conversation_id, wanted)
         return _sent_file(record, conversation_id=self.conversation_id) if record else None
 
-    def earlier_files(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
-        """The conversation's newest files that are not the request's own, newest first."""
+    def _conversation_files(self) -> tuple[list[SentFile], list[SentFile]]:
+        """The conversation's newest files that ``request.files`` lacks, newest first, split by turn.
+
+        The first list holds files saved with the request's own turn, which
+        another of its plan steps or recovery tasks received; the second holds
+        files of earlier turns. Both come from one bounded listing, the newest
+        ``CONVERSATION_ATTACHMENT_LIST_LIMIT`` files of the conversation.
+        """
 
         if self.conversation_id is None:
-            return []
-        own = {attachment.attachment_id for attachment in self.request.files}
+            return [], []
+        known = {attachment.attachment_id for attachment in self.request.files}
+        this_turn: list[SentFile] = []
+        earlier: list[SentFile] = []
         listed = self.store.list_conversation_attachments(self.conversation_id, limit=CONVERSATION_ATTACHMENT_LIST_LIMIT)
-        files = [
-            sent
-            for record in listed
-            if (sent := _sent_file(record, conversation_id=self.conversation_id)) is not None
-            and sent.attachment.attachment_id not in own
-        ]
-        return files[: max(0, limit)]
+        for record in listed:
+            sent = _sent_file(record, conversation_id=self.conversation_id)
+            if sent is None or sent.attachment.attachment_id in known:
+                continue
+            same_turn = str(record.get(ATTACHMENT_TASK_ID_KEY) or "") == self.request.request_task_id
+            (this_turn if same_turn else earlier).append(sent)
+        return this_turn, earlier
+
+    def current_files(self) -> list[SentFile]:
+        """The files of the request this task serves: ``request.files``, then any other saved with its turn."""
+
+        this_turn, _earlier = self._conversation_files()
+        return [*(SentFile(attachment) for attachment in self.request.files), *this_turn]
+
+    def earlier_files(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
+        """Files of the conversation's earlier turns, newest first."""
+
+        _this_turn, earlier = self._conversation_files()
+        return earlier[: max(0, limit)]
 
     def available(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
-        """The files to offer when an id is not found: the request's own, then earlier ones."""
+        """The files to offer when an id is not found: the current request's, then earlier ones."""
 
+        this_turn, earlier = self._conversation_files()
         own = [SentFile(attachment) for attachment in self.request.files]
-        return [*own, *self.earlier_files(limit)][: max(0, limit)]
+        return [*own, *this_turn, *earlier][: max(0, limit)]
 
 
 def attachment_scope(

@@ -33,14 +33,20 @@ from custom_agents.conversation_attachments import (
     upload_state,
 )
 from custom_agents.conversation_store import ConversationStore
-from custom_agents.steering_history_events import QUERY_ANSWER_FILES_KEY
+from custom_agents.steering_history_events import (
+    GUIDANCE_ACCEPTED_EVENT,
+    GUIDANCE_STEERING_KEY,
+    HISTORY_EVENT_KEY,
+    QUERY_ANSWER_FILES_KEY,
+)
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import _record_guidance_history
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import PlanStepTaskLink, RecoveryTaskLink
-from custom_messages.contracts.task_v1 import Task, TaskSteering
-from custom_messages.enums import MessageMetaType, TaskHistoryType, TaskSteeringType
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskSteering
+from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType, TaskSteeringType
+from custom_messages.records.task_results import TaskResultUpdate
 from runtime_settings.instance_layout import InstanceLayout
 
 TEAM = "team_files"
@@ -199,6 +205,65 @@ async def test_files_received_while_a_request_ran_are_found_after_the_drain_and_
     assert _ids(request_files(runtime.manager, ROOT).files) == ["att_list", "att_guidance", "att_answer"]
 
 
+@pytest.mark.asyncio
+async def test_files_in_a_subtasks_returned_history_never_count_as_sent_by_the_person(runtime: _Runtime) -> None:
+    """A worker's result history is copied into the request's history; its file records are not the person's."""
+
+    agent = SimpleNamespace(task_manager=runtime.manager)
+    own_guidance = TaskSteering(
+        task_id=ROOT,
+        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+        guidance_text="Use this one too.",
+        attachments=[_file(runtime.layout, "att_guidance")],
+    )
+    assert await _record_guidance_history(agent, ROOT, own_guidance)
+    assert runtime.manager.add_subtask(
+        ROOT,
+        Task(task_id="subtask_1", task_type=MessageMetaType.REQUEST, problem_statement="Research", parent_task_id=ROOT),
+        MessageHeader(from_agent_id="lead", response_routing_key="lead", agent_signature=""),
+        MessageMeta(conversation_id="conv_subtask_1", to_agent_name="Researcher"),
+    )
+    # Another person's upload, named by entries shaped like the ones this
+    # runtime records itself.
+    other = _file(runtime.layout, "att_other_person")
+    other.storage_refs[0].path = str(runtime.layout.uploads_dir / "session_bob" / "att_other_person")
+    forwarded = TaskSteering(
+        task_id="subtask_1", steering_type=TaskSteeringType.PROACTIVE_GUIDANCE, guidance_text="x", attachments=[other]
+    )
+    returned_history = [
+        TaskHistoryEntry(
+            summary="Mid-turn proactive steering accepted: x",
+            entry_type=TaskHistoryType.TASK_EVENT,
+            importance=TaskHistoryImportance.HIGH,
+            details={HISTORY_EVENT_KEY: GUIDANCE_ACCEPTED_EVENT, GUIDANCE_STEERING_KEY: forwarded.model_dump(mode="json")},
+        ),
+        TaskHistoryEntry(
+            summary="TaskQuery response: here",
+            entry_type=TaskHistoryType.QUERY_EVENT,
+            importance=TaskHistoryImportance.HIGH,
+            details={QUERY_ANSWER_FILES_KEY: [other.model_dump(mode="json")]},
+        ),
+    ]
+
+    # As the lead does with a worker's response, then its result.
+    assert runtime.manager.update_task_result(
+        "subtask_1", TaskResultUpdate(answer="done", execution_history=returned_history)
+    )
+    runtime.manager.bubble_subtask_result(ROOT, "subtask_1")
+
+    root_task = runtime.manager.get_task_info(ROOT).task
+    # Both entries were copied with their details as the worker wrote them.
+    copied = [entry for entry in root_task.execution_history if entry.details.get("bubbled_entry_id")]
+    assert [entry.entry_type for entry in copied] == [TaskHistoryType.SUBTASK_EVENT] * 2
+    assert GUIDANCE_STEERING_KEY in copied[0].details and QUERY_ANSWER_FILES_KEY in copied[1].details
+    assert _ids(received_attachments(root_task)) == ["att_guidance"]
+    assert _ids(request_files(runtime.manager, ROOT).files) == ["att_list", "att_guidance"]
+    scope = runtime.scope(ROOT)
+    assert scope.find("att_other_person") is None and scope.find("att_guidance") is not None
+    with pytest.raises(AttachmentSelectionError):
+        select_attachments(scope, ["att_other_person"], uploads_dir=runtime.layout.uploads_dir)
+
+
 def test_an_unreadable_received_record_is_reported_and_skipped(runtime: _Runtime, caplog: pytest.LogCaptureFixture) -> None:
     runtime.manager.append_history_entry(
         ROOT, "TaskQuery response", entry_type=TaskHistoryType.QUERY_EVENT,
@@ -293,9 +358,16 @@ def test_files_are_saved_with_the_turn_of_the_request_a_step_or_recovery_task_se
     assert resent == saved
     turn = runtime.store.get_turn_by_task_id(ROOT)
     assert [item["attachment_id"] for item in turn["attachments"]] == ["att_list", "att_step_answer", "att_recovery_answer"]
-    # The next step and the next turn find the step's answer file.
+    # The next step and the request itself find the step's answer file and
+    # list it with the current request, not with earlier turns.
     runtime.plan_step("step_3")
-    assert runtime.scope("step_3").find("att_step_answer") is not None
+    for task_id in ("step_3", ROOT):
+        scope = runtime.scope(task_id)
+        assert scope.find("att_step_answer").turn_index == 2
+        assert _ids(scope.current_files()) == ["att_list", "att_recovery_answer", "att_step_answer"]
+        assert _ids(scope.earlier_files()) == ["att_receipt"]
+        assert _ids(scope.available()) == ["att_list", "att_recovery_answer", "att_step_answer", "att_receipt"]
+    # The next turn lists them as earlier files.
     runtime.turn("task_turn_3", [])
     runtime.task("task_turn_3", conversation_id=CONVERSATION)
     assert "att_recovery_answer" in _ids(runtime.scope("task_turn_3").earlier_files())
