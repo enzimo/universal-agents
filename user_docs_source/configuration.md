@@ -1117,9 +1117,12 @@ change id, skill, reason and model (never file contents or keys). The reasons:
 - `task_model_unavailable` or `turn_finished`: the review needs the running
   task that staged the skill. Stage it again from a running task; if no model
   is found again, check the agent's model settings.
-- `input_too_large` or `input_too_large_for_model`: raise `max_input_bytes`
-  (up to 1 MiB), use a model with a larger context window, or use a smaller
-  skill.
+- `input_too_large`: the skill is larger than `max_input_bytes`. Raise
+  `max_input_bytes` (up to 1 MiB), or use a smaller skill.
+- `input_too_large_for_model`: the skill fits `max_input_bytes` but not the
+  model's context window, so raising `max_input_bytes` does not help. Use a
+  model with a larger context window for this agent, or lower
+  `max_input_bytes` so such skills are refused before any model call.
 - `model_key_refused` or `model_key_rejected`: the task may not use a model
   key, or the provider refused it. The refusal says who saves a working key
   with `/auth model` or `/auth model me`.
