@@ -1571,6 +1571,29 @@ change control files only through typed services (settings, roster,
 provisioning, reviewed skill installation). Team skills are the one readable
 exception, because agents must read a skill's files and run its scripts; they
 are never writable, and new or changed skills go through reviewed installation.
+The required SkillSpector scan stays local and credential-free. Optional
+`workspace.skill_installation.semantic_review` (`mode: "task_model"`) adds a
+tool-free Strands assessment with the model of the running turn that staged
+the skill: the person's own model when the turn uses one, else the turn's
+model (`custom_agents.skill_semantic_review`). The review runs on that turn's
+own event loop (`custom_agents.turn_registry.run_on_turn_loop`) as owned work
+that the turn's stop cancels. Why: a sync tool's worker thread would otherwise
+start a new event loop for each model call, while a provider client that keeps
+pooled connections (the native Anthropic client) is bound to the loop that
+opened them; on the turn's loop the review keeps the turn's exact model
+object, provider settings and per-call key binding, with no second client and
+no key handling of its own. A selected review fails closed: without a running
+turn or a model, after a stop, and for every incomplete answer it writes an
+`incomplete` report with one reason code (`AssessmentReason`); only
+`mode: "off"` lets the local checks decide alone. Staging and apply check the
+report with the same `validate_report`, bound to the review settings in force,
+so a settings change invalidates a pending plan. The staging refusal names the
+reason and who fixes it, and the staging log line
+(`event=skill_semantic_review_refused` or `event=skill_semantic_review_finished`)
+carries the change id, skill name, artifact digest, reason and model, never
+file contents, provider error text or keys. Complete file coverage and both
+reports bind to the installation plan. This is part of trusted installation
+code, not another agent-writable installer.
 Startup refuses an instance still in the old single-`workspace/` layout and
 prints the move commands rather than moving files itself.
 
@@ -4343,7 +4366,15 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   identifies persisted payload models and their owning sections. Frozen
   fingerprints in `data/schemas/team-transfer/section-contracts.json` detect
   payload changes even after schema regeneration: append a new version and
-  converter rather than replacing an existing fingerprint. A version
+  converter rather than replacing an existing fingerprint. When `main` and the
+  development branch (such as `release/0.10`) both change one section, the
+  number `main` gave it keeps `main`'s meaning, because `main` ships first:
+  each merge of `main` into the development branch keeps `main`'s fingerprint
+  for that number (the development branch's own fingerprint for it is
+  replaced), gives the development branch's section the next number above it,
+  and reads `main`'s version through one conversion step. That merge also tests
+  the development branch's own earlier shape of the number with a real import,
+  since its pre-release exports may still exist. A version
   imports its own section versions and the ones the previous release exported,
   through one conversion step per section that changed since
   (`team_transfer.sections.SECTION_UPGRADES`). Steps are pruned by release:
@@ -5201,8 +5232,9 @@ through versioned upgrade steps, so the running code reads only the current form
 instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
 (`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
 old file), a current file that still names it is refused by name like other removed
-settings, and the team transfer's settings section (version 9) drops it from older exports
-(`RETIRED_PRESENCE_SETTING`, the one name for the path). The settings export reads the file
+settings, and the team transfer's settings section (version 10) drops it from older
+exports, main's version 9 included (`RETIRED_PRESENCE_SETTING`, the one name for the
+path). The settings export reads the file
 through the upgrade steps (`read_upgraded_instance_config`), so an export taken after the
 code upgrade but before the launcher rewrote the file carries only what this version reads.
 The operational subject now carries only

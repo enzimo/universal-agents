@@ -5,9 +5,11 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from custom_agents.external_skills import normalize_external_skill_repository_urls
 from default_values import WORKSPACE_DEFAULTS
+from runtime_settings.skill_assessment import SkillSemanticReviewSettings
 
 
 class WorkspaceSkillInstallationSettings(BaseModel):
+    semantic_review: SkillSemanticReviewSettings = Field(default_factory=SkillSemanticReviewSettings)
     enabled: bool = WORKSPACE_DEFAULTS.skill_installation.value["enabled"]
     scanner_executable: str = WORKSPACE_DEFAULTS.skill_installation.value[
         "scanner_executable"

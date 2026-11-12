@@ -18,10 +18,12 @@ test, so it never leaks into the next one.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypeVar
 
 from custom_tools.runtime_context import TaskWork, _task_work, task_work
 from custom_tools.runtime_context import set_agent_ref as _set_agent_ref
@@ -104,6 +106,78 @@ class TurnHost(SimpleNamespace):
         from custom_agents.turn_registry import running_turn_task_ids
 
         return running_turn_task_ids(self)
+
+
+T = TypeVar("T")
+
+
+def turn_agent(**attributes: Any) -> TurnHost:
+    """A ``TurnHost`` that can also run owned work (``pending_work_runtime.run_as_owned_task``)."""
+
+    return with_turn_bookkeeping(TurnHost(**attributes))
+
+
+A = TypeVar("A")
+
+
+def with_turn_bookkeeping(agent: A) -> A:
+    """Give a test agent, such as a ``SimpleNamespace``, what ``run_in_turn`` and owned work need.
+
+    Keeps attributes the agent already has.
+    """
+
+    defaults = {
+        "id": "agent-1",
+        "_running_turns": {},
+        "_logger": logging.getLogger("tests.turn_agent"),
+        "_should_exit": asyncio.Event(),
+        "_owned_tasks": set(),
+    }
+    for name, value in defaults.items():
+        if not hasattr(agent, name):
+            setattr(agent, name, value)
+    return agent
+
+
+async def run_turn(agent: Any, task_id: str, body: Callable[[], Awaitable[T]]) -> T:
+    """Await ``body`` as a real model turn of ``task_id`` on ``agent``, such as a Strands agent's ``invoke_async``.
+
+    Binds the task's work record, starts the turn in its own asyncio task with
+    the real ``turn_registry.start_turn``, awaits ``body`` there, and ends the
+    turn with ``end_turn``.
+    """
+
+    from custom_agents.turn_registry import end_turn, start_turn
+
+    async def turn() -> T:
+        start_turn(agent, task_id)
+        try:
+            return await body()
+        finally:
+            end_turn(agent)
+
+    with task_work(task_id):
+        return await asyncio.create_task(turn())
+
+
+async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
+    """Run ``tool`` as a sync tool call of a real model turn of ``task_id`` on ``agent`` (``run_turn``).
+
+    The tool runs in a worker thread, as Strands runs a sync tool.
+    """
+
+    return await run_turn(agent, task_id, lambda: asyncio.to_thread(tool))
+
+
+def run_tool_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
+    """``run_in_turn`` for a synchronous test: a fresh event loop runs the turn.
+
+    Each call uses a new loop. An agent's turns all share its one runtime
+    loop, so a test of several turns with one model object whose client keeps
+    loop-bound connections runs them inside one loop (``run_in_turn``).
+    """
+
+    return asyncio.run(run_in_turn(agent, task_id, tool))
 
 
 def register_turn(host: Any, task_id: str, owner: Any, tool_stop: Any = None) -> TaskWork:
