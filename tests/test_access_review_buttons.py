@@ -404,7 +404,8 @@ async def test_hosted_adapters_send_the_press_to_the_gateway_as_a_command(harnes
     assert command.command_name == ACCESS_REVIEW_DECISION_COMMAND
     assert command.arguments == {"request_id": request.request_id, "choice": "approve"}
 
-    handler = GatewayAdapterRequestHandler(harness.application, lambda: None)  # type: ignore[arg-type]
+    # Commands carry no files: the upload store is never used.
+    handler = GatewayAdapterRequestHandler(harness.application, lambda: None, attachments=SimpleNamespace())  # type: ignore[arg-type]
     [delivery] = await handler.handle_command(command)
 
     assert harness.status(request.request_id) is AccessRequestStatus.GRANTED

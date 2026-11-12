@@ -34,7 +34,9 @@ only when the message is verified to come from the person the task works for.
 Any process on the team's NATS can address a message to the team lead, and
 these files are saved with the person's conversation and offered for later
 turns and delegation, so a message without that person's signed context
-keeps its text and loses its files.
+keeps its text and loses its files. Files with a question's answer are kept
+only on the answer to a question the top-level task itself asked
+(``answer_files_refusal``): only the gateway sends them, for the person.
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ from custom_agents.steering_history_events import (
     QUERY_ANSWER_FILES_KEY,
 )
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.enums import TaskHistoryType
+from custom_messages.enums import MessageMetaType, TaskHistoryType
 from storage.conversation_repository import (
     ATTACHMENT_TASK_ID_KEY,
     ATTACHMENT_TURN_INDEX_KEY,
@@ -81,6 +83,10 @@ _NO_VERIFIED_PERSON = "no_verified_person"
 # The message is verified for someone other than the person the task works for.
 SENDER_OTHER_PERSON = "other_person"
 SENDER_NOT_VERIFIED = _NO_VERIFIED_PERSON
+# Why files on a question's answer are not kept (``answer_files_refusal``).
+ANSWER_NOT_A_RESPONSE = "not_an_answer"
+ANSWER_FOR_SUBTASK = "subtask"
+ANSWER_TO_NO_QUESTION = "no_question"
 
 UploadState = Literal["available", "deleted", "remote"]
 UPLOAD_AVAILABLE: UploadState = "available"
@@ -174,6 +180,30 @@ async def sent_files_refusal(agent: Any, task_info: Any, msg_meta: Any) -> Optio
     if sender != task_info.owner_person_id:
         return SENDER_OTHER_PERSON
     return None
+
+
+async def answer_files_refusal(
+    agent: Any, task_info: Any, query: Any, msg_meta: Any, *, asked_by_task: bool
+) -> Optional[str]:
+    """Why files on a ``TaskQuery`` are not kept as the person's answer; None when they are.
+
+    Files come only with the person's answer (``RESPONSE``) to a question
+    the task itself asked (its ``REQUEST`` is in the task's question list:
+    ``asked_by_task``), on a top-level task, sent for the person the task works
+    for (``sent_files_refusal``). Only the gateway sends such answers: models
+    cannot set files on a question or an answer (``ModelTaskQueryPayload``),
+    and nothing passes an answer's files on to a worker. So files on a
+    question, on an answer for a subtask or on an answer to no question asked
+    are not the person's.
+    """
+
+    if query.query_type != MessageMetaType.RESPONSE:
+        return ANSWER_NOT_A_RESPONSE
+    if getattr(task_info.task, "parent_task_id", None) is not None:
+        return ANSWER_FOR_SUBTASK
+    if not asked_by_task:
+        return ANSWER_TO_NO_QUESTION
+    return await sent_files_refusal(agent, task_info, msg_meta)
 
 
 def _request_chain(task_manager: Any, task_id: str) -> list[str]:
@@ -556,3 +586,26 @@ def save_turn_attachments(
             ",".join(record["attachment_id"] for record in records),
         )
     return merged
+
+
+async def save_sent_files(agent: Any, task_id: str, attachments: Iterable[Any]) -> None:
+    """Save files the person sent with guidance or an answer, in the agent's task-manager lane.
+
+    Runs before the message is recorded or answered: a store error raises,
+    so nothing is recorded and the message comes again (the gateway resends
+    held guidance; an answer is redelivered or drained again from the runtime
+    mailbox). The merge adds each file once, so the next attempt saves only
+    what is missing. One lane operation reads the task's request links and
+    writes the turn, in order with the request's own admission.
+    """
+
+    files = list(attachments)
+    if not files:
+        return
+    task_manager = agent.task_manager
+    conversation_store = getattr(agent, "_conversation_store", None)
+
+    def save() -> Any:
+        return save_turn_attachments(task_id, files, task_manager=task_manager, conversation_store=conversation_store)
+
+    await task_manager.operations_runtime.run(save)

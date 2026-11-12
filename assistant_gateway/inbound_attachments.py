@@ -104,6 +104,22 @@ def resolve_web_chat_attachment_cache_dir(config: Any) -> Path:
     return resolve_inbound_attachment_cache_dir(config)
 
 
+def gateway_inbound_attachment_policy(config: Any) -> InboundAttachmentStoragePolicy:
+    """The checks and the folder (``state/uploads``) for every file people send to the gateway.
+
+    Chat apps running in the gateway and chat apps run by the adapter host
+    (``assistant_gateway.adapter_host.gateway_application``) save under this
+    one policy, so agents open any chat's file by id and the upload retention,
+    history clean-up and person departure find all of them.
+    """
+
+    return InboundAttachmentStoragePolicy(
+        cache_dir=resolve_inbound_attachment_cache_dir(config),
+        max_file_bytes=_max_file_bytes(config),
+        allowed_kinds=frozenset(_allowed_kinds(getattr(_settings(config), "allowed_kinds", None))),
+    )
+
+
 def safe_attachment_session_dir_name(value: str | None) -> str:
     rendered = str(value or "unknown").replace("/", "_").replace(":", "_").strip()
     return rendered or "unknown"
@@ -237,13 +253,7 @@ def store_inbound_attachment_bytes(
         data=data,
         filename=filename,
         content_type=content_type,
-        policy=InboundAttachmentStoragePolicy(
-            cache_dir=resolve_inbound_attachment_cache_dir(config),
-            max_file_bytes=_max_file_bytes(config),
-            allowed_kinds=frozenset(
-                _allowed_kinds(getattr(_settings(config), "allowed_kinds", None))
-            ),
-        ),
+        policy=gateway_inbound_attachment_policy(config),
         session_key=session_key,
         conversation_id=conversation_id,
         correlation_id=correlation_id,

@@ -36,10 +36,7 @@ from assistant_gateway.interactive_apps.host_ports import (
     InteractiveAppRuntimeContext,
     LocalInteractiveAppAttachmentStore,
 )
-from assistant_gateway.inbound_attachments import (
-    InboundAttachmentStoragePolicy,
-    resolve_inbound_attachment_cache_dir,
-)
+from assistant_gateway.inbound_attachments import gateway_inbound_attachment_policy
 from assistant_gateway.voice import build_voice_client
 from assistant_gateway.config import resolve_activity_collector_runtime_base_url
 
@@ -125,19 +122,13 @@ class InteractiveAppManager:
         self.output_sink = output_sink
         self.gateway_application = application
         self.bridge = ChannelBridge(self.gateway_application)
-        attachment_settings = config.interactive_apps.internal_website.attachments
         self.runtime = InteractiveAppRuntimeContext(
             request_timeout_seconds=config.manager.request_timeout_seconds,
             voice=config.voice,
             voice_client=build_voice_client(config.voice),
             authorization_presentation_mode=config.authorization.presentation.mode,
             attachments=LocalInteractiveAppAttachmentStore(
-                InboundAttachmentStoragePolicy(
-                    cache_dir=resolve_inbound_attachment_cache_dir(config),
-                    max_file_bytes=attachment_settings.max_file_bytes,
-                    allowed_kinds=frozenset(attachment_settings.allowed_kinds),
-                ),
-                self.gateway_application,
+                gateway_inbound_attachment_policy(config), self.gateway_application
             ),
             outgoing_attachments=gateway_staged_attachment_reader(config),
             website=InternalWebsiteHostEnvironment(

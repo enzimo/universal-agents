@@ -56,7 +56,7 @@ from custom_messages.enums import (
 )
 from custom_agents.conversation_attachments import (
     render_attachment_lines,
-    save_turn_attachments,
+    save_sent_files,
     sent_files_refusal,
 )
 from custom_agents.steering_history_events import (
@@ -434,31 +434,6 @@ async def _with_the_persons_files_only(
         ",".join(attachment.attachment_id for attachment in steering.attachments),
     )
     return steering.model_copy(update={"attachments": []})
-
-
-async def _save_guidance_files(agent: Any, task_id: str, steering: TaskSteering) -> None:
-    """Save the files sent with guidance with the turn of the request ``task_id`` serves.
-
-    Runs before the guidance is recorded or answered: a store error raises, so
-    nothing is recorded, the delivery is not acknowledged and the gateway sends
-    the held guidance again. The merge adds each file once, so the next attempt
-    saves only what is missing. A subtask's files stay in its own history
-    (``save_turn_attachments``).
-    """
-
-    if not steering.attachments:
-        return
-    task_manager = agent.task_manager
-    conversation_store = getattr(agent, "_conversation_store", None)
-
-    def save() -> Any:
-        # One lane operation: it reads the task's request links and writes the
-        # turn, in order with the request's own admission.
-        return save_turn_attachments(
-            task_id, steering.attachments, task_manager=task_manager, conversation_store=conversation_store
-        )
-
-    await task_manager.operations_runtime.run(save)
 
 
 async def _record_guidance_history(
@@ -892,7 +867,7 @@ async def handle_task_steering_message(
         # unanswered, to be sent again. Acknowledge only after the complete
         # guidance is in the task's durable history. Restart reconstructs
         # pending guidance, its files and deduplication there.
-        await _save_guidance_files(agent, task_id, steering)
+        await save_sent_files(agent, task_id, steering.attachments)
         if not await _record_guidance_history(agent, task_id, steering, applied=False):
             await _send_steering_status_response(
                 agent, steering, msg_header, msg_meta,
