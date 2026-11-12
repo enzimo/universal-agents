@@ -29,8 +29,11 @@ request produces one message however many agents work on it. Conditions:
   places the file outside this instance's ``state/uploads``
   (``conversation_attachments.locate_upload`` answers ``remote``, the rule by
   which both file tools answer ``remote_copy_required``). Reported at once, to
-  the person only, and closed with no message. Only a request is reported: a
-  subtask still held after its request ended is not.
+  the person only, and closed with no message. Only a request is reported, with
+  the files of all its work: its subtasks and its plan steps and recovery tasks
+  (tasks of the team lead with no parent, linked to the request in the lead's
+  saved work), and their subtasks. Work still held after its request ended is
+  not reported.
 
 Files sent before the upgrade. Up to 0.9 the adapter host recorded the files of
 chat apps it runs (``execution: "adapter_host"``) in its own transfer folder,
@@ -211,6 +214,51 @@ class StuckTasks:
             current = held[parent]
         return current
 
+    @staticmethod
+    def made_for(owners: Iterable[OwnerWork]) -> dict[str, str]:
+        """Each plan step and isolated recovery task, and the task it was made for.
+
+        A plan step or recovery task is a task of the team lead with no parent
+        that works for another task. These are the task manager's own links
+        (``plan_step_task_links``, ``recovery_links``), the ones
+        ``conversation_attachments._request_chain`` follows.
+        """
+        links: dict[str, str] = {}
+        for owner in owners:
+            links.update(
+                {task_id: link.original_task_id for task_id, link in owner.snapshot.recovery_links.items()}
+            )
+            links.update(
+                {task_id: link.root_task_id for task_id, link in owner.snapshot.plan_step_task_links.items()}
+            )
+        return links
+
+    @staticmethod
+    def request_of(held: dict[str, HeldTask], made_for: dict[str, str], task: HeldTask) -> HeldTask | None:
+        """The request a task's work serves, or None when no agent holds it any more.
+
+        Follows a held task's parent, and otherwise the link of a plan step or
+        recovery task, also when that step itself has ended (a recovery task
+        for an ended step still serves the request).
+        """
+        current_id = task.record.task_id
+        seen = {current_id}
+        while True:
+            current = held.get(current_id)
+            parent = current.record.task.parent_task_id if current is not None else None
+            next_id = parent or made_for.get(current_id)
+            if not next_id:
+                return current
+            if next_id in seen:
+                logger.warning(
+                    "A task's parents and plan links loop; it is not reported as part of a request. "
+                    "event=stuck_task_request_links_loop task_id=%s",
+                    task.record.task_id,
+                )
+                return None
+            seen.add(next_id)
+            current_id = next_id
+
     def owner_gone_since(self, owner: OwnerWork, now: datetime) -> datetime | None:
         """When an agent other than the lead stopped, or None while it may still run.
 
@@ -319,7 +367,7 @@ class StuckTasks:
         live_owners = self._owners_gone(owners, held, now, add)
         self._handbacks(now, held, agent_ids, found)
         self._waiting_for_access(now, held, add)
-        self._files_sent_before_upgrade(now, held, agent_ids, found)
+        self._files_sent_before_upgrade(now, held, self.made_for(owners), agent_ids, found)
         for owner in owners:
             if owner.owner_agent_id in live_owners:
                 self._live_owner_waits(owner, held, now, add)
@@ -390,17 +438,22 @@ class StuckTasks:
         self,
         now: datetime,
         held: dict[str, HeldTask],
+        made_for: dict[str, str],
         agent_ids: set[str],
         found: dict[tuple[str, str], StuckFinding],
     ) -> None:
-        """One finding per request whose unfinished work holds files stored before the upgrade."""
+        """One finding per request whose unfinished work holds files stored before the upgrade.
+
+        The work of a request's plan steps and recovery tasks, and of their
+        subtasks, counts as the request's, so the person gets one notice.
+        """
         uploads_dir = agent_layout(self.agent).uploads_dir
-        files_by_request: dict[str, dict[str, str]] = {}  # root task id -> attachment id -> file name
+        files_by_request: dict[str, dict[str, str]] = {}  # request task id -> attachment id -> file name
         for task in held.values():
-            root = self.root(held, task)
-            if root.record.task.parent_task_id:
-                # No agent holds this subtask's request any more: the request
-                # ended, and a stop may not have reached the subtask yet. The
+            request = self.request_of(held, made_for, task)
+            if request is None:
+                # No agent holds this task's request any more: the request
+                # ended, and a stop may not have reached the task yet. The
                 # person has nothing left to send files again for, so nothing
                 # is reported (an open incident for the request closes silently).
                 continue
@@ -420,17 +473,17 @@ class StuckTasks:
                 )
                 continue
             if old:
-                files = files_by_request.setdefault(root.record.task_id, {})
+                files = files_by_request.setdefault(request.record.task_id, {})
                 for attachment in old:
                     files.setdefault(attachment.attachment_id, attachment.filename)
-        for root_id, files in files_by_request.items():
-            root = held[root_id]
+        for request_id, files in files_by_request.items():
+            request = held[request_id]
             found.setdefault(
-                (root_id, TASK_FILES_SENT_BEFORE_UPGRADE),
+                (request_id, TASK_FILES_SENT_BEFORE_UPGRADE),
                 self._finding(
-                    root.record.task, root.record.header, root.record.meta,
+                    request.record.task, request.record.header, request.record.meta,
                     reason=TASK_FILES_SENT_BEFORE_UPGRADE, since=now, agent_ids=agent_ids,
-                    agent_type=root.owner_named_agent_type, file_names=tuple(files.values()),
+                    agent_type=request.owner_named_agent_type, file_names=tuple(files.values()),
                 ),
             )
 

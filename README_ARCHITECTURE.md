@@ -4436,12 +4436,14 @@ the desktop app never offers an older version.
   work, finds file records outside `state/uploads` (the rule by which the tools
   answer `remote_copy_required`) and tells the person in the request's signed
   context, once and at once, in the Inbox and the request's chat, which files
-  to send again. Without a verified person only administrators are told, with
+  to send again. The files of a request's subtasks, plan steps and recovery
+  tasks (found through the plan-step and recovery links in the team lead's
+  saved work) go into the request's one notice. Without a verified person only administrators are told, with
   the number of files and no names. It reads saved records only: it opens,
   moves and copies no file and scans no folder. Limits: it runs only while the
   stuck-task check is on (`agent.schedule_maintenance.stuck_tasks.enabled`, on
   by default); work still queued when the team lead starts is reported on the
-  first pass after an agent takes it; a subtask whose request has ended is not
+  first pass after an agent takes it; work whose request has ended is not
   reported. The condition goes with the other upgrade steps from 0.9.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
