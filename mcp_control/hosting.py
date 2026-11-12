@@ -263,6 +263,7 @@ def start_failure_sentence(failure: HostedMCPStartFailureV1) -> str:
 class MCPHostingPaths(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
+    instance_root: Path
     definitions: Path
     removed: Path
     state: Path
@@ -282,6 +283,16 @@ class MCPHostingPaths(BaseModel):
         ):
             path.mkdir(parents=True, mode=0o700, exist_ok=True)
 
+    def shown(self, path: Path) -> str:
+        """A hosting file as reasons name it: relative to the instance root.
+
+        Start-failure reasons reach agents' models and every person they work
+        for, so they never carry the host's absolute paths (account names and
+        the host's folder layout); the broker's own log has those.
+        """
+
+        return path.relative_to(self.instance_root).as_posix()
+
 
 def resolve_mcp_hosting_paths(config: Any) -> MCPHostingPaths:
     """Hosted MCP server folders, derived from the instance root (``InstanceLayout``)."""
@@ -290,6 +301,7 @@ def resolve_mcp_hosting_paths(config: Any) -> MCPHostingPaths:
     definitions = layout.mcp_hosting_definitions_dir
     state = layout.mcp_hosting_state_dir
     return MCPHostingPaths(
+        instance_root=layout.root,
         definitions=definitions,
         removed=state / "removed",
         state=state,

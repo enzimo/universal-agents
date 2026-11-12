@@ -21,7 +21,10 @@ import asyncio
 import contextlib
 import contextvars
 import json
+import os
+import signal
 import socket
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,6 +76,7 @@ from mcp_control.registry import (
 from secure_tool_broker.access_gate import REASON_IDENTITY_REJECTED
 from secure_tool_broker.mcp_client import BrokerMCPClient
 from secure_tool_broker.mcp_config import BrokerMCPConfig
+from secure_tool_broker import mcp_hosting_runtime as hosting_runtime
 from secure_tool_broker.mcp_hosting_runtime import HostedMCPPortInUse, MCPHostedProcessSupervisor
 from secure_tool_broker.mcp_runtime import BrokerMCPRuntime
 from storage.access_repository import AccessRepository
@@ -880,18 +884,20 @@ class _Running:
 
 
 @pytest.mark.asyncio
-async def test_an_earlier_starts_ready_line_in_the_sidecar_log_does_not_count(tmp_path: Path) -> None:
+async def test_an_earlier_starts_ready_line_in_the_sidecar_log_does_not_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hosting_runtime, "READY_TIMEOUT_SECONDS", 0.5)
     supervisor = MCPHostedProcessSupervisor(_supervisor_config(tmp_path))
-    log_path = tmp_path / "sidecar.log"
+    log_path = supervisor.paths.logs / "sidecar.log"
     log_path.write_text("INFO:     Uvicorn running on http://127.0.0.1:41000 (Press CTRL+C to quit)\n")
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(HostedMCPStartError, match="did not report listening on 127.0.0.1:41000 within 0.5 seconds"):
         await supervisor._wait_ready(
             _echo_definition(41000),
             _Running(),  # type: ignore[arg-type]
             log_path=log_path,
             offset=log_path.stat().st_size,
-            timeout_seconds=0.5,
         )
 
 
@@ -1102,3 +1108,343 @@ async def test_every_list_of_hosted_servers_says_why_a_server_set_to_run_is_not_
     finally:
         await broker.close()
     assert not [item for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")]
+
+
+# -- a start that does not finish leaves nothing running and says why --------------------
+
+
+def _held_open_by_this_process(path: Path) -> bool:
+    """Whether this process still holds a descriptor on ``path`` (Linux shows them in /proc)."""
+
+    descriptors = Path("/proc/self/fd")
+    if not descriptors.is_dir():
+        return False
+    for descriptor in descriptors.iterdir():
+        with contextlib.suppress(OSError):
+            if os.readlink(descriptor) == str(path):
+                return True
+    return False
+
+
+def _watch_readiness(
+    supervisor: MCPHostedProcessSupervisor,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    first: Callable[[], Any] | None = None,
+) -> tuple[list[asyncio.subprocess.Process], asyncio.Event]:
+    """Record every sidecar a start launches; the first one's readiness wait runs ``first`` instead when given."""
+
+    launched: list[asyncio.subprocess.Process] = []
+    waiting = asyncio.Event()
+    original = supervisor._wait_ready
+
+    async def wait_ready(definition: MCPHostedServerDefinitionV1, process: Any, **kwargs: Any) -> None:
+        launched.append(process)
+        waiting.set()
+        if first is not None and len(launched) == 1:
+            await first()
+            return
+        await original(definition, process, **kwargs)
+
+    monkeypatch.setattr(supervisor, "_wait_ready", wait_ready)
+    return launched, waiting
+
+
+def _count_launches(supervisor: MCPHostedProcessSupervisor, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    launches: list[str] = []
+    original = supervisor._launch
+
+    async def launch(definition: MCPHostedServerDefinitionV1) -> Any:
+        launches.append(definition.hosted_server_id)
+        return await original(definition)
+
+    monkeypatch.setattr(supervisor, "_launch", launch)
+    return launches
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_that_never_says_it_listens_is_stopped_and_the_start_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Far shorter than the sidecar needs to start, so this start's real sidecar is still loading.
+    monkeypatch.setattr(hosting_runtime, "READY_TIMEOUT_SECONDS", 0.05)
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    supervisor = MCPHostedProcessSupervisor(config)
+    launched, _waiting = _watch_readiness(supervisor, monkeypatch)
+    try:
+        with pytest.raises(HostedMCPStartError) as failed:
+            await supervisor.start(definition.hosted_server_id)
+    finally:
+        await supervisor.close()
+
+    reason = str(failed.value)
+    hosted_server_id = definition.hosted_server_id
+    assert reason == (
+        f"The hosted MCP server echo did not report listening on 127.0.0.1:{definition.port} within 0.05 "
+        f"seconds, so the broker stopped it. Its log is runtime/mcp-hosting/state/logs/{hosted_server_id}.log."
+    )
+    [process] = launched
+    assert process.returncode is not None, "the sidecar was stopped and reaped"
+    assert hosted_server_id not in supervisor._processes and not supervisor._stopping
+    assert not _held_open_by_this_process(supervisor.paths.logs / f"{hosted_server_id}.log")
+    recorded = supervisor.store.start_failure(hosted_server_id)
+    assert recorded is not None and recorded.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["token", "spawn"])
+async def test_an_os_error_while_starting_is_a_start_failure_naming_the_step_not_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    supervisor = MCPHostedProcessSupervisor(config)
+    if step == "token":
+        token = supervisor.paths.tokens / f"{definition.hosted_server_id}.token"
+
+        def no_token(_hosted_server_id: str) -> Path:
+            raise PermissionError(13, "Permission denied", str(token))
+
+        monkeypatch.setattr(supervisor, "_ensure_token", no_token)
+        expected = "preparing its access token failed (Permission denied)"
+    else:
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "no-python-here"))
+        expected = "starting its process failed (No such file or directory)"
+
+    with pytest.raises(HostedMCPStartError) as failed:
+        await supervisor.start(definition.hosted_server_id)
+
+    # An OSError would reach the broker's refusal answer (PermissionError, FileNotFoundError).
+    assert not isinstance(failed.value, OSError) and isinstance(failed.value.__cause__, OSError)
+    reason = str(failed.value)
+    assert reason == f"The hosted MCP server echo could not start: {expected}. The broker's log has the details."
+    assert str(tmp_path) not in reason
+    assert definition.hosted_server_id not in supervisor._processes
+    recorded = supervisor.store.start_failure(definition.hosted_server_id)
+    assert recorded is not None and recorded.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["timeout", "spawn", "defect"])
+async def test_the_broker_answers_why_its_own_start_failed_and_keeps_a_defect_a_defect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, ending: str
+) -> None:
+    """The real supervisor behind the broker's start route: start failures are a 503 with the reason."""
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from secure_tool_broker.service import SecureToolBrokerService
+    from tests.broker_access_support import BROKER_ROOT, caller_headers
+
+    config, _path = _hosting_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    runtime = _broker_runtime(config)
+
+    async def defect() -> None:
+        raise TypeError("a defect in the broker")
+
+    launched, _waiting = _watch_readiness(runtime.hosting, monkeypatch, first=defect if ending == "defect" else None)
+    if ending == "timeout":
+        monkeypatch.setattr(hosting_runtime, "READY_TIMEOUT_SECONDS", 0.05)
+    elif ending == "spawn":
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "no-python-here"))
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
+    monkeypatch.setattr(service, "_get_mcp_runtime", lambda: runtime)
+    try:
+        async with TestClient(TestServer(service.build_app())) as client:
+            answer = await client.post(
+                f"/v1/mcp/hosted/{definition.hosted_server_id}/start",
+                headers=caller_headers(),
+                json={"definition_digest": definition.definition_digest},
+            )
+            text = await answer.text()
+    finally:
+        await runtime.close()
+
+    recorded = runtime.hosting.store.start_failure(definition.hosted_server_id)
+    if ending == "defect":
+        assert answer.status == 502, text
+        assert recorded is None, "a defect is not the server's start failure"
+        [logged] = [record for record in caplog.records if "event=mcp_host_lifecycle_failed" in record.getMessage()]
+        assert logged.exc_info is not None, "a defect keeps its traceback"
+    else:
+        assert answer.status == 503, text
+        assert recorded is not None and json.loads(text) == {
+            "error": recorded.reason,
+            "reason_code": HOSTED_MCP_START_FAILED,
+        }
+    assert all(process.returncode is not None for process in launched)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_start_stops_its_sidecar_and_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    supervisor = MCPHostedProcessSupervisor(config)
+    launched, waiting = _watch_readiness(supervisor, monkeypatch, first=asyncio.Event().wait)
+    try:
+        start = asyncio.create_task(supervisor.start(definition.hosted_server_id))
+        await waiting.wait()
+        start.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start
+    finally:
+        await supervisor.close()
+
+    [process] = launched
+    assert process.returncode is not None
+    assert definition.hosted_server_id not in supervisor._processes and not supervisor._stopping
+    assert not _held_open_by_this_process(supervisor.paths.logs / f"{definition.hosted_server_id}.log")
+    assert supervisor.store.start_failure(definition.hosted_server_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_second_cancellation_does_not_stop_the_reaping_and_the_next_start_waits_for_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    hosted_server_id = definition.hosted_server_id
+    supervisor = MCPHostedProcessSupervisor(config)
+    launched, waiting = _watch_readiness(supervisor, monkeypatch, first=asyncio.Event().wait)
+    stopping, release = asyncio.Event(), asyncio.Event()
+    real_stop = hosting_runtime._stop_process
+
+    async def held_stop(process: asyncio.subprocess.Process, *, grace_seconds: float) -> None:
+        stopping.set()
+        await release.wait()
+        await real_stop(process, grace_seconds=grace_seconds)
+
+    monkeypatch.setattr(hosting_runtime, "_stop_process", held_stop)
+    try:
+        start = asyncio.create_task(supervisor.start(hosted_server_id))
+        await waiting.wait()
+        start.cancel()
+        await stopping.wait()
+        start.cancel()  # for example a shutdown cancelling its handlers again
+        with pytest.raises(asyncio.CancelledError):
+            await start
+        first = launched[0]
+        assert first.returncode is None and hosted_server_id in supervisor._stopping, "the stop goes on"
+
+        # The next start waits until the old sidecar is gone, so it cannot launch onto its port.
+        waiting.clear()
+        restart = asyncio.create_task(supervisor.start(hosted_server_id))
+        await asyncio.sleep(0.2)
+        assert not restart.done() and len(launched) == 1
+        release.set()
+        await waiting.wait()
+        assert first.returncode is not None, "the old sidecar was reaped before the next launch"
+        assert (await restart)["already_running"] is False
+    finally:
+        release.set()
+        await supervisor.close()
+
+
+@pytest.mark.asyncio
+async def test_agents_asking_together_launch_one_sidecar_and_all_get_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    supervisor = MCPHostedProcessSupervisor(config)
+    launches = _count_launches(supervisor, monkeypatch)
+    try:
+        with _port_held_by_a_leftover() as port:
+            definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+            answers = await asyncio.gather(
+                supervisor.ensure_running(definition.hosted_server_id),
+                supervisor.ensure_running(definition.hosted_server_id),
+                return_exceptions=True,
+            )
+            assert len(launches) == 1
+            assert all(isinstance(answer, HostedMCPStartError) for answer in answers)
+            assert str(answers[0]) == str(answers[1]) and "is already in use" in str(answers[0])
+
+            # Once the failure is no longer recent, the next ask launches again.
+            monkeypatch.setattr(hosting_runtime, "FAILED_START_REPEAT_SECONDS", 0.0)
+            with pytest.raises(HostedMCPPortInUse):
+                await supervisor.ensure_running(definition.hosted_server_id)
+            assert len(launches) == 2
+
+            # A person's start, from stopped, always launches.
+            monkeypatch.setattr(hosting_runtime, "FAILED_START_REPEAT_SECONDS", 30.0)
+            _saved(config, _echo_definition(port))
+            for _attempt in range(2):
+                with pytest.raises(HostedMCPPortInUse):
+                    await supervisor.start(definition.hosted_server_id)
+            assert len(launches) == 4
+    finally:
+        await supervisor.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_after_the_sidecar_exited_is_still_listed_after_the_broker_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    supervisor = MCPHostedProcessSupervisor(config)
+    definition = await _start_on_a_free_port(
+        supervisor, lambda port: _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+    )
+    sidecar = supervisor._processes[definition.hosted_server_id]
+    sidecar.kill()
+    await sidecar.wait()
+
+    async def cannot_start(_definition: MCPHostedServerDefinitionV1) -> Any:
+        raise HostedMCPStartError("The hosted MCP server echo could not start again.")
+
+    monkeypatch.setattr(supervisor, "_launch", cannot_start)
+    with pytest.raises(HostedMCPStartError):
+        await supervisor.ensure_running(definition.hosted_server_id)
+    await supervisor.close()
+
+    recorded = supervisor.store.start_failure(definition.hosted_server_id)
+    assert recorded is not None and recorded.reason == "The hosted MCP server echo could not start again."
+
+
+@pytest.mark.asyncio
+async def test_a_start_failure_note_the_broker_cannot_write_or_delete_changes_no_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = _supervisor_config(tmp_path)
+    supervisor = MCPHostedProcessSupervisor(config)
+
+    def unwritable(*_args: Any, **_kwargs: Any) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(supervisor.store, "record_start_failure", unwritable)
+    monkeypatch.setattr(supervisor.store, "clear_start_failure", unwritable)
+    try:
+        with _port_held_by_a_leftover() as port:
+            held = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+            with pytest.raises(HostedMCPPortInUse, match="is already in use"):
+                await supervisor.start(held.hosted_server_id)
+        definition = await _start_on_a_free_port(
+            supervisor, lambda free: _saved(config, _echo_definition(free, lifecycle=HostedMCPLifecycle.RUNNING))
+        )
+        assert supervisor._processes[definition.hosted_server_id].returncode is None
+    finally:
+        await supervisor.close()
+
+    logged = caplog.text
+    assert "event=mcp_host_start_failure_not_recorded" in logged
+    assert "event=mcp_host_start_failure_not_cleared" in logged
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_that_ignores_sigterm_is_killed_after_the_grace_period() -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); "
+        "time.sleep(60)",
+        stdout=asyncio.subprocess.PIPE,
+    )
+    assert process.stdout is not None and await process.stdout.readline() == b"ready\n"
+
+    await hosting_runtime._stop_process(process, grace_seconds=0.2)
+
+    assert process.returncode == -signal.SIGKILL
