@@ -33,13 +33,17 @@ Which files are kept at all, before anything is saved:
   named (``Task.attachments``). The lead sends guidance on to its workers
   without files. One delegated task can ask the person: the team lead's
   record of a worker's escalation (``manager_escalation``), whose question
-  the lead shows in the person's chat. The answer's files are kept, under
-  the same gateway rule, only when that task runs for a request the lead
-  holds for the same person, and then on that request too
-  (``sent_files_runtime.keep_sent_files``); a worker holds no request, so
-  its tasks keep none. The lead's result for the escalation carries them,
-  and only them (``answer_files``), to the worker, which keeps the ones in
-  the upload folders as its task's own (``ESCALATION_RESULT_MESSAGE_TYPE``).
+  the lead shows in the person's chat. The answer's files are kept on the
+  escalation under the same gateway rule, and also on the request it runs
+  for when the lead holds that request for the same person
+  (``sent_files_runtime.keep_sent_files``). An escalation from work the
+  lead never held (a worker's scheduled job or maintenance run) keeps them
+  on itself only; one linked to a request here that cannot take them
+  (another person's) keeps none, and no other delegated task keeps any. The
+  lead's result for the escalation carries them, and only them
+  (``answer_files``), to the worker, which keeps the ones in the upload
+  folders as its task's own (``ESCALATION_RESULT_MESSAGE_TYPE``), and on its
+  conversation turn when that task is its own request (a job run).
 - Files history entries are written only by this runtime after admission, so
   any a task message arrives with are dropped (``without_incoming_files_entries``).
 - Both writers then drop records that point outside this host's upload
@@ -139,8 +143,21 @@ QUESTION_ANSWER_MESSAGE_TYPE = "question_answer"
 # The ``message_type`` of a worker's files entry for the files the team lead's
 # result for its escalation brought (``sent_files_runtime.keep_escalation_result_files``).
 ESCALATION_RESULT_MESSAGE_TYPE = "escalation_result"
-# Why a delegated task keeps no files from a message (``log_refused_files``).
+# Why a message's files are not kept, beside the reasons of ``sent_files_access``
+# (``log_refused_files``): the task is delegated work that keeps none from it,
+# the message is a question rather than a person's answer, or its task is not
+# held here.
 DELEGATED_TASK_REASON = "delegated_task"
+NOT_AN_ANSWER_REASON = "not_an_answer"
+TASK_NOT_FOUND_REASON = "task_not_found"
+# What ``log_refused_files`` says for those reasons; any other reason is the
+# gateway's rule (``sent_files_access``) refusing the files.
+_REFUSAL_TEXT = {
+    DELEGATED_TASK_REASON: "the task it was sent to is delegated work that keeps no files from this message",
+    NOT_AN_ANSWER_REASON: "only a person's answer to a question brings files",
+    TASK_NOT_FOUND_REASON: "the task it was sent to is not held here",
+}
+_NOT_VOUCHED_TEXT = "the gateway does not vouch that it sent it for this task"
 # Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
 _BUBBLED_ENTRY_KEY = "bubbled_entry_id"
 
@@ -701,13 +718,13 @@ def answer_files_check(task_info: Any, answer: TaskQuery, meta: Any, *, team_id:
     must carry a context the gateway signed for this answer and these files,
     naming the task the question was asked in (``answer`` is the message as
     it arrived). That task may be delegated: the team lead's record of a
-    worker's escalation, whose question it asked the person. Such a task
-    keeps them only when it runs for a request this agent holds
-    (``sent_files_runtime.keep_sent_files``, module docstring).
+    worker's escalation, whose question it asked the person. Which delegated
+    tasks keep them is decided by ``sent_files_runtime.keep_sent_files``
+    (module docstring).
     """
 
     if answer.query_type != MessageMetaType.RESPONSE:
-        return OwnershipDecision(False, "not_an_answer")
+        return OwnershipDecision(False, NOT_AN_ANSWER_REASON)
     return _sent_to_task_check(task_info, meta, team_id, answer_context_id(answer))
 
 
@@ -725,12 +742,14 @@ def _sent_to_task_check(task_info: Any, meta: Any, team_id: str, message_context
 def log_refused_files(
     attachments: Iterable[UserTaskAttachment], reason: str, *, task_id: str, conversation_id: Optional[str]
 ) -> None:
-    """One warning per file a message brought that is not kept (``sent_files_access``)."""
+    """One warning per file a message brought that is not kept, saying why (``_REFUSAL_TEXT``)."""
 
+    explanation = _REFUSAL_TEXT.get(reason, _NOT_VOUCHED_TEXT)
     for attachment in attachments:
         logger.warning(
-            "A file on a message was not kept: the gateway does not vouch that it sent it for this task. "
+            "A file on a message was not kept: %s. "
             "event=sent_file_refused reason=%s attachment_id=%s task_id=%s conversation_id=%s",
+            explanation,
             reason,
             attachment.attachment_id,
             task_id,
@@ -820,9 +839,11 @@ __all__ = [
     "DELEGATED_TASK_REASON",
     "ESCALATION_RESULT_MESSAGE_TYPE",
     "INVENTORY_LIMIT",
+    "NOT_AN_ANSWER_REASON",
     "QUESTION_ANSWER_MESSAGE_TYPE",
     "TASK_FILES_EVENT",
     "TASK_FILES_KEY",
+    "TASK_NOT_FOUND_REASON",
     "UPLOAD_FILE_MISSING",
     "UPLOAD_NOT_ON_THIS_HOST",
     "UPLOAD_NO_LOCAL_COPY",

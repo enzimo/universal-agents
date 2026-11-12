@@ -28,22 +28,41 @@ turns and follow-up requests can all name and open them.
 A worker that needs the person escalates to the team lead
 (``manager_escalation``); the lead holds the escalation as a delegated task
 of its own, and asks the person in that task. The person's answer names the
-escalation, whose execution root (through the delegation links) is the
-request. Its files are kept like a step's: on the escalation and on the
-request. A delegated task with no request held here (a worker's own task)
-keeps none. The lead's result for the escalation then carries the files of
-those answers, and only those (``result_with_answer_files``); the model
-never chooses them. The worker keeps the ones inside this host's upload
-folders as its escalating task's own (``keep_escalation_result_files``): it
-trusts the result as it trusts its task's ``Task.attachments``, because it
-comes from the agent that held the escalation, and it never reads the
-request's conversation.
+escalation. Which delegated tasks keep its files is decided by what the task
+is (``_delegated_task_keeps_files``):
+
+- An escalation about work the lead delegated: its execution root (through
+  the delegation links) is the lead's request, and the files are kept like a
+  step's, on the escalation and on the request.
+- An escalation from work the lead never held: a worker's scheduled job run
+  or maintenance run is a top-level task in the worker's own process, so the
+  escalation runs for no task here. The files are kept on the escalation
+  only; the run's conversation turn is in the worker, which keeps them there
+  when the result arrives.
+- Any other delegated task keeps none: a worker's own tasks (only the team
+  lead holds escalations, and answers go only to it), and an escalation
+  linked to a task here that cannot take them, such as another person's
+  request.
+
+The gateway's rule still decides first in every case: the answer's own
+signed context names the escalation, its conversation and person, and is
+bound to the answer and its files.
+
+The lead's result for the escalation then carries the files of those
+answers, and only those (``result_with_answer_files``); the model never
+chooses them. The worker keeps the ones inside this host's upload folders as
+its escalating task's own, and on that task's conversation turn when it is
+its own request (a job run) (``keep_escalation_result_files``): it trusts
+the result as it trusts its task's ``Task.attachments``, because it comes
+from the agent that held the escalation, and it never reads the lead's
+conversations.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from access_control.ownership import OwnershipDecision
@@ -83,7 +102,9 @@ async def keep_sent_files(
     task has ended, nothing else is recorded and None is returned. Then they
     are merged into the task's conversation turn. For a plan step, a
     recovery task or a worker's escalation, the turn is its request's, and
-    the request's history gets a files entry too (module docstring); any
+    the request's history gets a files entry too; a delegated task with no
+    such request keeps them only when it is the team lead's escalation from
+    work it never held, and then on itself only (module docstring); any
     other delegated task keeps none (logged with ``delegated_task``). A
     store error propagates: the
     handler has acknowledged nothing yet, so the sender sends the message
@@ -99,11 +120,11 @@ async def keep_sent_files(
         log_refused_files(attachments, decision.reason, task_id=task_id, conversation_id=conversation_id)
         return []
     # Only read here; the request is written to after the task's own entry.
-    root_info = await _request_root(agent, task_info)
-    if root_info is None and task_info.task.parent_task_id is not None:
-        # A delegated task keeps files only for a request held here (module docstring).
+    request = await _request_root(agent, task_info)
+    if task_info.task.parent_task_id is not None and not _delegated_task_keeps_files(agent, task_info, request):
         log_refused_files(attachments, DELEGATED_TASK_REASON, task_id=task_id, conversation_id=conversation_id)
         return []
+    root_info = request.info
     folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
     kept = keep_upload_files(attachments, folders, task_id=task_id, conversation_id=conversation_id)
     if not kept:
@@ -151,31 +172,43 @@ async def _files_entry(agent: Any, task_id: str, summary: str, details: dict[str
     )
 
 
-async def _request_root(agent: Any, task_info: Any) -> Optional[Any]:
-    """The request a step or delegated task runs for, when files sent to it are also the request's; else None.
+@dataclass(frozen=True)
+class _RequestLink:
+    """The request a step or delegated task runs for, as this agent holds it (``_request_root``).
 
-    None for a task that is its own request, and for a delegated task whose
-    parent this agent does not hold (a worker's). The root is found only
-    through the task manager's plan-step, recovery and delegation links,
-    never from the message. It must be a top-level task this agent holds,
-    working for the same person as the task (``owner_person_id``, recorded
-    at admission from verified identity); otherwise a warning names both
-    tasks, and the files stay with a step or are refused for a delegated
-    task (``keep_sent_files``).
+    ``info`` is that request when files sent to the task are also its own.
+    ``linked`` says the task runs for another task this agent holds, whether
+    or not that one can take the files; False for a task that is its own
+    request and for a delegated task whose parent this agent does not hold.
+    """
+
+    info: Optional[Any] = None
+    linked: bool = False
+
+
+async def _request_root(agent: Any, task_info: Any) -> _RequestLink:
+    """The request a step or delegated task runs for, and whether files sent to it are also the request's.
+
+    The root is found only through the task manager's plan-step, recovery
+    and delegation links, never from the message. It must be a top-level
+    task this agent holds, working for the same person as the task
+    (``owner_person_id``, recorded at admission from verified identity);
+    otherwise a warning names both tasks, and the files stay with a step or
+    are refused for a delegated task (``keep_sent_files``).
     """
 
     task_manager = agent.task_manager
     task_id = task_info.task.task_id
     root_id = await task_manager.operations_runtime.run(task_manager.resolve_root_task_id, task_id)
     if not root_id or root_id == task_id:
-        return None
+        return _RequestLink()
     root_info = await task_manager.operations_runtime.run(task_manager.get_task_info, root_id)
     if (
         root_info is not None
         and root_info.task.parent_task_id is None
         and root_info.owner_person_id == task_info.owner_person_id
     ):
-        return root_info
+        return _RequestLink(info=root_info, linked=True)
     agent._logger.warning(
         "Files sent to a step or delegated task cannot be kept on its request. "
         "event=sent_files_root_not_usable task_id=%s root_task_id=%s reason=%s",
@@ -183,7 +216,34 @@ async def _request_root(agent: Any, task_info: Any) -> Optional[Any]:
         root_id,
         "not_held" if root_info is None else ("delegated" if root_info.task.parent_task_id else "other_person"),
     )
-    return None
+    return _RequestLink(linked=True)
+
+
+def _delegated_task_keeps_files(agent: Any, task_info: Any, request: _RequestLink) -> bool:
+    """Whether a delegated task keeps the files of an answer the gateway vouched for (module docstring).
+
+    Yes when it runs for a request this agent holds for the same person
+    (``request``). Otherwise only the team lead's escalation from work it
+    never held (no link to any task here) keeps them, on itself. A task
+    linked to a task here that cannot take them keeps none: the link says
+    whose work it is, and that work is not the answer's person's.
+    """
+
+    if request.info is not None:
+        return True
+    return not request.linked and _team_lead_escalation(agent, task_info)
+
+
+def _team_lead_escalation(agent: Any, task_info: Any) -> bool:
+    """The team lead's record of a worker's escalation (``manager_escalation`` in its admitted meta).
+
+    The same test as ``task_context_runtime.sign_system_escalation``. The
+    meta is the one the worker's runtime set when it escalated
+    (``turn_action_outbox_runtime``); only the team lead accepts
+    escalations, and answers reach only the team lead.
+    """
+
+    return bool(getattr(agent, "is_team_lead", False)) and getattr(task_info.meta, "manager_escalation", None) is not None
 
 
 async def result_with_answer_files(agent: Any, content: Any, incoming: Any) -> Any:
@@ -229,7 +289,14 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
     (``result_with_answer_files``); records outside this host's upload
     folders are dropped. The rest are written to the parent's history as one
     files entry, so the parent's turn lists them and the attachment tools
-    open them by id. Each refused file is logged.
+    open them by id. When the parent is its own request (a scheduled job or
+    maintenance run that escalated), they are then merged into its
+    conversation turn as well, as the team lead does for a request, so later
+    turns of that conversation list and open them; for a delegated parent
+    this adds nothing. The entry comes first and decides, as in
+    ``keep_sent_files``. Each refused file is logged; a store error
+    propagates before the result is recorded, so its redelivery records the
+    files again, each once.
     """
 
     if not result.attachments:
@@ -262,6 +329,17 @@ async def keep_escalation_result_files(agent: Any, subtask_info: Any, result: Ta
             parent_id,
             subtask_info.task.task_id,
             _ids(kept),
+        )
+        return
+    task_manager = agent.task_manager
+    parent_info = await task_manager.operations_runtime.run(task_manager.get_task_info, parent_id)
+    if parent_info is not None:
+        await asyncio.to_thread(
+            record_turn_attachments,
+            getattr(agent, "_conversation_store", None),
+            parent_info,
+            kept,
+            logger=agent._logger,
         )
 
 

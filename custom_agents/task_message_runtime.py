@@ -31,6 +31,7 @@ from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyFini
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
 from custom_agents.conversation_attachments import (
     QUESTION_ANSWER_MESSAGE_TYPE,
+    TASK_NOT_FOUND_REASON,
     UploadFolders,
     answer_files_check,
     log_refused_files,
@@ -832,7 +833,7 @@ async def _handle_task_query_for_parent(
         # An answer for a task this agent no longer holds keeps none of its files.
         log_refused_files(
             task_query_msg.attachments,
-            "task_not_found",
+            TASK_NOT_FOUND_REASON,
             task_id=parent_task_id,
             conversation_id=incoming_msg_meta.conversation_id,
         )

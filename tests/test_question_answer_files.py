@@ -66,7 +66,7 @@ from custom_agents.conversation_attachments import QUESTION_ANSWER_MESSAGE_TYPE
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import CommsMessage, MessageEnvelope
-from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import GatewayContext, ManagerEscalationContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskStatus
 from custom_messages.enums import (
     MessageMetaType,
@@ -619,15 +619,28 @@ async def test_a_question_an_agent_asks_brings_no_files(
     assert "reason=not_an_answer" in refused
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        # Delegated work that is not an escalation, with no request held here.
+        "not_an_escalation",
+        # An escalation held by an agent that is not the team lead: only the lead takes escalations.
+        "not_the_team_lead",
+    ],
+)
 @pytest.mark.asyncio
 async def test_a_delegated_task_keeps_no_files_from_an_answer(
-    tmp_path: Path, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    case: str, tmp_path: Path, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     worker = _lead(tmp_path, layout)
+    escalation = None
+    if case == "not_the_team_lead":
+        worker.is_team_lead = False
+        escalation = ManagerEscalationContext(escalation_type="needs_user_input")
     worker.task_manager.add_task(
         Task(task_id="task_child", parent_task_id="task_parent", task_type=MessageMetaType.REQUEST, problem_statement="Parse it."),
         MessageHeader(from_agent_id=LEAD_ID),
-        MessageMeta(conversation_id=CONVERSATION),
+        MessageMeta(conversation_id=CONVERSATION, manager_escalation=escalation),
         owner_person_id=ANN,
     )
     object.__setattr__(worker, "process_llm_interaction", _ModelTurns(worker))
@@ -641,6 +654,9 @@ async def test_a_delegated_task_keeps_no_files_from_an_answer(
     assert _files_entries(worker.task_manager, "task_child") == []
     [refused] = _messages(caplog, "sent_file_refused")
     assert "reason=delegated_task" in refused
+    # The gateway did vouch for the file, so the warning says why it was not kept instead.
+    assert "is delegated work that keeps no files from this message" in refused
+    assert "gateway" not in refused
 
 
 @pytest.mark.asyncio

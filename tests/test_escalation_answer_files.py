@@ -23,6 +23,11 @@ test through the agent's real outbox. Covers:
   path, opened by id, and still its own after a restart;
 - a follow-up request in the same chat, in a restarted lead, lists and opens it.
 
+An escalation from work the lead never held (a worker's scheduled job run or
+maintenance run, a top-level task in the worker) keeps the answer's file on
+the escalation; the result carries it, and the worker keeps it as the run's
+own and on the run's conversation turn, where the next run lists and opens it.
+
 The other tests cover the refusals: an escalation whose request works for
 someone else, a result that is not for an escalation, records outside the
 upload folders, and which results carry files at all.
@@ -455,6 +460,88 @@ async def test_an_answer_to_a_workers_escalation_keeps_its_file_on_the_request_a
     assert inspect_user_attachment._tool_func(attachment_id=notes.attachment_id)["status"] == "success"
 
 
+# --- An escalation from work the lead never held ------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_answer_to_a_job_runs_escalation_keeps_its_file_on_the_escalation_and_on_the_runs_turn(
+    tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A worker's own top-level task escalates, so the lead holds no task the escalation runs for.
+
+    A scheduled job run or maintenance run is such a task: the worker's
+    process admits it (``scheduled_runtime``) and records it as a turn of its
+    own conversation, and the lead never holds it. Here the run is Ann's
+    top-level task admitted through the worker's real admission, which
+    records the same turn. Before this change the lead refused the answer's
+    file (``reason=delegated_task``) and its result carried none. The answer
+    reaches the lead as the gateway signs it; the end-to-end test above
+    covers the gateway's side.
+    """
+
+    lead, worker = _lead(tmp_path, layout), _worker(tmp_path, layout)
+    lead_turns, worker_turns = _LeadTurns(lead, worker), _WorkerTurns(worker)
+    object.__setattr__(lead, "process_llm_interaction", lead_turns)
+    object.__setattr__(worker, "process_llm_interaction", worker_turns)
+    await _admit(worker, task_id="task_run", text="Plan this week's dinners.", attachments=[])
+    await _turn(worker, "task_run", [_escalate()])
+    escalation = _last_sent(worker, Task)
+    escalation_id = escalation.msg_content.task_id
+    await task_message_runtime._handle_task_request(lead, escalation.msg_content, escalation.msg_header, escalation.msg_meta)
+    await _deliver_claims(lead, worker)
+    manager = lead.task_manager
+    # The lead holds the escalation, for Ann, and no task it runs for.
+    held = manager.get_task_info(escalation_id)
+    assert (held.task.parent_task_id, held.owner_person_id) == ("task_run", ANN)
+    assert held.meta.manager_escalation is not None
+    assert manager.resolve_root_task_id(escalation_id) == escalation_id
+    # The lead asks Ann in the escalation, and she answers with a file.
+    assert manager.get_next_task_to_process() == escalation_id
+    manager.update_main_task_state(escalation_id, ProgressState.IN_PROGRESS, NOW)
+    asked = TaskQuery(task_query_id="task_query_list", query_type=MessageMetaType.REQUEST, parent_task_id=escalation_id, message=QUESTION)
+    manager.add_task_query(escalation_id, asked, agent_name="Lead", agent_id=lead.id)
+    notes = _upload(layout, "list.png")
+    answer = _answer_to([notes], task_id=escalation_id)
+
+    with caplog.at_level(logging.INFO):
+        await _deliver(lead, answer, _answer_meta(answer, task_id=escalation_id))
+
+    # The lead keeps it on the escalation (which ends with the result it sends): its turn names
+    # the file under the stored answer, never by path, and its result carries the file of its
+    # answer files entry (``answer_files``) to the worker.
+    assert not _messages(caplog, "sent_file_refused")
+    [escalation_prompt] = lead_turns.prompts
+    assert f"`{notes.attachment_id}` list.png" in _sections(escalation_prompt)["task_history"]
+    assert str(layout.uploads_dir) not in escalation_prompt.prompt
+    result = lead_turns.result.msg_content
+    assert (result.task_id, result.parent_task_id, result.attachments) == (escalation_id, "task_run", [notes])
+
+    # The worker keeps it as the run's own and on the run's conversation turn.
+    [files_entry] = _files_entries(worker.task_manager, "task_run")
+    assert (files_entry.details["message_id"], files_entry.details["message_type"]) == (
+        escalation_id,
+        ESCALATION_RESULT_MESSAGE_TYPE,
+    )
+    store = worker._conversation_store
+    assert [item["attachment_id"] for item in store.get_turn_by_task_id("task_run")["attachments"]] == [notes.attachment_id]
+    assert any("task_id=task_run" in message for message in _messages(caplog, "conversation_turn_attachments_merged"))
+    assert notes.attachment_id in _own(worker.task_manager, store, "task_run")
+    [worker_prompt] = worker_turns.prompts
+    assert f"`{notes.attachment_id}` list.png" in _sections(worker_prompt)["conversation_attachments"]
+    assert str(layout.uploads_dir) not in worker_prompt.prompt
+    assert worker_turns.opened[notes.attachment_id]["status"] == "success"
+    # After a restart it is still the run's.
+    assert notes.attachment_id in _own(_restarted_worker(worker, tmp_path), None, "task_run")
+    # The next turn of the run's conversation (as the schedule's next run is) lists it and opens it by id.
+    await _answer(worker, "task_run", "Planned.")
+    await _admit(worker, task_id="task_next_run", text="Plan next week's dinners.", attachments=[])
+    info = worker.task_manager.get_task_info("task_next_run")
+    use_agent(worker, "task_next_run")
+    listed = _sections(_prompt(worker, info.task, info.header, info.meta))["conversation_attachments"]
+    assert f"`{notes.attachment_id}` list.png" in listed
+    assert inspect_user_attachment._tool_func(attachment_id=notes.attachment_id)["status"] == "success"
+
+
 # --- Refusals -------------------------------------------------------------------------------------
 
 
@@ -477,7 +564,7 @@ def _escalation_held_by(agent: Any, *, escalation_id: str = "task_escalation") -
             problem_statement="Ask which diet.",
         ),
         MessageHeader(from_agent_id=WORKER_ID, response_routing_key=WORKER_ID),
-        MessageMeta(conversation_id=CONVERSATION),
+        MessageMeta(conversation_id=CONVERSATION, manager_escalation=ManagerEscalationContext(escalation_type="needs_user_input")),
         owner_person_id=ANN,
     )
     return manager.get_task_info(escalation_id)
@@ -502,6 +589,7 @@ async def test_an_escalation_about_someone_elses_request_keeps_no_files_from_the
     # The answer's text is kept without its file, and no task holds the file.
     assert lead.task_manager.get_task_queries("task_escalation")[-1].attachments == []
     assert all(_files_entries(lead.task_manager, task_id) == [] for task_id in ("task_escalation", "task_bob", "task_recipe"))
+    # An escalation linked to a request here keeps none when that request cannot take them.
     [refused] = _messages(caplog, "sent_file_refused")
     assert f"reason=delegated_task attachment_id={notes.attachment_id} task_id=task_escalation" in refused
     [warning] = _messages(caplog, "sent_files_root_not_usable")
