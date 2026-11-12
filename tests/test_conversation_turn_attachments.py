@@ -128,6 +128,30 @@ def test_the_list_gives_the_newest_unique_files_with_their_turns_and_only_this_c
     assert repo.list_conversation_attachments("conv_none") == []
 
 
+def test_the_current_requests_files_do_not_take_the_places_of_earlier_files(db_path: Path) -> None:
+    """A prompt lists its request's files with the request; the bound counts only the other turns' files."""
+
+    repo = _open(db_path)
+    for turn in range(1, 4):
+        add_turn(repo, "conv_1", f"task_{turn}", [attachment_record(f"att_t{turn}_{index}") for index in range(10)])
+    # The current request's turn: 20 files with its message and one a plan step received.
+    add_turn(repo, "conv_1", "task_4", [attachment_record(f"att_t4_{index}") for index in range(21)])
+    # Named with the request: its message's files and an earlier file the person sent again.
+    named = {f"att_t4_{index}" for index in range(20)} | {"att_t2_9"}
+
+    listed = repo.list_conversation_attachments("conv_1", current_task_id="task_4", skip_ids=named)
+
+    others = [item for item in listed if item["task_id"] != "task_4"]
+    assert ids(listed)[0] == "att_t4_20" and len(others) == CONVERSATION_ATTACHMENT_LIST_LIMIT
+    assert ids(others) == [f"att_t3_{index}" for index in range(9, -1, -1)] + [
+        f"att_t2_{index}" for index in range(8, -1, -1)
+    ] + ["att_t1_9"]
+    # The request's turn is listed whole even when newer turns fill the bound
+    # (another request of the conversation started later).
+    older = repo.list_conversation_attachments("conv_1", limit=3, current_task_id="task_1")
+    assert ids(older) == ["att_t4_20", "att_t4_19", "att_t4_18"] + [f"att_t1_{index}" for index in range(9, -1, -1)]
+
+
 def test_a_file_is_found_by_its_exact_id_in_this_conversation_only(db_path: Path) -> None:
     repo = _open(db_path)
     add_turn(repo, "conv_1", "task_1", [attachment_record("attX1"), attachment_record("att%2")])

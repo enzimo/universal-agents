@@ -255,6 +255,8 @@ class DefaultContextEngine:
         # read once: the request's other files go with the current request,
         # earlier turns' files get their own section below.
         scope_files = self._scope_files(request) if incoming_task is not None else None
+        # Rendered before the thread so the thread's budget leaves room for it.
+        earlier_files = render_earlier_files(scope_files) if scope_files is not None else ""
         if incoming_task is not None:
             current_request_context = render_current_request_context(
                 incoming_task,
@@ -340,7 +342,7 @@ class DefaultContextEngine:
                     available_thread_tokens = self._available_thread_tokens(
                         sections=sections,
                         incoming_message_summary=self._render_incoming_message_context(request),
-                        pending_pinned_texts=[execution_digest, markdown_summary],
+                        pending_pinned_texts=[execution_digest, markdown_summary, earlier_files],
                     )
                     rendered_thread = self.thread_renderer.render(
                         store=self.conversation_store,
@@ -398,13 +400,14 @@ class DefaultContextEngine:
                     source="TaskManager.render_task_runtime_timing_markdown",
                 )
 
-        # Pinned and outside the thread budget: the files of earlier turns stay
-        # named however much of the conversation's history the prompt shows.
+        # Pinned: the files of earlier turns stay named however much of the
+        # conversation's history the prompt shows; the thread's budget above
+        # counts this section, so the thread makes room for it.
         self._append_prompt_section(
             sections,
             prompt_parts,
             name="conversation_files",
-            text=render_earlier_files(scope_files) if scope_files is not None else "",
+            text=earlier_files,
             priority=75,
             pinned=True,
             source="conversation_attachments.render_earlier_files",

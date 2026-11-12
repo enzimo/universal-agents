@@ -368,21 +368,25 @@ class AttachmentScope:
 
         ``current``: the request's own files (``request.files``), then the
         files saved with its turn that another of its plan steps or recovery
-        tasks received. ``earlier``: the files of earlier turns, newest first.
-        The conversation part is the newest ``CONVERSATION_ATTACHMENT_LIST_LIMIT``
-        files of the conversation (one query), so call this once per prompt.
+        tasks received. ``earlier``: the newest ``CONVERSATION_ATTACHMENT_LIST_LIMIT``
+        files of the other turns, newest first, however many files the request
+        itself holds. Read with one query, so call this once per prompt.
         """
 
         own = tuple(SentFile(attachment) for attachment in self.request.files)
         if self.conversation_id is None:
             return ScopeFiles(current=own, earlier=())
-        known = {attachment.attachment_id for attachment in self.request.files}
         this_turn: list[SentFile] = []
         earlier: list[SentFile] = []
-        listed = self.store.list_conversation_attachments(self.conversation_id, limit=CONVERSATION_ATTACHMENT_LIST_LIMIT)
+        listed = self.store.list_conversation_attachments(
+            self.conversation_id,
+            limit=CONVERSATION_ATTACHMENT_LIST_LIMIT,
+            current_task_id=self.request.request_task_id,
+            skip_ids={attachment.attachment_id for attachment in self.request.files},
+        )
         for record in listed:
             sent = _sent_file(record, conversation_id=self.conversation_id)
-            if sent is None or sent.attachment.attachment_id in known:
+            if sent is None:
                 continue
             same_turn = str(record.get(ATTACHMENT_TASK_ID_KEY) or "") == self.request.request_task_id
             (this_turn if same_turn else earlier).append(sent)

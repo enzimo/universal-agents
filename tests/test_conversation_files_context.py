@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from custom_agents.context_engine import ContextAssemblyRequest, ContextEngineAdapters, DefaultContextEngine
+from custom_agents.context_engine.base import AssembledContext
 from custom_agents.conversation_attachments import EARLIER_FILES_HEADING, REQUEST_FILES_HEADING
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.steering_history_events import QUERY_ANSWER_FILES_KEY
@@ -86,7 +87,7 @@ class _Instance:
         self.manager = TaskManager(db_path=str(self.layout.root / "tasks.db"))
         self.manager.set_owner_identity("lead", "TeamLead", TEAM, "TeamArchitect")
 
-    def turn(self, task_id: str, files: list[UserTaskAttachment]) -> None:
+    def turn(self, task_id: str, files: list[UserTaskAttachment], *, text: str = "") -> None:
         """A person's turn with its files; earlier turns are answered (``ROOT`` is the one running)."""
 
         self.store.ensure_thread(
@@ -107,7 +108,7 @@ class _Instance:
             requester_name=PERSON,
             requester_id=PERSON,
             correlation_id=f"corr_{task_id}",
-            problem_text=f"Request {task_id}",
+            problem_text=f"Request {task_id} {text}".strip(),
             owner_canonical_user_id=PERSON,
             attachments=[file.model_dump(mode="json") for file in files],
         )
@@ -115,8 +116,8 @@ class _Instance:
             self.store.update_turn_completion(
                 task_id=task_id,
                 task_status="completed",
-                final_answer_text=f"Answer {task_id}",
-                turn_summary_text=f"Answered {task_id}",
+                final_answer_text=f"Answer {task_id} {text}".strip(),
+                turn_summary_text=f"Answered {task_id} {text[:400]}".strip(),
             )
 
     def task(
@@ -143,7 +144,12 @@ class _Instance:
         return task
 
     def engine(
-        self, *, is_team_lead: bool = True, thread_window: dict | None = None, verified_person_of=_verified_person
+        self,
+        *,
+        is_team_lead: bool = True,
+        thread_window: dict | None = None,
+        verified_person_of=_verified_person,
+        context_window_tokens: int = 200_000,
     ) -> DefaultContextEngine:
         return DefaultContextEngine(
             agent_id="lead" if is_team_lead else "worker",
@@ -151,7 +157,7 @@ class _Instance:
             task_manager=self.manager,
             conversation_store=self.store,
             conversation_compactor=None,
-            context_window_tokens=200_000,
+            context_window_tokens=context_window_tokens,
             reserved_output_tokens=0,
             model=_CountingModel(),
             thread_window=thread_window,
@@ -167,6 +173,9 @@ class _Instance:
         )
 
     def prompt(self, task_id: str, engine: DefaultContextEngine | None = None) -> str:
+        return self.assembled(task_id, engine).prompt
+
+    def assembled(self, task_id: str, engine: DefaultContextEngine | None = None) -> AssembledContext:
         info = self.manager.get_task_info(task_id)
         return (engine or self.engine()).assemble(
             ContextAssemblyRequest(
@@ -177,7 +186,7 @@ class _Instance:
                 execution_task_id=task_id,
                 incoming_message_json=json.dumps({"msg_content": {"task_id": task_id}}),
             )
-        ).prompt
+        )
 
     def focused_prompt(self, task_id: str, *, plan_step: bool) -> str:
         """A plan step's or recovery task's prompt, with the placeholder ids the turn gives it."""
@@ -233,29 +242,73 @@ def test_a_follow_up_names_the_newest_20_earlier_files_however_little_history_it
     second = [_file(layout, f"att_t2_{index:02d}") for index in range(10)] + [first[0]]
     instance.turn("task_turn_1", first)
     instance.turn("task_turn_2", second)
-    current = _file(layout, "att_current", filename="current.png")
-    instance.turn(ROOT, [current])
-    instance.task(ROOT, files=[current], conversation_id=CONVERSATION)
+    # This request brings 20 files of its own; they do not take earlier files' places.
+    current = [_file(layout, "att_current", filename="current.png")]
+    current += [_file(layout, f"att_current_{index:02d}") for index in range(19)]
+    instance.turn(ROOT, current)
+    instance.task(ROOT, files=current, conversation_id=CONVERSATION)
 
     # The prompt's history shows only turn 2 (the newest two turns are loaded; one is this request's).
     prompt = instance.prompt(ROOT, instance.engine(thread_window={"max_turns_to_load": 2, "recent_full_turns": 1}))
 
     assert "Request task_turn_1" not in prompt and "Request task_turn_2" in prompt
     earlier = _section(prompt, EARLIER_FILES_HEADING)
-    # 20 newest files of the conversation, each once; the current request's
-    # own file is one of them and is listed with the request instead.
-    assert len(earlier) == 19
+    # The 20 newest files of earlier turns, each once; the request's own files
+    # are listed with the request instead.
+    assert len(earlier) == 20
     assert [line.endswith("sent in turn 2)") for line in earlier].count(True) == 11
-    assert [line.endswith("sent in turn 1)") for line in earlier].count(True) == 8
+    assert [line.endswith("sent in turn 1)") for line in earlier].count(True) == 9
     listed = _listed_ids(earlier)
-    assert len(set(listed)) == 19 and "att_t1_00" in listed and "att_current" not in listed
+    assert len(set(listed)) == 20 and "att_t1_00" in listed
+    assert not any(attachment_id.startswith("att_current") for attachment_id in listed)
     # Turn 1's oldest files fall outside the bound.
-    assert "att_t1_01" not in prompt and "att_t1_14" in listed
-    assert "current.png (id=att_current" in prompt
+    assert "att_t1_05" not in prompt and "att_t1_06" in listed and "att_t1_14" in listed
+    assert "current.png (id=att_current" in prompt and "id=att_current_18" in prompt
     # Names, ids, kind, type, size and turn; never where a file is stored.
     assert earlier[0].startswith("- att_t1_00.png (attachment_id att_t1_00, image, image/png, 4 bytes, sent in turn 2)")
     assert not any(str(layout.uploads_dir) in line or "ab" * 32 in line for line in earlier)
     assert _section(prompt, REQUEST_FILES_HEADING) == []
+
+
+def _long_conversation(instance: _Instance, *, with_files: bool) -> AssembledContext:
+    """29 long answered turns (two files each when ``with_files``), then this request, in a 12,000-token window."""
+
+    layout = instance.layout
+    for turn in range(1, 30):
+        files = (
+            [_file(layout, f"att_h{turn:02d}_{index}", filename=f"{'scan' * 25}_{turn}_{index}.png") for index in range(2)]
+            if with_files
+            else []
+        )
+        instance.turn(f"task_turn_h{turn:02d}", files, text="word " * 600)
+    instance.turn(ROOT, [])
+    instance.task(ROOT, conversation_id=CONVERSATION)
+    engine = instance.engine(
+        thread_window={"max_turns_to_load": 30, "recent_full_turns": 3}, context_window_tokens=12_000
+    )
+    return instance.assembled(ROOT, engine)
+
+
+def _tokens(assembled: AssembledContext) -> dict[str, int]:
+    return {source["name"]: source["estimated_tokens"] for source in assembled.source_lengths}
+
+
+def test_a_long_conversation_leaves_room_for_its_earlier_files_within_the_soft_budget(
+    instance: _Instance, tmp_path: Path
+) -> None:
+    """The thread's budget counts the earlier-files section, so a full history does not push the prompt over."""
+
+    plain = _long_conversation(_Instance(tmp_path / "plain"), with_files=False)
+    with_files = _long_conversation(instance, with_files=True)
+
+    # Without files the history fills the soft budget.
+    assert plain.estimated_tokens > 0.9 * plain.soft_limit_tokens and not plain.warnings
+    # With files the history gives up room for the files section, listed in full.
+    files_tokens = _tokens(with_files)["conversation_files"]
+    assert files_tokens > 500 and len(_section(with_files.prompt, EARLIER_FILES_HEADING)) == 20
+    assert _tokens(with_files)["conversation_thread_context"] < _tokens(plain)["conversation_thread_context"]
+    assert with_files.estimated_tokens < with_files.soft_limit_tokens
+    assert not [warning for warning in with_files.warnings if warning["warning"] == "context_soft_limit_reached"]
 
 
 @pytest.mark.asyncio

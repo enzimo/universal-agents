@@ -95,6 +95,12 @@ def test_the_list_is_newest_first_and_bounded_and_ids_match_exactly(storage: Sto
 
     assert len(listed) == len(set(ids(listed))) == 20
     assert ids(listed)[:3] == ["att%2", "attX1", "att_t5_4"]
+    # The current request's turn is listed whole and its named files are left out, outside the bound.
+    assert ids(repo.list_conversation_attachments("conv_1", limit=2, current_task_id="task_1", skip_ids={"att%2"})) == [
+        "attX1",
+        "att_t5_4",
+        *[f"att_t1_{index}" for index in range(4, -1, -1)],
+    ]
     assert repo.find_conversation_attachment("conv_1", "att%2")["task_id"] == "task_6"
     assert repo.find_conversation_attachment("conv_1", "att_1") is None  # "attX1" is not a match; conv_2's is elsewhere
     assert repo.find_conversation_attachment("conv_1", "att%") is None

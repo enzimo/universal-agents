@@ -382,9 +382,9 @@ def test_a_prompts_files_come_from_one_listing_of_the_conversation(
     listings: list[tuple[str, int]] = []
     listing = runtime.store.list_conversation_attachments
 
-    def counted(conversation_id: str, limit: int = 20):
+    def counted(conversation_id: str, *, limit: int = 20, **kwargs):
         listings.append((conversation_id, limit))
-        return listing(conversation_id, limit=limit)
+        return listing(conversation_id, limit=limit, **kwargs)
 
     monkeypatch.setattr(runtime.store, "list_conversation_attachments", counted)
     scope = runtime.scope(ROOT)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from collections.abc import Collection
 from typing import Any, Optional
 from datetime import datetime
 
@@ -182,8 +183,17 @@ class ConversationStore:
             conversation_id=conversation_id, task_id=task_id, attachments=attachments
         )
 
-    def list_conversation_attachments(self, conversation_id: str, *, limit: int) -> list[dict[str, Any]]:
-        return self._repository.list_conversation_attachments(conversation_id, limit=limit)
+    def list_conversation_attachments(
+        self,
+        conversation_id: str,
+        *,
+        limit: int,
+        current_task_id: Optional[str] = None,
+        skip_ids: Collection[str] = (),
+    ) -> list[dict[str, Any]]:
+        return self._repository.list_conversation_attachments(
+            conversation_id, limit=limit, current_task_id=current_task_id, skip_ids=skip_ids
+        )
 
     def find_conversation_attachment(self, conversation_id: str, attachment_id: str) -> Optional[dict[str, Any]]:
         return self._repository.find_conversation_attachment(conversation_id, attachment_id)

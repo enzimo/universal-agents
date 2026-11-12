@@ -10,6 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from pathlib import Path
+from collections.abc import Collection
 from typing import Any, Iterator, Optional, Protocol
 
 from custom_agents.conversation_delivery_states import (
@@ -292,7 +293,12 @@ class ConversationRepository(Protocol):
     ) -> Optional[list[dict[str, Any]]]: ...
 
     def list_conversation_attachments(
-        self, conversation_id: str, *, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT
+        self,
+        conversation_id: str,
+        *,
+        limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT,
+        current_task_id: Optional[str] = None,
+        skip_ids: Collection[str] = (),
     ) -> list[dict[str, Any]]: ...
 
     def find_conversation_attachment(
@@ -1242,13 +1248,23 @@ class _RelationalConversationRepository:
         return merged
 
     def list_conversation_attachments(
-        self, conversation_id: str, *, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT
+        self,
+        conversation_id: str,
+        *,
+        limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT,
+        current_task_id: Optional[str] = None,
+        skip_ids: Collection[str] = (),
     ) -> list[dict[str, Any]]:
-        """The newest ``limit`` files of a conversation, newest first, each once.
+        """The newest files of a conversation, newest first, each once.
 
-        Each record gains the ``turn_index`` and ``task_id`` of the turn it
-        was sent with. Reads at most ``CONVERSATION_ATTACHMENT_SCAN_TURNS`` of
-        the newest turns that have files.
+        ``limit`` bounds the files of the other turns. The files of the turn
+        of ``current_task_id`` (the request a prompt is for) are all listed and
+        do not count, and files whose ids are in ``skip_ids`` (already named
+        with that request) are left out, so neither takes the place of an
+        earlier turn's file. Each record gains the ``turn_index`` and
+        ``task_id`` of the turn it was sent with. Reads at most
+        ``CONVERSATION_ATTACHMENT_SCAN_TURNS`` of the newest turns that have
+        files.
         """
 
         bounded = max(1, min(int(limit), CONVERSATION_ATTACHMENT_LIST_LIMIT))
@@ -1263,19 +1279,25 @@ class _RelationalConversationRepository:
                 (conversation_id, CONVERSATION_ATTACHMENT_SCAN_TURNS),
             ).fetchall()
         listed: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        seen: set[str] = {str(value) for value in skip_ids}
+        others = 0
         for row in rows:
+            this_turn = current_task_id is not None and row["task_id"] == current_task_id
+            if not this_turn and others >= bounded:
+                continue
             # A turn's later files arrived later (guidance, answers).
             for item in reversed(self._stored_attachments(row["attachments_json"], task_id=row["task_id"])):
                 attachment_id = str(item.get(_ATTACHMENT_ID_KEY) or "")
                 if not attachment_id or attachment_id in seen:
                     continue
+                if not this_turn:
+                    if others >= bounded:
+                        break
+                    others += 1
                 seen.add(attachment_id)
                 listed.append(
                     {**item, ATTACHMENT_TURN_INDEX_KEY: row["turn_index"], ATTACHMENT_TASK_ID_KEY: row["task_id"]}
                 )
-                if len(listed) >= bounded:
-                    return listed
         return listed
 
     def find_conversation_attachment(
