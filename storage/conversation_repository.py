@@ -9,12 +9,14 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
 from custom_agents.conversation_delivery_states import (
     MODEL_VISIBLE_TIMER_DELIVERY_STATES,
 )
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from id_generation import new_id
 
 from .backends import STORAGE_BACKEND_POSTGRES, STORAGE_BACKEND_SQLITE
@@ -27,6 +29,14 @@ from .postgres_connection import (
 )
 from .runtime import describe_storage_capabilities, require_repository_backend
 from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .turn_attachments import (
+    NewestFilesFirst,
+    TurnAttachment,
+    attachment_summary,
+    decode_turn_attachments,
+    encode_turn_attachments,
+    merge_unique,
+)
 
 
 def utc_now_iso() -> str:
@@ -173,11 +183,15 @@ TURN_SELECT_COLUMNS = """
     execution_history_text, turn_summary_text, user_request_summary,
     assistant_response_summary, context_summary_text, artifact_summary_json,
     summary_generator, summary_generated_at, tool_artifact_manifest_json,
-    gateway_context_json,
+    gateway_context_json, attachments_json,
     memory_review_status, memory_review_job_id, memory_review_queued_at_utc,
     memory_reviewed_at_utc, memory_reviewed_by_agent_id,
     created_at, updated_at
 """
+
+# Rows read per query while looking through a conversation's files, newest
+# turns first (list_turn_attachments). Most lookups stop in the first batch.
+TURN_ATTACHMENT_SCAN_BATCH_ROWS = 100
 
 
 class ConversationRepository(Protocol):
@@ -236,7 +250,24 @@ class ConversationRepository(Protocol):
         task_status: str = "accepted",
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> dict[str, Any]: ...
+
+    def merge_turn_attachments(
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        attachments: Sequence[UserTaskAttachment],
+    ) -> Optional[int]: ...
+
+    def list_turn_attachments(
+        self,
+        conversation_id: str,
+        *,
+        attachment_ids: Optional[Collection[str]] = None,
+        limit: Optional[int] = None,
+    ) -> list[TurnAttachment]: ...
 
     def append_clarification(
         self,
@@ -456,6 +487,7 @@ _TASK_LINK_TEXT_COLUMNS = (
     "artifact_summary_json",
     "tool_artifact_manifest_json",
     "gateway_context_json",
+    "attachments_json",
 )
 _THREAD_TEXT_COLUMNS = ("subject_preview", "synopsis_json", "synopsis_markdown", "compaction_state_json")
 _CONTEXT_EPOCH_TEXT_COLUMNS = (
@@ -539,6 +571,7 @@ class _RelationalConversationRepository:
                     summary_generated_at TEXT,
                     tool_artifact_manifest_json TEXT,
                     gateway_context_json TEXT,
+                    attachments_json TEXT,
                     created_at TEXT,
                     updated_at TEXT,
                     PRIMARY KEY (conversation_id, task_id)
@@ -554,6 +587,8 @@ class _RelationalConversationRepository:
             self._ensure_column(conn, "conversation_task_links", "summary_generator", "TEXT")
             self._ensure_column(conn, "conversation_task_links", "summary_generated_at", "TEXT")
             self._ensure_column(conn, "conversation_task_links", "gateway_context_json", "TEXT")
+            # The turn's files (storage.turn_attachments); NULL on turns saved before turns kept them.
+            self._ensure_column(conn, "conversation_task_links", "attachments_json", "TEXT")
             self._ensure_column(
                 conn,
                 "conversation_task_links",
@@ -953,6 +988,7 @@ class _RelationalConversationRepository:
             "summary_generated_at": row["summary_generated_at"],
             "tool_artifact_manifest": manifest,
             "gateway_context": gateway_context if isinstance(gateway_context, dict) else {},
+            "attachments": self._turn_attachment_summaries(row),
             "memory_review_status": row["memory_review_status"] or TURN_MEMORY_REVIEW_UNREVIEWED,
             "memory_review_job_id": row["memory_review_job_id"],
             "memory_review_queued_at_utc": row["memory_review_queued_at_utc"],
@@ -961,6 +997,14 @@ class _RelationalConversationRepository:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
+
+    def _turn_attachment_summaries(self, row: Any) -> list[dict[str, Any]]:
+        """A turn row's files, descriptive fields only: generic turn reads reach models."""
+
+        stored = decode_turn_attachments(
+            row["attachments_json"], logger=self._logger, conversation_id=row["conversation_id"], task_id=row["task_id"]
+        )
+        return [attachment_summary(attachment) for attachment in stored]
 
     def append_turn(
         self,
@@ -981,10 +1025,21 @@ class _RelationalConversationRepository:
         task_status: str = "accepted",
         memory_review_status: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> dict[str, Any]:
+        """Record a new turn with the request's own files; an existing turn is returned unchanged.
+
+        ``attachments`` are trusted records only (the caller checked them,
+        ``custom_agents.conversation_runtime``); files that arrive later are
+        added with ``merge_turn_attachments``.
+        """
+
         existing = self.get_turn_by_task_id(task_id)
         if existing:
             return existing
+        turn_attachments, _ = merge_unique(
+            (), attachments, logger=self._logger, conversation_id=conversation_id, task_id=task_id
+        )
 
         initial_memory_review_status = _memory_review_initial_status(
             memory_review_status=memory_review_status,
@@ -1014,10 +1069,10 @@ class _RelationalConversationRepository:
                     execution_history_text, turn_summary_text, user_request_summary,
                     assistant_response_summary, context_summary_text, artifact_summary_json,
                     summary_generator, summary_generated_at, tool_artifact_manifest_json,
-                    gateway_context_json,
+                    gateway_context_json, attachments_json,
                     memory_review_status,
                     created_at, updated_at
-                ) VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind})
+                ) VALUES ({", ".join([self._dialect.bind] * 33)})
                 """,
                 (
                     conversation_id,
@@ -1049,6 +1104,7 @@ class _RelationalConversationRepository:
                     None,
                     "[]",
                     json.dumps(gateway_context or {}),
+                    encode_turn_attachments(turn_attachments),
                     initial_memory_review_status,
                     now_ts,
                     now_ts,
@@ -1068,6 +1124,115 @@ class _RelationalConversationRepository:
             )
             conn.commit()
         return self.get_turn_by_task_id(task_id) or {}
+
+    def merge_turn_attachments(
+        self,
+        *,
+        conversation_id: str,
+        task_id: str,
+        attachments: Sequence[UserTaskAttachment],
+    ) -> Optional[int]:
+        """Add files a running turn received to its record; how many were new, None without the turn.
+
+        One write transaction reads, merges and writes the list, so concurrent
+        merges into one turn each see the other's files: SQLite's write
+        transaction (``BEGIN IMMEDIATE``) runs them one at a time, and in
+        PostgreSQL the turn's row stays locked (``SELECT ... FOR UPDATE``)
+        until commit. Ids already recorded are skipped, so a retried merge adds
+        nothing twice. ``attachments`` are trusted records only, as for
+        ``append_turn``.
+        """
+
+        bind = self._dialect.bind
+        row_lock = " FOR UPDATE" if self._dialect == POSTGRES else ""
+        with self._connect() as conn:
+            conn.begin_write()
+            row = conn.execute(
+                f"""
+                SELECT attachments_json FROM conversation_task_links
+                WHERE conversation_id = {bind} AND task_id = {bind}{row_lock}
+                """,
+                (conversation_id, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            stored = decode_turn_attachments(
+                row["attachments_json"], logger=self._logger, conversation_id=conversation_id, task_id=task_id
+            )
+            merged, added = merge_unique(
+                stored, attachments, logger=self._logger, conversation_id=conversation_id, task_id=task_id
+            )
+            if added:
+                conn.execute(
+                    f"""
+                    UPDATE conversation_task_links
+                    SET attachments_json = {bind}, updated_at = {bind}
+                    WHERE conversation_id = {bind} AND task_id = {bind}
+                    """,
+                    (encode_turn_attachments(merged), utc_now_iso(), conversation_id, task_id),
+                )
+            conn.commit()
+        return added
+
+    def list_turn_attachments(
+        self,
+        conversation_id: str,
+        *,
+        attachment_ids: Optional[Collection[str]] = None,
+        limit: Optional[int] = None,
+    ) -> list[TurnAttachment]:
+        """A conversation's files with their turns, newest first, one per id.
+
+        Newest means the latest turn first and, within a turn, the file that
+        arrived last first; an id recorded on more than one turn is listed with
+        its newest turn. ``attachment_ids`` keeps only those ids; ``limit``
+        stops after that many files. Rows are read in batches
+        (``TURN_ATTACHMENT_SCAN_BATCH_ROWS``), newest turns first, and reading
+        stops once the limit is reached or every requested id was found.
+
+        The records are complete, storage references included: trusted
+        callers only (``custom_agents.conversation_attachments``).
+        """
+
+        picked = NewestFilesFirst(attachment_ids=attachment_ids, limit=limit)
+        before: Optional[tuple[int, str]] = None
+        with self._connect() as conn:
+            while not picked.done:
+                rows = self._turn_attachment_rows(conn, conversation_id, before=before)
+                for row in rows:
+                    if picked.done:
+                        break
+                    task_id = str(row["task_id"])
+                    turn_files = decode_turn_attachments(
+                        row["attachments_json"], logger=self._logger, conversation_id=conversation_id, task_id=task_id
+                    )
+                    picked.add_turn(int(row["turn_index"]), task_id, turn_files)
+                if len(rows) < TURN_ATTACHMENT_SCAN_BATCH_ROWS:
+                    break
+                before = (int(rows[-1]["turn_index"]), str(rows[-1]["task_id"]))
+        return picked.found
+
+    def _turn_attachment_rows(
+        self, conn: Any, conversation_id: str, *, before: Optional[tuple[int, str]]
+    ) -> list[Any]:
+        """One batch of a conversation's turns that recorded files, newest first, older than ``before``."""
+
+        bind = self._dialect.bind
+        older = ""
+        params: tuple[Any, ...] = (conversation_id,)
+        if before is not None:
+            older = f" AND (turn_index < {bind} OR (turn_index = {bind} AND task_id < {bind}))"
+            params += (before[0], before[0], before[1])
+        rows: list[Any] = conn.execute(
+            f"""
+            SELECT turn_index, task_id, attachments_json FROM conversation_task_links
+            WHERE conversation_id = {bind} AND attachments_json IS NOT NULL AND attachments_json <> '[]'{older}
+            ORDER BY turn_index DESC, task_id DESC
+            LIMIT {TURN_ATTACHMENT_SCAN_BATCH_ROWS}
+            """,
+            params,
+        ).fetchall()
+        return rows
 
     def append_clarification(
         self,

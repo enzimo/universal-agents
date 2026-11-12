@@ -15,6 +15,10 @@ conversation stores, the lead's real ``DefaultContextEngine`` and the real
 tools. Turn 2 runs in a restarted lead over the same databases, so nothing
 depends on memory kept from turn 1.
 
+The scenario itself is checked without an expected-failure marker
+(``test_the_follow_up_scenario_is_set_up_as_a_real_second_turn``), so a
+broken setup fails at once instead of passing as the expected failure.
+
 Covers, for turn 2 (the follow-up, which has no files of its own):
 - its prompt lists the photo from turn 1 by name and id;
 - ``inspect_user_attachment`` opens the photo by id;
@@ -81,6 +85,7 @@ class _FollowUp:
     """Turn 2's lead (restarted over turn 1's databases) and the photo turn 1 received."""
 
     lead: Any
+    layout: InstanceLayout
     photo: UserTaskAttachment
     upload: Path
 
@@ -160,7 +165,7 @@ async def follow_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _FollowU
     lead = _lead(tmp_path, layout)
     await _admit(lead, task_id=FOLLOW_UP, text="How often should I water the plant in that photo?", attachments=[])
     use_agent(lead, FOLLOW_UP)
-    return _FollowUp(lead=lead, photo=stored.attachment, upload=stored.local_path)
+    return _FollowUp(lead=lead, layout=layout, photo=stored.attachment, upload=stored.local_path)
 
 
 def _follow_up_prompt(lead) -> Any:
@@ -181,20 +186,46 @@ def _payload(result: dict) -> dict:
     return json.loads(result["content"][0]["text"])
 
 
-@pytest.mark.xfail(strict=True, reason="regression: earlier uploads are not listed in follow-up turns")
+def _sections(assembly: Any) -> dict[str, str]:
+    return {section.name: section.text for section in assembly.sections}
+
+
+# The regression tests below are expected to fail only at their own checks
+# (an assertion or a missing key), never in setup or with another error.
+_MISSING_BEHAVIOR = (AssertionError, KeyError)
+
+
+@pytest.mark.asyncio
+async def test_the_follow_up_scenario_is_set_up_as_a_real_second_turn(follow_up: _FollowUp) -> None:
+    store = follow_up.lead._conversation_store
+    first = store.get_turn_by_task_id(FIRST)
+    second = store.get_turn_by_task_id(FOLLOW_UP)
+
+    # Both turns are Ann's, in one conversation, and turn 2 follows turn 1.
+    assert store.get_thread(CONVERSATION)["owner_canonical_user_id"] == ANN
+    assert (first["conversation_id"], first["owner_canonical_user_id"]) == (CONVERSATION, ANN)
+    assert (second["conversation_id"], second["owner_canonical_user_id"]) == (CONVERSATION, ANN)
+    assert second["followup_to_task_id"] == FIRST
+    assert (first["task_status"], first["final_answer_text"]) == ("completed", "It looks like a young fig tree.")
+    # The photo's bytes are in the instance's upload folder.
+    assert follow_up.upload.resolve().is_relative_to(follow_up.layout.uploads_dir.resolve())
+    assert follow_up.upload.read_bytes() == PHOTO_BYTES
+    # Turn 1's text reaches the follow-up; its photo is what went missing.
+    assert "What plant is this?" in _sections(_follow_up_prompt(follow_up.lead))["conversation_thread_context"]
+
+
+@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: earlier uploads are not listed in follow-up turns")
 @pytest.mark.asyncio
 async def test_the_follow_up_prompt_lists_the_photo_from_turn_one(follow_up: _FollowUp) -> None:
     assembly = _follow_up_prompt(follow_up.lead)
 
-    # Turn 1's text reaches the follow-up; its photo is what went missing.
-    assert "What plant is this?" in assembly.prompt
-    listed ={section.name: section.text for section in assembly.sections}.get("conversation_attachments", "")
+    listed = _sections(assembly).get("conversation_attachments", "")
     assert follow_up.photo.attachment_id in listed
     assert PHOTO_NAME in listed
     assert str(follow_up.upload) not in assembly.prompt
 
 
-@pytest.mark.xfail(strict=True, reason="regression: earlier uploads cannot be inspected by id")
+@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: earlier uploads cannot be inspected by id")
 @pytest.mark.asyncio
 async def test_the_follow_up_turn_inspects_the_photo_by_id(follow_up: _FollowUp) -> None:
     result = inspect_user_attachment._tool_func(attachment_id=follow_up.photo.attachment_id)
@@ -206,7 +237,7 @@ async def test_the_follow_up_turn_inspects_the_photo_by_id(follow_up: _FollowUp)
     assert str(follow_up.upload) not in result["content"][0]["text"]
 
 
-@pytest.mark.xfail(strict=True, reason="regression: earlier uploads cannot be loaded for the model by id")
+@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: earlier uploads cannot be loaded for the model by id")
 @pytest.mark.asyncio
 async def test_the_follow_up_turn_loads_the_photo_for_the_model_by_id(follow_up: _FollowUp) -> None:
     schema = load_local_media_for_model_context.tool_spec["inputSchema"]["json"]
@@ -220,7 +251,7 @@ async def test_the_follow_up_turn_loads_the_photo_for_the_model_by_id(follow_up:
     assert str(follow_up.upload) not in label["text"]
 
 
-@pytest.mark.xfail(strict=True, reason="regression: conversation turns do not record their uploads")
+@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: conversation turns do not record their uploads")
 @pytest.mark.asyncio
 async def test_the_conversation_slice_shows_the_photo_on_turn_one(follow_up: _FollowUp) -> None:
     text = get_conversation_context_slice._tool_func(conversation_id=CONVERSATION, mode="summary")
