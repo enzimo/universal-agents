@@ -150,7 +150,8 @@ def _turn_decision_force_prompt(
     )
     # Only the team lead chooses which of the person's files a delegated task gets.
     delegation_files_guidance = (
-        "\n  The task gets the files of the person's current message. To pass other\n"
+        "\n  The task gets the files the person sent with the request's own message\n"
+        "  (for a specialist's escalation, the files it came with). To pass other\n"
         "  files the person sent (with guidance, with an answer, or earlier in the\n"
         "  conversation), list their ids in `actions[].attachment_ids`; `[]` passes none."
         if is_team_lead
@@ -663,7 +664,8 @@ class StructuredLLMResponse(BaseModel):
 DELEGATION_ATTACHMENT_IDS_DESCRIPTION = (
     "Optional. The attachment_id of each file the person sent that the delegated task needs: "
     "files of this request, files sent with guidance or an answer, or earlier files of this "
-    "conversation. Leave out to send the files of the person's current message; [] sends none."
+    "conversation. Leave out to send the files that came with the request's own message (for a "
+    "specialist's escalation, the files it came with); [] sends none."
 )
 
 

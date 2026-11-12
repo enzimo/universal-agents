@@ -129,8 +129,46 @@ class _Lead:
         assert self.manager.update_main_task_state(task_id, ProgressState.IN_PROGRESS, "2026-11-12T10:00:00+00:00")
         bind_task(task_id)
 
-    async def delegate(self, attachment_ids: Any = LEFT_OUT, *, model: type = ModelAgentTurnDecision) -> Task:
-        """The lead's model delegates to a specialist, as its provider schema lets it."""
+    def plan_step(self) -> str:
+        """The first step of a plan the lead makes for ``ROOT``, started by the task manager and being handled."""
+
+        plan = self.manager.activate_plan_execution(
+            ROOT, steps=[{"title": "List", "objective": "Make the shopping list from the photo."}],
+            final_review=False, agent_name="manager", agent_id=self.agent.id,
+        )
+        assert plan is not None
+        return self._handle(str(plan.plan_steps[0].current_step_task_id))
+
+    def recovery(self) -> str:
+        """An isolated recovery task for ``ROOT``, started as the task manager starts one for a failed step."""
+
+        self.manager.activate_plan_execution(
+            ROOT, steps=[{"title": "List", "objective": "Make the shopping list from the photo."}],
+            final_review=False, agent_name="manager", agent_id=self.agent.id,
+        )
+        root = self.manager.get_task_info(ROOT)
+        meta = root.meta.model_copy(deep=True)
+        meta.msg_correlation_id = "recovery_corr_recovery_task_1"
+        meta.conversation_id = "recov_conv_1"
+        info = self.manager.start_isolated_recovery_task(
+            ROOT, failure_type="step_failed", failure_summary="The list step failed.",
+            recovery_brief="Find a way to make the list.", header=root.header.model_copy(deep=True), meta=meta,
+            recovery_task_id="recovery_task_1", notify_user=False, agent_name="manager", agent_id=self.agent.id,
+        )
+        assert info is not None
+        return self._handle(info.task.task_id)
+
+    def _handle(self, task_id: str) -> str:
+        # Created without files of its own, as the task manager creates them.
+        assert self.manager.get_task_info(task_id).task.attachments == []
+        assert self.manager.update_main_task_state(task_id, ProgressState.IN_PROGRESS, "2026-11-12T10:00:00+00:00")
+        bind_task(task_id)
+        return task_id
+
+    async def delegate(
+        self, attachment_ids: Any = LEFT_OUT, *, model: type = ModelAgentTurnDecision, from_task: str = ROOT
+    ) -> Task:
+        """The lead's model delegates to a specialist from ``from_task``, as its provider schema lets it."""
 
         action: dict[str, Any] = {
             "action_type": "delegate_task",
@@ -140,7 +178,7 @@ class _Lead:
         if attachment_ids is not LEFT_OUT:
             action["attachment_ids"] = attachment_ids
         decision = self.agent._turn_decision_from_structured_output(model.model_validate({"actions": [action]}))
-        info = self.manager.get_task_info(ROOT)
+        info = self.manager.get_task_info(from_task)
         return await self.agent._execute_turn_decision_outbox(
             decision=decision, incoming_content=info.task, incoming_header=info.header, incoming_meta=info.meta
         )
@@ -179,7 +217,7 @@ async def test_the_files_the_lead_names_go_to_the_specialist_with_their_trusted_
     assert lead.sent_files()[0].filename == stored["att_photo"]["filename"]
     assert (
         f"event=delegation_attachments_selected parent_task_id={ROOT} subtask_id={created.task_id} "
-        "attachment_ids=att_photo,att_notes left_out_own_ids=att_list"
+        "attachment_ids=att_photo,att_notes left_out_message_ids=att_list"
     ) in caplog.text
 
 
@@ -204,6 +242,27 @@ async def test_left_out_ids_pass_the_current_messages_files_and_an_empty_list_pa
 
         assert _ids(created.attachments) == expected
         assert _ids(lead.sent_files()) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handled", ["plan_step", "recovery"])
+async def test_a_plan_step_or_recovery_task_passes_its_requests_files_when_the_lead_names_none(
+    tmp_path: Path, handled: str
+) -> None:
+    # Turn 2 sent list.png; the lead made a plan, and a step (or a recovery
+    # task for a failed step) delegates. Neither carries files of its own:
+    # left out, the new task gets the files of the request's own message.
+    lead = _Lead(tmp_path)
+    task_id = getattr(lead, handled)()
+
+    for model in (ModelAgentTurnDecision, CompatibleModelAgentTurnDecision):
+        left_out = await lead.delegate(model=model, from_task=task_id)
+        assert _ids(left_out.attachments) == ["att_list"]
+        assert _ids(lead.sent_files()) == ["att_list"]
+    assert _ids((await lead.delegate([], from_task=task_id)).attachments) == []
+    assert _ids((await lead.delegate(["att_photo"], from_task=task_id)).attachments) == ["att_photo"]
+    # The request's own task is unchanged: still its message's file.
+    assert _ids(lead.manager.get_task_info(ROOT).task.attachments) == ["att_list"]
 
 
 @pytest.mark.asyncio
@@ -299,7 +358,7 @@ def test_specialists_turn_answers_have_no_file_choice(model: type) -> None:
 @pytest.mark.parametrize("model", [ModelAgentTurnDecision, CompatibleModelAgentTurnDecision])
 def test_the_leads_turn_answers_offer_an_optional_file_choice_on_delegation_only(model: type) -> None:
     spec = json.dumps(convert_pydantic_to_tool_spec(model))
-    assert "attachment_ids" in spec and "Leave out to send the files of the person's current message" in spec
+    assert "attachment_ids" in spec and "Leave out to send the files that came with the request's own message" in spec
     for attachment_ids, expected in ((LEFT_OUT, None), ([], []), (["att_photo"], ["att_photo"])):
         action: dict[str, Any] = {
             "action_type": "delegate_task", "task": {"problem_statement": "Help."}, "target_named_agent_type": SPECIALIST,

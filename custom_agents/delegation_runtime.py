@@ -4,8 +4,9 @@ Delegated tasks for a worker type are published to the type's shared queue and
 wait there until a free worker takes one (ADR-019); ``delegated_work_runtime``
 tracks them after publication.
 
-A delegated task gets the files of the delegating task's own message, or
-exactly the files the team lead names with ``attachment_ids``
+A delegated task gets the files of the message of the request the delegating
+task serves (its own message; for a plan step or an isolated recovery task, its
+request's), or exactly the files the team lead names with ``attachment_ids``
 (``selected_attachments``): files of its request, files the person sent with
 guidance or an answer, and earlier files of its conversation, found within the
 same scope the lead's prompt and tools use.
@@ -22,6 +23,7 @@ from custom_agents.access_runtime import verified_person_id
 from custom_agents.agent_requests import AgentUnreachable
 from custom_agents.conversation_attachments import (
     AttachmentSelectionError,
+    request_files,
     select_attachments,
     task_attachment_scope,
 )
@@ -52,8 +54,8 @@ logger = logging.getLogger(__name__)
 async def selected_attachments(agent: Any, attachment_ids: Optional[list[str]]) -> Optional[list[UserTaskAttachment]]:
     """The files ``attachment_ids`` names for a task delegated from the current task; None when it names none.
 
-    ``None`` (left out) means the new task gets the delegating task's own
-    files (``_create_subtask_request``). A list, ``[]`` included, is resolved
+    ``None`` (left out) means the new task gets the files of its request's
+    message (``_give_subtask_files``). A list, ``[]`` included, is resolved
     with ``select_attachments`` in the scope of the task being handled: the
     one the team lead's prompt lists and its tools open, with the person from
     the task's signed context. An unknown, removed or excess id raises
@@ -97,12 +99,36 @@ async def selected_attachments(agent: Any, attachment_ids: Optional[list[str]]) 
         raise
 
 
-def _give_subtask_files(
-    self: Any, subtask: Task, parent: Task, selected: Optional[list[UserTaskAttachment]]
-) -> None:
-    """Give a new subtask the files the team lead chose, or, when it chose none (None), its parent's own."""
+def _parent_and_message_files(
+    task_manager: Any, task_id: str
+) -> tuple[Optional[TaskInfo], list[UserTaskAttachment]]:
+    """The delegating task and the files of the message of the request it serves; (None, []) for a task not held.
 
-    own = list(getattr(parent, "attachments", None) or [])
+    The files of the task's own message for a request itself or an escalation;
+    for a plan step or an isolated recovery task, which carry no files of their
+    own, the request's (``conversation_attachments.request_files``). Read
+    together in one task-manager lane operation.
+    """
+
+    info = task_manager.get_task_info(task_id)
+    request = request_files(task_manager, task_id) if info is not None else None
+    return info, (list(request.message_files) if request is not None else [])
+
+
+def _give_subtask_files(
+    self: Any,
+    subtask: Task,
+    parent: Task,
+    selected: Optional[list[UserTaskAttachment]],
+    message_files: list[UserTaskAttachment],
+) -> None:
+    """Give a new subtask the files the team lead chose or, when it chose none (None), its request's message files.
+
+    ``message_files`` (``_parent_and_message_files``) are the parent's own
+    files, or for a plan step or recovery task its request's.
+    """
+
+    own = list(message_files)
     if selected is None:
         if not subtask.attachments:
             subtask.attachments = [attachment.model_copy(deep=True) for attachment in own]
@@ -111,7 +137,7 @@ def _give_subtask_files(
     chosen_ids = {attachment.attachment_id for attachment in selected}
     self._logger.info(
         "A delegated task gets the files the team lead chose. event=delegation_attachments_selected "
-        "parent_task_id=%s subtask_id=%s attachment_ids=%s left_out_own_ids=%s",
+        "parent_task_id=%s subtask_id=%s attachment_ids=%s left_out_message_ids=%s",
         parent.task_id,
         subtask.task_id,
         ",".join(attachment.attachment_id for attachment in selected),
@@ -348,7 +374,8 @@ async def _create_subtask_request(
     Args:
         llm_comms_message (CommsMessage): CommsMessage from the LLM.
         chosen_files: the files the team lead chose (``selected_attachments``),
-            ``[]`` for none; None gives the subtask the parent task's own files.
+            ``[]`` for none; None gives the subtask the files of the message of
+            the parent task's request (``_give_subtask_files``).
 
     Returns:
         Optional[TaskInfo]: The created TaskInfo object for the subtask, or None on failure.
@@ -368,8 +395,10 @@ async def _create_subtask_request(
         )
         return None
 
-    parent_task_info = await self.task_manager.operations_runtime.run(
-        self.task_manager.get_task_info, parent_task_id
+    task_manager = self.task_manager
+    # The lane copies an operation's arguments, so the manager is not passed as one.
+    parent_task_info, message_files = await task_manager.operations_runtime.run(
+        lambda: _parent_and_message_files(task_manager, parent_task_id)
     )
     if not parent_task_info:
         self._logger.error(
@@ -439,7 +468,7 @@ async def _create_subtask_request(
     sub_task_to_create.task_type = MessageMetaType.REQUEST
     sub_task_to_create.answer = None
     sub_task_to_create.errors = None
-    _give_subtask_files(self, sub_task_to_create, parent_task_info.task, chosen_files)
+    _give_subtask_files(self, sub_task_to_create, parent_task_info.task, chosen_files, message_files)
 
     # Determine target agent
     target_agent_name = None

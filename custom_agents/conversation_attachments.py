@@ -266,12 +266,16 @@ class RequestFiles:
     Plain data, so it can be read in the task manager's operation lane.
     ``conversation_id`` is the request's own conversation, set only for a
     top-level request (only those are turns of a conversation).
+    ``message_files`` are the files of the request's own message, the ones a
+    task delegated from it gets when the delegation names none
+    (``delegation_runtime._give_subtask_files``).
     """
 
     task_id: str
     request_task_id: str
     conversation_id: Optional[str]
     files: tuple[UserTaskAttachment, ...]
+    message_files: tuple[UserTaskAttachment, ...] = ()
 
 
 def request_files(task_manager: Any, task_id: str) -> Optional[RequestFiles]:
@@ -305,6 +309,7 @@ def request_files(task_manager: Any, task_id: str) -> Optional[RequestFiles]:
         request_task_id=request_id,
         conversation_id=str(conversation_id) if conversation_id else None,
         files=tuple(files.values()),
+        message_files=tuple(request_info.task.attachments or ()),
     )
 
 
