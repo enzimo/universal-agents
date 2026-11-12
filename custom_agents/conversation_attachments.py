@@ -531,7 +531,7 @@ def attachment_summary(sent: SentFile | UserTaskAttachment) -> dict[str, Any]:
     return summary
 
 
-def _shown_name(filename: str) -> str:
+def shown_name(filename: str) -> str:
     """The file name as one line of bounded length (names are the person's text)."""
 
     single_line = " ".join(str(filename or "").split())
@@ -556,7 +556,7 @@ def describe_attachment(sent: SentFile | UserTaskAttachment) -> str:
     attachment = file.attachment
     turn = f", sent in turn {file.turn_index}" if file.turn_index is not None else ""
     return (
-        f"{_shown_name(attachment.filename)} (attachment_id {attachment.attachment_id}, {attachment.kind}, "
+        f"{shown_name(attachment.filename)} (attachment_id {attachment.attachment_id}, {attachment.kind}, "
         f"{attachment.content_type}, {_shown_size(attachment.size_bytes)}{turn})"
     )
 

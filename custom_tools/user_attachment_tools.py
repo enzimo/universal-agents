@@ -220,10 +220,10 @@ def inspect_user_attachment(
         # Only a file named by path fails here: an upload's read failures are UploadUnreadable.
         return _json_result("error", {"error": str(exc), "path": str(source.path)})
     if upload_to_copy is not None:
-        # The copy is the last read of the upload: if it is removed before or during any read, the
-        # result is an error and the task's folders hold no copy; a result with workspace_path always
-        # means the copy was made. Only reading the upload is handled: a failure writing the task's own
-        # folder is raised as before.
+        # The copy is the last read of the upload. An upload removed before the copy opens it gives an
+        # error and leaves no copy; once the copy has opened it, the copy completes even if the file is
+        # removed, so a result with workspace_path always means the copy was made. Only reading the
+        # upload is handled: a failure writing the task's own folder is raised as before.
         try:
             payload["workspace_path"] = str(_copy_into_task_folder(upload_to_copy))
         except UploadUnreadable as exc:

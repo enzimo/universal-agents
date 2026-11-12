@@ -21,6 +21,7 @@ from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.liveness_observation import observe_liveness
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.stuck_tasks import (
+    TASK_FILES_SENT_BEFORE_UPGRADE,
     TASK_HANDBACK_UNCLAIMED,
     TASK_NO_PROGRESS,
     TASK_OWNER_GONE,
@@ -29,6 +30,7 @@ from custom_agents.stuck_tasks import (
     report_stuck_tasks,
 )
 from custom_agents.task_manager import TaskManager
+from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessRequestV1,
@@ -54,6 +56,7 @@ from custom_messages.contracts.worker_handback_v1 import (
     WorkerTaskHandbackV1,
 )
 from custom_messages.enums import ControlType, MessageMetaType, ProgressState, RequesterType
+from runtime_settings.instance_layout import InstanceLayout
 from storage.access_repository import AccessRepository
 from storage.stuck_work_repository import StuckWorkRepository
 from storage.worker_handback_repository import HANDBACK_STATUS_REDISPATCHED, WorkerHandbackRepository
@@ -75,6 +78,7 @@ def lead(tmp_path, monkeypatch):
         name="lead",
         team_id="team",
         is_team_lead=True,
+        instance_root=str(tmp_path / "instance"),
         instance_config_path=None,
         schedule_maintenance={},
         task_manager=manager,
@@ -90,7 +94,9 @@ def iso(moment: datetime) -> str:
     return moment.isoformat()
 
 
-def record(task_id, *, state=ProgressState.IN_PROGRESS, parent=None, signed=True, at=None, route=GATEWAY_ROUTE):
+def record(
+    task_id, *, state=ProgressState.IN_PROGRESS, parent=None, signed=True, at=None, route=GATEWAY_ROUTE, files=()
+):
     at = at or datetime.now(timezone.utc)
     context = GatewayContext(
         canonical_user_id="jordan",
@@ -105,6 +111,7 @@ def record(task_id, *, state=ProgressState.IN_PROGRESS, parent=None, signed=True
         problem_statement=REQUEST if parent is None else "Fetch daily candles",
         parent_task_id=parent,
         task_state=[(ProgressState.ACCEPTED, iso(at)), (state, iso(at))],
+        attachments=list(files),
     )
     return TaskSnapshotRecord(
         task_id=task_id,
@@ -388,3 +395,104 @@ async def test_resume_grace_does_not_close_an_existing_stuck_incident(lead, monk
     await report_stuck_tasks(lead, now=woke)
     assert open_incidents(lead)[0].incident_id == incident.incident_id
     assert len(notices(lead)) == 1 and len(admin_notices(lead)) == 1
+
+
+# -- files sent before the upgrade --------------------------------------------------
+
+
+def stored_file(lead, attachment_id, filename, *, folder, exists=True):
+    """A file record as the gateway saved it, its copy under ``folder`` of the instance."""
+    path = InstanceLayout.at(lead.instance_root).root / folder / f"{attachment_id}_{filename}"
+    if exists:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"data")
+    return UserTaskAttachment(
+        attachment_id=attachment_id, filename=filename, size_bytes=4, sha256="0" * 64, origin="telegram",
+        storage_refs=[AttachmentStorageRef(storage_type="local", path=str(path))],
+    )
+
+
+# Where 0.9's adapter host kept a hosted chat app's files (``interactive_apps`` ``upload_dir``).
+ADAPTER_HOST_FOLDER = "runtime/adapter-host-uploads/telegram/session-1"
+UPLOADS_FOLDER = "state/uploads/telegram-jordan"
+
+
+def no_storage_path(text):
+    return "adapter-host-uploads" not in text and "state/uploads" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_request_holding_files_sent_before_the_upgrade_tells_its_person_once(lead, caplog):
+    caplog.set_level(logging.INFO)
+    old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
+    new = stored_file(lead, "att_new", "report.pdf", folder=UPLOADS_FOLDER)
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, files=[old, new])])
+    save(lead, "worker-1", "WebResearchAgent", [record("child-a", parent="root", route="lead", files=[old])])
+    seen(lead, "worker-1")
+    now = datetime.now(timezone.utc)
+    await report_stuck_tasks(lead, now=now)
+
+    (notice,) = notices(lead)
+    assert notice.title == f'Your request "{REQUEST}" needs files sent again'
+    assert "files you sent before the team was upgraded (photo.png)" in notice.summary
+    assert "send them again in this chat" in notice.summary
+    assert "report.pdf" not in notice.summary and no_storage_path(notice.summary)
+    assert not admin_notices(lead)
+    (envelope,) = chats(lead)
+    assert envelope.msg_header.to_routing_path == GATEWAY_ROUTE
+    assert envelope.msg_content.reason == "work_stuck"
+    assert "photo.png" in envelope.msg_content.text and no_storage_path(envelope.msg_content.text)
+    (incident,) = open_incidents(lead)
+    assert (incident.subject_id, incident.reason) == ("root", TASK_FILES_SENT_BEFORE_UPGRADE)
+    assert "event=stuck_work_notified" in caplog.text
+    assert f"reason={TASK_FILES_SENT_BEFORE_UPGRADE}" in caplog.text
+
+    await report_stuck_tasks(lead, now=now + timedelta(minutes=1))  # told once
+    assert len(chats(lead)) == 1 and len(notices(lead)) == 1
+
+    for owner in ("lead", "worker-1"):  # the request ended
+        lead.task_manager.runtime_state_store.clear_task_runtime(owner)
+    await report_stuck_tasks(lead, now=now + timedelta(minutes=2))
+    assert not open_incidents(lead)
+    assert len(chats(lead)) == 1 and len(notices(lead)) == 1  # closed with no "warning cleared"
+    assert "event=stuck_work_closed_silently" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_files_sent_before_the_upgrade_of_unverified_work_tell_administrators_no_names(lead):
+    old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, signed=False, files=[old])])
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+    assert not notices(lead)
+    (admin,) = admin_notices(lead)
+    assert admin.title == "A task needs files sent again"
+    assert "uses 1 file sent before the upgrade" in admin.summary
+    assert "photo.png" not in admin.title + admin.summary
+    assert REQUEST not in admin.title + admin.summary
+    assert no_storage_path(admin.summary)
+
+
+@pytest.mark.asyncio
+async def test_files_this_instance_stored_are_not_reported_as_sent_before_the_upgrade(lead):
+    kept = stored_file(lead, "att_kept", "report.pdf", folder=UPLOADS_FOLDER)
+    removed = stored_file(lead, "att_removed", "old.pdf", folder=UPLOADS_FOLDER, exists=False)  # retention ended
+    save(lead, "lead", "TeamArchitect", [record("root", state=ProgressState.WAITING, files=[kept, removed])])
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+    assert not notices(lead) and not admin_notices(lead) and not chats(lead)
+    assert not open_incidents(lead)
+
+
+@pytest.mark.asyncio
+async def test_a_task_whose_files_cannot_be_checked_is_skipped_and_other_notices_still_go_out(lead, caplog):
+    unreadable = stored_file(lead, "att_bad", "bad.png", folder=ADAPTER_HOST_FOLDER, exists=False)
+    unreadable.storage_refs[0].path += "\x00"  # os.path.realpath raises ValueError
+    old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
+    save(lead, "worker-1", "WebResearchAgent", [record("root", files=[unreadable])])  # no heartbeat: gone
+    save(lead, "lead", "TeamArchitect", [record("other", state=ProgressState.WAITING, files=[old])])
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc) + timedelta(minutes=11))
+
+    reported = {(incident.subject_id, incident.reason) for incident in open_incidents(lead)}
+    assert reported == {("root", TASK_OWNER_GONE), ("other", TASK_FILES_SENT_BEFORE_UPGRADE)}
+    assert "event=stuck_task_upgrade_files_check_failed task_id=root error_type=ValueError" in caplog.text
+    assert "event=stuck_task_scan_failed" not in caplog.text
+    assert no_storage_path(caplog.text)
