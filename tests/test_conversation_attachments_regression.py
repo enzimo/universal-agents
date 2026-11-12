@@ -15,9 +15,11 @@ conversation stores, the lead's real ``DefaultContextEngine`` and the real
 tools. Turn 2 runs in a restarted lead over the same databases, so nothing
 depends on memory kept from turn 1.
 
-The scenario itself is checked without an expected-failure marker
+The scenario itself is checked on its own
 (``test_the_follow_up_scenario_is_set_up_as_a_real_second_turn``), so a
-broken setup fails at once instead of passing as the expected failure.
+broken setup is reported as such rather than as a missing behavior. Each
+check below failed on main before this change (the saved run is in the
+change's review notes).
 
 Covers, for turn 2 (the follow-up, which has no files of its own):
 - its prompt lists the photo from turn 1 by name and id;
@@ -107,7 +109,11 @@ def _lead(tmp_path: Path, layout: InstanceLayout):
     return agent
 
 
-async def _admit(agent, *, task_id: str, text: str, attachments: list[UserTaskAttachment]) -> None:
+async def _admit(
+    agent, *, task_id: str, text: str, attachments: list[UserTaskAttachment], conversation_id: str = CONVERSATION
+) -> None:
+    """Admit Ann's request ``task_id`` in ``conversation_id`` as the gateway sends it."""
+
     task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=text, attachments=attachments)
     # As the gateway signs a new request: naming its task and conversation, with
     # an id bound to the request and its files, vouches for those files.
@@ -116,7 +122,7 @@ async def _admit(agent, *, task_id: str, text: str, attachments: list[UserTaskAt
         person_id=ANN,
         person_roles=("member",),
         root_task_id=task_id,
-        conversation_id=CONVERSATION,
+        conversation_id=conversation_id,
         context_id=request_context_id(task),
     )
     await task_message_runtime._handle_task_request(
@@ -124,7 +130,7 @@ async def _admit(agent, *, task_id: str, text: str, attachments: list[UserTaskAt
         task,
         MessageHeader(from_agent_id="gateway", response_routing_key="test_team_gateway_response"),
         MessageMeta(
-            conversation_id=CONVERSATION,
+            conversation_id=conversation_id,
             msg_correlation_id=f"corr_{task_id}",
             requester_type=RequesterType.USER_REQUESTER,
             gateway_context=GatewayContext(canonical_user_id=ANN, session_key=SESSION, task_context=signed),
@@ -201,11 +207,6 @@ def _sections(assembly: Any) -> dict[str, str]:
     return {section.name: section.text for section in assembly.sections}
 
 
-# The regression tests below are expected to fail only at their own checks
-# (an assertion or a missing key), never in setup or with another error.
-_MISSING_BEHAVIOR = (AssertionError, KeyError)
-
-
 @pytest.mark.asyncio
 async def test_the_follow_up_scenario_is_set_up_as_a_real_second_turn(follow_up: _FollowUp) -> None:
     store = follow_up.lead._conversation_store
@@ -235,7 +236,6 @@ async def test_the_follow_up_prompt_lists_the_photo_from_turn_one(follow_up: _Fo
     assert str(follow_up.upload) not in assembly.prompt
 
 
-@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: earlier uploads cannot be inspected by id")
 @pytest.mark.asyncio
 async def test_the_follow_up_turn_inspects_the_photo_by_id(follow_up: _FollowUp) -> None:
     result = inspect_user_attachment._tool_func(attachment_id=follow_up.photo.attachment_id)
@@ -247,7 +247,6 @@ async def test_the_follow_up_turn_inspects_the_photo_by_id(follow_up: _FollowUp)
     assert str(follow_up.upload) not in result["content"][0]["text"]
 
 
-@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: earlier uploads cannot be loaded for the model by id")
 @pytest.mark.asyncio
 async def test_the_follow_up_turn_loads_the_photo_for_the_model_by_id(follow_up: _FollowUp) -> None:
     schema = load_local_media_for_model_context.tool_spec["inputSchema"]["json"]

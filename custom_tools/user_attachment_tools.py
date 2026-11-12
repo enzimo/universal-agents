@@ -1,15 +1,17 @@
 """Bounded inspection tools for user-provided task attachments.
 
-Uploads by id are stored in the runtime's own records, out of agents' reach.
-A file named by path is checked and read once through the agent file library
-(``custom_tools.file_access``), and the inspection works on those bytes, so a
-link swapped in afterwards changes nothing.
+Uploads are named by ``attachment_id``: the runtime decides which files the
+task may use (its own and, for a top-level task, its conversation's earlier
+files) and reads them only from this host's upload folders
+(``custom_tools.task_uploads``); results by id never show where they are
+stored. A file named by path is checked and read once through the agent file
+library (``custom_tools.file_access``), and the inspection works on those
+bytes, so a link swapped in afterwards changes nothing.
 """
 
 from __future__ import annotations
 
 import io
-import json
 import shutil
 import mimetypes
 import stat
@@ -19,11 +21,17 @@ from typing import Any, Dict, Optional
 
 from strands import tool
 
-from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_tools import file_access
+from custom_tools.task_uploads import (
+    TaskUpload,
+    described,
+    open_task_upload,
+    read_failed,
+    remote_copy_required,
+    tool_result,
+)
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import PERSON_UPLOADS_DIRNAME
-from custom_tools.runtime_context import bound_task_id, get_agent_ref
 
 
 DEFAULT_MAX_CHARS = 6000
@@ -44,10 +52,6 @@ TEXT_SUFFIXES = {".csv", ".html", ".json", ".md", ".txt", ".xml", ".yaml", ".yml
 MAX_INSPECTED_BYTES = 64 * 1024 * 1024
 
 
-def _json_result(status: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {"status": status, "content": [{"text": json.dumps(payload, indent=2, sort_keys=True)}]}
-
-
 def _safe_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(value)
@@ -56,68 +60,18 @@ def _safe_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
-def _current_task_attachments() -> list[UserTaskAttachment]:
-    agent = get_agent_ref()
-    if agent is None:
-        return []
-    task_id = bound_task_id()
-    task_info = None
-    task_manager = getattr(agent, "task_manager", None)
-    if task_id and task_manager is not None and hasattr(task_manager, "get_task_info"):
-        task_info = task_manager.get_task_info(task_id)
+def _path_summary(path: Path, size_bytes: Optional[int] = None) -> Dict[str, Any]:
+    """How a by-path result names the file: the workspace path the caller gave, resolved."""
 
-    attachments = [
-        attachment
-        for attachment in list(getattr(getattr(task_info, "task", None), "attachments", None) or [])
-        if isinstance(attachment, UserTaskAttachment)
-    ]
-    for steering in list(getattr(agent, "_pending_proactive_task_steering", {}).get(task_id, []) or []):
-        attachments.extend(
-            attachment
-            for attachment in list(getattr(steering, "attachments", None) or [])
-            if isinstance(attachment, UserTaskAttachment)
-        )
-    return attachments
-
-
-def _attachment_local_path(attachment: UserTaskAttachment) -> Optional[str]:
-    for ref in list(attachment.storage_refs or []):
-        if ref.storage_type == "local" and ref.path:
-            return ref.path
-    return None
-
-
-def _find_attachment(attachment_id: str) -> Optional[UserTaskAttachment]:
-    normalized = str(attachment_id or "").strip()
-    for attachment in _current_task_attachments():
-        if attachment.attachment_id == normalized:
-            return attachment
-    return None
-
-
-def _attachment_summary(
-    attachment: Optional[UserTaskAttachment], path: Optional[Path], size_bytes: Optional[int] = None
-) -> Dict[str, Any]:
-    if attachment is None:
-        content_type = mimetypes.guess_type(str(path or ""))[0] or "application/octet-stream"
-        return {
-            "attachment_id": None,
-            "filename": path.name if path else None,
-            "content_type": content_type,
-            "kind": _kind_for_content_type(content_type),
-            "size_bytes": size_bytes,
-            "sha256": None,
-            "storage_refs": [{"storage_type": "local", "path": str(path)}] if path else [],
-        }
+    content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     return {
-        "attachment_id": attachment.attachment_id,
-        "filename": attachment.filename,
-        "content_type": attachment.content_type,
-        "kind": attachment.kind,
-        "size_bytes": attachment.size_bytes,
-        "sha256": attachment.sha256,
-        "created_at": attachment.created_at,
-        "storage_refs": [ref.model_dump(exclude_none=True) for ref in list(attachment.storage_refs or [])],
+        "attachment_id": None,
+        "filename": path.name,
+        "content_type": content_type,
+        "kind": _kind_for_content_type(content_type),
+        "size_bytes": size_bytes,
+        "sha256": None,
+        "storage_refs": [{"storage_type": "local", "path": str(path)}],
     }
 
 
@@ -202,13 +156,14 @@ def _pdf_excerpt(data: bytes, *, max_chars: int) -> Dict[str, Any]:
         return {"parser": "pypdf", "error": str(exc)}
 
 
-def _copy_into_task_folder(attachment: UserTaskAttachment, source: Path) -> Path:
-    """Copy one of this task's uploads (a runtime record) into the task's own folder."""
+def _copy_into_task_folder(upload: TaskUpload) -> Path:
+    """Copy an upload the task may use into the task's own folder, where shell and Python can reach it."""
 
+    attachment, located = upload.attachment, upload.located
     home = current_workspace_scope().home
-    name = Path(str(attachment.filename or source.name)).name or source.name
+    name = Path(str(attachment.filename or located.path.name)).name or located.path.name
     target = home / PERSON_UPLOADS_DIRNAME / f"{attachment.attachment_id}_{name}"
-    with source.open("rb") as reader, file_access.writable(target) as (location, writer):
+    with located.reader() as reader, file_access.writable(target) as (location, writer):
         shutil.copyfileobj(reader, writer, length=1024 * 1024)
     return location.path
 
@@ -222,13 +177,24 @@ def inspect_user_attachment(
     copy_to_workspace: bool = False,
 ) -> Dict[str, Any]:
     """
-    Inspect a user-provided task attachment without returning raw binary bytes.
+    Inspect a file the person sent, or a file in this task's folders, without returning raw binary bytes.
 
-    Prefer passing an `attachment_id` from the current task's attachment list.
+    Name a file the person sent by its `attachment_id`. Ids are listed in the
+    prompt (this request's files and the files sent earlier in this
+    conversation), in a guidance or answer that came with files, and per turn
+    by get_conversation_context_slice. A task delegated to you can open only
+    the files its delegation gave it. Use `path` only for a file in this
+    task's folders.
+
     Text-like documents return bounded line excerpts. Images, audio, video,
-    Office files, and other binary files return metadata only. If the attachment
-    reference has no readable local file, report `remote_copy_required` to the
-    team lead instead of pasting bytes or base64 into task messages.
+    Office files, and other binary files return metadata only.
+
+    When a file cannot be opened, `result` says why: `unknown_attachment_id`
+    (this task may not use that id; `available_attachments` lists the files
+    it may use), `upload_unavailable` (the file was deleted; ask the person to
+    send it again), or `remote_copy_required` (it is stored on another host;
+    report this to the team lead instead of pasting bytes or base64 into task
+    messages).
 
     Uploads are stored where shell and Python cannot reach them. Set
     `copy_to_workspace=true` with an `attachment_id` to copy the file into this
@@ -240,77 +206,77 @@ def inspect_user_attachment(
     source = _source(attachment_id, path)
     if isinstance(source, dict):
         return source
-    attachment, resolved_path, size_bytes = source.attachment, source.path, source.size_bytes
-    summary = _attachment_summary(attachment, resolved_path, size_bytes)
-    content_type = str(summary.get("content_type") or mimetypes.guess_type(resolved_path.name)[0] or "")
-    payload: Dict[str, Any] = {
-        "attachment": summary,
-        "local_path": str(resolved_path),
-        "bytes_returned_inline": 0,
-        "binary_bytes_included": False,
-    }
-    if copy_to_workspace:
-        if attachment is None:
-            return _json_result(
-                "error", {"error": "copy_to_workspace needs an attachment_id."}
-            )
-        payload["workspace_path"] = str(_copy_into_task_folder(attachment, resolved_path))
+    summary = source.summary()
+    content_type = str(summary.get("content_type") or mimetypes.guess_type(source.path.name)[0] or "")
+    payload: Dict[str, Any] = {"attachment": summary, "bytes_returned_inline": 0, "binary_bytes_included": False}
+    if source.upload is None:
+        if copy_to_workspace:
+            return tool_result("error", {"error": "copy_to_workspace needs an attachment_id."})
+        payload["local_path"] = str(source.path)  # the path the caller named, in the task's folders
     try:
+        if copy_to_workspace and source.upload is not None:
+            payload["workspace_path"] = str(_copy_into_task_folder(source.upload))
         payload["inspection"] = _inspection(source, content_type, max_chars=requested_chars, max_lines=requested_lines)
     except (OSError, file_access.PathPolicyError) as exc:
-        return _json_result("error", {"error": str(exc), "path": str(resolved_path)})
-    return _json_result("success", payload)
+        return _read_failed(source, exc)
+    return tool_result("success", payload)
 
 
 @dataclass(frozen=True)
 class _Source:
-    """The file to inspect: an upload record (by id) or a file in the task's folders (by path)."""
+    """The file to inspect: an upload the task may use (by id) or a file in the task's folders (by path).
 
-    attachment: Optional[UserTaskAttachment]
+    ``path`` is where the bytes are; it is shown only for a file named by path.
+    """
+
     path: Path
     size_bytes: int
+    upload: Optional[TaskUpload] = None
 
+    def summary(self) -> Dict[str, Any]:
+        if self.upload is not None:
+            return described(self.upload.attachment)
+        return _path_summary(self.path, self.size_bytes)
 
-def _remote_copy_required(attachment: Optional[UserTaskAttachment], path: Optional[Path], reason: str) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"attachment": _attachment_summary(attachment, path)}
-    if path is not None:
-        payload["local_path"] = str(path)
-    payload["reason"] = reason
-    payload["team_lead_action"] = "Request a gateway-backed NATS Object Store mirror for this attachment."
-    return _json_result("remote_copy_required", payload)
+    def read(self, *, max_bytes: int) -> bytes:
+        """The bytes, read once: an upload from its upload folder, a file through the agent file library."""
+
+        if self.upload is not None:
+            return self.upload.located.read_bytes(max_bytes=max_bytes)
+        return file_access.read_bytes(self.path, max_bytes=max_bytes)[1]
 
 
 def _source(attachment_id: str, path: str) -> _Source | Dict[str, Any]:
     """The file to inspect, or the tool result that explains why there is none."""
 
     if attachment_id:
-        attachment = _find_attachment(attachment_id)
-        if attachment is None:
-            return _json_result(
-                "error",
-                {
-                    "error": "attachment_id was not found on the current task",
-                    "attachment_id": attachment_id,
-                    "available_attachment_ids": [item.attachment_id for item in _current_task_attachments()],
-                },
-            )
-        local_path = _attachment_local_path(attachment)
-        if not local_path:
-            return _remote_copy_required(attachment, None, "attachment does not include a local storage reference")
-        # Uploads are runtime records, out of agents' reach, so the path is trusted.
-        resolved = Path(local_path).expanduser().resolve()
-        if not resolved.is_file():
-            return _remote_copy_required(attachment, resolved, "local attachment path is unavailable to this agent")
-        return _Source(attachment, resolved, resolved.stat().st_size)
+        upload = open_task_upload(attachment_id)
+        if isinstance(upload, dict):
+            return upload
+        return _Source(upload.located.path, upload.located.size_bytes, upload)
     if not path:
-        return _json_result("error", {"error": "Provide attachment_id or path."})
+        return tool_result("error", {"error": "Provide attachment_id or path."})
     try:
         location, entry = file_access.status(path)
     except Exception as exc:
-        return _json_result("error", {"error": str(exc), "path": path})
+        return tool_result("error", {"error": str(exc), "path": path})
     if entry is None or not stat.S_ISREG(entry.st_mode):
-        return _remote_copy_required(None, location.path, "local attachment path is unavailable to this agent")
-    return _Source(None, location.path, entry.st_size)
+        return remote_copy_required(
+            {
+                "attachment": _path_summary(location.path),
+                "local_path": str(location.path),
+                "reason": "local attachment path is unavailable to this agent",
+            }
+        )
+    return _Source(location.path, entry.st_size)
+
+
+def _read_failed(source: _Source, exc: OSError) -> Dict[str, Any]:
+    """The result when the file could not be read or copied; an upload's error never shows where it is stored."""
+
+    if source.upload is None:
+        return tool_result("error", {"error": str(exc), "path": str(source.path)})
+    return tool_result("error", read_failed(source.upload.attachment, exc))
 
 
 def _inspection(source: _Source, content_type: str, *, max_chars: int, max_lines: int) -> Dict[str, Any]:
@@ -328,11 +294,7 @@ def _inspection(source: _Source, content_type: str, *, max_chars: int, max_lines
             "kind": "metadata_only",
             "message": f"The file is larger than {MAX_INSPECTED_BYTES} bytes, so only its metadata is returned.",
         }
-    data = (
-        source.path.read_bytes()
-        if source.attachment is not None
-        else file_access.read_bytes(source.path, max_bytes=MAX_INSPECTED_BYTES)[1]
-    )
+    data = source.read(max_bytes=MAX_INSPECTED_BYTES)
     if text_like:
         return {"kind": "text_excerpt", **_bounded_text(data, max_chars=max_chars, max_lines=max_lines)}
     return {"kind": "pdf_text", **_pdf_excerpt(data, max_chars=max_chars)}
