@@ -1,4 +1,8 @@
-"""The live scenarios' Website start: the gateway's links name the port the app serves on."""
+"""The live scenarios' Website start: the gateway's links name the port the app serves on.
+
+Stand-in gateway and app classes, so no live service: the module is not named
+``test_live_*``, which the suite reserves for modules marked ``live``.
+"""
 
 from __future__ import annotations
 
