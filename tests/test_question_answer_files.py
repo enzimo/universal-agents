@@ -18,6 +18,10 @@ envelopes pass through the NATS encoding between them. Covers:
 - Web Chat and the chat bridge send an answer with files (no longer refused);
 - the lead keeps them: on the turn, among the task's files, named by id in
   the prompt, after a restart and in a follow-up turn;
+- an answer to a question a plan step or an isolated recovery task asked
+  (each a task with its own conversation id and no turn) keeps its files on
+  the step and on the request it runs for, and a follow-up request opens
+  them; a request working for someone else gets none (logged);
 - an answer deferred while the task's turn runs keeps its files only when it
   is handled from the runtime mailbox, once;
 - refused: an answer for a task the lead no longer holds, a context that
@@ -669,3 +673,137 @@ async def test_a_pause_answer_asked_again_keeps_its_files_with_its_text(
     stored = [query for query in agent.task_manager.get_task_queries(TASK) if query.query_type == MessageMetaType.RESPONSE]
     assert [(query.message, query.attachments) for query in stored] == [("Here is the list I meant.", [notes])]
     assert notes.attachment_id in _own(agent.task_manager, agent._conversation_store)
+
+
+# --- Questions a plan step or a recovery task asks -------------------------------------------------
+
+
+def _step_of_a_plan(agent: Any) -> Any:
+    """The first step task of a two-step plan for TASK, as the lead runs it (its own conversation id, no turn)."""
+
+    manager = agent.task_manager
+    assert manager.activate_plan_execution(
+        TASK,
+        steps=[{"title": "Ask", "objective": "Ask which list."}, {"title": "Cook", "objective": "Cook."}],
+        final_review=False,
+    )
+    [step] = [info for info in manager.task_state.tasks.values() if manager.is_plan_step_task(info.task.task_id)]
+    return step
+
+
+def _recovery_of(agent: Any) -> Any:
+    """An isolated recovery task for TASK's plan, as the lead starts one (its own conversation id, no turn)."""
+
+    _step_of_a_plan(agent)
+    root = agent.task_manager.get_task_info(TASK)
+    meta = root.meta.model_copy(update={"conversation_id": "recov_conv_1", "msg_correlation_id": "recovery_corr_1"})
+    return agent.task_manager.start_isolated_recovery_task(
+        TASK,
+        failure_type="tool_failure",
+        failure_summary="The shop's page did not load.",
+        recovery_brief="Find another way to get the list.",
+        header=root.header.model_copy(deep=True),
+        meta=meta,
+        notify_user=False,
+    )
+
+
+async def _answer_the_question_of(agent: Any, asking: Any, files: list[UserTaskAttachment]) -> None:
+    """``asking``'s turn asks the person, who answers with ``files``; delivered as the gateway sends it.
+
+    The runtime names the asking task as the question's parent, and the
+    gateway signs the answer for that task and the conversation id of the
+    question's message (the task's own).
+    """
+
+    task_id = asking.task.task_id
+    question = _asked().model_copy(update={"parent_task_id": task_id})
+    agent.task_manager.add_task_query(task_id, question, agent_name="Lead", agent_id=LEAD_ID)
+    answer = _answer_to(files, task_id=task_id)
+    signed = context_signer().issue(
+        team_id=TEAM,
+        person_id=ANN,
+        person_roles=("member",),
+        root_task_id=task_id,
+        conversation_id=asking.meta.conversation_id,
+        context_id=answer_context_id(answer),
+    )
+    meta = MessageMeta(
+        conversation_id=asking.meta.conversation_id,
+        requester_type=RequesterType.USER_REQUESTER,
+        gateway_context=GatewayContext(canonical_user_id=ANN, task_context=signed),
+    )
+    await _deliver(agent, answer, meta)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asking_task", [_step_of_a_plan, _recovery_of], ids=["plan_step", "recovery_task"])
+async def test_an_answer_to_a_steps_question_keeps_its_files_on_the_request_too(
+    asking_task: Any, tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = _lead(tmp_path, layout)
+    await _admit(agent, task_id=TASK, text="Plan dinner in steps.", attachments=[])
+    asking = asking_task(agent)
+    assert asking.meta.conversation_id != CONVERSATION
+    object.__setattr__(agent, "process_llm_interaction", _ModelTurns(agent))
+    notes = _upload(layout, "list.png")
+
+    with caplog.at_level(logging.INFO):
+        await _answer_the_question_of(agent, asking, [notes])
+
+    step_id = asking.task.task_id
+    manager, store = agent.task_manager, agent._conversation_store
+    # The step keeps the answer with its file, so its own turn opens it.
+    assert manager.get_task_queries(step_id)[-1].attachments == [notes]
+    assert _own(manager, store, step_id) == [notes.attachment_id]
+    # The request has it too: on its conversation turn and among its own files.
+    assert _turn_files(agent) == [notes.attachment_id]
+    [entry] = _files_entries(manager)
+    assert (entry.details["message_id"], entry.details["message_type"]) == ("task_query_list", QUESTION_ANSWER_MESSAGE_TYPE)
+    assert step_id in entry.summary
+    assert _own(manager, store) == [notes.attachment_id]
+    assert not _messages(caplog, "conversation_turn_missing_for_attachments")
+
+    # A follow-up request in the same chat, in a restarted lead, lists it and opens it by id.
+    await _answer(agent, TASK, "Dinner is planned.")
+    follow_up_agent = _lead(tmp_path, layout)
+    await _admit(follow_up_agent, task_id="task_follow_up", text="What was on that list?", attachments=[])
+    info = follow_up_agent.task_manager.get_task_info("task_follow_up")
+    use_agent(follow_up_agent, "task_follow_up")
+    listed = _sections(_prompt(follow_up_agent, info.task, info.header, info.meta))["conversation_attachments"]
+    assert f"`{notes.attachment_id}` list.png" in listed
+    opened = inspect_user_attachment._tool_func(attachment_id=notes.attachment_id)
+    assert opened["status"] == "success", opened
+
+
+@pytest.mark.asyncio
+async def test_files_sent_to_a_step_stay_with_it_when_its_request_works_for_someone_else(
+    tmp_path: Path, layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = _lead(tmp_path, layout)
+    await _admit(agent, task_id=TASK, text="Plan dinner in steps.", attachments=[])
+    step = _step_of_a_plan(agent)
+    manager = agent.task_manager
+    assert manager.add_task(
+        Task(task_id="task_bob", task_type=MessageMetaType.REQUEST, problem_statement="Bob's request."),
+        MessageHeader(from_agent_id="gateway"),
+        MessageMeta(conversation_id="conv_bob"),
+        owner_person_id="usr_bob",
+    )
+    # Not reachable through the plan links (a step works for its request's person); the guard holds anyway.
+    resolve = manager.resolve_root_task_id
+    monkeypatch.setattr(
+        manager, "resolve_root_task_id", lambda task_id: "task_bob" if task_id == step.task.task_id else resolve(task_id)
+    )
+    object.__setattr__(agent, "process_llm_interaction", _ModelTurns(agent))
+    notes = _upload(layout, "list.png")
+
+    with caplog.at_level(logging.WARNING):
+        await _answer_the_question_of(agent, step, [notes])
+
+    assert _own(manager, agent._conversation_store, step.task.task_id) == [notes.attachment_id]
+    assert _files_entries(manager, "task_bob") == []
+    assert _files_entries(manager) == []
+    assert _turn_files(agent) == []
+    [warning] = _messages(caplog, "sent_files_root_not_usable")
+    assert f"task_id={step.task.task_id} root_task_id=task_bob reason=other_person" in warning
