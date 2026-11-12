@@ -148,11 +148,16 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
-    """Older choices survive while newly introduced storage warnings use defaults."""
+    """Older choices survive while settings newer than the export use defaults.
+
+    Version 8 predates the skill semantic-review settings, so its import keeps
+    the review turned off even when the team changed another skill
+    installation setting.
+    """
 
     from assistant_gateway.config import GatewayInstanceConfig
 
@@ -166,6 +171,8 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
             ]
             if exported_version == 7:
                 records.append(SettingV1(path=("tool_policy", "output_retention_days"), value=0))
+            if exported_version == 8:
+                records.append(SettingV1(path=("workspace", "skill_installation", "safe_max_score"), value=10))
             return SectionExport(records=[record.model_dump(mode="json") for record in records])
 
     path, _config = _old_instance(tmp_path)
@@ -186,6 +193,39 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
         "person_step_gb": 5,
         "nearing_limit_percent": 80,
         "nearly_full_percent": 95,
+    }
+    skill_installation = imported.workspace.skill_installation
+    assert skill_installation.safe_max_score == (10 if exported_version == 8 else 20)
+    assert skill_installation.semantic_review.model_dump() == {"mode": "off", "max_input_bytes": 262144}
+
+
+def test_a_selected_skill_semantic_review_moves_with_the_team(tmp_path: Path) -> None:
+    """This version's export carries the skill semantic-review choice and its input limit."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    def selected_review(config: Any) -> None:
+        config.workspace.skill_installation.semantic_review.mode = "task_model"
+        config.workspace.skill_installation.semantic_review.max_input_bytes = 524288
+
+    path, _config = _old_instance(tmp_path, selected_review)
+    out = _export(tmp_path, path)
+    assert {record.dotted: record.value for record in _records(out)} == {
+        "workspace.skill_installation.semantic_review.mode": "task_model",
+        "workspace.skill_installation.semantic_review.max_input_bytes": 524288,
+    }
+    target = tmp_path / "new"
+
+    plan = _import(out, target, dry_run=False)
+
+    assert {(r.key, r.outcome) for r in plan.records} == {
+        ("workspace.skill_installation.semantic_review.mode", RecordOutcome.IMPORT),
+        ("workspace.skill_installation.semantic_review.max_input_bytes", RecordOutcome.IMPORT),
+    }
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.workspace.skill_installation.semantic_review.model_dump() == {
+        "mode": "task_model",
+        "max_input_bytes": 524288,
     }
 
 
