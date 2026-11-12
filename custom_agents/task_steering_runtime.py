@@ -1,4 +1,13 @@
-"""Mid-turn steering helpers for UniversalAgent."""
+"""Mid-turn steering helpers for UniversalAgent.
+
+Files sent with a guidance or an answer (``TaskSteering.attachments``) are
+accepted before the message is acknowledged (``_accept_sent_files``): records
+outside this host's upload folders are dropped, the rest are added to the
+task's conversation turn and recorded in its history, and the model sees them
+by name and id with the guidance or answer text. They then stay usable by id
+after the guidance is read and after a restart
+(``custom_agents.conversation_attachments``).
+"""
 
 from __future__ import annotations
 
@@ -11,6 +20,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 from strands.hooks import BeforeToolCallEvent, HookRegistry
 
+from custom_agents.conversation_attachments import (
+    UploadFolders,
+    keep_upload_files,
+    sent_file_lines,
+    task_files_details,
+)
+from custom_agents.conversation_runtime import record_turn_attachments
 from custom_agents.message_routing import resolve_requester_routing_key
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
@@ -423,6 +439,50 @@ async def _record_guidance_history(
     return entry is not None
 
 
+async def _accept_sent_files(agent: Any, task_info: Any, steering: TaskSteering) -> Optional[TaskSteering]:
+    """``steering`` with only the files that were kept, after recording them; None when the task is gone.
+
+    Runs before the guidance or answer is acknowledged (module docstring).
+    Records outside this host's upload folders are dropped (logged). The rest
+    are added to the task's conversation turn and written to its history as
+    one files entry. A store error propagates: nothing is acknowledged, so
+    the sender sends the message again, and recording again adds no file twice.
+    """
+
+    if not steering.attachments:
+        return steering
+    task_id = task_info.task.task_id
+    conversation_id = getattr(task_info.meta, "conversation_id", None)
+    folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
+    kept = keep_upload_files(steering.attachments, folders, task_id=task_id, conversation_id=conversation_id)
+    accepted = steering.model_copy(update={"attachments": kept})
+    if not kept:
+        return accepted
+    await asyncio.to_thread(
+        record_turn_attachments,
+        getattr(agent, "_conversation_store", None),
+        task_info,
+        kept,
+        logger=agent._logger,
+    )
+    entry = await agent.task_manager.operations_runtime.run(
+        agent.task_manager.append_history_entry,
+        task_id,
+        f"Files sent with a {_steering_subject(steering)} accepted: "
+        + ", ".join(attachment.filename for attachment in kept),
+        entry_type=TaskHistoryType.TASK_EVENT,
+        importance=TaskHistoryImportance.NORMAL,
+        details=task_files_details(
+            kept, steering_id=steering.steering_id, steering_type=steering.steering_type.value
+        ),
+    )
+    return accepted if entry is not None else None
+
+
+def _steering_subject(steering: TaskSteering) -> str:
+    return "guidance" if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE else "answer"
+
+
 async def _forward_proactive_guidance_to_pending_subtasks(
     agent: Any,
     task_id: str,
@@ -660,7 +720,8 @@ async def handle_task_steering_message(
             return
         # Acknowledge only after the complete guidance is in the task's durable
         # history. Restart reconstructs pending guidance and deduplication there.
-        if not await _record_guidance_history(agent, task_id, steering, applied=False):
+        accepted = await _accept_sent_files(agent, task_info, steering)
+        if accepted is None or not await _record_guidance_history(agent, task_id, accepted, applied=False):
             await _send_steering_status_response(
                 agent, steering, msg_header, msg_meta,
                 status=TaskSteeringStatus.STALE,
@@ -669,11 +730,11 @@ async def handle_task_steering_message(
             )
             return
         seen.add(dedupe_key)
-        agent._pending_proactive_task_steering.setdefault(task_id, []).append(steering)
+        agent._pending_proactive_task_steering.setdefault(task_id, []).append(accepted)
         forwarded_count = await _forward_proactive_guidance_to_pending_subtasks(
             agent,
             task_id,
-            steering,
+            accepted,
             msg_meta,
         )
         reason = (
@@ -692,6 +753,16 @@ async def handle_task_steering_message(
         return
 
     if steering.steering_type == TaskSteeringType.INTERRUPT_RESPONSE:
+        answer = await _accept_sent_files(agent, task_info, steering)
+        if answer is None:
+            await _send_steering_status_response(
+                agent, steering, msg_header, msg_meta,
+                status=TaskSteeringStatus.STALE,
+                reason="This agent no longer holds the target task.",
+                status_code=TaskSteeringStatusCode.TARGET_TASK_NOT_FOUND,
+            )
+            return
+        steering = answer
         seen.add(dedupe_key)
         response_text = _format_interrupt_responses(steering)
         session = agent._interrupted_turn_sessions.get(task_id)
@@ -793,13 +864,14 @@ def _format_interrupt_responses(steering: TaskSteering) -> str:
 
 
 def _interrupt_reply_text(text: str, steering: TaskSteering) -> str:
-    """Keep the same background label in SDK resume and durable recovery notes."""
-    if steering.replied_message is None:
-        return text
-    return "\n\n".join([
-        text,
-        "\n".join(render_replied_message_lines(steering.replied_message, subject="answer")),
-    ])
+    """Keep the same background label and file list in SDK resume and durable recovery notes."""
+    parts = [text]
+    files = sent_file_lines(steering.attachments, subject="answer")
+    if files:
+        parts.append("\n".join(files))
+    if steering.replied_message is not None:
+        parts.append("\n".join(render_replied_message_lines(steering.replied_message, subject="answer")))
+    return "\n\n".join(parts)
 
 
 def _build_interrupt_response_blocks(
@@ -1300,6 +1372,7 @@ async def _guidance_block(
             if not await _record_guidance_history(agent, task_id, item, applied=True):
                 raise RuntimeCustodyLost(agent.id, CustodyStore.TASK_RUNTIME)
         lines.append(f"- {item.guidance_text}")
+        lines.extend(f"  {line}" for line in sent_file_lines(item.attachments, subject="guidance"))
         if item.replied_message is not None:
             lines.extend(
                 f"  {line}"

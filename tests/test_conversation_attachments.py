@@ -20,6 +20,7 @@ import pytest
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents.conversation_attachments import (
     INVENTORY_LIMIT,
+    TASK_FILES_EVENT,
     TASK_FILES_KEY,
     UPLOAD_FILE_MISSING,
     UPLOAD_NO_LOCAL_COPY,
@@ -30,15 +31,17 @@ from custom_agents.conversation_attachments import (
     TaskAttachments,
     UnavailableUpload,
     UploadFolders,
+    keep_upload_files,
     locate_upload,
     task_files_details,
 )
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.task_manager import TaskManager, TaskResultUpdate
 from custom_agents.task_records import TaskInfo
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry
-from custom_messages.enums import MessageMetaType
+from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.interactive_apps import AdapterHostSettings
 from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS
@@ -140,6 +143,12 @@ def _task_info(
     return info
 
 
+def _files(*attachments: UserTaskAttachment) -> dict[str, Any]:
+    """History details of one accepted guidance's files, as the steering runtime writes them."""
+
+    return task_files_details(list(attachments), steering_id="steer_1", steering_type="proactive_guidance")
+
+
 def _ids(records: list[Any]) -> list[str]:
     return [getattr(record, "attachment", record).attachment_id for record in records]
 
@@ -153,7 +162,7 @@ def test_a_top_level_task_uses_its_own_files_and_its_conversations(layout, store
     guidance_file, answer_file = _upload(layout.uploads_dir, "att_guidance"), _upload(layout.uploads_dir, "att_answer")
     info = _task_info(
         attachments=[request_file],
-        history=[{"event": "guidance"}, task_files_details([guidance_file]), task_files_details([answer_file, request_file])],
+        history=[{"event": "guidance"}, _files(guidance_file), _files(answer_file, request_file)],
     )
 
     scope = TaskAttachments.load(info, store)
@@ -303,8 +312,8 @@ def test_an_unknown_id_lists_at_most_twenty_choices_without_storage_paths(layout
 def test_unreadable_task_file_entries_are_logged_and_skipped(layout, store, caplog) -> None:
     good = _upload(layout.uploads_dir, "att_good")
     history = [
-        {TASK_FILES_KEY: "not a list"},
-        {TASK_FILES_KEY: [{"attachment_id": "att_broken"}, good.model_dump(mode="json")]},
+        {"event": TASK_FILES_EVENT, TASK_FILES_KEY: "not a list"},
+        {"event": TASK_FILES_EVENT, TASK_FILES_KEY: [{"attachment_id": "att_broken"}, good.model_dump(mode="json")]},
     ]
 
     with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
@@ -316,7 +325,89 @@ def test_unreadable_task_file_entries_are_logged_and_skipped(layout, store, capl
     assert any("attachment_id=att_broken" in message for message in unreadable)
 
 
+def test_only_files_entries_this_task_wrote_are_its_own_files(layout, store) -> None:
+    mine = _upload(layout.uploads_dir, "att_mine")
+    copied, other_event, subtask_event = (
+        _upload(layout.uploads_dir, "att_copied"),
+        _upload(layout.uploads_dir, "att_other_event"),
+        _upload(layout.uploads_dir, "att_subtask_event"),
+    )
+    info = _task_info(conversation_id=None)
+    history = info.task.execution_history
+    history.append(TaskHistoryEntry(summary="files", details=_files(mine)))
+    # A lead's copy of a worker's entry keeps its details (TaskManager._bubble_subtask_entries).
+    history.append(
+        TaskHistoryEntry(
+            summary="[Subtask child] files",
+            entry_type=TaskHistoryType.SUBTASK_EVENT,
+            details={**_files(copied), "bubbled_entry_id": "task_hist_worker"},
+        )
+    )
+    history.append(TaskHistoryEntry(summary="other", details={"event": "guidance", TASK_FILES_KEY: [other_event.model_dump(mode="json")]}))
+    history.append(TaskHistoryEntry(summary="subtask", entry_type=TaskHistoryType.SUBTASK_EVENT, details=_files(subtask_event)))
+
+    scope = TaskAttachments.load(info, store)
+
+    assert _ids(list(scope.own)) == ["att_mine"]
+
+
+def test_a_workers_returned_files_entry_does_not_become_its_leads_file(tmp_path: Path, layout, store) -> None:
+    """A worker's answer carries its history; the lead keeps copies of its important entries."""
+
+    manager = TaskManager(db_path=str(tmp_path / "lead.db"))
+    manager.set_owner_identity("lead_1", "lead", "team", "TeamArchitect")
+    manager.add_task(
+        Task(task_id="run_1", task_type=MessageMetaType.REQUEST, problem_statement="Ann's request."),
+        MessageHeader(from_agent_id="gateway"),
+        MessageMeta(conversation_id=CONVERSATION),
+        owner_person_id=ANN,
+    )
+    manager.add_subtask(
+        "run_1",
+        Task(task_id="child", parent_task_id="run_1", task_type=MessageMetaType.REQUEST),
+        MessageHeader(),
+        MessageMeta(),
+    )
+    # Another person's upload, in a session folder of the same upload folder.
+    bobs = _upload(layout.uploads_dir / "bob_session", "att_bobs_scan", name="passport.png")
+    returned = [TaskHistoryEntry(summary="accepted guidance", importance=TaskHistoryImportance.HIGH, details=_files(bobs))]
+    manager.update_task_result("child", TaskResultUpdate(execution_history=returned))
+
+    manager.bubble_subtask_result("run_1", "child")
+
+    lead = manager.get_task_info("run_1")
+    copies = [entry for entry in lead.task.execution_history if entry.details.get(TASK_FILES_KEY)]
+    assert len(copies) == 1  # the copy is in the lead's history ...
+    scope = TaskAttachments.load(lead, store)
+    assert scope.own == ()  # ... but is not one of its files
+    assert scope.find(["att_bobs_scan"]) == ([], ["att_bobs_scan"])
+
+
 # --- Reading bytes only from this host's upload folders ----------------------------------------
+
+
+def test_only_files_in_an_upload_folder_or_without_a_local_copy_are_kept(layout, tmp_path, caplog) -> None:
+    folders = UploadFolders.for_instance(layout.root)
+    inside = _upload(layout.uploads_dir, "att_inside")
+    no_copy = _record("att_no_copy", None)
+    outside = _record("att_outside", layout.root / "state" / "secrets.db")
+    climbing = _record("att_climbing", layout.uploads_dir / ".." / "elsewhere.png")
+
+    with caplog.at_level(logging.WARNING, logger=MODULE_LOGGER):
+        kept = keep_upload_files(
+            [inside, no_copy, outside, climbing], folders, task_id=CURRENT, conversation_id=CONVERSATION
+        )
+        without_folders = keep_upload_files([inside, no_copy], None, task_id=CURRENT, conversation_id=None)
+
+    assert _ids(kept) == ["att_inside", "att_no_copy"]
+    assert _ids(without_folders) == ["att_no_copy"]
+    refused = [record.getMessage() for record in caplog.records if "event=attachment_outside_upload_folders" in record.getMessage()]
+    assert len(refused) == 3
+    assert any(
+        f"attachment_id=att_outside task_id={CURRENT} conversation_id={CONVERSATION}" in message
+        for message in refused
+    )
+    assert all("so it was not saved" in message for message in refused)
 
 
 def test_an_upload_inside_an_upload_folder_is_located(layout) -> None:

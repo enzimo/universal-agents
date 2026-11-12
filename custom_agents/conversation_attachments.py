@@ -4,18 +4,23 @@ A person's files reach the team through the gateway, which stores the bytes
 in this host's upload folders and puts a ``UserTaskAttachment`` record on the
 task's messages: the request's own files on ``Task.attachments``, and files
 sent while it runs on its guidance and answers (``TaskSteering``). Trusted
-runtime code keeps those records in two places: the task's own history
-(``TASK_FILES_KEY`` entries, written when a guidance or answer is accepted)
-and the conversation turn the task belongs to (``attachments_json`` in
-``storage.conversation_repository``). This module is the one place that
-decides which of them a task may use; the attachment tools, the prompt's file
-list and delegation all ask it.
+runtime code keeps those records in two places: the task's own history (one
+``TASK_FILES_EVENT`` entry per accepted guidance or answer with files, written
+by ``custom_agents.task_steering_runtime``) and the conversation turn the task
+belongs to (``attachments_json`` in ``storage.conversation_repository``,
+written by ``custom_agents.conversation_runtime``). Both writers first drop
+records that point outside this host's upload folders (``keep_upload_files``).
+This module is the one place that decides which of them a task may use; the
+attachment tools, the prompt's file list and delegation all ask it.
 
 What a task may use (``TaskAttachments``):
 
 - its own files: ``Task.attachments`` plus the files of every guidance and
   answer it accepted, read from its durable history, so they survive the
-  guidance being read and a restart;
+  guidance being read and a restart. Only entries this task's runtime wrote
+  count: a lead's history also holds copies of its workers' important entries
+  (``TaskManager.bubble_subtask_result`` keeps their details), and a worker
+  must not add files to its lead's task that way;
 - for a top-level task only, the files earlier turns of its own conversation
   received, while it works for the conversation's person
   (``access_control.ownership.conversation_files_access``, with the person
@@ -48,6 +53,7 @@ from pydantic import ValidationError
 
 from access_control.ownership import conversation_files_access
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_messages.enums import TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import TurnAttachment, attachment_summary
 
@@ -55,9 +61,13 @@ logger = logging.getLogger(__name__)
 
 # The most files the prompt lists and an error offers as choices (approved bound).
 INVENTORY_LIMIT = 20
-# Task-history ``details`` key under which trusted code records the files a
-# task accepted with a guidance or an answer (full ``UserTaskAttachment`` dumps).
+# The task-history event that records the files a task accepted with a
+# guidance or an answer, and the ``details`` key holding them (full
+# ``UserTaskAttachment`` dumps). Written only by ``task_files_details``.
+TASK_FILES_EVENT = "task_files_accepted"
 TASK_FILES_KEY = "task_files"
+# Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
+_BUBBLED_ENTRY_KEY = "bubbled_entry_id"
 
 # Why an upload cannot be read here (``locate_upload``).
 UPLOAD_NO_LOCAL_COPY = "no_local_copy"
@@ -66,23 +76,53 @@ UPLOAD_FILE_MISSING = "file_missing"
 UPLOAD_OUTSIDE_FOLDERS = "outside_upload_folders"
 
 
-def task_files_details(attachments: Sequence[UserTaskAttachment]) -> dict[str, Any]:
-    """History ``details`` that make ``attachments`` part of the task's own files."""
+def task_files_details(
+    attachments: Sequence[UserTaskAttachment], *, steering_id: str, steering_type: str
+) -> dict[str, Any]:
+    """History ``details`` that make ``attachments`` part of the task's own files.
 
-    return {TASK_FILES_KEY: [attachment.model_dump(mode="json") for attachment in attachments]}
+    For the files of one accepted guidance or answer (``steering_id``), after
+    ``keep_upload_files`` checked them.
+    """
+
+    return {
+        "event": TASK_FILES_EVENT,
+        "steering_id": steering_id,
+        "steering_type": steering_type,
+        TASK_FILES_KEY: [attachment.model_dump(mode="json") for attachment in attachments],
+    }
+
+
+def _file_basics(summary: dict[str, Any]) -> str:
+    return (
+        f"`{summary.get('attachment_id')}` {summary.get('filename')} "
+        f"({summary.get('content_type')}, {summary.get('kind')}, {summary.get('size_bytes')} bytes"
+    )
 
 
 def describe_file(summary: dict[str, Any]) -> str:
     """One line naming a file for a model: id, name, type and size, and the turn it came with."""
 
-    line = (
-        f"`{summary.get('attachment_id')}` {summary.get('filename')} "
-        f"({summary.get('content_type')}, {summary.get('kind')}, {summary.get('size_bytes')} bytes"
-    )
     turn_index = summary.get("turn_index")
     if turn_index is None:
-        return line + "; sent with this task)"
-    return line + f"; turn {turn_index}, task {summary.get('task_id')})"
+        return _file_basics(summary) + "; sent with this task)"
+    return _file_basics(summary) + f"; turn {turn_index}, task {summary.get('task_id')})"
+
+
+def sent_file_lines(attachments: Sequence[UserTaskAttachment], *, subject: str) -> list[str]:
+    """Lines naming the files sent with a guidance or an answer (``subject``), for the model.
+
+    Empty without files. Names each file by id, name, type and size only.
+    """
+
+    if not attachments:
+        return []
+    lines = [
+        f"Files sent with this {subject} (open one by its attachment_id with "
+        "inspect_user_attachment or load_local_media_for_model_context):"
+    ]
+    lines.extend(f"- {_file_basics(attachment_summary(attachment))})" for attachment in attachments)
+    return lines
 
 
 class AttachmentSelectionError(ValueError):
@@ -203,18 +243,34 @@ def _own_files(task: Any) -> tuple[UserTaskAttachment, ...]:
     collected = [item for item in list(task.attachments or []) if isinstance(item, UserTaskAttachment)]
     for entry in list(task.execution_history or []):
         details = getattr(entry, "details", None) or {}
-        collected.extend(_recorded_files(task.task_id, details.get(TASK_FILES_KEY)))
+        if _written_by_this_task(entry, details):
+            collected.extend(_recorded_files(task.task_id, details.get(TASK_FILES_KEY)))
     unique: dict[str, UserTaskAttachment] = {}
     for attachment in collected:
         unique.setdefault(attachment.attachment_id, attachment)
     return tuple(unique.values())
 
 
-def _recorded_files(task_id: str, items: Any) -> list[UserTaskAttachment]:
-    """The records in one history entry's ``TASK_FILES_KEY`` value; unreadable ones are logged and skipped.
+def _written_by_this_task(entry: Any, details: dict[str, Any]) -> bool:
+    """A files entry this task's runtime wrote (``task_files_details``).
 
-    Only trusted code writes them (``task_files_details``), so an unreadable
-    value is a defect worth a warning.
+    A lead's copies of its workers' entries keep their details but are
+    subtask events marked with the copied entry's id; they never count, so a
+    worker cannot add files to its lead's task.
+    """
+
+    return (
+        details.get("event") == TASK_FILES_EVENT
+        and getattr(entry, "entry_type", None) != TaskHistoryType.SUBTASK_EVENT
+        and _BUBBLED_ENTRY_KEY not in details
+    )
+
+
+def _recorded_files(task_id: str, items: Any) -> list[UserTaskAttachment]:
+    """The records in one files entry's ``TASK_FILES_KEY`` value; unreadable ones are logged and skipped.
+
+    Only ``task_files_details`` writes them, so an unreadable value is a
+    defect worth a warning.
     """
 
     if items is None:
@@ -372,13 +428,7 @@ def locate_upload(
     resolved = Path(local_path).expanduser().resolve()
     folder = folders.containing(resolved)
     if folder is None:
-        logger.warning(
-            "A file record points outside this host's upload folders, so it was not opened. "
-            "event=attachment_outside_upload_folders attachment_id=%s task_id=%s conversation_id=%s",
-            attachment.attachment_id,
-            task_id,
-            conversation_id or "-",
-        )
+        _log_outside(attachment, task_id, conversation_id, action="it was not opened")
         return UnavailableUpload(
             UPLOAD_OUTSIDE_FOLDERS,
             "This file's record does not point into this host's upload folders, so it cannot be opened.",
@@ -405,8 +455,48 @@ def locate_upload(
     return UnavailableUpload(UPLOAD_NOT_ON_THIS_HOST, "This file is stored on another host, not where this agent runs.")
 
 
+def keep_upload_files(
+    attachments: Iterable[UserTaskAttachment],
+    folders: Optional[UploadFolders],
+    *,
+    task_id: str,
+    conversation_id: Optional[str],
+) -> list[UserTaskAttachment]:
+    """The records trusted code may save for a task: those it could later read by id.
+
+    A record with no local copy is kept (it opens as ``no_local_copy``). A
+    record whose local path resolves outside ``folders`` (None: no folder is
+    trusted) is dropped and logged with the ids, so it is never saved in the
+    task's history or its conversation (module docstring). The file need not
+    exist: a deleted upload is reported when it is opened.
+    """
+
+    kept: list[UserTaskAttachment] = []
+    for attachment in attachments:
+        local_path = attachment.local_path()
+        if local_path and (folders is None or folders.containing(Path(local_path).expanduser().resolve()) is None):
+            _log_outside(attachment, task_id, conversation_id, action="it was not saved")
+            continue
+        kept.append(attachment)
+    return kept
+
+
+def _log_outside(
+    attachment: UserTaskAttachment, task_id: str, conversation_id: Optional[str], *, action: str
+) -> None:
+    logger.warning(
+        "A file record points outside this host's upload folders, so %s. "
+        "event=attachment_outside_upload_folders attachment_id=%s task_id=%s conversation_id=%s",
+        action,
+        attachment.attachment_id,
+        task_id,
+        conversation_id or "-",
+    )
+
+
 __all__ = [
     "INVENTORY_LIMIT",
+    "TASK_FILES_EVENT",
     "TASK_FILES_KEY",
     "UPLOAD_FILE_MISSING",
     "UPLOAD_NOT_ON_THIS_HOST",
@@ -418,6 +508,8 @@ __all__ = [
     "UnavailableUpload",
     "UploadFolders",
     "describe_file",
+    "keep_upload_files",
     "locate_upload",
+    "sent_file_lines",
     "task_files_details",
 ]

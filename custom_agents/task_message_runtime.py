@@ -29,6 +29,7 @@ from custom_agents.task_custody import (
 from custom_agents.task_custody import check_admission as check_task_custody
 from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyFinished, TaskCustodyReleased
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
+from custom_agents.conversation_attachments import UploadFolders
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
     ensure_task_conversation_context,
@@ -1336,6 +1337,10 @@ async def _handle_task_request(
     # may read storage (schedule run identities), so it runs in a thread.
     owner_person_id = await asyncio.to_thread(verified_meta_person_id, self, normalized_meta)
     if task_request.parent_task_id is None:
+        # The turn keeps the request's files; reading the upload folders reads settings.
+        upload_folders = (
+            await asyncio.to_thread(UploadFolders.for_agent, self) if task_request.attachments else None
+        )
         try:
             normalized_meta = ensure_task_conversation_context(
                 conversation_store=self._conversation_store,
@@ -1347,6 +1352,7 @@ async def _handle_task_request(
                 msg_meta=normalized_meta,
                 owner_person_id=owner_person_id,
                 owner_named_agent_type=self.named_agent_type,
+                upload_folders=upload_folders,
             )
         except ValueError as exc:
             self._logger.warning(
