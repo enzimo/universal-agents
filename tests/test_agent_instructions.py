@@ -85,9 +85,14 @@ def test_shared_prompt_prohibits_generated_site_url_guessing() -> None:
 
 
 def test_shared_prompt_routes_generated_site_kinds_by_information_shape() -> None:
-    for site_kind in ("`article`", "`comparison`", "`how_to`", "`app`"):
+    for site_kind in ("`article`", "`comparison`", "`how_to`", "`app`", "`report`"):
         assert site_kind in shared_agent_base_prompt
 
+    assert "Use `report` only for the coder-critic-team work report" in shared_agent_base_prompt
+    assert "the `stats.json` that `cct.py stats` wrote in `site_spec_path`" in shared_agent_base_prompt
+    assert "works only for small statistics" in shared_agent_base_prompt
+    assert "pass the same path with `update_site_id`, and do not edit the file" in shared_agent_base_prompt
+    assert "Any other report is an `article`" in shared_agent_base_prompt
     assert "Default to `article`" in shared_agent_base_prompt
     assert "whose order materially affects success" in shared_agent_base_prompt
     assert "do not by themselves make content a `how_to`" in shared_agent_base_prompt

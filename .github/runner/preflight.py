@@ -106,6 +106,7 @@ def main():
                 f"ua-ci-smoke:{job_id}-{architecture}",
             )
         # Leave the image and builder for the completed hook to reclaim.
+        run(sys.executable, ".github/runner/image_cache_smoke.py")
 
 
 if __name__ == "__main__":

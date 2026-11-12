@@ -263,7 +263,8 @@ onboarding's server, titled **Choose what to import**, with these differences:
 - Both themes have a stable mesh seed and a **Regenerate Mesh** action. A new
   seed changes the composition without changing the other tuning values.
 - Generated sites served under `/docs/sites/` must use the same
-  static polygonal background and runtime theme assets as Docs.
+  static polygonal background and runtime theme assets as Docs. The one
+  exception is the coder-critic work report (see Generated Sites).
 - Standalone credential and broker auth pages must match the same frosted
   visual language and embedded static mesh, even when the main website service
   is not running.
@@ -2250,6 +2251,12 @@ its history. Steps with linked requests cannot use this correction.
 - These UI elements are optional building blocks. Render only elements backed
   by useful content; do not add empty cards, fake metrics, redundant callouts,
   or decorative controls merely to fill a template.
+- Work report pages (`report` kind) are the deliberate exception to this
+  section: they show the coder-critic work report in its own design, which the
+  canonical `coder-critic-team` skill in `../ua-skills` owns
+  (`references/report-design.md`), with no mesh, theme assets or embedded chat.
+  Do not restyle them here; change the design in ua-skills and copy it with
+  `scripts/sync_work_report_renderer.py`.
 
 ## Device OAuth During Onboarding
 

@@ -29,7 +29,9 @@ def prepare_occurrence(
     # count a run as started before its Objective work session opened, so a
     # failed opening would skip the run instead of retrying it (2026-10-30
     # review). Child timers keep their existing correlation.
-    if not supports_local_worker(schedule) or not schedule.claim_named_agent_type:
+    # Exact-agent targets need the same final-run authority as type targets.
+    # The admitted worker supplies its type under the durable custody guard.
+    if not supports_local_worker(schedule) or not (schedule.claim_named_agent_type or schedule.claim_agent_id):
         return None
     occurrence_id = occurrence_identity(schedule.schedule_id, schedule.next_fire_at)
     binding = agent._schedule_store.worker_records.get_binding(

@@ -525,8 +525,13 @@ class ScheduleWorkerRepository:
             row["owner_canonical_user_id"] or ""
         ) != occurrence.owner_canonical_user_id:
             raise ScheduleWorkerConflict("schedule_admission_scope_mismatch")
-        if row["claim_named_agent_type"] != occurrence.named_agent_type or (
+        if (
+            row["claim_named_agent_type"]
+            and row["claim_named_agent_type"] != occurrence.named_agent_type
+        ) or (
             row["claim_agent_id"] and row["claim_agent_id"] != occurrence.agent_id
+        ) or not (
+            row["claim_named_agent_type"] or row["claim_agent_id"]
         ):
             raise ScheduleWorkerConflict("schedule_admission_target_mismatch")
         if occurrence.policy_revision is not None:
@@ -736,32 +741,34 @@ class ScheduleWorkerRepository:
 
     @staticmethod
     def record_terminal_task(
-        conn: Any, dialect: SqlDialect, *, agent_id: str, task_id: str, outcome: str
+        conn: Any, dialect: SqlDialect, *, agent_id: str, task_id: str, outcome: str,
+        reason: str | None = None,
     ) -> None:
-        """Record completion with the runtime task's terminal snapshot transaction."""
+        """Close a run's receipts in its terminal snapshot or supersession transaction."""
         p = dialect.bind
         rows = conn.execute(
             f"SELECT payload_json FROM schedule_occurrences WHERE agent_id={p}",
             (agent_id,),
         ).fetchall()
+        terminal_state = "superseded" if outcome == "superseded" else "finished"
+        update = {"finished_at_utc": database_now(conn), "outcome": outcome}
+        if reason is not None:
+            update["reason"] = reason
         for row in rows:
             record = ScheduleOccurrenceV1.model_validate_json(row[0])
             if (
                 record.coalesced_into_task_id or record.task_id
-            ) == task_id and record.finished_at_utc is None:
-                # A coalesced occurrence never ran itself; keep that fact and
-                # only close it with the run it was merged into.
-                record = record.model_copy(
-                    update={
-                        "state": "coalesced" if record.coalesced_into_task_id else "finished",
-                        "finished_at_utc": database_now(conn),
-                        "outcome": outcome,
-                    }
-                )
-                conn.execute(
-                    f"UPDATE schedule_occurrences SET payload_json={p} WHERE occurrence_id={p}",
-                    (record.model_dump_json(), record.occurrence_id),
-                )
+            ) != task_id or record.finished_at_utc is not None:
+                continue
+            # A coalesced occurrence never ran itself; keep that fact and
+            # only close it with the run it was merged into.
+            record = record.model_copy(update={
+                **update, "state": "coalesced" if record.coalesced_into_task_id else terminal_state,
+            })
+            conn.execute(
+                f"UPDATE schedule_occurrences SET payload_json={p} WHERE occurrence_id={p}",
+                (record.model_dump_json(), record.occurrence_id),
+            )
 
     def unfinished_occurrences(
         self, schedule_id: str, team_id: str
@@ -855,9 +862,10 @@ class ScheduleWorkerRepository:
         return moved
 
     def supersede_run(self, task_id: str, team_id: str, *, reason: str) -> bool:
-        """Close an interrupted run that will not run again."""
+        """Close an interrupted run and the occurrences merged into it together."""
         p = self.dialect.bind
         with self._connect() as conn:
+            conn.begin_write()
             row = conn.execute(
                 f"SELECT payload_json FROM schedule_occurrences WHERE task_id={p} AND team_id={p}",
                 (task_id, team_id),
@@ -867,17 +875,12 @@ class ScheduleWorkerRepository:
             record = ScheduleOccurrenceV1.model_validate_json(row[0])
             if record.finished_at_utc is not None:
                 return False
-            record = record.model_copy(
-                update={
-                    "state": "superseded",
-                    "finished_at_utc": database_now(conn),
-                    "outcome": "superseded",
-                    "reason": reason,
-                }
-            )
-            conn.execute(
-                f"UPDATE schedule_occurrences SET payload_json={p} WHERE occurrence_id={p}",
-                (record.model_dump_json(), record.occurrence_id),
+            # A coalesced fire depends on this run even though it never ran
+            # itself. Use the terminal-snapshot path so neither receipt can
+            # keep an exhausted schedule after supersession.
+            self.record_terminal_task(
+                conn, self.dialect, agent_id=record.agent_id, task_id=task_id,
+                outcome="superseded", reason=reason,
             )
             conn.commit()
         return True

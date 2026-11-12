@@ -1,8 +1,9 @@
 # Generated Sites
 
 Generated sites are browser pages the agent can create when information is
-easier to use visually than in a chat thread. Every generated site has embedded
-chat and uses the same saved visual theme as the rest of the website.
+easier to use visually than in a chat thread. Articles, comparisons, how-tos
+and apps have embedded chat and use the same saved visual theme as the rest of
+the website. A work report keeps its own design and has no chat.
 
 ## Site Types
 
@@ -25,6 +26,18 @@ The agent chooses the content shape before publishing:
   goal dashboards. Useful optional elements include stat cards, counters,
   progress trackers, task or habit checklists, action links, and supporting
   content sections.
+- **Work report** is only for the report of a coder-critic-team run: what a
+  coding agent and a critic agent built, how they settled each critique, and
+  what the project review found. The agent publishes the statistics file the
+  skill's `cct.py stats` command wrote by naming the file, for example
+  `coder-critic/<run name>/stats.json` in your folder, instead of copying its
+  contents into its request; it can copy them only when they are small. The
+  file is read under the same folder rules as the agent's other file reads
+  and can be up to 2 MB. The page shows the statistics in the report's own
+  design: one page without scripts, with its own light and dark colors, not
+  the website theme, and no chat panel. Statistics that are not in the shape
+  `cct.py stats` writes are refused and nothing is published. Any other report
+  is an article.
 
 These elements are building blocks, not required template sections. Generated
 sites omit empty elements and should not add filler merely to populate a
@@ -98,12 +111,16 @@ tool did not write. Ask the agent to publish the page again to change it.
 When you ask the agent to add content to an existing generated site, it can
 regenerate that same page in place by reusing the prior `site_id` or `site_url`.
 The browser URL stays the same; refresh the page to see the latest generated
-content. Only a page made for you can be regenerated for you.
+content. Only a page made for you can be regenerated for you. A work report is
+published again the same way after `cct.py stats` has rewritten its
+statistics file: the agent names the file and the page, and leaves the file
+as it is.
 
 ## Embedded Chat
 
-The embedded chat panel sends follow-up questions back through the gateway,
-as you. It works only for the person the page was made for, signed in to Web
+Every page except a work report has an embedded chat panel. It sends
+follow-up questions back through the gateway, as you. It works only for the
+person the page was made for, signed in to Web
 Chat in the same browser; anyone else who opens the page sees a sign-in link
 instead, so a shared link never lets someone talk to the agents in your name.
 When the generated page includes the original session and conversation
