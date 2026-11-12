@@ -2,11 +2,12 @@
 
 A person's files reach the team through the gateway, which stores the bytes
 in this host's upload folders and puts a ``UserTaskAttachment`` record on the
-task's messages: the request's own files on ``Task.attachments``, and files
-sent while it runs on its guidance and answers (``TaskSteering``). Trusted
+task's messages: the request's own files on ``Task.attachments``, files sent
+while it runs on its guidance and interrupt answers (``TaskSteering``), and
+files sent with an answer to one of its questions (``TaskQuery``). Trusted
 runtime code keeps those records in two places: the task's own history (one
 ``TASK_FILES_EVENT`` entry per accepted guidance or answer with files, written
-by ``custom_agents.task_steering_runtime``) and the conversation turn the task
+by ``custom_agents.sent_files_runtime``) and the conversation turn the task
 belongs to (``attachments_json`` in ``storage.conversation_repository``,
 written by ``custom_agents.conversation_runtime``). This module is the one
 place that decides which of them a task may use; the attachment tools, the
@@ -20,14 +21,16 @@ Which files are kept at all, before anything is saved:
   message's own signed context names all three and has the id derived from
   the message's key and its file records
   (``access_control.ownership.sent_files_access``, checked by
-  ``request_files_kept`` at admission and ``steering_files_check`` for
-  guidance and answers). Other agent processes also send tasks and steering
+  ``request_files_kept`` at admission, ``steering_files_check`` for guidance
+  and interrupt answers and ``answer_files_check`` for answers to
+  questions). Other agent processes also send tasks and steering
   messages, every worker of a request holds a copy of its signed context,
   and every agent process receives each guidance's context; the rule's
   docstring explains why none of them can vouch for other files.
   Refused files are dropped from the message itself and logged one by one.
-- A delegated task keeps no files from guidance or answers; its files are the
-  ones its delegation named (``Task.attachments``). The lead sends guidance on
+- A delegated task keeps no files from guidance or answers, and questions
+  an agent asks bring none; a delegated task's files are the ones its
+  delegation named (``Task.attachments``). The lead sends guidance on
   to its workers without files.
 - Files history entries are written only by this runtime after admission, so
   any a task message arrives with are dropped (``without_incoming_files_entries``).
@@ -86,6 +89,7 @@ from access_control import safe_open
 from access_control.identity import IdentityRejected
 from access_control.ownership import (
     OwnershipDecision,
+    answer_context_id,
     conversation_files_access,
     request_context_id,
     sent_files_access,
@@ -94,8 +98,8 @@ from access_control.ownership import (
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.contracts.task_v1 import Task, TaskSteering
-from custom_messages.enums import TaskHistoryType
+from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
+from custom_messages.enums import MessageMetaType, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import TurnAttachment, attachment_summary
 
@@ -120,6 +124,9 @@ UNRECORDED_TURNS_NOTE = (
 # ``UserTaskAttachment`` dumps). Written only by ``task_files_details``.
 TASK_FILES_EVENT = "task_files_accepted"
 TASK_FILES_KEY = "task_files"
+# The ``message_type`` of a files entry for a person's answer to a question
+# (``TaskQuery``); guidance and interrupt answers use their steering type.
+QUESTION_ANSWER_MESSAGE_TYPE = "question_answer"
 # Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
 _BUBBLED_ENTRY_KEY = "bubbled_entry_id"
 
@@ -131,18 +138,19 @@ UPLOAD_OUTSIDE_FOLDERS = "outside_upload_folders"
 
 
 def task_files_details(
-    attachments: Sequence[UserTaskAttachment], *, steering_id: str, steering_type: str
+    attachments: Sequence[UserTaskAttachment], *, message_id: str, message_type: str
 ) -> dict[str, Any]:
     """History ``details`` that make ``attachments`` part of the task's own files.
 
-    For the files of one accepted guidance or answer (``steering_id``), after
-    ``keep_upload_files`` checked them.
+    For the files of one accepted guidance, interrupt answer or question
+    answer (``message_id``: its steering id or the question's
+    ``task_query_id``), after ``keep_upload_files`` checked them.
     """
 
     return {
         "event": TASK_FILES_EVENT,
-        "steering_id": steering_id,
-        "steering_type": steering_type,
+        "message_id": message_id,
+        "message_type": message_type,
         TASK_FILES_KEY: [attachment.model_dump(mode="json") for attachment in attachments],
     }
 
@@ -165,6 +173,9 @@ def describe_file(summary: dict[str, Any]) -> str:
 
 def sent_file_lines(attachments: Sequence[UserTaskAttachment], *, subject: str) -> list[str]:
     """Lines naming the files sent with a guidance or an answer (``subject``), for the model.
+
+    Used for guidance and interrupt answers (``task_steering_runtime``) and
+    for answers to questions (``TaskManager.render_task_query_history_markdown``).
 
     Empty without files. Names each file by id, name, type and size only.
     """
@@ -645,6 +656,24 @@ def steering_files_check(task_info: Any, steering: TaskSteering, meta: Any, *, t
     these files; ``steering`` is the message as it arrived.
     """
 
+    return _sent_to_task_check(task_info, meta, team_id, steering_context_id(steering))
+
+
+def answer_files_check(task_info: Any, answer: TaskQuery, meta: Any, *, team_id: str) -> OwnershipDecision:
+    """Whether the files on ``answer`` (a ``TaskQuery`` with message meta ``meta``) may become the task's.
+
+    Only a person's answer to a question (a RESPONSE, which the gateway
+    sends) brings files; a question an agent asks keeps none. Otherwise the
+    rule of ``steering_files_check``, with the context id bound to the
+    question this message answers; ``answer`` is the message as it arrived.
+    """
+
+    if answer.query_type != MessageMetaType.RESPONSE:
+        return OwnershipDecision(False, "not_an_answer")
+    return _sent_to_task_check(task_info, meta, team_id, answer_context_id(answer))
+
+
+def _sent_to_task_check(task_info: Any, meta: Any, team_id: str, message_context_id: str) -> OwnershipDecision:
     task = task_info.task
     if task.parent_task_id is not None:
         return OwnershipDecision(False, "delegated_task")
@@ -653,7 +682,7 @@ def steering_files_check(task_info: Any, steering: TaskSteering, meta: Any, *, t
         task_id=task.task_id,
         conversation_id=_text(getattr(task_info.meta, "conversation_id", None)),
         person_id=getattr(task_info, "owner_person_id", None),
-        message_context_id=steering_context_id(steering),
+        message_context_id=message_context_id,
     )
 
 
@@ -753,6 +782,7 @@ __all__ = [
     "CONVERSATION_ATTACHMENTS_HEADING",
     "CONVERSATION_ATTACHMENTS_SECTION",
     "INVENTORY_LIMIT",
+    "QUESTION_ANSWER_MESSAGE_TYPE",
     "TASK_FILES_EVENT",
     "TASK_FILES_KEY",
     "UPLOAD_FILE_MISSING",
@@ -764,6 +794,7 @@ __all__ = [
     "TaskAttachments",
     "UnavailableUpload",
     "UploadFolders",
+    "answer_files_check",
     "describe_file",
     "inventory_text",
     "keep_upload_files",

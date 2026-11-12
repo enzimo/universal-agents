@@ -214,8 +214,9 @@ class GatewayApplication(Protocol):
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
+        attachments: list[UserTaskAttachment] | None = None,
     ) -> GatewayApplicationResponse:
-        """Answer the named question waiting in a chat."""
+        """Answer the named question waiting in a chat, with the files the person sent with the answer."""
 
     async def list_scheduled_jobs(
         self,

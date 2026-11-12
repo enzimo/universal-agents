@@ -161,7 +161,7 @@ def _task_info(
 def _files(*attachments: UserTaskAttachment) -> dict[str, Any]:
     """History details of one accepted guidance's files, as the steering runtime writes them."""
 
-    return task_files_details(list(attachments), steering_id="steer_1", steering_type="proactive_guidance")
+    return task_files_details(list(attachments), message_id="steer_1", message_type="proactive_guidance")
 
 
 def _ids(records: list[Any]) -> list[str]:

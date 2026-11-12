@@ -7,15 +7,19 @@ Which question a chat shows, and their order, belong to
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from access_control.ownership import answer_context_id
+
 from assistant_gateway.application.local_responses import GatewayLocalResponseFactory
 from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.pending_questions import (
     ALREADY_ANSWERED_TEXT,
+    ANSWER_FILES_NOT_SENT_TEXT,
     NO_LONGER_WAITING_TEXT,
     NOTE_MESSAGE_TYPE,
     QUESTION_MESSAGE_TYPE,
@@ -42,6 +46,7 @@ from assistant_gateway.domain.request_state import (
     PendingQueryStatus,
 )
 from assistant_gateway.ports.repositories import SessionRepository
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.replied_message_v1 import RepliedMessage
 from custom_messages.contracts.routing_v1 import DELIVERY_MODE_INTERACTIVE, MessageHeader, MessageMeta
@@ -269,7 +274,17 @@ class GatewayClarificationCore:
         session_key: str,
         conversation_id: str | None,
         replied_message: RepliedMessage | None = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> None:
+        """Send the person's answer, with the files they sent with it, to the question's task.
+
+        The answer's signed context names the question's task as
+        ``root_task_id``, its conversation and an id bound to this answer and
+        its files (``access_control.ownership.answer_context_id``); the team
+        lead keeps the files only under such a context
+        (``access_control.ownership.sent_files_access``).
+        """
+
         manager_id = self._manager.manager_id
         if manager_id is None:
             raise RuntimeError(self._settings.manager_unavailable_text)
@@ -285,21 +300,23 @@ class GatewayClarificationCore:
             enforce_owner_scope=False,
         )
         presentation = self._request_context.requester_presentation_for_session(session)
-        envelope = MessageEnvelope(
-            msg_content=TaskQuery(
-                task_query_id=task_query.task_query_id,
-                query_type=MessageMetaType.RESPONSE,
-                message=response_text,
-                replied_message=replied_message,
-                parent_task_id=task_query.parent_task_id,
-                choice_mode=task_query.choice_mode,
-                choices=task_query.choices,
-                allow_free_text=task_query.allow_free_text,
-                selected_choice_ids=selected_choice_ids_from_text(
-                    task_query,
-                    response_text,
-                ),
+        answer = TaskQuery(
+            task_query_id=task_query.task_query_id,
+            query_type=MessageMetaType.RESPONSE,
+            message=response_text,
+            replied_message=replied_message,
+            attachments=list(attachments),
+            parent_task_id=task_query.parent_task_id,
+            choice_mode=task_query.choice_mode,
+            choices=task_query.choices,
+            allow_free_text=task_query.allow_free_text,
+            selected_choice_ids=selected_choice_ids_from_text(
+                task_query,
+                response_text,
             ),
+        )
+        envelope = MessageEnvelope(
+            msg_content=answer,
             msg_meta=MessageMeta(
                 from_agent_name=presentation.display_name,
                 msg_correlation_id=correlation_id,
@@ -318,6 +335,9 @@ class GatewayClarificationCore:
                         canonical_user_id=session.owner_canonical_user_id,
                     ),
                     manager_agent_id=manager_id,
+                    root_task_id=task_query.parent_task_id,
+                    conversation_id=conversation_id,
+                    context_id=answer_context_id(answer),
                 ),
             ),
             msg_header=MessageHeader(
@@ -377,34 +397,56 @@ class GatewayClarificationApplication:
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> GatewayResponse:
+        """Send ``response_text``, and the files the person sent with it, as the answer.
+
+        When the message is not sent as the answer, its reply starts by
+        saying that its files were not sent either.
+        """
+
         question = self._questions.get(task_query_id)
         if question is None or question.session_key != session_key:
             raise ValueError(
                 f"No question {task_query_id} waits in session_key={session_key}"
             )
+
+        def not_sent(response: GatewayResponse) -> GatewayResponse:
+            if not attachments:
+                return response
+            self._logger.info(
+                "A message with files was not sent as an answer, and the person is told. "
+                "event=gateway_answer_files_not_sent task_query_id=%s session_key=%s attachment_count=%d",
+                task_query_id,
+                session_key,
+                len(attachments),
+            )
+            return dataclasses.replace(response, text=f"{ANSWER_FILES_NOT_SENT_TEXT}\n\n{response.text}")
+
         if not question.is_open:
-            return self._not_sent(question)
+            return not_sent(self._not_sent(question))
         if not question.was_shown:
             # The person has not seen this question (its turn came while they
             # wrote), so their message cannot be its answer.
             self._questions.mark_shown(question)
-            return self._show(question, intro=QUESTION_WAITING_INTRO_TEXT)
+            return not_sent(self._show(question, intro=QUESTION_WAITING_INTRO_TEXT))
 
         correlation_id = question.correlation_id
         if self._manager.manager_id is None:
             # Nothing is sent, so the question stays open for a later answer.
             async with self._manager.response_channel(correlation_id, task_id=question.parent_task_id):
                 await self._responses.queue_manager_unavailable(correlation_id)
-                return await self._responses.await_terminal_response(
-                    correlation_id=correlation_id,
-                    session_key=session_key,
-                    query_handler=None,
-                    response_task_id=question.parent_task_id,
+                return not_sent(
+                    await self._responses.await_terminal_response(
+                        correlation_id=correlation_id,
+                        session_key=session_key,
+                        query_handler=None,
+                        response_task_id=question.parent_task_id,
+                    )
                 )
         if not self._questions.claim_answer(task_query_id):
             # Another message answered it, or it ended, since the check.
-            return self._not_sent(self._questions.get(task_query_id) or question)
+            return not_sent(self._not_sent(self._questions.get(task_query_id) or question))
         published = False
         try:
             async with self._manager.response_channel(correlation_id, task_id=question.parent_task_id):
@@ -415,15 +457,17 @@ class GatewayClarificationApplication:
                     session_key=session_key,
                     conversation_id=question.conversation_id,
                     replied_message=replied_message,
+                    attachments=attachments,
                 )
                 published = True
                 self._logger.info(
                     "Sent a person's answer to its question. event=gateway_question_answered "
-                    "task_query_id=%s parent_task_id=%s correlation_id=%s session_key=%s",
+                    "task_query_id=%s parent_task_id=%s correlation_id=%s session_key=%s attachment_count=%d",
                     task_query_id,
                     question.parent_task_id,
                     correlation_id,
                     session_key,
+                    len(attachments),
                 )
                 # Waiting or cancellation after publication cannot send the
                 # answer again. Different tasks sharing this correlation

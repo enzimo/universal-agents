@@ -292,6 +292,7 @@ class GatewayRuntimeApplication:
         task_query_id: str,
         response_text: str,
         replied_message: RepliedMessage | None = None,
+        attachments: list[UserTaskAttachment] | None = None,
     ) -> GatewayApplicationResponse:
         return gateway_response_view(
             await self._clarification.reply(
@@ -299,6 +300,7 @@ class GatewayRuntimeApplication:
                 task_query_id=task_query_id,
                 response_text=response_text,
                 replied_message=replied_message,
+                attachments=tuple(attachments or ()),
             )
         )
 

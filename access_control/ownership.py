@@ -41,8 +41,8 @@ Which files become a task's and its conversation's in the first place is
 decided by ``sent_files_access``: only files the gateway vouches it sent for
 that task, in that conversation, for that person, with a signed context
 bound to that one message and its files (``request_context_id``,
-``steering_context_id``; see its docstring for why a context another agent
-process holds or overheard cannot pass).
+``steering_context_id``, ``answer_context_id``; see its docstring for why a
+context another agent process holds or overheard cannot pass).
 
 Objectives are the team lead's records, all kept in its one durable scope, so
 its Objective tools ask ``objective_access`` which ones a task may reach: the
@@ -68,7 +68,7 @@ from access_control.identity import ISSUER_GATEWAY
 from access_control.people import is_administrator, normalized_roles
 from custom_messages.contracts.access_v2 import MESSAGE_CONTEXT_ID_PREFIX, TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.contracts.task_v1 import Task, TaskSteering
+from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +101,10 @@ _CREATABLE = frozenset(
     {RESOURCE_USER_MEMORY, RESOURCE_TEAM_MEMORY, RESOURCE_KNOWLEDGE_PERSONAL_PAGE, RESOURCE_KNOWLEDGE_TEAM_PAGE}
 )
 # The kinds of message a signed context can be bound to (``sent_files_access``);
-# a request's id never equals a guidance's or an answer's.
+# an id of one kind never equals an id of another.
 _REQUEST_MESSAGE = "request"
 _STEERING_MESSAGE = "steering"
+_ANSWER_MESSAGE = "question_answer"
 
 
 @dataclass(frozen=True)
@@ -227,11 +228,12 @@ def sent_files_access(
     the gateway's, name the person the task verifiably works for
     (``person_id``, decided at admission), name the task as ``root_task_id``,
     name its conversation, and have the id the caller derived from the
-    message as it arrived (``message_context_id``: ``request_context_id`` or
-    ``steering_context_id``). The gateway signs ``root_task_id`` and
-    ``conversation_id``, and an id derived the same way, only on a new
-    request's context and on the context of each guidance or answer it sends
-    to that request (``assistant_gateway.application.request_context``).
+    message as it arrived (``message_context_id``: ``request_context_id``,
+    ``steering_context_id`` or ``answer_context_id``). The gateway signs
+    ``root_task_id`` and ``conversation_id``, and an id derived the same way,
+    only on a new request's context and on the context of each guidance,
+    interrupt answer or question answer it sends to that request
+    (``assistant_gateway.application.request_context``).
 
     Why the id: other agent processes hold or see valid gateway contexts for
     the task. Delegation copies the request's admitted context into every
@@ -280,6 +282,18 @@ def steering_context_id(steering: TaskSteering) -> str:
     """
 
     return _message_context_id(_STEERING_MESSAGE, steering.idempotency_key or steering.steering_id, steering.attachments)
+
+
+def answer_context_id(answer: TaskQuery) -> str:
+    """The id of the signed context the gateway issues for a person's answer to a question (``sent_files_access``).
+
+    It names the message by the question it answers (``task_query_id``): the
+    gateway sends at most one answer per question
+    (``GatewayPendingQuestions.claim_answer``), and a resend of that answer
+    carries the same id and files.
+    """
+
+    return _message_context_id(_ANSWER_MESSAGE, answer.task_query_id, answer.attachments)
 
 
 def _message_context_id(kind: str, message_key: str, attachments: Sequence[UserTaskAttachment]) -> str:
@@ -451,6 +465,7 @@ __all__ = [
     "RESOURCE_TEAM_MEMORY",
     "RESOURCE_USER_MEMORY",
     "WORKSPACE_FILE_READ",
+    "answer_context_id",
     "conversation_continuation",
     "conversation_files_access",
     "named_task_access",

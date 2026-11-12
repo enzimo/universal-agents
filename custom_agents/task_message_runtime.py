@@ -29,7 +29,15 @@ from custom_agents.task_custody import (
 from custom_agents.task_custody import check_admission as check_task_custody
 from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyFinished, TaskCustodyReleased
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
-from custom_agents.conversation_attachments import UploadFolders, request_files_kept, without_incoming_files_entries
+from custom_agents.conversation_attachments import (
+    QUESTION_ANSWER_MESSAGE_TYPE,
+    UploadFolders,
+    answer_files_check,
+    log_refused_files,
+    request_files_kept,
+    without_incoming_files_entries,
+)
+from custom_agents.sent_files_runtime import keep_sent_files
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
     ensure_task_conversation_context,
@@ -821,6 +829,13 @@ async def _handle_task_query_for_parent(
     if not parent_task_info:
         from custom_agents.orphaned_subtasks import stop_report_for_ended_parent
 
+        # An answer for a task this agent no longer holds keeps none of its files.
+        log_refused_files(
+            task_query_msg.attachments,
+            "task_not_found",
+            task_id=parent_task_id,
+            conversation_id=incoming_msg_meta.conversation_id,
+        )
         # A worker still asking about work whose request ended is told to stop.
         if not await stop_report_for_ended_parent(
             self,
@@ -832,6 +847,19 @@ async def _handle_task_query_for_parent(
                 f"[{self.id}] Parent task {parent_task_id} for TaskQuery not found. Discarding."
             )
         return
+
+    # Files on the message are kept with its text, and only those the gateway
+    # sent with this answer: the stored query and everything after use the copy.
+    accepted_query = await _accept_answer_files(self, parent_task_info, task_query_msg, incoming_msg_meta)
+    if accepted_query is None:
+        self._logger.warning(
+            "A TaskQuery's task ended while its files were recorded; the message was not handled. "
+            "event=task_query_task_gone task_query_id=%s task_id=%s",
+            task_query_msg.task_query_id,
+            parent_task_id,
+        )
+        return
+    task_query_msg = accepted_query
 
     # Update task with new query information and preserve provenance.
     await self.task_manager.operations_runtime.run(
@@ -1154,6 +1182,33 @@ async def _handle_task_query_for_parent(
         self._logger.warning(
             f"[{self.id}] Received TaskQuery with unknown query_type: {task_query_msg.query_type}"
         )
+
+
+async def _accept_answer_files(
+    self: Any, task_info: TaskInfo, task_query: TaskQuery, msg_meta: MessageMeta
+) -> Optional[TaskQuery]:
+    """``task_query`` with only the files that were kept, after recording them; None when the task is gone.
+
+    Runs once the message's task is known, after a deferred answer comes back
+    from the runtime mailbox, and before its text is recorded, so an answer
+    keeps its files exactly when its text is kept. Only a person's answer
+    that the gateway vouches for brings files (``answer_files_check``); the
+    rest are kept by ``sent_files_runtime.keep_sent_files``.
+    """
+
+    if not task_query.attachments:
+        return task_query
+    decision = answer_files_check(task_info, task_query, msg_meta, team_id=str(getattr(self, "team_id", "") or ""))
+    kept = await keep_sent_files(
+        self,
+        task_info,
+        task_query.attachments,
+        decision,
+        message_id=task_query.task_query_id,
+        message_type=QUESTION_ANSWER_MESSAGE_TYPE,
+        subject="an answer to a question",
+    )
+    return task_query.model_copy(update={"attachments": kept}) if kept is not None else None
 
 
 async def _custody_for_new_task(

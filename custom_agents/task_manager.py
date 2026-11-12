@@ -34,6 +34,7 @@ from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyTake
 
 from storage.backends import STORAGE_BACKEND_SQLITE
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.conversation_attachments import sent_file_lines
 from custom_agents.prompt_context_sanitization import (
     extract_display_request_text,
     render_replied_message_lines,
@@ -3240,7 +3241,10 @@ class TaskManager(
         """Clarifications for this task, separate from its general execution history.
 
         Focused plan-step and recovery turns omit general history, but still
-        need the person's answers to questions this exact task asked.
+        need the person's answers to questions this exact task asked. Files
+        a person sent with an answer are named by id under it (the stored
+        answer holds only the files that were kept,
+        ``task_message_runtime._accept_answer_files``).
         """
         queries = self.get_task_queries(task_id) if task_query_list is None else task_query_list
         if latest_only:
@@ -3254,6 +3258,7 @@ class TaskManager(
             replied = getattr(query, "replied_message", None)
             if replied is not None:
                 lines.extend(render_replied_message_lines(replied, subject="clarification answer"))
+            lines.extend(f"  {line}" for line in sent_file_lines(getattr(query, "attachments", None) or [], subject="answer"))
         return "\n".join(lines) + "\n"
 
     def get_task_info(self, task_id: str) -> Optional[TaskInfo]:

@@ -1,7 +1,8 @@
 """Mid-turn steering helpers for UniversalAgent.
 
 Files sent with a guidance or an answer (``TaskSteering.attachments``) are
-accepted before the message is acknowledged (``_accept_sent_files``), and
+accepted before the message is acknowledged (``_accept_sent_files``, which
+records them with ``custom_agents.sent_files_runtime``), and
 only after the handler decided to take the message. They are kept only when
 the gateway vouches that it sent them with this message for this task
 (``steering_files_check``: the message's own signed context names the task,
@@ -26,19 +27,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 from strands.hooks import BeforeToolCallEvent, HookRegistry
 
-from custom_agents.conversation_attachments import (
-    UploadFolders,
-    keep_upload_files,
-    log_refused_files,
-    sent_file_lines,
-    steering_files_check,
-    task_files_details,
-)
-from custom_agents.conversation_runtime import record_turn_attachments
+from custom_agents.conversation_attachments import sent_file_lines, steering_files_check
 from custom_agents.message_routing import resolve_requester_routing_key
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.prompt_context_sanitization import render_replied_message_lines
 from custom_agents.provider_error_runtime import ProviderTimeoutError, is_provider_timeout_error
+from custom_agents.sent_files_runtime import keep_sent_files
 from custom_agents.sdk.strands.turn_tool_stop import (
     TURN_CANCELLED_REASON,
     invoke_with_tool_stop,
@@ -454,49 +448,27 @@ async def _accept_sent_files(
 
     Runs once the handler takes the guidance or answer, before it is
     acknowledged (module docstring). Files the gateway does not vouch for
-    (``steering_files_check`` on ``msg_meta``) are all dropped, and so are
-    records outside this host's upload folders (each logged). The rest are
-    added to the task's conversation turn and written to its history as one
-    files entry. A store error propagates: nothing is acknowledged, so the
-    sender sends the message again, and recording again adds no file twice.
+    (``steering_files_check`` on ``msg_meta``) are all dropped; the rest are
+    kept by ``sent_files_runtime.keep_sent_files``.
     """
 
     if not steering.attachments:
         return steering
-    task_id = task_info.task.task_id
-    conversation_id = getattr(task_info.meta, "conversation_id", None)
     decision = steering_files_check(task_info, steering, msg_meta, team_id=str(getattr(agent, "team_id", "") or ""))
-    if not decision.allowed:
-        log_refused_files(steering.attachments, decision.reason, task_id=task_id, conversation_id=conversation_id)
-        return steering.model_copy(update={"attachments": []})
-    folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
-    kept = keep_upload_files(steering.attachments, folders, task_id=task_id, conversation_id=conversation_id)
-    accepted = steering.model_copy(update={"attachments": kept})
-    if not kept:
-        return accepted
-    await asyncio.to_thread(
-        record_turn_attachments,
-        getattr(agent, "_conversation_store", None),
+    kept = await keep_sent_files(
+        agent,
         task_info,
-        kept,
-        logger=agent._logger,
+        steering.attachments,
+        decision,
+        message_id=steering.steering_id,
+        message_type=steering.steering_type.value,
+        subject=_steering_subject(steering),
     )
-    entry = await agent.task_manager.operations_runtime.run(
-        agent.task_manager.append_history_entry,
-        task_id,
-        f"Files sent with a {_steering_subject(steering)} accepted: "
-        + ", ".join(attachment.filename for attachment in kept),
-        entry_type=TaskHistoryType.TASK_EVENT,
-        importance=TaskHistoryImportance.NORMAL,
-        details=task_files_details(
-            kept, steering_id=steering.steering_id, steering_type=steering.steering_type.value
-        ),
-    )
-    return accepted if entry is not None else None
+    return steering.model_copy(update={"attachments": kept}) if kept is not None else None
 
 
 def _steering_subject(steering: TaskSteering) -> str:
-    return "guidance" if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE else "answer"
+    return "a guidance" if steering.steering_type == TaskSteeringType.PROACTIVE_GUIDANCE else "an answer"
 
 
 async def _forward_proactive_guidance_to_pending_subtasks(

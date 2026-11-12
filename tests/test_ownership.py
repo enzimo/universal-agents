@@ -17,6 +17,7 @@ from access_control.ownership import (
     RESOURCE_TEAM_MEMORY,
     RESOURCE_USER_MEMORY,
     WORKSPACE_FILE_READ,
+    answer_context_id,
     conversation_continuation,
     conversation_files_access,
     named_task_access,
@@ -28,7 +29,7 @@ from access_control.ownership import (
 )
 from custom_messages.contracts.access_v2 import MESSAGE_CONTEXT_ID_PREFIX, TaskContextV1
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
-from custom_messages.contracts.task_v1 import Task, TaskSteering
+from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
 from custom_messages.enums import MessageMetaType, TaskSteeringType
 
 
@@ -323,3 +324,33 @@ def test_a_message_context_id_names_one_message_and_its_files_exactly() -> None:
     # Without an idempotency key the lead deduplicates on the steering id, and so does the id.
     unkeyed = _guidance().model_copy(update={"idempotency_key": None})
     assert steering_context_id(unkeyed) == steering_context_id(_guidance(key="task_steer_id_1"))
+
+
+def _answer(task_query_id: str = "task_query_1", files: list[UserTaskAttachment] | None = None) -> TaskQuery:
+    return TaskQuery(
+        task_query_id=task_query_id,
+        query_type=MessageMetaType.RESPONSE,
+        parent_task_id="task_1",
+        message="This one.",
+        attachments=[_file()] if files is None else files,
+    )
+
+
+def test_an_answer_context_id_names_the_question_it_answers_and_its_files_exactly() -> None:
+    """An answer's id differs from any guidance's or request's, and from another answer's or files'."""
+
+    answer_id = answer_context_id(_answer())
+    ids = {
+        answer_id,
+        answer_context_id(_answer("task_query_2")),  # an answer to another question
+        answer_context_id(_answer(files=[])),  # its files left out
+        answer_context_id(_answer(files=[_file("att_bob")])),  # another file
+        # A guidance and a request keyed on the question's id: the kinds still differ.
+        steering_context_id(_guidance(key="task_query_1")),
+        request_context_id(_request([_file()], task_id="task_query_1")),
+    }
+    assert len(ids) == 6
+    assert answer_id.startswith(f"{MESSAGE_CONTEXT_ID_PREFIX}_") and len(answer_id) <= 120
+    # The answer's text is not part of it; the answer as the lead parses it gets the same id.
+    assert answer_context_id(_answer().model_copy(update={"message": "Another text."})) == answer_id
+    assert answer_context_id(TaskQuery.model_validate_json(_answer().model_dump_json())) == answer_id

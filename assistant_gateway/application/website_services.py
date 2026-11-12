@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
@@ -110,6 +110,7 @@ from assistant_gateway.domain.transcript import (
 )
 from assistant_gateway.ports.repositories import DeliveryRepository, SessionRepository
 from custom_messages.contracts.runtime_v1 import DELIVERY_CHANNEL_WEBSITE
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.schedule_v1 import schedule_listing_digest
 from custom_messages.contracts.control_v1 import PINNED_MEMORY_SORT_NEWEST, ManagerRuntimeWorkCommand, PinnedMemoryCommandPayload, PinnedMemoryFactPayload
 from custom_messages.enums import ScheduleManagementClass
@@ -799,6 +800,7 @@ class WebsiteTranscriptApplication:
         conversation_id: str | None,
         client_request_id: str,
         user_text: str,
+        attachments: Sequence[UserTaskAttachment] = (),
     ) -> tuple[WebTranscriptMessageV1, bool] | None:
         session = self._visible_session(session_key, owner_canonical_user_id)
         if session is None:
@@ -808,7 +810,7 @@ class WebsiteTranscriptApplication:
             route=self._route(owner_canonical_user_id, client_request_id),
             conversation_id=conversation_id or session.conversation_id,
             text=user_text,
-            attachments=(),
+            attachments=tuple(attachments),
         )
         if acceptance is None:
             return None

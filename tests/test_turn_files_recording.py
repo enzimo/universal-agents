@@ -250,7 +250,7 @@ async def test_guidance_files_are_kept_before_it_is_acknowledged_and_survive_rea
     first_page = lead.task_manager.get_task_info(TASK).task.attachments[0].attachment_id
     assert _turn_files(lead) == [first_page, page_two.attachment_id]
     [entry] = _files_entries(lead.task_manager)
-    assert entry.details["steering_id"] == steering.steering_id
+    assert entry.details["message_id"] == steering.steering_id
     assert [item["attachment_id"] for item in entry.details["task_files"]] == [page_two.attachment_id]
     assert _own(lead.task_manager, lead._conversation_store) == [first_page, page_two.attachment_id]
     # The record outside the upload folders is dropped everywhere, with a warning.
@@ -379,7 +379,7 @@ async def test_answer_files_without_a_conversation_record_stay_the_tasks_own_aft
     assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.ACCEPTED]
     assert statuses[0][2] == "Interrupt response accepted as durable recovery guidance."
     [entry] = _files_entries(lead.task_manager)
-    assert entry.details["steering_type"] == TaskSteeringType.INTERRUPT_RESPONSE.value
+    assert entry.details["message_type"] == TaskSteeringType.INTERRUPT_RESPONSE.value
     # The restart path's resume note names the file by id.
     directive = lead.task_manager.read_runtime_resume_directive(TASK)
     assert "This pan." in directive and f"`{photo.attachment_id}` pan.png" in directive
@@ -574,7 +574,7 @@ async def test_a_request_keeps_only_files_the_gateway_sent_for_it(
         execution_history=[
             TaskHistoryEntry(
                 summary="Files sent with a guidance accepted: bobs scan.png",
-                details=task_files_details([bobs], steering_id="s", steering_type="proactive_guidance"),
+                details=task_files_details([bobs], message_id="s", message_type="proactive_guidance"),
             )
         ],
     )

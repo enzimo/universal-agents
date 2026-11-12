@@ -2359,6 +2359,14 @@
           "title": "Allowed Decisions",
           "type": "array"
         },
+        "attachments": {
+          "description": "Files the person sent with this answer (only on a RESPONSE the gateway sends). Binary bytes are stored outside the message. The team lead keeps them only when the answer's own signed context vouches for exactly these files (access_control.ownership.answer_context_id).",
+          "items": {
+            "$ref": "#/$defs/UserTaskAttachment"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
         "choice_mode": {
           "anyOf": [
             {
