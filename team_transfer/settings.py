@@ -676,7 +676,8 @@ __all__ = [
 
 
 # V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
-# and V8 gateway.storage_warnings. Their records keep the same shape and carry
+# V8 gateway.storage_warnings and V9 workspace.skill_installation.semantic_review
+# (an older export leaves the review off). Their records keep the same shape and carry
 # only values that differ from defaults, so old choices pass on unchanged and
 # settings absent from an older export use the current defaults.
 SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records

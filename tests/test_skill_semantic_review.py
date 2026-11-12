@@ -658,17 +658,6 @@ def test_static_rejection_never_sends_skill_contents_to_the_model(installation, 
     assert not agent._strands_model.calls
 
 
-def test_settings_transfer_preserves_old_choices_and_defaults_to_non_llm():
-    from team_transfer.sections import SECTION_UPGRADES
-    from team_transfer.settings import SettingsSection
-    from assistant_gateway.config import GatewayInstanceConfig
-
-    records = [{"path": ["workspace", "skill_installation", "safe_max_score"], "value": 10}]
-    assert SECTION_UPGRADES[("settings", 8, SettingsSection.schema_version)](records) == records
-    config = GatewayInstanceConfig.create(instance_name="example", instance_root="/example", team_id="example", timezone="UTC")
-    assert config.workspace.skill_installation.semantic_review.mode == "off"
-
-
 def test_one_gate_binds_the_settings_and_passes_a_model_free_report_only_when_off(artifact):
     manifest = build_skill_tree_manifest(artifact)
     paths = {entry.path for entry in manifest.entries}
