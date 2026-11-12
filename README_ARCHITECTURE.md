@@ -937,14 +937,18 @@ delivered (a crashed process loses nothing either way). So:
 A store whose writes read before they write takes turns between writers on
 both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
 PostgreSQL the default READ COMMITTED isolation lets two transactions read the
-same rows before either writes, so the access store and the knowledge store
-take their own transaction-level advisory lock in `begin_write`
-(`storage/postgres_connection.py`, one key per store, so unrelated stores never
-wait for each other); other stores lock the rows they change (`SELECT ... FOR
-UPDATE`). An advisory lock key covers the whole PostgreSQL database, so
-instances or teams that share one database in different schemas also wait for
-each other's writes to that store. Reads and writes a thread makes while it
-holds an open write transaction of the access store (a grant plan, a whole
+same rows before either writes, so the access store, the knowledge store,
+pinned memory, the conversation store's thread tags and stored command
+refusals, and the delegated-task store take their own transaction-level
+advisory lock in `begin_write` (`storage/postgres_connection.py`, one key per
+store, so unrelated stores never wait for each other); other stores lock the
+rows they change (`SELECT ... FOR UPDATE`). A row lock cannot cover a row
+that does not exist yet, so the delegated-task store, whose first check-back
+time and first progress note for a parent both create the parent's wait, uses
+the advisory lock. An advisory lock key covers the whole PostgreSQL database,
+so instances or teams that share one database in different schemas also wait
+for each other's writes to that store. Reads and writes a thread makes while
+it holds an open write transaction of the access store (a grant plan, a whole
 decision) join that transaction, so no second connection is opened while the
 lock is held. Moving rows between tables uses `DELETE ... RETURNING` so exactly the
 rows deleted are the rows kept elsewhere (a removed person's held records,
@@ -952,6 +956,11 @@ rows deleted are the rows kept elsewhere (a removed person's held records,
 concurrency audit found that on PostgreSQL an approved change could be claimed
 twice, two edits to one person's model settings lost one, and holding a
 person's records could delete a row written meanwhile without holding it.
+The delegated-task store takes its lock because a later review of recovered
+requesters found that, on PostgreSQL, an earlier requester runtime still
+running beside its recovered replacement could erase a later check-back time,
+take one due check-back twice, or reopen a closed task
+(`tests/test_delegated_task_store_postgres.py`).
 
 Opening a store takes turns too. Each store creates its tables and indexes
 and adds missing columns when it opens, and the launcher starts the manager,
@@ -5259,7 +5268,9 @@ in the recovered task tree, rather than by the requester's earlier agent id. The
 pass reads those waits once, but each wake runs its request's turn before the next, so it
 clears a time only if the time is still due when the pass reaches that request
 (`DelegatedTaskRepository.take_due_check_back`); a later time the request's own turn set
-meanwhile is kept. The watchdog prefers current task custody over an older worker claim. During a mixed-contract upgrade,
+meanwhile is kept. The read and the clear run under the store's write lock on both
+backends, so a time set by another runtime after the read is kept too, and of two passes
+taking the same due time only one wakes the request. The watchdog prefers current task custody over an older worker claim. During a mixed-contract upgrade,
 the gateway tracks retained waiting replies separately for each draining lead, and every
 unavailable transition except a refused join leaves them out
 (`GatewayManagerTransition.kept_replies`), so a lead that leaves, whether it drained or left
