@@ -7,6 +7,9 @@ manager and conversation store (SQLite, and PostgreSQL when
 guidance's files are saved with the turn before the guidance is recorded or
 answered, named with their ids when the model reads the guidance, and still
 found by id after the guidance was read, after a restart and in the next turn.
+Guidance files are kept only when the guidance is signed for the person the
+request works for (real Ed25519 keys and the real identity resolver); a
+worker-shaped message, or one signed for someone else, keeps its text only.
 """
 
 from __future__ import annotations
@@ -18,10 +21,11 @@ from typing import Any
 
 import pytest
 
+from access_control.identity import ENV_VERIFY_KEYS
 from custom_agents.conversation_attachments import attachment_scope, request_files
 from custom_agents.conversation_runtime import ensure_task_conversation_context
 from custom_agents.conversation_store import ConversationStore
-from custom_agents.steering_history_events import GUIDANCE_ACCEPTED_EVENT, HISTORY_EVENT_KEY
+from custom_agents.steering_history_events import GUIDANCE_ACCEPTED_EVENT, GUIDANCE_STEERING_KEY, HISTORY_EVENT_KEY
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import (
     consume_pending_proactive_guidance_message,
@@ -29,7 +33,7 @@ from custom_agents.task_steering_runtime import (
 )
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskSteering
 from custom_messages.enums import (
     MessageMetaType,
@@ -39,12 +43,14 @@ from custom_messages.enums import (
     TaskSteeringType,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from tests.broker_access_support import context_verify_keys, forget_task_context_keys, signed_task_context
 from tests.knowledge_support import BACKENDS, knowledge_storage
 
 TEAM = "team_guidance_files"
 LEAD = "lead_files"
 GATEWAY = "team_guidance_files_gateway_response"
 PERSON = "alice"
+OTHER_PERSON = "bob"
 ROOT = "task_turn_1"
 
 
@@ -57,8 +63,8 @@ class RecordingComms:
     async def send_message(self, *, message: MessageEnvelope, routing_key: str) -> None:
         self.sent.append((routing_key, message))
 
-    def answers(self) -> list[TaskSteering]:
-        return [envelope.msg_content for key, envelope in self.sent if key == GATEWAY]
+    def answers(self, to: str = GATEWAY) -> list[TaskSteering]:
+        return [envelope.msg_content for key, envelope in self.sent if key == to]
 
 
 class _Instance:
@@ -133,17 +139,37 @@ class _Instance:
         return [entry for entry in task.execution_history if entry.details.get(HISTORY_EVENT_KEY) == GUIDANCE_ACCEPTED_EVENT]
 
 
-def _guidance(instance: _Instance, key: str = "corr_guidance") -> tuple[TaskSteering, MessageHeader, MessageMeta]:
+def _guidance(
+    instance: _Instance, key: str = "corr_guidance", *, sender: str = GATEWAY, signed_for: str | None = PERSON,
+) -> tuple[TaskSteering, MessageHeader, MessageMeta]:
+    """Guidance with one photo, as the gateway sends it: signed for the person (``build_gateway_context``)."""
+
     steering = TaskSteering(
         steering_type=TaskSteeringType.PROACTIVE_GUIDANCE, target_task_id=ROOT, target_agent_id=LEAD,
         guidance_text="Use this photo too.", idempotency_key=key,
         attachments=[instance.file("att_guidance", "pantry.jpg")],
     )
-    header = MessageHeader(from_agent_id=GATEWAY, to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
-                           response_routing_key=GATEWAY)
+    header = MessageHeader(from_agent_id=sender, to_routing_path=RoutingType.ALL_AGENTS_ROUTE,
+                           response_routing_key=sender)
+    context = (
+        GatewayContext(canonical_user_id=signed_for, task_context=signed_task_context(signed_for, team_id=TEAM))
+        if signed_for
+        else None
+    )
     meta = MessageMeta(msg_correlation_id=key, conversation_id=instance.conversation_id,
-                       requester_type=RequesterType.USER_REQUESTER, is_response_requested=True)
+                       requester_type=RequesterType.USER_REQUESTER, is_response_requested=True,
+                       gateway_context=context)
     return steering, header, meta
+
+
+@pytest.fixture(autouse=True)
+def _verify_keys(monkeypatch: pytest.MonkeyPatch):
+    """The lead trusts the test gateway key, as it trusts the gateway's."""
+
+    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
+    forget_task_context_keys()
+    yield
+    forget_task_context_keys()
 
 
 @pytest.fixture(params=BACKENDS)
@@ -196,7 +222,7 @@ async def test_guidance_files_are_saved_named_and_found_after_reading_a_restart_
         instance.restart()
     # The next turn finds it with the turn it came with.
     instance.admit("task_turn_2", [], instance.conversation_id)
-    earlier = instance.scope("task_turn_2").earlier_files()
+    earlier = instance.scope("task_turn_2").files().earlier
     assert [(file.attachment.attachment_id, file.turn_index) for file in earlier] == [
         ("att_guidance", 1), ("att_receipt", 1),
     ]
@@ -268,3 +294,37 @@ async def test_a_workers_forwarded_guidance_files_stay_with_its_subtask(instance
     assert instance.turn_file_ids() == ["att_receipt"]
     worker_request = request_files(worker_manager, "task_child")
     assert (worker_request.conversation_id, _ids(worker_request.files)) == (None, ["att_guidance"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sender", "signed_for", "reason"),
+    [
+        # A worker sends guidance instead of returning its result: no signed context.
+        ("worker_1", None, "no_verified_person"),
+        # Signed, but for someone other than the person the request works for.
+        ("worker_1", OTHER_PERSON, "other_person"),
+    ],
+)
+async def test_guidance_not_signed_for_the_requests_person_keeps_its_text_and_saves_no_file(
+    instance: _Instance, caplog: pytest.LogCaptureFixture, sender: str, signed_for: str | None, reason: str
+) -> None:
+    steering, header, meta = _guidance(instance, sender=sender, signed_for=signed_for)
+
+    with caplog.at_level(logging.WARNING):
+        await handle_task_steering_message(instance.lead, steering, header, meta)
+
+    # The text is accepted and recorded as usual; the file is nowhere.
+    assert [answer.status for answer in instance.lead.team_comms.answers(sender)] == [TaskSteeringStatus.ACCEPTED]
+    [entry] = instance.accepted_entries()
+    assert entry.details[GUIDANCE_STEERING_KEY]["guidance_text"] == "Use this photo too."
+    assert entry.details[GUIDANCE_STEERING_KEY]["attachments"] == []
+    assert instance.turn_file_ids() == ["att_receipt"]
+    assert _ids(request_files(instance.manager, ROOT).files) == ["att_receipt"]
+    assert instance.scope().find("att_guidance") is None
+    block = await consume_pending_proactive_guidance_message(instance.lead, ROOT)
+    assert "- Use this photo too." in block and "att_guidance" not in block
+    assert (
+        f"event=guidance_files_refused task_id={ROOT} sender={sender} reason={reason} "
+        "steering_type=proactive_guidance attachment_ids=att_guidance"
+    ) in caplog.text

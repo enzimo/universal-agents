@@ -288,7 +288,7 @@ def test_plan_steps_and_recovery_tasks_use_their_requests_files_and_conversation
         assert scope.find("att_list").attachment.attachment_id == "att_list"
         earlier = scope.find("att_receipt")
         assert (earlier.attachment.filename, earlier.turn_index) == ("receipt.jpg", 1)
-        assert _ids(scope.earlier_files()) == ["att_receipt"]
+        assert _ids(scope.files().earlier) == ["att_receipt"]
 
 
 def test_a_delegated_subtask_never_reaches_its_requesters_files(runtime: _Runtime) -> None:
@@ -323,7 +323,7 @@ def test_earlier_conversation_files_are_only_for_the_team_lead_working_for_their
     # A specialist (here, a worker's scheduled job run continuing its owner's
     # conversation) gets only its own task's files.
     assert runtime.scope(ROOT, is_team_lead=False).find("att_receipt") is None
-    assert runtime.scope(ROOT, is_team_lead=False).earlier_files() == []
+    assert runtime.scope(ROOT, is_team_lead=False).files().earlier == ()
     # Another conversation's file is not found, and nothing says it exists.
     assert runtime.scope(ROOT).find("att_bob") is None
     with caplog.at_level(logging.INFO):
@@ -364,13 +364,37 @@ def test_files_are_saved_with_the_turn_of_the_request_a_step_or_recovery_task_se
     for task_id in ("step_3", ROOT):
         scope = runtime.scope(task_id)
         assert scope.find("att_step_answer").turn_index == 2
-        assert _ids(scope.current_files()) == ["att_list", "att_recovery_answer", "att_step_answer"]
-        assert _ids(scope.earlier_files()) == ["att_receipt"]
+        files = scope.files()
+        assert _ids(files.current) == ["att_list", "att_recovery_answer", "att_step_answer"]
+        assert _ids(files.earlier) == ["att_receipt"]
         assert _ids(scope.available()) == ["att_list", "att_recovery_answer", "att_step_answer", "att_receipt"]
     # The next turn lists them as earlier files.
     runtime.turn("task_turn_3", [])
     runtime.task("task_turn_3", conversation_id=CONVERSATION)
-    assert "att_recovery_answer" in _ids(runtime.scope("task_turn_3").earlier_files())
+    assert "att_recovery_answer" in _ids(runtime.scope("task_turn_3").files().earlier)
+
+
+def test_a_prompts_files_come_from_one_listing_of_the_conversation(
+    runtime: _Runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both groups a prompt shows (current and earlier files) are read with one bounded query."""
+
+    listings: list[tuple[str, int]] = []
+    listing = runtime.store.list_conversation_attachments
+
+    def counted(conversation_id: str, limit: int = 20):
+        listings.append((conversation_id, limit))
+        return listing(conversation_id, limit=limit)
+
+    monkeypatch.setattr(runtime.store, "list_conversation_attachments", counted)
+    scope = runtime.scope(ROOT)
+
+    files = scope.files()
+    assert (_ids(files.current), _ids(files.earlier)) == (["att_list"], ["att_receipt"])
+    assert listings == [(CONVERSATION, 20)]
+    assert _ids(scope.available(limit=1)) == ["att_list"] and len(listings) == 2
+    # A specialist's scope has no conversation to list.
+    assert _ids(runtime.scope(ROOT, is_team_lead=False).files().current) == ["att_list"] and len(listings) == 2
 
 
 def test_a_subtasks_files_stay_in_its_history_and_a_missing_turn_is_reported(runtime: _Runtime, caplog) -> None:

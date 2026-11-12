@@ -27,10 +27,19 @@ Which files a task may use (``request_files`` then ``attachment_scope``):
 
 An id the scope does not hold is "not found", with no hint that it exists in
 another conversation.
+
+Who may add files (``sent_files_refusal``): files that arrive while a
+top-level task runs, with guidance or with an answer to a question, are kept
+only when the message is verified to come from the person the task works for.
+Any process on the team's NATS can address a message to the team lead, and
+these files are saved with the person's conversation and offered for later
+turns and delegation, so a message without that person's signed context
+keeps its text and loses its files.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -41,6 +50,7 @@ from typing import Any, Iterable, Literal, Optional
 from pydantic import ValidationError
 
 from access_control.ownership import PRIVATE_READ, RESOURCE_CONVERSATION, private_access
+from custom_agents.access_runtime import verified_meta_person_id
 from custom_agents.steering_history_events import (
     GUIDANCE_ACCEPTED_EVENT,
     GUIDANCE_STEERING_KEY,
@@ -68,6 +78,9 @@ MAX_SELECTED_ATTACHMENTS = 20
 _MAX_REPORTED_IDS = 10
 _MAX_SHOWN_NAME_CHARS = 120
 _NO_VERIFIED_PERSON = "no_verified_person"
+# The message is verified for someone other than the person the task works for.
+SENDER_OTHER_PERSON = "other_person"
+SENDER_NOT_VERIFIED = _NO_VERIFIED_PERSON
 
 UploadState = Literal["available", "deleted", "remote"]
 UPLOAD_AVAILABLE: UploadState = "available"
@@ -132,6 +145,35 @@ def received_attachments(task: Any) -> list[UserTaskAttachment]:
         elif entry_type == TaskHistoryType.QUERY_EVENT and details.get(QUERY_ANSWER_FILES_KEY):
             found.extend(_validated(details[QUERY_ANSWER_FILES_KEY], task_id=task_id, source="answer"))
     return found
+
+
+async def sent_files_refusal(agent: Any, task_info: Any, msg_meta: Any) -> Optional[str]:
+    """Why files a message carries for this task are not kept as its person's; None when they are.
+
+    For a top-level task (a request, a plan step, a recovery task, a job
+    run), whose files are saved with its conversation turn, the message must
+    be verified to work for the person the task works for: its signed task
+    context or schedule run identity (``access_runtime.verified_meta_person_id``)
+    names ``TaskInfo.owner_person_id``, recorded at admission (plan steps and
+    recovery tasks keep their request's). The gateway signs every guidance
+    message and answer it sends for a person. ``SENDER_NOT_VERIFIED`` when
+    nothing valid names a person (also for work for nobody),
+    ``SENDER_OTHER_PERSON`` for someone else.
+
+    A delegated subtask is not checked: its files never reach a conversation
+    (``save_turn_attachments``), and the copies of guidance the team lead
+    passes on to its workers carry no signed context.
+    """
+
+    if getattr(task_info.task, "parent_task_id", None) is not None:
+        return None
+    # Reading a schedule run identity may touch storage, so off the event loop.
+    sender = await asyncio.to_thread(verified_meta_person_id, agent, msg_meta)
+    if not sender:
+        return SENDER_NOT_VERIFIED
+    if sender != task_info.owner_person_id:
+        return SENDER_OTHER_PERSON
+    return None
 
 
 def _request_chain(task_manager: Any, task_id: str) -> list[str]:
@@ -230,6 +272,19 @@ def _sent_file(record: dict[str, Any], *, conversation_id: str) -> Optional[Sent
 
 
 @dataclass(frozen=True)
+class ScopeFiles:
+    """The files a task may name: the current request's, then earlier turns' (``AttachmentScope.files``)."""
+
+    current: tuple[SentFile, ...]
+    earlier: tuple[SentFile, ...]
+
+    def available(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
+        """Current files first, then earlier ones, at most ``limit``."""
+
+        return [*self.current, *self.earlier][: max(0, limit)]
+
+
+@dataclass(frozen=True)
 class AttachmentScope:
     """The files one task may name and open by id.
 
@@ -256,17 +311,19 @@ class AttachmentScope:
         record = self.store.find_conversation_attachment(self.conversation_id, wanted)
         return _sent_file(record, conversation_id=self.conversation_id) if record else None
 
-    def _conversation_files(self) -> tuple[list[SentFile], list[SentFile]]:
-        """The conversation's newest files that ``request.files`` lacks, newest first, split by turn.
+    def files(self) -> ScopeFiles:
+        """The files this task may name, grouped for its prompt, read with one bounded listing.
 
-        The first list holds files saved with the request's own turn, which
-        another of its plan steps or recovery tasks received; the second holds
-        files of earlier turns. Both come from one bounded listing, the newest
-        ``CONVERSATION_ATTACHMENT_LIST_LIMIT`` files of the conversation.
+        ``current``: the request's own files (``request.files``), then the
+        files saved with its turn that another of its plan steps or recovery
+        tasks received. ``earlier``: the files of earlier turns, newest first.
+        The conversation part is the newest ``CONVERSATION_ATTACHMENT_LIST_LIMIT``
+        files of the conversation (one query), so call this once per prompt.
         """
 
+        own = tuple(SentFile(attachment) for attachment in self.request.files)
         if self.conversation_id is None:
-            return [], []
+            return ScopeFiles(current=own, earlier=())
         known = {attachment.attachment_id for attachment in self.request.files}
         this_turn: list[SentFile] = []
         earlier: list[SentFile] = []
@@ -277,26 +334,12 @@ class AttachmentScope:
                 continue
             same_turn = str(record.get(ATTACHMENT_TASK_ID_KEY) or "") == self.request.request_task_id
             (this_turn if same_turn else earlier).append(sent)
-        return this_turn, earlier
-
-    def current_files(self) -> list[SentFile]:
-        """The files of the request this task serves: ``request.files``, then any other saved with its turn."""
-
-        this_turn, _earlier = self._conversation_files()
-        return [*(SentFile(attachment) for attachment in self.request.files), *this_turn]
-
-    def earlier_files(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
-        """Files of the conversation's earlier turns, newest first."""
-
-        _this_turn, earlier = self._conversation_files()
-        return earlier[: max(0, limit)]
+        return ScopeFiles(current=(*own, *this_turn), earlier=tuple(earlier))
 
     def available(self, limit: int = CONVERSATION_ATTACHMENT_LIST_LIMIT) -> list[SentFile]:
         """The files to offer when an id is not found: the current request's, then earlier ones."""
 
-        this_turn, earlier = self._conversation_files()
-        own = [SentFile(attachment) for attachment in self.request.files]
-        return [*own, *this_turn, *earlier][: max(0, limit)]
+        return self.files().available(limit)
 
 
 def attachment_scope(
