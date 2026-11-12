@@ -18,10 +18,12 @@ test, so it never leaks into the next one.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+import logging
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypeVar
 
 from custom_tools.runtime_context import TaskWork, _task_work, task_work
 from custom_tools.runtime_context import set_agent_ref as _set_agent_ref
@@ -104,6 +106,40 @@ class TurnHost(SimpleNamespace):
         from custom_agents.turn_registry import running_turn_task_ids
 
         return running_turn_task_ids(self)
+
+
+T = TypeVar("T")
+
+
+def turn_agent(**attributes: Any) -> TurnHost:
+    """A ``TurnHost`` that can also run owned work (``pending_work_runtime.run_as_owned_task``)."""
+
+    attributes.setdefault("id", "agent-1")
+    attributes.setdefault("_logger", logging.getLogger("tests.turn_agent"))
+    attributes.setdefault("_should_exit", asyncio.Event())
+    attributes.setdefault("_owned_tasks", set())
+    return TurnHost(**attributes)
+
+
+async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
+    """Run ``tool`` as a sync tool call of a real model turn of ``task_id`` on ``agent``.
+
+    Binds the task's work record, starts the turn in its own asyncio task with
+    the real ``turn_registry.start_turn``, runs ``tool`` in a worker thread as
+    Strands runs a sync tool, and ends the turn with ``end_turn``.
+    """
+
+    from custom_agents.turn_registry import end_turn, start_turn
+
+    async def turn() -> T:
+        start_turn(agent, task_id)
+        try:
+            return await asyncio.to_thread(tool)
+        finally:
+            end_turn(agent)
+
+    with task_work(task_id):
+        return await asyncio.create_task(turn())
 
 
 def register_turn(host: Any, task_id: str, owner: Any, tool_stop: Any = None) -> TaskWork:

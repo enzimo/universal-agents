@@ -12,6 +12,14 @@ A turn's own code (tools, hooks, post-turn steps) never reads an agent-wide
 task: ``executing_task_ids`` reads it beside the parallel lanes and running
 turns to report everything executing now.
 
+A sync tool that needs an asynchronous call for its turn, such as a model
+call, runs it on the turn's own event loop with ``run_on_turn_loop``. Strands
+runs sync tools in a worker thread, and a sync Strands call made there runs on
+a fresh event loop in yet another thread, where model clients that keep
+connections bound to the loop that opened them (the native Anthropic client)
+fail or retry. On the turn's loop the call uses the turn's own model object
+and its per-call key binding, and it stops when the turn stops.
+
 Kept outside ``UniversalAgent``, whose size is capped
 (``tests/test_runtime_architecture_boundaries.py``); the agent keeps thin
 ``_set_active_execution_context`` and ``_clear_active_execution_context``
@@ -21,10 +29,30 @@ methods for the turn executor and the resumed-turn path.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+import logging
+import threading
+from collections.abc import Coroutine
+from typing import Any, Generic, TypeVar, cast
 
+from custom_agents.pending_work_runtime import AgentStopping, run_as_owned_task
 from custom_tools.runtime_context import TaskWork, current_task_work
 from custom_tools.tool_stop import ToolStop
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# How often a tool thread waiting for work on its turn's loop checks that the
+# turn still runs. A stop therefore reaches the work within this time.
+TURN_POLL_SECONDS = 0.25
+
+# How long a tool thread waits for work it cancelled to end on the turn's loop,
+# below the turn's own wait for its tool calls (tool_stop.TOOL_STOP_GRACE_SECONDS).
+TURN_WORK_CANCEL_GRACE_SECONDS = 5.0
+
+
+class TurnEnded(RuntimeError):
+    """The bound task's model turn ended or was asked to stop (or none runs), so its work did not run to the end."""
 
 
 def start_turn(agent: Any, task_id: str | None) -> ToolStop:
@@ -85,6 +113,148 @@ def executing_task_ids(agent: Any) -> set[str]:
     return set(running_turn_task_ids(agent)) | parallel_roots | ({current} if current else set())
 
 
+def turn_has_ended(agent: Any, work: TaskWork | None) -> bool:
+    """Whether ``work`` has no running model turn, or its turn was asked to stop.
+
+    True with no work record, before its turn started, after the runner left
+    its scope, once the turn's asyncio task is done, once ``end_turn`` removed
+    the turn (it puts the team model back before the runner finishes, so the
+    turn's person model is gone from then on), and once the turn's
+    ``ToolStop`` was requested. It only reads, so a tool's worker thread may
+    call it.
+    """
+
+    if work is None or work.handling_finished:
+        return True
+    owner = work.turn_owner
+    if owner is None or owner.done() or agent._running_turns.get(owner) is not work:
+        return True
+    return work.tool_stop is not None and work.tool_stop.is_requested()
+
+
+class _TurnLoopCall(Generic[T]):
+    """One coroutine a tool thread runs on its turn's loop (``run_on_turn_loop``).
+
+    ``start`` and ``cancel`` run on the loop; ``call_soon_threadsafe`` keeps
+    their order, so ``cancel`` always finds the task. The done callback runs
+    even for a task cancelled before its first step, so the tool thread always
+    learns when the work ended and an unstarted coroutine is closed. (With
+    ``asyncio.run_coroutine_threadsafe`` an early cancel stops the task before
+    its first step, and a wrapper's own cleanup never runs.)
+    """
+
+    def __init__(self, agent: Any, coroutine: Coroutine[Any, Any, T], name: str) -> None:
+        self._agent = agent
+        self._coroutine = coroutine
+        self._name = name
+        self._task: asyncio.Task[T] | None = None
+        self.ended = threading.Event()
+        self.result: T | None = None
+        self.error: BaseException | None = None
+        self.cancelled = False
+
+    def start(self) -> None:
+        self._task = asyncio.get_running_loop().create_task(
+            run_as_owned_task(self._agent, self._coroutine, name=self._name), name=self._name
+        )
+        self._task.add_done_callback(self._finish)
+
+    def cancel(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+
+    def _finish(self, task: asyncio.Task[T]) -> None:
+        # No-op once the coroutine ran; closes it when its task never started.
+        self._coroutine.close()
+        if task.cancelled():
+            self.cancelled = True
+        elif (error := task.exception()) is not None:
+            self.error = error
+        else:
+            self.result = task.result()
+        self.ended.set()
+
+
+def _refuse_turn_work(coroutine: Coroutine[Any, Any, Any], error: Exception) -> Exception:
+    coroutine.close()
+    return error
+
+
+def run_on_turn_loop(agent: Any, coroutine: Coroutine[Any, Any, T], *, name: str) -> T:
+    """Run ``coroutine`` on the bound turn's event loop from a sync tool's worker thread; return its result.
+
+    Why: see the module docstring. The coroutine keeps this thread's context
+    (``call_soon_threadsafe`` copies it): the task's work record, the agent
+    and the signed task context the model key lookup reads.
+
+    It runs as owned work (``pending_work_runtime.run_as_owned_task``): refused
+    once the agent is stopping, cancelled and joined at shutdown. While it runs
+    this thread checks every ``TURN_POLL_SECONDS`` that the turn still runs
+    (``turn_has_ended``). Once it ended or was asked to stop, the coroutine is
+    cancelled on its loop, this thread waits up to
+    ``TURN_WORK_CANCEL_GRACE_SECONDS`` for it to end, and ``TurnEnded`` is
+    raised. The coroutine's own exceptions, timeouts included, reach the caller
+    unchanged; it bounds its own running time.
+
+    Raises ``TurnEnded``, closing the coroutine unrun, when no turn runs for
+    the bound work or its loop is not running, and ``RuntimeError`` on an
+    event loop thread, where waiting would block the loop the coroutine needs.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise _refuse_turn_work(
+            coroutine, RuntimeError(f"{name} must start from a tool's worker thread, not an event loop thread.")
+        )
+    work = current_task_work()
+    if work is None or work.turn_owner is None or turn_has_ended(agent, work):
+        raise _refuse_turn_work(coroutine, TurnEnded(f"The model turn ended, so {name} was not started."))
+    loop = work.turn_owner.get_loop()
+    call = _TurnLoopCall(agent, coroutine, name)
+    try:
+        if not loop.is_running():
+            raise RuntimeError("the turn's event loop is not running")
+        loop.call_soon_threadsafe(call.start)
+    except RuntimeError as exc:  # also a loop closed after the check
+        raise _refuse_turn_work(coroutine, TurnEnded(f"The model turn ended, so {name} was not started.")) from exc
+    while not call.ended.wait(TURN_POLL_SECONDS):
+        if turn_has_ended(agent, work) or not loop.is_running():
+            _cancel_turn_work(agent, work, loop, call, name)
+            raise TurnEnded(f"The model turn ended or was stopped, so {name} was cancelled.")
+    if call.cancelled:
+        raise TurnEnded(f"{name} was cancelled, as its turn or the agent is stopping.")
+    if isinstance(call.error, AgentStopping):
+        raise TurnEnded(f"The agent is stopping, so {name} was not started.") from call.error
+    if call.error is not None:
+        raise call.error
+    return cast(T, call.result)
+
+
+def _cancel_turn_work(
+    agent: Any, work: TaskWork, loop: asyncio.AbstractEventLoop, call: _TurnLoopCall[Any], name: str
+) -> None:
+    """Cancel ``call`` on its loop and wait a bounded time for it to end (``run_on_turn_loop``)."""
+
+    try:
+        loop.call_soon_threadsafe(call.cancel)
+    except RuntimeError:  # the loop closed; nothing runs on it any more
+        return
+    if loop.is_running() and call.ended.wait(TURN_WORK_CANCEL_GRACE_SECONDS):
+        return
+    logger.warning(
+        "Work for a stopped model turn did not end within its grace period after it was cancelled. "
+        "event=turn_work_cancel_unconfirmed agent_id=%s task_id=%s work_name=%s grace_seconds=%s loop_running=%s",
+        getattr(agent, "id", None),
+        work.task_id,
+        name,
+        TURN_WORK_CANCEL_GRACE_SECONDS,
+        loop.is_running(),
+    )
+
+
 def pin_turn_strands(agent: Any) -> Any:
     """The Strands parts the bound turn calls, taking new ones after a model rebuild.
 
@@ -109,10 +279,15 @@ def pin_turn_strands(agent: Any) -> Any:
 
 
 __all__ = [
+    "TURN_POLL_SECONDS",
+    "TURN_WORK_CANCEL_GRACE_SECONDS",
+    "TurnEnded",
     "end_turn",
     "executing_task_ids",
     "pin_turn_strands",
+    "run_on_turn_loop",
     "running_turn_task_ids",
     "running_turn_works",
     "start_turn",
+    "turn_has_ended",
 ]
