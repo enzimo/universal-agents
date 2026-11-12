@@ -1170,7 +1170,7 @@ async def test_every_list_of_hosted_servers_says_why_a_server_set_to_run_is_not_
 
 
 def _gone_when_read(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
-    """``target`` disappears just as it is read, as when the broker clears or removes it during a list."""
+    """``target`` disappears just as it is read, as when another process clears or removes it during a list."""
 
     read_text = Path.read_text
 

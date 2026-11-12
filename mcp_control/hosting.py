@@ -354,10 +354,11 @@ _Record = TypeVar("_Record", bound=BaseModel)
 def _read_if_present(path: Path, model: type[_Record]) -> _Record | None:
     """The record stored in ``path``, or ``None`` when there is none.
 
-    The broker removes start failures and definitions while lists are being
-    read, without the readers taking the hosting lock, so a file can go away
-    after a check for it or after the folder was listed. Opening it is the only
-    check: a file that is gone means no record, never an error.
+    Other processes delete these files while lists are read (the broker clears
+    a start failure; the manager or the gateway removes a definition), and
+    readers do not take the hosting lock, so a file can go away after a check
+    for it or after the folder was listed. Opening it is the only check: a file
+    that is gone means no record, never an error.
     """
 
     try:
