@@ -7,6 +7,9 @@ on with the old one, which may hold another store or other credentials.
 
 A start that fails after launching its server stops and reaps that server: the caller never
 gets the process, so a server left running would keep the ports and refuse the next start.
+
+Every start appends to one startup log. Only lines written after this start began, and with
+this start's server's ``[<pid>] `` prefix, count; a start that overlaps it writes its own.
 """
 
 from __future__ import annotations
@@ -225,21 +228,89 @@ def test_the_consumer_check_stops_its_local_server_when_the_check_fails(
     assert f"event=local_nats_stop pid={server.pid}" in caplog.text
 
 
-class _Running:
+class _FakeServer:
+    """A server process as the readiness wait sees it: its pid and whether it has exited."""
+
+    def __init__(self, pid: int, returncode: int | None = None) -> None:
+        self.pid = pid
+        self.returncode = returncode
+
     def poll(self) -> int | None:
-        return None
+        return self.returncode
 
 
-def test_an_earlier_starts_ready_line_in_the_startup_log_does_not_count(tmp_path: Path) -> None:
-    log_path = tmp_path / "nats-server-startup.log"
-    log_path.write_text("[INF] Listening for client connections on 127.0.0.1:4222\n[INF] Server is ready\n")
+_LISTENING_LINE = "Listening for client connections on 127.0.0.1:4222"
+_READY_LINE = "Server is ready"
+_MONITOR_TAKEN_LINE = (
+    "Can't start monitoring: can't listen to the monitor port: "
+    "listen tcp 127.0.0.1:8222: bind: address already in use"
+)
 
-    with pytest.raises(RuntimeError, match="did not say it was ready"):
+
+def _line(pid: int, text: str) -> str:
+    """A startup log line as nats-server writes it: every line begins with ``[<pid>] ``."""
+
+    return f"[{pid}] 2026/11/12 01:46:30.900694 [INF] {text}\n"
+
+
+def _says_ready(server: _FakeServer, log_path: Path, offset: int = 0) -> bool:
+    """One readiness check of the startup log, with no timeout to wait through."""
+
+    try:
         nats_service._wait_for_nats_ready(
-            _Running(),  # type: ignore[arg-type]
+            server,  # type: ignore[arg-type]
             logger=_LOGGER,
-            service_root=tmp_path,
+            service_root=log_path.parent,
             startup_log_path=log_path,
-            offset=log_path.stat().st_size,
-            timeout_seconds=0.5,
+            offset=offset,
+            timeout_seconds=0,
         )
+    except RuntimeError as not_ready:
+        if "did not say it was ready" not in str(not_ready):
+            raise
+        return False
+    return True
+
+
+def test_an_earlier_starts_ready_lines_in_the_startup_log_do_not_count(tmp_path: Path) -> None:
+    # An earlier server with the pid this start's server now has: only the offset leaves its lines out.
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(111, _LISTENING_LINE) + _line(111, _READY_LINE))
+
+    assert not _says_ready(_FakeServer(111), log_path, offset=log_path.stat().st_size)
+    assert _says_ready(_FakeServer(111), log_path, offset=0)
+
+
+def test_an_overlapping_starts_ready_lines_after_the_offset_do_not_count(tmp_path: Path) -> None:
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(222, _LISTENING_LINE) + _line(222, _READY_LINE))
+
+    assert not _says_ready(_FakeServer(111), log_path)
+
+
+def test_interleaved_lines_count_only_when_one_server_wrote_both(tmp_path: Path) -> None:
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(111, _LISTENING_LINE) + _line(222, _READY_LINE))
+
+    assert not _says_ready(_FakeServer(111), log_path)
+    assert not _says_ready(_FakeServer(222), log_path)
+
+    with log_path.open("a") as log:
+        log.write(_line(111, _READY_LINE))
+    assert _says_ready(_FakeServer(111), log_path)
+    assert not _says_ready(_FakeServer(222), log_path)
+
+
+def test_an_overlapping_starts_port_error_is_not_reported_as_this_starts(tmp_path: Path) -> None:
+    log_path = tmp_path / "nats-server-startup.log"
+    log_path.write_text(_line(222, _MONITOR_TAKEN_LINE))
+
+    with pytest.raises(RuntimeError) as exited:
+        _says_ready(_FakeServer(111, returncode=1), log_path)
+    assert str(exited.value).startswith("NATS process exited before becoming ready with code 1")
+
+    # The same line from this start's own server is its refusal, naming the address it reported.
+    with log_path.open("a") as log:
+        log.write(_line(111, _MONITOR_TAKEN_LINE))
+    with pytest.raises(RuntimeError, match=r"cannot start: 127\.0\.0\.1:8222 is already in use"):
+        _says_ready(_FakeServer(111, returncode=1), log_path)

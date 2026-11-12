@@ -103,12 +103,22 @@ _READY = "Server is ready"
 _PORT_TAKEN = re.compile(r"listen tcp (\S+): bind: address already in use")
 
 
-def _startup_output(startup_log_path: Path, offset: int) -> str:
-    """What the server of this start wrote: the startup log is appended to on every start."""
+def _startup_output(startup_log_path: Path, offset: int, pid: int) -> str:
+    """The lines the server of this start wrote to the startup log every start appends to.
 
+    The offset drops what earlier starts wrote. A start of the same instance that overlaps
+    this one appends to the file at the same time, so its server's ready or "address
+    already in use" lines can follow the offset too. nats-server begins every log line
+    with ``[<pid>] ``, so only the lines of this start's server count. Lines without the
+    prefix (an error printed before the server's logger starts) matter only once the
+    server has exited, and that message carries the whole log tail.
+    """
+
+    prefix = f"[{pid}] "
     with startup_log_path.open("rb") as log:
         log.seek(offset)
-        return log.read().decode("utf-8", errors="replace")
+        text = log.read().decode("utf-8", errors="replace")
+    return "\n".join(line for line in text.splitlines() if line.startswith(prefix))
 
 
 def _wait_for_nats_ready(
@@ -126,12 +136,14 @@ def _wait_for_nats_ready(
     session, so one left over from an earlier start (a launcher that crashed, or a team
     still running) can keep the port; this start's server then stops with "address
     already in use", and the start must say so instead of going on with the old one.
+    Both the ready lines and the "address already in use" line count only when this
+    start's server wrote them (``_startup_output``).
     """
 
     deadline = time.time() + timeout_seconds
     while True:
         code = process.poll()
-        output = _startup_output(startup_log_path, offset)
+        output = _startup_output(startup_log_path, offset, process.pid)
         if code is not None:
             taken = _PORT_TAKEN.search(output)
             if taken is not None:
