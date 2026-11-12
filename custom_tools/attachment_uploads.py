@@ -12,6 +12,15 @@ Uploads are runtime records out of agents' reach (``state/uploads``): the file
 opened is the one the record names, and only when it is inside this
 instance's uploads folder. Results name a file by id, name, type, size and
 turn, never where it is stored.
+
+The tools read and copy an upload only through ``read_upload`` and
+``copy_upload``. Upload retention, a history clean-up or a person's removal
+delete uploads from the gateway's process, so a file found here can be gone by
+the time a tool reads it, and no lock spans the two processes. Opening the
+file is therefore the real check: its failure becomes ``UploadUnreadable``,
+whose result says "no longer stored" when the file was removed and gives a
+fixed message otherwise, never an operating-system error, which would name
+the storage path (its folder name carries chat identifiers).
 """
 
 from __future__ import annotations
@@ -20,7 +29,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, BinaryIO, Optional
 
 from custom_agents.access_runtime import verified_person_id
 from custom_agents.conversation_attachments import (
@@ -34,6 +43,7 @@ from custom_agents.conversation_attachments import (
     request_files,
 )
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_tools import file_access
 from custom_tools.runtime_context import bound_task_id, get_agent_ref
 from custom_tools.workspace_scope import runtime_layout
 
@@ -43,6 +53,7 @@ STATUS_ERROR = "error"
 STATUS_REMOTE_COPY_REQUIRED = "remote_copy_required"
 # What the team lead can do when this runtime has no copy of a file.
 REMOTE_COPY_ACTION = "Request a gateway-backed NATS Object Store mirror for this attachment."
+COPY_CHUNK_BYTES = 1024 * 1024
 
 
 def tool_result(status: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -129,22 +140,112 @@ def upload_by_id(attachment_id: str) -> OpenedUpload | dict[str, Any]:
             },
         )
     if location.state == UPLOAD_DELETED or location.path is None or size_bytes is None:
-        logger.info(
-            "A file the person sent is no longer stored. event=attachment_upload_deleted task_id=%s attachment_id=%s",
-            bound_task_id(),
-            found.attachment.attachment_id,
+        return _no_longer_stored(found)
+    return OpenedUpload(found, location.path, size_bytes)
+
+
+class UploadUnreadable(Exception):
+    """An upload found by id could not be read; ``result`` is the tool result to return instead.
+
+    Deliberately not an ``OSError``: the tools' handlers for files named by
+    path turn an ``OSError`` into its text, which would show the storage path.
+    """
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        super().__init__("A file the person sent could not be read.")
+        self.result = result
+
+
+def read_upload(upload: OpenedUpload, max_bytes: int) -> bytes:
+    """At most ``max_bytes`` bytes of the upload; ``UploadUnreadable`` when it cannot be read or is larger."""
+
+    with _opened(upload) as reader:
+        data = _read(upload, reader, max_bytes + 1)
+    if len(data) > max_bytes:
+        raise UploadUnreadable(
+            tool_result(
+                STATUS_ERROR,
+                {"error": f"The file is larger than {max_bytes} bytes.", "attachment": upload.summary()},
+            )
         )
-        return tool_result(
+    return data
+
+
+def copy_upload(upload: OpenedUpload, target: Path) -> Path:
+    """Copy the upload to ``target`` in the task's folders (``file_access.writable``); the copy's real path.
+
+    The upload is opened first, so a removed one creates nothing in the
+    task's folders, and a read failing part way leaves no partial file (the
+    writer replaces the target only when the block ends). Read failures raise
+    ``UploadUnreadable``; failures writing the target are raised unchanged.
+    """
+
+    with _opened(upload) as reader, file_access.writable(target) as (location, writer):
+        while chunk := _read(upload, reader, COPY_CHUNK_BYTES):
+            writer.write(chunk)
+    return location.path
+
+
+def _opened(upload: OpenedUpload) -> BinaryIO:
+    try:
+        return upload.path.open("rb")
+    except OSError as exc:
+        raise _unreadable(upload, exc) from None
+
+
+def _read(upload: OpenedUpload, reader: BinaryIO, size: int) -> bytes:
+    try:
+        return reader.read(size)
+    except OSError as exc:
+        raise _unreadable(upload, exc) from None
+
+
+def _unreadable(upload: OpenedUpload, exc: OSError) -> UploadUnreadable:
+    """The failure as the tools report it: removed means no longer stored; anything else, a fixed message."""
+
+    if isinstance(exc, FileNotFoundError):
+        return UploadUnreadable(_no_longer_stored(upload.sent))
+    # The error's text names the storage path, so only its type and number are logged.
+    logger.warning(
+        "A file the person sent could not be read. event=attachment_upload_unreadable task_id=%s "
+        "attachment_id=%s error_type=%s errno=%s",
+        bound_task_id(),
+        upload.attachment.attachment_id,
+        type(exc).__name__,
+        exc.errno,
+    )
+    return UploadUnreadable(
+        tool_result(
             STATUS_ERROR,
             {
                 "error": (
-                    "This file is no longer stored: files people send are kept only for the team's file "
-                    "retention period. Ask the person to send it again if it is still needed."
+                    "This file could not be read. Try again later; if it still fails, ask the person to "
+                    "send it again."
                 ),
-                "attachment": attachment_summary(found),
+                "attachment": upload.summary(),
             },
         )
-    return OpenedUpload(found, location.path, size_bytes)
+    )
+
+
+def _no_longer_stored(found: SentFile) -> dict[str, Any]:
+    """The result for a file removed from this instance (its retention ended, a clean-up or its person's removal)."""
+
+    logger.info(
+        "A file the person sent is no longer stored. event=attachment_upload_deleted task_id=%s attachment_id=%s",
+        bound_task_id(),
+        found.attachment.attachment_id,
+    )
+    return tool_result(
+        STATUS_ERROR,
+        {
+            "error": (
+                "This file is no longer stored: files people send are kept only for the team's file "
+                "retention period. Ask the person to send it again if it is still needed."
+            ),
+            "attachment": attachment_summary(found),
+        },
+    )
 
 
 def _size(path: Path) -> Optional[int]:

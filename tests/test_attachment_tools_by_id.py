@@ -8,18 +8,27 @@ calls them (through Strands' input validation) on a real task manager and a
 real SQLite conversation store, with the person taken from a gateway-signed
 task context. tests/test_conversation_attachment_followup.py covers the
 reported case (a photo opened in the next turn, as an image block).
+
+Upload retention, a history clean-up or a person's removal delete uploads
+from the gateway's process at any moment; the race tests change the stored
+file right after the real ``upload_by_id`` found it, before the tool reads it.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
+import custom_tools.attachment_uploads as attachment_uploads
+import custom_tools.local_media_context_tool as media_tool_module
+import custom_tools.user_attachment_tools as inspection_tool_module
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import _record_guidance_history
@@ -300,6 +309,131 @@ async def test_a_removed_upload_says_it_is_no_longer_stored(instance: _Instance)
         assert (status, blocks) == ("error", [])
         assert "no longer stored" in payload["error"] and "send it again" in payload["error"]
         assert payload["attachment"]["attachment_id"] == "att_photo" and "storage_refs" not in payload["attachment"]
+
+
+# The tool calls that read or copy a file the person sent.
+_READS: dict[str, tuple[Any, dict[str, Any]]] = {
+    "image": (load_local_media_for_model_context, {"attachment_id": "att_photo"}),
+    "document": (load_local_media_for_model_context, {"attachment_id": "att_notes"}),
+    "inspection": (inspect_user_attachment, {"attachment_id": "att_notes"}),
+    "copy": (inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True}),
+}
+
+
+def _change_after_check(monkeypatch: pytest.MonkeyPatch, change: Callable[[Path], None]) -> None:
+    """Run ``change`` on the stored file right after the real ``upload_by_id`` found it."""
+
+    found_by_id = attachment_uploads.upload_by_id
+
+    def racing(attachment_id: str) -> Any:
+        found = found_by_id(attachment_id)
+        assert not isinstance(found, dict)
+        change(found.path)
+        return found
+
+    for module in (media_tool_module, inspection_tool_module):
+        monkeypatch.setattr(module, "upload_by_id", racing)
+
+
+def _replace_with_folder(path: Path) -> None:
+    path.unlink()
+    path.mkdir()
+
+
+def _assert_names_no_storage(instance: _Instance, payload: dict[str, Any]) -> None:
+    shown = json.dumps(payload)
+    assert str(instance.layout.root) not in shown and "session_alice" not in shown and "storage_refs" not in shown
+
+
+def _files_in_person_folder(instance: _Instance) -> list[Path]:
+    """Every file in the person's folder (a copy, or a temporary one left behind)."""
+
+    return [path for path in instance.layout.person_dir(PERSON).rglob("*") if path.is_file()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", sorted(_READS))
+async def test_an_upload_removed_after_it_was_found_says_it_is_no_longer_stored(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    _change_after_check(monkeypatch, Path.unlink)
+    instance.use(ROOT)
+    tool, tool_input = _READS[call]
+
+    status, payload, blocks = await _call(tool, tool_input)
+
+    assert (status, blocks) == ("error", [])
+    assert "no longer stored" in payload["error"] and "send it again" in payload["error"]
+    assert payload["attachment"]["attachment_id"] == tool_input["attachment_id"]
+    _assert_names_no_storage(instance, payload)
+    assert _files_in_person_folder(instance) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", sorted(_READS))
+async def test_an_upload_that_cannot_be_read_gives_a_fixed_message_and_logs_no_path(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, call: str
+) -> None:
+    _change_after_check(monkeypatch, _replace_with_folder)  # opening it raises IsADirectoryError
+    instance.use(ROOT)
+    tool, tool_input = _READS[call]
+
+    with caplog.at_level(logging.INFO, logger="custom_tools.attachment_uploads"):
+        status, payload, blocks = await _call(tool, tool_input)
+
+    assert (status, blocks) == ("error", [])
+    assert payload["error"].startswith("This file could not be read.") and "send it again" in payload["error"]
+    assert payload["attachment"]["attachment_id"] == tool_input["attachment_id"]
+    _assert_names_no_storage(instance, payload)
+    assert _files_in_person_folder(instance) == []
+    [logged] = [record for record in caplog.records if "event=attachment_upload_unreadable" in record.getMessage()]
+    assert logged.levelno == logging.WARNING
+    assert f"task_id={ROOT} attachment_id={tool_input['attachment_id']} error_type=IsADirectoryError" in (
+        logged.getMessage()
+    )
+    assert str(instance.layout.root) not in logged.getMessage() and "session_alice" not in logged.getMessage()
+
+
+class _FailsAfterFirstRead:
+    """An upload's reader whose second read fails, as a disk error part way through a copy would."""
+
+    def __init__(self, reader: Any) -> None:
+        self._reader = reader
+        self._reads = 0
+
+    def __enter__(self) -> "_FailsAfterFirstRead":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._reader.close()
+
+    def read(self, size: int = -1) -> bytes:
+        self._reads += 1
+        if self._reads > 1:
+            raise OSError(errno.EIO, os.strerror(errno.EIO), self._reader.name)
+        return self._reader.read(size)
+
+
+@pytest.mark.asyncio
+async def test_a_copy_whose_read_fails_part_way_leaves_no_partial_file(
+    instance: _Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upload = instance.layout.uploads_dir / "session_alice" / "att_notes"
+    opened = Path.open
+
+    def failing_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        reader = opened(path, *args, **kwargs)
+        return _FailsAfterFirstRead(reader) if path == upload else reader
+
+    monkeypatch.setattr(attachment_uploads, "COPY_CHUNK_BYTES", 4)
+    monkeypatch.setattr(Path, "open", failing_open)
+    instance.use(ROOT)
+
+    status, payload, _ = await _call(inspect_user_attachment, {"attachment_id": "att_notes", "copy_to_workspace": True})
+
+    assert status == "error" and payload["error"].startswith("This file could not be read.")
+    _assert_names_no_storage(instance, payload)
+    assert _files_in_person_folder(instance) == []
 
 
 @pytest.mark.asyncio

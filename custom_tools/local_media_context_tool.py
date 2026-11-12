@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Optional
 from strands import tool
 
 from custom_tools import file_access
-from custom_tools.attachment_uploads import OpenedUpload, upload_by_id
+from custom_tools.attachment_uploads import UploadUnreadable, read_upload, upload_by_id
 from custom_tools.runtime_context import get_agent_ref
 
 
@@ -184,7 +184,9 @@ class _Media:
     person sent came with): its suffix decides the file's type, and it names a
     document block. ``named`` is how results name the file: its path, or the
     attachment_id of a file the person sent, never where that is stored.
-    ``read`` returns at most ``max_bytes`` bytes of the file that was checked.
+    ``read`` returns at most ``max_bytes`` bytes of the file that was checked;
+    for a file the person sent it raises ``UploadUnreadable`` with the result
+    to return when the file cannot be read.
     """
 
     name: Path
@@ -230,18 +232,8 @@ def _media_by_id(attachment_id: str, content_type: str) -> _Media | Dict[str, An
         content_type=_content_type(name, explicit_content_type=content_type or upload.attachment.content_type),
         size_bytes=upload.size_bytes,
         named={"attachment_id": upload.attachment.attachment_id},
-        read=lambda max_bytes: _read_upload(upload, max_bytes),
+        read=lambda max_bytes: read_upload(upload, max_bytes),
     )
-
-
-def _read_upload(upload: OpenedUpload, max_bytes: int) -> bytes:
-    """At most ``max_bytes`` bytes of an upload (a runtime record out of agents' reach)."""
-
-    with upload.path.open("rb") as reader:
-        data = reader.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise OSError(f"The file is larger than {max_bytes} bytes.")
-    return data
 
 
 @tool
@@ -325,6 +317,9 @@ def load_local_media_for_model_context(
 
     try:
         data = media.read(requested_max_bytes)
+    except UploadUnreadable as exc:
+        # A file the person sent, removed or unreadable after it was found: a result that names no path.
+        return exc.result
     except (OSError, file_access.PathPolicyError) as exc:
         return _error({"error": str(exc), **media.named})
     size_bytes = len(data)
