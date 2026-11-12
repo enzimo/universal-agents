@@ -20,6 +20,11 @@ from custom_agents.context_engine.thread_renderer import (
     BudgetedThreadContextRenderer,
     BudgetedThreadContextRendererConfig,
 )
+from custom_agents.conversation_attachments import (
+    CONVERSATION_ATTACHMENTS_SECTION,
+    TaskAttachments,
+    inventory_text,
+)
 from custom_agents.conversation_compaction.base import CompactionResult
 from custom_agents.filtered_tool_result_context import (
     FilteredToolResultConversationManager,
@@ -28,6 +33,7 @@ from custom_agents.filtered_tool_result_context import (
 from custom_agents.instance_delivery_context import build_instance_delivery_context
 from custom_agents.output_retention import SavedOutputRetention
 from custom_agents.prompt_context_sanitization import (
+    CURRENT_REQUEST_ATTACHMENT_LIMIT,
     render_current_request_context,
     render_incoming_message_summary,
 )
@@ -321,11 +327,14 @@ class DefaultContextEngine:
                 if markdown_summary:
                     markdown_summary = f"Task History:\n{markdown_summary}"
 
+                # Built before the thread so the thread's budget reserves it; placed after the thread.
+                attachment_inventory = self._conversation_attachments_context(request, degraded_sections)
+
                 if request.incoming_content.parent_task_id is None and getattr(request.incoming_meta, "conversation_id", None):
                     available_thread_tokens = self._available_thread_tokens(
                         sections=sections,
                         incoming_message_summary=self._render_incoming_message_context(request),
-                        pending_pinned_texts=[execution_digest, markdown_summary],
+                        pending_pinned_texts=[execution_digest, markdown_summary, attachment_inventory],
                     )
                     rendered_thread = self.thread_renderer.render(
                         store=self.conversation_store,
@@ -346,6 +355,18 @@ class DefaultContextEngine:
                         pinned=False,
                         source="BudgetedThreadContextRenderer.render",
                     )
+
+                # Pinned and not in the default overflow degrade list: it is
+                # bounded and exists so earlier files outlast trimmed history.
+                self._append_prompt_section(
+                    sections,
+                    prompt_parts,
+                    name=CONVERSATION_ATTACHMENTS_SECTION,
+                    text=attachment_inventory,
+                    priority=55,
+                    pinned=True,
+                    source="conversation_attachments.inventory_text",
+                )
 
                 self._append_prompt_section(
                     sections,
@@ -604,6 +625,34 @@ class DefaultContextEngine:
         reserved += sum(section.estimated_tokens for section in sections)
         reserved += sum(self.estimate_tokens(text) for text in pending_pinned_texts if text)
         return max(0, soft_limit - reserved)
+
+    def _conversation_attachments_context(self, request: ContextAssemblyRequest, degraded_sections: set[str]) -> str:
+        """The list of earlier files the request's task may use (``conversation_attachments.inventory_text``).
+
+        Read for the task the runtime runs (``execution_task_id``), with the
+        conversation and person recorded at its admission, so the list follows
+        the same rules as opening a file by id. Files the current request lists
+        itself are left out. Empty when overflow recovery drops the section
+        (only when an operator names it in ``degrade_sections``).
+        """
+
+        if CONVERSATION_ATTACHMENTS_SECTION in degraded_sections:
+            return ""
+        task_id = request.execution_task_id
+        task_info = self.task_manager.get_task_info(task_id) if task_id else None
+        if task_info is None:
+            self.logger.warning(
+                "[%s] The task being prompted has no record, so its earlier files are not listed. "
+                "event=conversation_attachments_task_missing task_id=%s",
+                self.agent_id,
+                task_id or "-",
+            )
+            return ""
+        listed_now = list(getattr(request.incoming_content, "attachments", None) or [])
+        return inventory_text(
+            TaskAttachments.load(task_info, self.conversation_store),
+            exclude_ids=[attachment.attachment_id for attachment in listed_now[:CURRENT_REQUEST_ATTACHMENT_LIMIT]],
+        )
 
     def _tool_setup_context(self, request: ContextAssemblyRequest, degraded_sections: set[str]) -> str:
         """TeamLead's line of the person's known tool setup states (empty when degraded or for others)."""

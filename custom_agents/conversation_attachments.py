@@ -92,8 +92,14 @@ from storage.turn_attachments import TurnAttachment, attachment_summary
 
 logger = logging.getLogger(__name__)
 
-# The most files the prompt lists and an error offers as choices (approved bound).
+# The most files the prompt lists, an error offers as choices and a conversation
+# slice shows per turn (approved bound).
 INVENTORY_LIMIT = 20
+# The prompt section listing earlier files (``inventory_text``); its name in
+# context accounting and in ``overflow_recovery.degrade_sections`` is
+# ``CONVERSATION_ATTACHMENTS_SECTION``.
+CONVERSATION_ATTACHMENTS_HEADING = "Conversation Attachments:"
+CONVERSATION_ATTACHMENTS_SECTION = "conversation_attachments"
 # The task-history event that records the files a task accepted with a
 # guidance or an answer, and the ``details`` key holding them (full
 # ``UserTaskAttachment`` dumps). Written only by ``task_files_details``.
@@ -247,27 +253,75 @@ class TaskAttachments:
 
         ``exclude_ids`` are left out (files listed elsewhere, such as the
         current request's). The store is asked for at most ``limit`` plus the
-        excluded count plus one files, never the whole conversation.
+        excluded count plus one files, never the whole conversation. With
+        ``limit`` 0 it only says whether there are any.
         """
 
-        if not self.conversation_id or limit <= 0:
+        if not self.conversation_id:
             return [], False
+        limit = max(limit, 0)
         excluded = set(exclude_ids)
         listed = self.store.list_turn_attachments(self.conversation_id, limit=limit + len(excluded) + 1)
         kept = [entry for entry in listed if entry.attachment.attachment_id not in excluded]
         return kept[:limit], len(kept) > limit
 
-    def choices(self, limit: int = INVENTORY_LIMIT) -> list[dict[str, Any]]:
-        """Descriptive summaries of the files the task may use, newest first: its own, then its conversation's."""
+    def inventory(
+        self, *, limit: int = INVENTORY_LIMIT, exclude_ids: Iterable[str] = ()
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Descriptive summaries of the files the task may use, newest first, and whether there are more.
 
+        Its own files come first (they arrived with the current request, so
+        they are the newest), then the files earlier turns of its conversation
+        received. ``exclude_ids`` are left out, such as the files the prompt
+        already lists as the current request's. Summaries never carry storage
+        references (``storage.turn_attachments.TURN_ATTACHMENT_SUMMARY_FIELDS``).
+        """
+
+        excluded = set(exclude_ids)
         own = [
             {**attachment_summary(attachment), "turn_index": None, "task_id": self.task_id}
             for attachment in reversed(self.own)
-        ][:limit]
-        earlier, _more = self.conversation_files(
-            limit=limit - len(own), exclude_ids=[attachment.attachment_id for attachment in self.own]
+            if attachment.attachment_id not in excluded
+        ]
+        listed = own[:limit]
+        earlier, more_earlier = self.conversation_files(
+            limit=limit - len(listed),
+            exclude_ids=[*excluded, *(attachment.attachment_id for attachment in self.own)],
         )
-        return own + [entry.summary() for entry in earlier]
+        return listed + [entry.summary() for entry in earlier], len(own) > limit or more_earlier
+
+    def choices(self, limit: int = INVENTORY_LIMIT) -> list[dict[str, Any]]:
+        """Descriptive summaries of the files the task may use, newest first: its own, then its conversation's."""
+
+        return self.inventory(limit=limit)[0]
+
+
+def inventory_text(scope: TaskAttachments, *, exclude_ids: Iterable[str] = ()) -> str:
+    """The prompt's list of earlier files the task may use, or "" when there are none.
+
+    At most ``INVENTORY_LIMIT`` files, newest first, from ``scope.inventory``
+    (``exclude_ids``: the files the prompt lists as the current request's).
+    Built from stored records, so it does not depend on how much of the
+    conversation's text the prompt keeps. Names files by id, name, type and
+    size only.
+    """
+
+    files, more = scope.inventory(exclude_ids=exclude_ids)
+    if not files:
+        return ""
+    lines = [
+        CONVERSATION_ATTACHMENTS_HEADING,
+        "Files sent earlier in this conversation or while this request ran, newest first. Open one by its "
+        "attachment_id with inspect_user_attachment, or load_local_media_for_model_context to see an image or "
+        "document.",
+    ]
+    lines.extend(f"- {describe_file(item)}" for item in files)
+    if more:
+        lines.append(
+            f"Only the newest {INVENTORY_LIMIT} are listed. get_conversation_context_slice shows the files of "
+            "each earlier turn."
+        )
+    return "\n".join(lines)
 
 
 def _own_files(task: Any) -> tuple[UserTaskAttachment, ...]:
@@ -625,6 +679,8 @@ def _log_outside(
 
 
 __all__ = [
+    "CONVERSATION_ATTACHMENTS_HEADING",
+    "CONVERSATION_ATTACHMENTS_SECTION",
     "INVENTORY_LIMIT",
     "TASK_FILES_EVENT",
     "TASK_FILES_KEY",
@@ -638,6 +694,7 @@ __all__ = [
     "UnavailableUpload",
     "UploadFolders",
     "describe_file",
+    "inventory_text",
     "keep_upload_files",
     "locate_upload",
     "log_refused_files",

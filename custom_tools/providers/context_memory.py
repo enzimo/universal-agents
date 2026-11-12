@@ -13,6 +13,7 @@ from custom_agents.after_action_report_knowledge import (
     lesson_problem,
     save_review_lesson,
 )
+from custom_agents.conversation_attachments import INVENTORY_LIMIT
 from custom_agents.output_retention import SavedOutputRetention, with_deleted_outputs_marked
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.enums import AfterActionReportReviewStatus
@@ -189,6 +190,9 @@ def _conversation_turn_summary_payload(
     )
     artifacts = turn.get("tool_artifact_manifest") or []
     artifact_summary = turn.get("artifact_summary") or []
+    # The turn's files, descriptive fields only (the store's turn rows carry no
+    # storage references); a model opens one by its attachment_id.
+    attachments = turn.get("attachments") or []
     return {
         "turn_index": turn.get("turn_index"),
         "task_id": turn.get("task_id"),
@@ -208,6 +212,8 @@ def _conversation_turn_summary_payload(
         "has_full_user_text": bool(user_text),
         "has_full_assistant_text": bool(turn.get("final_answer_text")),
         "artifact_count": len(artifacts) if isinstance(artifacts, list) else 0,
+        "attachments": attachments[:INVENTORY_LIMIT],
+        "attachment_count": len(attachments),
     }
 
 
@@ -444,7 +450,10 @@ def get_conversation_context_slice(
     """
     Retrieve a bounded slice of one conversation thread for context recovery.
 
-    `mode="summary"` returns compact per-turn summaries and identifiers.
+    `mode="summary"` returns compact per-turn summaries and identifiers,
+    including each turn's files (`attachments`: id, name, type and size, at
+    most 20 per turn; `attachment_count`: how many it received). Open one with
+    inspect_user_attachment by its attachment_id.
     `mode="full"` returns the full stored turn rows. The limit is capped at 50.
     """
     agent = get_agent_ref()

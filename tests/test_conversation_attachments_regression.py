@@ -225,7 +225,6 @@ async def test_the_follow_up_scenario_is_set_up_as_a_real_second_turn(follow_up:
     assert "What plant is this?" in _sections(_follow_up_prompt(follow_up.lead))["conversation_thread_context"]
 
 
-@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: earlier uploads are not listed in follow-up turns")
 @pytest.mark.asyncio
 async def test_the_follow_up_prompt_lists_the_photo_from_turn_one(follow_up: _FollowUp) -> None:
     assembly = _follow_up_prompt(follow_up.lead)
@@ -262,7 +261,6 @@ async def test_the_follow_up_turn_loads_the_photo_for_the_model_by_id(follow_up:
     assert str(follow_up.upload) not in label["text"]
 
 
-@pytest.mark.xfail(strict=True, raises=_MISSING_BEHAVIOR, reason="regression: conversation turns do not record their uploads")
 @pytest.mark.asyncio
 async def test_the_conversation_slice_shows_the_photo_on_turn_one(follow_up: _FollowUp) -> None:
     text = get_conversation_context_slice._tool_func(conversation_id=CONVERSATION, mode="summary")

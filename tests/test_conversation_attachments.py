@@ -19,6 +19,7 @@ import pytest
 
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents.conversation_attachments import (
+    CONVERSATION_ATTACHMENTS_HEADING,
     INVENTORY_LIMIT,
     TASK_FILES_EVENT,
     TASK_FILES_KEY,
@@ -31,6 +32,7 @@ from custom_agents.conversation_attachments import (
     TaskAttachments,
     UnavailableUpload,
     UploadFolders,
+    inventory_text,
     keep_upload_files,
     locate_upload,
     task_files_details,
@@ -287,6 +289,51 @@ def test_the_conversation_list_is_bounded_and_skips_files_listed_elsewhere(layou
     assert (_ids(files), has_more) == (expected, more)
     # Asked for the limit, plus the one excluded file, plus one to tell whether there are more.
     assert counting.limits == [INVENTORY_LIMIT + 2]
+
+
+def test_the_inventory_lists_own_files_then_earlier_ones_and_leaves_out_excluded_ones(layout, store) -> None:
+    _thread(store)
+    photo = _upload(layout.uploads_dir, "att_photo", name="garden plant.png")
+    _turn(store, "task_first", [photo])
+    request_file, guidance_file = _upload(layout.uploads_dir, "att_request"), _upload(layout.uploads_dir, "att_guidance")
+    # The current turn's row holds its own files too; they are listed once, as the task's own.
+    _turn(store, CURRENT, [request_file, guidance_file])
+    scope = TaskAttachments.load(_task_info(attachments=[request_file], history=[_files(guidance_file)]), store)
+
+    files, more = scope.inventory(exclude_ids=["att_request"])
+
+    assert ([item["attachment_id"] for item in files], more) == (["att_guidance", "att_photo"], False)
+    text = inventory_text(scope, exclude_ids=["att_request"])
+    assert text.splitlines()[0] == CONVERSATION_ATTACHMENTS_HEADING
+    assert "- `att_guidance` att_guidance.png (image/png, image, 10 bytes; sent with this task)" in text
+    assert "- `att_photo` garden plant.png (image/png, image, 10 bytes; turn 1, task task_first)" in text
+    assert "att_request" not in text and "Only the newest" not in text
+    assert str(layout.root) not in text
+
+
+def test_the_inventory_says_when_older_files_are_not_listed(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_first", [_upload(layout.uploads_dir, "att_photo")])
+    own = [_upload(layout.uploads_dir, f"att_own_{index:02d}") for index in range(INVENTORY_LIMIT)]
+    # The task's own files fill the list; the earlier photo still counts as one more.
+    scope = TaskAttachments.load(_task_info(history=[_files(*own)]), store)
+
+    files, more = scope.inventory()
+
+    assert len(files) == INVENTORY_LIMIT and more is True
+    assert "att_photo" not in [item["attachment_id"] for item in files]
+    assert f"Only the newest {INVENTORY_LIMIT} are listed" in inventory_text(scope)
+
+
+def test_no_inventory_without_files_beyond_the_current_requests(layout, store) -> None:
+    _thread(store)
+    _turn(store, "task_first", [_upload(layout.uploads_dir, "att_photo")])
+    given = _upload(layout.uploads_dir, "att_given")
+
+    # A delegated task's only files are its own request's; the prompt lists them already.
+    delegated = TaskAttachments.load(_task_info(attachments=[given], parent_task_id="task_parent"), store)
+    assert inventory_text(delegated, exclude_ids=["att_given"]) == ""
+    assert inventory_text(TaskAttachments.load(_task_info(conversation_id=None), store)) == ""
 
 
 def test_an_unknown_id_lists_at_most_twenty_choices_without_storage_paths(layout, store) -> None:

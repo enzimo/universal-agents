@@ -8,6 +8,7 @@ from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents.conversation_delivery_states import (
     DELIVERY_STATE_NOTIFICATION_QUEUED,
 )
+from custom_agents.task_records import TaskInfo
 from custom_agents.context_engine import (
     ContextAssemblyRequest,
     ContextBudgetExceededError,
@@ -61,6 +62,12 @@ class _TaskManager:
 
     def render_earlier_turn_work_markdown(self, task_id) -> str:
         return ""
+
+    def get_task_info(self, task_id: str) -> TaskInfo:
+        """The task as admitted, which the engine reads earlier files from: none here, and no conversation."""
+
+        task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="")
+        return TaskInfo(task, MessageHeader(), MessageMeta(), owner_person_id=None)
 
 
 class _ConversationCompactor:
