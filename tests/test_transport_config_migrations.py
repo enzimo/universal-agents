@@ -434,21 +434,34 @@ def test_current_schemas_refuse_a_removed_mcp_folder_by_name(tmp_path: Path, pat
 PINNED_0_9_CONFIG = Path(__file__).parent / "fixtures" / "pinned_memory" / "main_instance_config.yaml"
 
 
-def test_upgrading_the_pinned_old_instance_config_removes_the_presence_setting() -> None:
-    """The fixture is an earlier version's file, kept byte for byte; it holds the setting."""
+CONCURRENCY_STEP = "13 -> 14: remove the obsolete per-agent concurrency setting; agent.max_concurrent_top_level_tasks removed"
+
+
+def test_upgrading_the_pinned_old_instance_config_removes_the_retired_settings() -> None:
+    """The fixture is an earlier version's file (schema 9), kept byte for byte; it holds both settings.
+
+    The whole chain runs from 9. The file itself does not load: it also holds settings of the
+    old permission system, which this version refuses by name (the fixture's header).
+    """
 
     raw = yaml.safe_load(PINNED_0_9_CONFIG.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 9
     assert raw["transport"]["presence_max_age_seconds"] == 600.0
+    assert raw["agent"]["max_concurrent_top_level_tasks"] == 1
 
     migrated, steps = _migrate_instance_config_dict(raw, source_path=PINNED_0_9_CONFIG)
 
     assert migrated["schema_version"] == INSTANCE_CONFIG_SCHEMA_VERSION
     assert "presence_max_age_seconds" not in migrated["transport"]
+    assert "max_concurrent_top_level_tasks" not in migrated["agent"]
+    assert migrated["agent"]["max_queued_top_level_tasks"] == raw["agent"]["max_queued_top_level_tasks"]
     assert "12 -> 13: the presence stream was removed; transport.presence_max_age_seconds removed" in steps
+    assert CONCURRENCY_STEP in steps
     assert raw["transport"]["presence_max_age_seconds"] == 600.0, "the caller's mapping is not changed"
+    assert raw["agent"]["max_concurrent_top_level_tasks"] == 1, "the caller's mapping is not changed"
 
 
-def test_upgrading_a_0_9_instance_config_file_removes_the_setting_and_keeps_a_backup(tmp_path: Path) -> None:
+def test_upgrading_a_0_9_instance_config_file_removes_the_retired_settings_and_keeps_a_backup(tmp_path: Path) -> None:
     from tests.pinned_memory_support import zero_nine_instance
 
     path = zero_nine_instance(tmp_path, "alpha", "team_a")
@@ -457,9 +470,16 @@ def test_upgrading_a_0_9_instance_config_file_removes_the_setting_and_keeps_a_ba
 
     assert (result.original_version, result.migrated_version) == (12, INSTANCE_CONFIG_SCHEMA_VERSION)
     assert any(step.startswith("12 -> 13: the presence stream was removed;") for step in result.applied_steps)
-    assert "presence_max_age_seconds" not in yaml.safe_load(path.read_text(encoding="utf-8"))["transport"]
-    assert yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))["transport"]["presence_max_age_seconds"] == 600.0
-    assert GatewayInstanceConfig.load(path).transport.work_max_age_seconds == 604800.0
+    assert CONCURRENCY_STEP in result.applied_steps
+    upgraded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    backup = yaml.safe_load(result.backup_path.read_text(encoding="utf-8"))
+    assert "presence_max_age_seconds" not in upgraded["transport"]
+    assert "max_concurrent_top_level_tasks" not in upgraded["agent"]
+    assert backup["transport"]["presence_max_age_seconds"] == 600.0
+    assert backup["agent"]["max_concurrent_top_level_tasks"] == 1
+    loaded = GatewayInstanceConfig.load(path)  # the current format, which refuses either setting by name
+    assert loaded.transport.work_max_age_seconds == 604800.0
+    assert "max_concurrent_top_level_tasks" not in loaded.agent.model_dump()
 
 
 def test_upgrading_a_config_yaml_removes_the_setting_and_keeps_a_backup(tmp_path: Path) -> None:

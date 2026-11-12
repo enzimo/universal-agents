@@ -405,7 +405,8 @@ def test_choosing_environment_secrets_writes_no_team_env(tmp_path: Path) -> None
 def test_a_0_9_instance_exports_no_retired_setting_and_a_reviewed_import_refuses_nothing(
     tmp_path: Path, upgraded_first: bool
 ) -> None:
-    """A 0.9 instance holds transport.presence_max_age_seconds (message contract step 7d removed it).
+    """A 0.9 instance holds transport.presence_max_age_seconds (message contract step 7d removed it)
+    and agent.max_concurrent_top_level_tasks (0.9.4 onboarding wrote it; 0.10 removed it).
 
     Upgraded first: the launcher rewrote the file at its first start. Not upgraded: the export
     ran after the code was upgraded, before any start; the export reads the file as this
