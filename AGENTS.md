@@ -41,6 +41,7 @@ For each change, define a verification plan that matches that strategy. Generate
 - For any non-trivial task, form a short execution plan and a verification plan before editing.
 - Re-plan when new evidence invalidates the current approach.
 - Prefer simple, durable solutions over clever patches.
+- Git stashes are shared by every worktree. During parallel work, use commits or uniquely named patch files instead of git stash.
 
 ## Intent is king
 - Make sure you execute to intent rather than to your written plan. If you find during implementation of the plan that it is drifting from the intent, stop and adjust your approach. Executing to intent is **paramount**. We must make sure to verify that the intent is clear and whenever there are deviations in code or plan, to communicate with the user to clarify intent and to change the plan + code to execute to intent.

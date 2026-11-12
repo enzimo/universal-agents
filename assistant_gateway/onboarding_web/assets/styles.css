@@ -5984,11 +5984,13 @@ body.is-theme-customizing {
   color: var(--status-not-running-ink);
 }
 
-.objective-card .schedule-not-running {
+.objective-card .schedule-not-running,
+.objective-card .hosted-server-not-started {
   margin: 0;
 }
 
-.schedule-not-running-text {
+.schedule-not-running-text,
+.hosted-server-not-started-text {
   display: grid;
   gap: 4px;
   min-width: 0;

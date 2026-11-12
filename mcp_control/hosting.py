@@ -16,7 +16,7 @@ import logging
 import os
 from pathlib import Path
 import re
-from typing import Any, Iterator
+from typing import Any, Iterator, TypeVar
 
 from jsonschema.validators import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -31,6 +31,10 @@ from runtime_settings.instance_layout import InstanceLayout
 
 LOGGER = logging.getLogger(__name__)
 HOSTED_MCP_SCHEMA_VERSION = 1
+# The broker's answer when a hosted server's sidecar could not start
+# (``HostedMCPStartError``): "temporarily unavailable", with this reason code.
+HOSTED_MCP_START_FAILED = "hosted_mcp_start_failed"
+HOSTED_MCP_START_FAILED_STATUS = 503
 _NAME = re.compile(r"[a-z][a-z0-9_.-]{0,119}\Z")
 _TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,127}\Z")
 
@@ -188,14 +192,85 @@ class MCPHostedServerDefinitionV1(BaseModel):
         )
 
 
+class HostedMCPStartFailureV1(BaseModel):
+    """Why the broker could not start the sidecar of a server set to run, and when it last tried.
+
+    The broker writes it beside the server's running state and deletes it when
+    a start succeeds or the server is stopped; the server stays set to run, so
+    the broker tries again at its next start and when an agent uses the tools.
+    A missing file means no failure, so instances that never wrote one need no
+    upgrade step.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = 1
+    hosted_server_id: str = Field(min_length=1, max_length=240)
+    reason: str = Field(min_length=1, max_length=4000)
+    failed_at: datetime
+
+
+class HostedMCPStartError(RuntimeError):
+    """A hosted MCP server's sidecar did not start; the message says why and what to do.
+
+    A start failure is not a refusal: what failed is the server's process, for
+    example on a port another process holds, not anyone's access. Nothing about
+    access or the connection changes when someone frees that port, so a caller
+    that waits for such a change would wait forever.
+    The broker therefore answers it with ``HOSTED_MCP_START_FAILED_STATUS``
+    (503) and ``HOSTED_MCP_START_FAILED``, never with a refusal's 403, and the
+    agents' loader (``custom_agents.mcp_server_tools``) tries the server again
+    on its schedule, as it does a server that does not answer. Both clients of
+    the broker (the agent's ``BrokeredMCPClient`` and the manager's
+    ``MCPHostingAdministration``) raise this error again from that answer, so
+    agents, Web Chat and ``/mcp`` all show the same reason. It is a
+    ``RuntimeError`` so those callers' existing handling shows its text.
+    """
+
+    def broker_answer(self) -> dict[str, str]:
+        """The JSON body of the broker's answer: the reason, and the code that marks a start failure."""
+
+        return {"error": str(self), "reason_code": HOSTED_MCP_START_FAILED}
+
+    @classmethod
+    def from_broker_answer(cls, status_code: int, body: str) -> "HostedMCPStartError | None":
+        """The error again from the broker's answer, or ``None`` when the answer is not a start failure.
+
+        Only the 503 that carries ``HOSTED_MCP_START_FAILED`` counts: any other
+        503 (for example from a proxy) stays an ordinary HTTP error.
+        """
+
+        if status_code != HOSTED_MCP_START_FAILED_STATUS:
+            return None
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return None
+        if not isinstance(payload, dict) or payload.get("reason_code") != HOSTED_MCP_START_FAILED:
+            return None
+        return cls(str(payload.get("error") or "").strip() or "The hosted MCP server could not start.")
+
+
+def start_failure_sentence(reason: str, failed_at: datetime) -> str:
+    """The plain words lists of hosted servers use for a server set to run whose sidecar did not start.
+
+    It takes plain values so the agents' list, which has a listed row, and
+    ``/mcp``, which has the gateway's copy of that row, say the same thing.
+    """
+
+    return f"Set to run, but it could not start: {reason} (last tried {failed_at:%Y-%m-%d %H:%M} UTC)"
+
+
 class MCPHostingPaths(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
+    instance_root: Path
     definitions: Path
     removed: Path
     state: Path
     tokens: Path
     logs: Path
+    start_failures: Path
     lock: Path
 
     def ensure(self) -> None:
@@ -205,8 +280,19 @@ class MCPHostingPaths(BaseModel):
             self.state,
             self.tokens,
             self.logs,
+            self.start_failures,
         ):
             path.mkdir(parents=True, mode=0o700, exist_ok=True)
+
+    def shown(self, path: Path) -> str:
+        """A hosting file as reasons name it: relative to the instance root.
+
+        Start-failure reasons reach agents' models and every person they work
+        for, so they never carry the host's absolute paths (account names and
+        the host's folder layout); the broker's own log has those.
+        """
+
+        return path.relative_to(self.instance_root).as_posix()
 
 
 def resolve_mcp_hosting_paths(config: Any) -> MCPHostingPaths:
@@ -216,11 +302,13 @@ def resolve_mcp_hosting_paths(config: Any) -> MCPHostingPaths:
     definitions = layout.mcp_hosting_definitions_dir
     state = layout.mcp_hosting_state_dir
     return MCPHostingPaths(
+        instance_root=layout.root,
         definitions=definitions,
         removed=state / "removed",
         state=state,
         tokens=state / "tokens",
         logs=state / "logs",
+        start_failures=state / "start-failures",
         lock=state / ".hosting.lock",
     )
 
@@ -260,22 +348,46 @@ def _atomic_json(path: Path, value: BaseModel) -> None:
         temporary.unlink(missing_ok=True)
 
 
+_Record = TypeVar("_Record", bound=BaseModel)
+
+
+def _read_if_present(path: Path, model: type[_Record]) -> _Record | None:
+    """The record stored in ``path``, or ``None`` when there is none.
+
+    Other processes delete these files while lists are read (the broker clears
+    a start failure; the manager or the gateway removes a definition), and
+    readers do not take the hosting lock, so a file can go away after a check
+    for it or after the folder was listed. Opening it is the only check: a file
+    that is gone means no record, never an error.
+    """
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return model.model_validate_json(text)
+
+
 class MCPHostedServerStore:
     def __init__(self, paths: MCPHostingPaths) -> None:
         self.paths = paths
         paths.ensure()
 
     def list_definitions(self) -> tuple[MCPHostedServerDefinitionV1, ...]:
-        return tuple(
-            MCPHostedServerDefinitionV1.model_validate_json(path.read_text(encoding="utf-8"))
+        """Every installed definition; one removed after the folder was listed is left out."""
+
+        found = (
+            _read_if_present(path, MCPHostedServerDefinitionV1)
             for path in sorted(self.paths.definitions.glob("mcp_host_*.json"))
         )
+        return tuple(definition for definition in found if definition is not None)
 
     def require(self, hosted_server_id: str) -> MCPHostedServerDefinitionV1:
         path = self.paths.definitions / f"{str(hosted_server_id or '').strip()}.json"
-        if not path.is_file():
+        definition = _read_if_present(path, MCPHostedServerDefinitionV1)
+        if definition is None:
             raise FileNotFoundError(f"Hosted MCP definition not found: {hosted_server_id}")
-        return MCPHostedServerDefinitionV1.model_validate_json(path.read_text(encoding="utf-8"))
+        return definition
 
     def save(self, definition: MCPHostedServerDefinitionV1) -> MCPHostedServerDefinitionV1:
         validated = MCPHostedServerDefinitionV1.model_validate(definition)
@@ -331,6 +443,28 @@ class MCPHostedServerStore:
             (self.paths.definitions / f"{removed.hosted_server_id}.json").unlink()
         return removed
 
+    def _start_failure_path(self, hosted_server_id: str) -> Path:
+        return self.paths.start_failures / f"{str(hosted_server_id or '').strip()}.json"
+
+    def record_start_failure(self, hosted_server_id: str, reason: str, *, at: datetime) -> HostedMCPStartFailureV1:
+        """Keep why the server's sidecar could not start (the broker, for a server set to run)."""
+
+        failure = HostedMCPStartFailureV1(hosted_server_id=hosted_server_id, reason=reason[:4000], failed_at=at)
+        with _lock(self.paths):
+            _atomic_json(self._start_failure_path(hosted_server_id), failure)
+        return failure
+
+    def clear_start_failure(self, hosted_server_id: str) -> None:
+        """Forget the last start failure: the sidecar started, or the server was stopped."""
+
+        with _lock(self.paths):
+            self._start_failure_path(hosted_server_id).unlink(missing_ok=True)
+
+    def start_failure(self, hosted_server_id: str) -> HostedMCPStartFailureV1 | None:
+        """Why the server's sidecar last could not start, or ``None`` after a start or a stop cleared it."""
+
+        return _read_if_present(self._start_failure_path(hosted_server_id), HostedMCPStartFailureV1)
+
 
 
 
@@ -356,13 +490,18 @@ def resolve_hosted_broker_config(config: Any, hosted_server_id: str) -> dict[str
 
 __all__ = [
     "HOSTED_MCP_SCHEMA_VERSION",
+    "HOSTED_MCP_START_FAILED",
+    "HOSTED_MCP_START_FAILED_STATUS",
     "HostedMCPBehavior",
     "HostedMCPLifecycle",
+    "HostedMCPStartError",
+    "HostedMCPStartFailureV1",
     "HostedMCPToolDefinitionV1",
     "MCPHostedServerDefinitionV1",
     "MCPHostedServerStore",
     "MCPHostingPaths",
     "resolve_hosted_broker_config",
     "resolve_mcp_hosting_paths",
+    "start_failure_sentence",
 ]
 

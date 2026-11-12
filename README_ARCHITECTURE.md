@@ -3658,7 +3658,15 @@ writing, because the only reliable way to learn a provider's limit is to send
 that many. No MCP server loads at startup in either mode, so a server that does
 not answer never stops an agent from starting: the loader retries it within
 `mcp.load_retry_window_minutes`, then tells administrators, and does not retry a
-broker refusal until access or the server changes. Fixed tool groups,
+broker refusal until access or the server's connection record changes. The
+broker answers a hosted server whose sidecar could not start with 503 and the
+reason (`mcp_control.hosting.HostedMCPStartError`), never as a refusal (403):
+freeing its port changes nothing the loader watches, so only the retry schedule
+brings its tools back. For the same reason a hosted server's start does not
+bring back agents that gave up on it; they load it when they restart. An agent
+that tries while a server set to run is stopped is refused (403) and waits the
+same way, so the Status page and the docs say to leave the server set to run
+while its port is freed. Fixed tool groups,
 capability attachments and restart-to-attach were removed for this. Skills provide reusable instructions without loading every
 procedure into the base prompt. A reviewed managed-skill change commits an
 immutable local receipt before TeamArchitect sends an authority-free team

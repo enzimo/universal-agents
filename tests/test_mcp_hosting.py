@@ -18,13 +18,17 @@ token.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import json
+import os
+import signal
 import socket
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable, Iterator
 
 import httpx
 import pytest
@@ -37,6 +41,7 @@ from assistant_gateway.application.website_application import (
     WebMCPLifecycleResultV1,
 )
 from assistant_gateway.config import GatewayInstanceConfig
+from assistant_gateway.status_page import HOSTED_MCP_SOURCE
 from custom_agents import access_runtime
 from custom_agents.access_runtime import runtime_requests
 from custom_agents.mcp_hosting_changes import HOSTED_MCP_SERVER_CHANGE_KIND, HostedMCPServerChangeService
@@ -52,7 +57,9 @@ from custom_messages.contracts.mcp_v1 import (
 from custom_tools.providers.capabilities import hosted_mcp_servers
 from tests.task_work_support import set_agent_ref
 from mcp_control.hosting import (
+    HOSTED_MCP_START_FAILED,
     HostedMCPLifecycle,
+    HostedMCPStartError,
     MCPHostedServerDefinitionV1,
     MCPHostedServerStore,
     resolve_mcp_hosting_paths,
@@ -70,7 +77,8 @@ from mcp_control.registry import (
 from secure_tool_broker.access_gate import REASON_IDENTITY_REJECTED
 from secure_tool_broker.mcp_client import BrokerMCPClient
 from secure_tool_broker.mcp_config import BrokerMCPConfig
-from secure_tool_broker.mcp_hosting_runtime import MCPHostedProcessSupervisor
+from secure_tool_broker import mcp_hosting_runtime as hosting_runtime
+from secure_tool_broker.mcp_hosting_runtime import HostedMCPPortInUse, MCPHostedProcessSupervisor
 from secure_tool_broker.mcp_runtime import BrokerMCPRuntime
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import caller_token, open_gate, signed_task_context
@@ -109,17 +117,30 @@ def _free_port() -> int:
         return int(candidate.getsockname()[1])
 
 
-def _supervisor_config(tmp_path: Path, port: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        instance_root_path=tmp_path,
-        mcp=SimpleNamespace(
-            hosting=SimpleNamespace(
-                bind_host="127.0.0.1",
-                port_range_start=port,
-                port_range_end=port,
-            )
-        ),
-    )
+def _supervisor_config(tmp_path: Path) -> SimpleNamespace:
+    """What the sidecar supervisor reads from the instance settings: where the instance lives."""
+
+    return SimpleNamespace(instance_root_path=tmp_path)
+
+
+async def _start_on_a_free_port(
+    supervisor: MCPHostedProcessSupervisor, save: Callable[[int], MCPHostedServerDefinitionV1]
+) -> MCPHostedServerDefinitionV1:
+    """Save a definition for a free port and start its sidecar; use another port when that one was taken.
+
+    A sidecar listens on the port its definition names, so the test picks a free port and
+    closes it before the sidecar binds it. Another test's server can take it in between; the
+    start then says so (``HostedMCPPortInUse``) instead of reporting that server as running.
+    """
+
+    for _attempt in range(3):
+        definition = save(_free_port())
+        try:
+            await supervisor.start(definition.hosted_server_id)
+        except HostedMCPPortInUse:
+            continue
+        return definition
+    raise AssertionError("Every port the test picked was taken before the sidecar could listen on it.")
 
 
 def _hosting_config(tmp_path: Path) -> tuple[GatewayInstanceConfig, Path]:
@@ -164,8 +185,17 @@ def _hosted_connection(config: GatewayInstanceConfig, hosted_server_id: str):
 class _Broker:
     """The secure broker's hosted-server route, reached over HTTP by the runtime."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, status_code: int = 200) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        status_code: int = 200,
+        text: str = "",
+        answer: dict[str, Any] | None = None,
+    ) -> None:
         self.status_code = status_code
+        self.text = text
+        self.answer = answer
         self.requests: list[dict[str, Any]] = []
         monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", "http://broker.test")
         monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", caller_token(CALLER_MANAGER))
@@ -181,7 +211,11 @@ class _Broker:
             )
             operation = request.url.path.rsplit("/", 1)[-1]
             status = "running" if operation == "start" else "stopped"
-            return httpx.Response(self.status_code, json={"status": status} if self.status_code == 200 else None)
+            if self.answer is not None:
+                return httpx.Response(self.status_code, json=self.answer)
+            if self.status_code != 200:
+                return httpx.Response(self.status_code, text=self.text)
+            return httpx.Response(self.status_code, json={"status": status})
 
         monkeypatch.setattr(
             httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs)
@@ -287,21 +321,77 @@ def test_starting_stopping_and_removing_a_hosted_server(tmp_path: Path, monkeypa
     assert connection.lifecycle == MCPConnectionLifecycle.DISABLED, "a removed server leaves the catalog"
 
 
-def test_a_refused_broker_call_leaves_the_hosted_server_as_it_was(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("status_code", "text"),
+    [(403, ""), (503, '{"error": "The broker is busy."}')],
+    ids=["refused", "unavailable-without-the-start-failure-code"],
+)
+def test_a_broker_answer_that_is_not_a_start_failure_leaves_the_hosted_server_as_it_was(
+    tmp_path: Path, monkeypatch, status_code: int, text: str
+) -> None:
     config, path = _hosting_config(tmp_path)
     agent = change_agent(config, path, authorization_enabled=False)
     definition = _propose(agent, config)
     MCPHostingAdministration(config).install(
         definition.hosted_server_id, approval=MCPConnectionAdministration.person_approval("admin-1")
     )
-    _Broker(monkeypatch, status_code=403)
+    _Broker(monkeypatch, status_code=status_code, text=text)
 
     result = _call_tool(agent, hosted_mcp_servers, action="start", hosted_server_id=definition.hosted_server_id)
 
-    assert "403" in result["error"]
+    assert str(status_code) in result["error"], "an ordinary HTTP error, not a start failure"
     assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
         HostedMCPLifecycle.STOPPED
     )
+
+
+PORT_TAKEN = (
+    "The hosted MCP server echo cannot start: 127.0.0.1:41000 is already in use, most likely by its "
+    "sidecar left over from an earlier broker run."
+)
+# What the broker answers when it could not start a sidecar (HostedMCPStartError).
+START_FAILED = {"error": PORT_TAKEN, "reason_code": HOSTED_MCP_START_FAILED}
+
+
+def test_a_start_the_broker_could_not_finish_tells_the_agent_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config, path = _hosting_config(tmp_path)
+    agent = change_agent(config, path, authorization_enabled=False)
+    definition = _propose(agent, config)
+    MCPHostingAdministration(config).install(
+        definition.hosted_server_id, approval=MCPConnectionAdministration.person_approval("admin-1")
+    )
+    _Broker(monkeypatch, status_code=503, answer=START_FAILED)
+
+    result = _call_tool(agent, hosted_mcp_servers, action="start", hosted_server_id=definition.hosted_server_id)
+
+    assert result["error"] == PORT_TAKEN
+    assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
+        HostedMCPLifecycle.STOPPED
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_person_whose_start_the_broker_could_not_finish_sees_why(tmp_path: Path, monkeypatch) -> None:
+    """The gateway's MCP controls (Web Chat, /mcp) start a server through ``perform_by_person``."""
+
+    config, path = _hosting_config(tmp_path)
+    definition = _propose(change_agent(config, path, authorization_enabled=False), config)
+    administration = MCPHostingAdministration(config)
+    administration.install(definition.hosted_server_id, approval=MCPConnectionAdministration.person_approval(ADMIN))
+    _Broker(monkeypatch, status_code=503, answer=START_FAILED)
+
+    with pytest.raises(HostedMCPStartError) as failed:
+        await administration.perform_by_person(
+            hosted_server_id=definition.hosted_server_id,
+            action="start",
+            expected_definition_digest=definition.definition_digest,
+            expected_lifecycle="stopped",
+            person_id=ADMIN,
+        )
+
+    assert str(failed.value) == PORT_TAKEN
+    assert isinstance(failed.value, RuntimeError), "Web Chat answers it with 409 and its text, /mcp says it"
+    assert administration.store.require(definition.hosted_server_id).lifecycle == HostedMCPLifecycle.STOPPED
 
 
 def test_publishing_a_hosted_server_is_not_an_operation(tmp_path: Path, monkeypatch) -> None:
@@ -487,26 +577,14 @@ async def test_broker_starts_or_stops_only_the_exact_installed_definition(tmp_pa
 async def test_declarative_host_sidecar_requires_broker_token_and_serves_tools(
     tmp_path: Path,
 ) -> None:
-    port = _free_port()
-    config = _supervisor_config(tmp_path, port)
-    definition = MCPHostedServerDefinitionV1.build(
-        server_name="echo",
-        purpose="Return an attested copy of reviewed arguments.",
-        owner_canonical_user_id="usr_owner",
-        team_id=TEAM,
-        target_agent_types=("TeamArchitect",),
-        tools=(ECHO_TOOL,),
-        bind_host="127.0.0.1",
-        port=port,
-        lifecycle=HostedMCPLifecycle.STOPPED,
-    )
-    store = MCPHostedServerStore(resolve_mcp_hosting_paths(config))
-    store.save(definition)
+    config = _supervisor_config(tmp_path)
     supervisor = MCPHostedProcessSupervisor(config)
     provider = None
     try:
+        definition = await _start_on_a_free_port(supervisor, lambda port: _saved(config, _echo_definition(port)))
+        port = definition.port
         result = await supervisor.start(definition.hosted_server_id)
-        assert result["status"] == "running"
+        assert result["status"] == "running" and result["already_running"] is True
         async with httpx.AsyncClient(timeout=5.0) as client:
             denied = await client.post(f"http://127.0.0.1:{port}/mcp")
         assert denied.status_code == 403
@@ -547,25 +625,27 @@ async def test_broker_discovers_authenticated_static_server_from_env_reference(
     monkeypatch,
 ) -> None:
     config, _path = _hosting_config(tmp_path)
-    port = config.mcp.hosting.port_range_start
     config.mcp.network_policy.allow_loopback = True
     config.mcp.static_reconciliation.upgrade_mode = "grandfather_current"
-    definition = MCPHostedServerDefinitionV1.build(
-        server_name="authenticated-echo",
-        purpose="Verify broker-owned static environment materialization.",
-        owner_canonical_user_id=config.user.canonical_user_id,
-        team_id=config.manager.team_id,
-        target_agent_types=("TeamArchitect",),
-        tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
-        bind_host="127.0.0.1",
-        port=port,
-        lifecycle=HostedMCPLifecycle.STOPPED,
-    )
-    MCPHostedServerStore(resolve_mcp_hosting_paths(config)).save(definition)
+
+    def definition_for(port: int) -> MCPHostedServerDefinitionV1:
+        return MCPHostedServerDefinitionV1.build(
+            server_name="authenticated-echo",
+            purpose="Verify broker-owned static environment materialization.",
+            owner_canonical_user_id=config.user.canonical_user_id,
+            team_id=config.manager.team_id,
+            target_agent_types=("TeamArchitect",),
+            tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
+            bind_host="127.0.0.1",
+            port=port,
+            lifecycle=HostedMCPLifecycle.STOPPED,
+        )
+
     supervisor = MCPHostedProcessSupervisor(config)
     runtime = None
     try:
-        await supervisor.start(definition.hosted_server_id)
+        definition = await _start_on_a_free_port(supervisor, lambda port: _saved(config, definition_for(port)))
+        port = definition.port
         token = (
             (supervisor.paths.tokens / f"{definition.hosted_server_id}.token")
             .read_text(encoding="utf-8")
@@ -608,19 +688,30 @@ async def test_broker_dispatches_exact_hosted_operation_through_final_mcp_pep(
     tmp_path: Path,
 ) -> None:
     config, _path = _hosting_config(tmp_path)
-    port = config.mcp.hosting.port_range_start
-    definition = MCPHostedServerDefinitionV1.build(
-        server_name="broker-echo",
-        purpose="Exercise the final broker authorization boundary.",
-        owner_canonical_user_id=config.user.canonical_user_id,
-        team_id=config.manager.team_id,
-        target_agent_types=("TeamArchitect",),
-        tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
-        bind_host="127.0.0.1",
-        port=port,
-        lifecycle=HostedMCPLifecycle.RUNNING,
-    )
-    MCPHostedServerStore(resolve_mcp_hosting_paths(config)).save(definition)
+
+    def definition_for(port: int) -> MCPHostedServerDefinitionV1:
+        return MCPHostedServerDefinitionV1.build(
+            server_name="broker-echo",
+            purpose="Exercise the final broker authorization boundary.",
+            owner_canonical_user_id=config.user.canonical_user_id,
+            team_id=config.manager.team_id,
+            target_agent_types=("TeamArchitect",),
+            tools=({"name": "echo", "behavior": "echo_arguments", "input_schema": {"type": "object"}},),
+            bind_host="127.0.0.1",
+            port=port,
+            lifecycle=HostedMCPLifecycle.RUNNING,
+        )
+
+    # Every invocation passes the access gate (verified identity, then the tool catalog).
+    gate = open_gate(team_id=config.manager.team_id, instance_root=config.instance_root_path)
+    runtime = _broker_runtime(config, gate)
+    try:
+        # Started here so a taken port can be swapped; the discovery below finds it running.
+        definition = await _start_on_a_free_port(runtime.hosting, lambda port: _saved(config, definition_for(port)))
+    except BaseException:
+        await runtime.close()
+        raise
+    port = definition.port
     descriptor = descriptor_from_server_config(
         {
             "name": definition.server_name,
@@ -654,8 +745,6 @@ async def test_broker_dispatches_exact_hosted_operation_through_final_mcp_pep(
         named_agent_type="TeamArchitect",
     )
 
-    # Every invocation passes the access gate (verified identity, then the tool catalog).
-    gate = open_gate(team_id=config.manager.team_id, instance_root=config.instance_root_path)
     gate_checks = []
     check = gate.check
 
@@ -667,7 +756,6 @@ async def test_broker_dispatches_exact_hosted_operation_through_final_mcp_pep(
     gate.check = recording_check
     task_context = signed_task_context(config.user.canonical_user_id, team_id=config.manager.team_id)
     manager = BrokerCaller(CALLER_MANAGER)
-    runtime = _broker_runtime(config, gate)
     try:
         discovered = await runtime.discover_tools(
             record.connection_id,
@@ -741,3 +829,769 @@ def test_static_response_is_schema_validated_before_install() -> None:
             port=18700,
             lifecycle=HostedMCPLifecycle.PENDING,
         )
+
+
+# -- a sidecar is running only when the sidecar this start launched says so ----------------
+
+
+def _saved(config: Any, definition: MCPHostedServerDefinitionV1) -> MCPHostedServerDefinitionV1:
+    MCPHostedServerStore(resolve_mcp_hosting_paths(config)).save(definition)
+    return definition
+
+
+def _echo_definition(
+    port: int, *, lifecycle: HostedMCPLifecycle = HostedMCPLifecycle.STOPPED, server_name: str = "echo"
+) -> MCPHostedServerDefinitionV1:
+    return MCPHostedServerDefinitionV1.build(
+        server_name=server_name,
+        purpose="Return an attested copy of reviewed arguments.",
+        owner_canonical_user_id="usr_owner",
+        team_id=TEAM,
+        target_agent_types=("TeamArchitect",),
+        tools=(ECHO_TOOL,),
+        bind_host="127.0.0.1",
+        port=port,
+        lifecycle=lifecycle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_left_over_from_an_earlier_broker_stops_the_start_and_says_what_to_do(
+    tmp_path: Path,
+) -> None:
+    config = _supervisor_config(tmp_path)
+    earlier_broker = MCPHostedProcessSupervisor(config)
+    restarted_broker = MCPHostedProcessSupervisor(config)
+    try:
+        definition = await _start_on_a_free_port(earlier_broker, lambda port: _saved(config, _echo_definition(port)))
+        port = definition.port
+        # The earlier broker stopped without stopping its sidecar, which runs in its own session.
+
+        with pytest.raises(HostedMCPPortInUse) as refused:
+            await restarted_broker.start(definition.hosted_server_id)
+
+        message = str(refused.value)
+        assert f"127.0.0.1:{port} is already in use" in message, message
+        assert "Stop that process" in message, message
+        # Review C08: the reason never says to stop and start a server set to run.
+        assert message.endswith(PORT_IN_USE_ADVICE), message
+        assert earlier_broker._processes[definition.hosted_server_id].returncode is None
+        assert definition.hosted_server_id not in restarted_broker._processes
+        # Not set to run: the person who started it got the reason in the answer.
+        assert MCPHostedServerStore(resolve_mcp_hosting_paths(config)).start_failure(definition.hosted_server_id) is None
+    finally:
+        await restarted_broker.close()
+        await earlier_broker.close()
+
+
+PORT_IN_USE_ADVICE = "A server set to run then starts on an agent's next try; start a stopped one again."
+
+
+def test_agents_see_the_whole_port_in_use_advice_for_a_server_name_of_typical_length() -> None:
+    """Agents read a start failure in ``load_status`` cut to 300 characters; the advice ends the reason."""
+
+    from custom_agents.mcp_server_tools import MAX_ERROR_TEXT, error_text
+
+    name = "customer_support_ticket_lookups"  # 31 characters; the reason allows 32 on a loopback port
+    reason = hosting_runtime._port_in_use_reason(name, "127.0.0.1:65535")
+
+    assert error_text(HostedMCPPortInUse(reason)) == reason
+    assert reason.endswith(PORT_IN_USE_ADVICE)
+    assert len(hosting_runtime._port_in_use_reason("n" * 32, "127.0.0.1:65535")) <= MAX_ERROR_TEXT
+
+
+class _Running:
+    returncode = None
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_starts_ready_line_in_the_sidecar_log_does_not_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hosting_runtime, "READY_TIMEOUT_SECONDS", 0.5)
+    supervisor = MCPHostedProcessSupervisor(_supervisor_config(tmp_path))
+    log_path = supervisor.paths.logs / "sidecar.log"
+    log_path.write_text("INFO:     Uvicorn running on http://127.0.0.1:41000 (Press CTRL+C to quit)\n")
+
+    with pytest.raises(HostedMCPStartError, match="did not report listening on 127.0.0.1:41000 within 0.5 seconds"):
+        await supervisor._wait_ready(
+            _echo_definition(41000),
+            _Running(),  # type: ignore[arg-type]
+            log_path=log_path,
+            offset=log_path.stat().st_size,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        HostedMCPPortInUse(PORT_TAKEN),
+        HostedMCPStartError("The hosted MCP server echo stopped while starting, with status 1."),
+    ],
+    ids=["port-taken", "stopped-while-starting"],
+)
+async def test_the_broker_answers_a_start_it_could_not_finish_with_the_reason_never_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from secure_tool_broker.service import SecureToolBrokerService
+    from tests.broker_access_support import BROKER_ROOT, caller_headers
+
+    class Runtime:
+        """A person's start, and an agent's listing or call, which start a server set to run."""
+
+        raised: Exception = error
+
+        async def change_host_lifecycle(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            raise self.raised
+
+        async def discover_tools(self, *_args: object, **_kwargs: object) -> Any:
+            raise self.raised
+
+        async def invoke(self, *_args: object, **_kwargs: object) -> Any:
+            raise self.raised
+
+    runtime = Runtime()
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
+    monkeypatch.setattr(service, "_get_mcp_runtime", lambda: runtime)
+    principal = PrincipalDescriptorV1(
+        principal_type=PrincipalType.AGENT, principal_id="agent_1", team_id=TEAM, roles=("worker",),
+        named_agent_type="TeamArchitect",
+    )
+    invocation = MCPInvocationRequestV1(
+        record_digest="0" * 64, operation_name="echo", tool_use_id="call-1", principal=principal
+    ).model_dump(mode="json", by_alias=True, exclude_none=True)
+    discovery = {"record_digest": "0" * 64, "named_agent_type": "TeamArchitect"}
+    async with TestClient(TestServer(service.build_app())) as client:
+        answers = [
+            await client.post(path, headers=caller_headers(), json=body)
+            for path, body in (
+                ("/v1/mcp/hosted/h1/start", {"definition_digest": "0" * 64}),
+                ("/v1/mcp/connections/mcp_conn_x/tools", discovery),
+                ("/v1/mcp/connections/mcp_conn_x/invoke", invocation),
+            )
+        ]
+        bodies = [await answer.json() for answer in answers]
+        runtime.raised = PermissionError("The MCP connection record changed before discovery.")
+        refused = await client.post("/v1/mcp/connections/mcp_conn_x/tools", headers=caller_headers(), json=discovery)
+
+    assert [answer.status for answer in answers] == [503, 503, 503]
+    assert bodies == [{"error": str(error), "reason_code": HOSTED_MCP_START_FAILED}] * 3
+    assert refused.status == 403, "a refusal is still a refusal"
+
+
+@pytest.mark.asyncio
+async def test_the_mcp_chat_command_shows_why_a_start_failed() -> None:
+    from assistant_gateway.application.manager_control_command_service import GatewayManagerControlCommandService
+    from assistant_gateway.application.commands.manager_control import ManagerControlCommandRequest
+    from assistant_gateway.application.commands.context import GatewayActorContext
+
+    hosted = SimpleNamespace(
+        hosted_server_id="h1", server_name="echo", lifecycle="stopped", available_actions=("start",),
+        definition_digest="d" * 64,
+    )
+
+    class Controls:
+        def list_web_chat_mcp_connections(self, _request: object) -> SimpleNamespace:
+            return SimpleNamespace(connections=[])
+
+        def list_web_chat_hosted_mcp_servers(self, _request: object) -> SimpleNamespace:
+            return SimpleNamespace(servers=[hosted])
+
+        async def control_web_chat_mcp_lifecycle(self, _request: object) -> SimpleNamespace:
+            raise HostedMCPStartError(PORT_TAKEN)
+
+    service = GatewayManagerControlCommandService(SimpleNamespace(), mcp_controls=Controls())  # type: ignore[arg-type]
+    result = await service.execute(
+        ManagerControlCommandRequest(
+            command="/mcp hosted start h1",
+            current_session_key="web:session",
+            actor=GatewayActorContext(channel_name="website", user_id="u1", chat_id="c1", canonical_user_id="usr_owner"),
+        )
+    )
+
+    assert result.text == f"MCP hosted_server h1 was not changed: {PORT_TAKEN}"
+
+
+# -- a server set to run whose sidecar cannot start says so wherever it is listed ----------
+
+
+@contextlib.contextmanager
+def _port_held_by_a_leftover() -> Iterator[int]:
+    """A port another process listens on, as a sidecar left over from an earlier broker run does."""
+
+    with socket.socket() as leftover:
+        leftover.bind(("127.0.0.1", 0))
+        leftover.listen()
+        yield leftover.getsockname()[1]
+
+
+async def _broker_start(config: Any) -> None:
+    """What a broker start does for hosted servers: start every server set to run, then (here) stop."""
+
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        await broker.restore()
+    finally:
+        await broker.close()
+
+
+def _restore_failures(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    return [record for record in caplog.records if "event=mcp_host_restore_failed" in record.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_server_set_to_run_whose_sidecar_cannot_start_stays_set_to_run_and_is_listed_with_why(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config, _path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+
+    [listed] = MCPHostingAdministration(config).list_public()
+    assert listed["lifecycle"] == "running", "the state people chose stays, so the next broker start tries again"
+    assert f"127.0.0.1:{port} is already in use" in listed["start_failure"]["reason"]
+    assert listed["start_failure"]["failed_at"]
+    assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
+        HostedMCPLifecycle.RUNNING
+    )
+    # Nothing in the broker failed: a warning with the reason, no traceback.
+    [logged] = _restore_failures(caplog)
+    assert logged.levelname == "WARNING" and logged.exc_info is None
+    assert "is already in use" in logged.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_defect_while_restoring_a_server_is_logged_with_its_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config, _path = _hosting_config(tmp_path)
+    _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+
+    async def defect(_self: MCPHostedProcessSupervisor, _definition: MCPHostedServerDefinitionV1) -> Any:
+        raise TypeError("a defect in the broker")
+
+    monkeypatch.setattr(MCPHostedProcessSupervisor, "_launch", defect)
+    await _broker_start(config)
+
+    [logged] = _restore_failures(caplog)
+    assert logged.levelname == "ERROR" and logged.exc_info is not None
+    assert isinstance(logged.exc_info[1], TypeError)
+
+
+@pytest.mark.asyncio
+async def test_a_later_start_that_succeeds_clears_the_reason(tmp_path: Path) -> None:
+    config, _path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+    assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is not None
+
+    # The leftover is gone; the next broker start brings the server up.
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        await broker.restore()
+        assert broker._processes[definition.hosted_server_id].returncode is None
+        assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is None
+    finally:
+        await broker.close()
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_server_clears_the_reason(tmp_path: Path) -> None:
+    config, _path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        assert (await broker.stop(definition.hosted_server_id))["already_stopped"] is True
+    finally:
+        await broker.close()
+
+    assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is None
+
+
+@pytest.mark.asyncio
+async def test_every_list_of_hosted_servers_says_why_a_server_set_to_run_is_not_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from assistant_gateway.application.manager_control_command_service import _render_mcp_inventory
+    from tests.test_status_page import _page
+
+    config, path = _hosting_config(tmp_path)
+    with _port_held_by_a_leftover() as port:
+        definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+        await _broker_start(config)
+    said = "Set to run, but it could not start:"
+
+    # Web Chat's MCP settings and the /mcp command use the same projection.
+    [shown] = [WebHostedMCPServerV1.model_validate(item) for item in MCPHostingAdministration(config).list_public()]
+    assert shown.start_failure is not None and "already in use" in shown.start_failure.reason
+    inventory = _render_mcp_inventory([], [shown])
+    assert said in inventory and f"127.0.0.1:{port} is already in use" in inventory
+
+    # The agents' list.
+    agent = change_agent(config, path, authorization_enabled=False)
+    listing = await asyncio.to_thread(_call_tool, agent, hosted_mcp_servers, action="list")
+    [listed] = listing["hosted_servers"]
+    assert listed["status"].startswith(said) and "already in use" in listed["status"]
+
+    # The Status page, until the server starts.
+    report = await _page(config).report()
+    [finding] = [item for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")]
+    assert finding.finding_id == f"hosted_mcp_server_not_started:{definition.hosted_server_id}"
+    assert "echo" in finding.title and "already in use" in str(finding.details)
+    assert "stop the process that holds it" in finding.action
+    # Review C01: a start does not bring back agents that stopped trying.
+    assert "agents keep trying for 60 minutes (mcp.load_retry_window_minutes)" in finding.summary
+    assert "then stop until they restart" in finding.summary
+    # Review C08: stopping a server set to run makes an agent that tries meanwhile stop trying.
+    assert "Leave the server set to run: agents start it on their next try" in finding.action
+    assert "tries while the server is stopped, or that stopped trying, loads its tools only when it restarts" in (
+        finding.action
+    )
+    assert "stop and start" not in finding.action
+
+    broker = MCPHostedProcessSupervisor(config)
+    try:
+        await broker.restore()
+        report = await _page(config).report()
+    finally:
+        await broker.close()
+    assert not [item for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")]
+
+
+# -- lists read each server once, and a note or server removed meanwhile is no error ----
+
+
+def _gone_when_read(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """``target`` disappears just as it is read, as when another process clears or removes it during a list."""
+
+    read_text = Path.read_text
+
+    def read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == target:
+            target.unlink(missing_ok=True)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+
+
+def test_a_start_failure_cleared_while_it_is_read_means_no_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _path = _hosting_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    store = MCPHostedServerStore(resolve_mcp_hosting_paths(config))
+    store.record_start_failure(definition.hosted_server_id, "127.0.0.1:1 is already in use.", at=datetime.now(timezone.utc))
+    _gone_when_read(monkeypatch, store._start_failure_path(definition.hosted_server_id))
+
+    assert store.start_failure(definition.hosted_server_id) is None
+    assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_server_removed_while_a_list_is_read_is_left_out_of_every_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_status_page import _page
+
+    config, path = _hosting_config(tmp_path)
+    paths = resolve_mcp_hosting_paths(config)
+    store = MCPHostedServerStore(paths)
+    kept = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    removed = _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING, server_name="tickets")
+    agent = change_agent(config, path, authorization_enabled=False)
+    for definition in (kept, removed):
+        store.record_start_failure(definition.hosted_server_id, "127.0.0.1:1 is already in use.", at=datetime.now(timezone.utc))
+
+    @contextlib.contextmanager
+    def removed_once_listed() -> Iterator[None]:
+        # The folder lists it, then the broker removes it before its file is read.
+        _saved(config, removed)
+        with monkeypatch.context() as patch:
+            _gone_when_read(patch, paths.definitions / f"{removed.hosted_server_id}.json")
+            yield
+
+    with removed_once_listed():
+        public = MCPHostingAdministration(config).list_public()
+    assert [item["hosted_server_id"] for item in public] == [kept.hosted_server_id]
+
+    with removed_once_listed():
+        listing = await asyncio.to_thread(_call_tool, agent, hosted_mcp_servers, action="list")
+    assert [item["hosted_server_id"] for item in listing["hosted_servers"]] == [kept.hosted_server_id]
+
+    with removed_once_listed():
+        report = await _page(config).report()
+    assert HOSTED_MCP_SOURCE not in report.unavailable_sources
+    assert [item.finding_id for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")] == [
+        f"hosted_mcp_server_not_started:{kept.hosted_server_id}"
+    ]
+
+
+def test_the_agents_list_says_each_servers_state_from_its_own_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, path = _hosting_config(tmp_path)
+    store = MCPHostedServerStore(resolve_mcp_hosting_paths(config))
+    failing = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    running = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING, server_name="files"))
+    stopped = _saved(config, _echo_definition(_free_port(), server_name="tickets"))
+    store.record_start_failure(failing.hosted_server_id, "127.0.0.1:1 is already in use.", at=datetime.now(timezone.utc))
+    agent = change_agent(config, path, authorization_enabled=False)
+
+    def looked_up_again(self: Any, hosted_server_id: str) -> Any:
+        raise AssertionError(f"the list looked {hosted_server_id} up again")
+
+    monkeypatch.setattr(MCPHostedServerStore, "require", looked_up_again)
+    listing = _call_tool(agent, hosted_mcp_servers, action="list")
+
+    status = {item["hosted_server_id"]: item["status"] for item in listing["hosted_servers"]}
+    assert status[failing.hosted_server_id].startswith("Set to run, but it could not start: 127.0.0.1:1 is already")
+    assert status[running.hosted_server_id] == "Running"
+    assert status[stopped.hosted_server_id] == "Installed and stopped"
+
+
+# -- a start that does not finish leaves nothing running and says why --------------------
+
+
+def _held_open_by_this_process(path: Path) -> bool:
+    """Whether this process still holds a descriptor on ``path`` (Linux shows them in /proc)."""
+
+    descriptors = Path("/proc/self/fd")
+    if not descriptors.is_dir():
+        return False
+    for descriptor in descriptors.iterdir():
+        with contextlib.suppress(OSError):
+            if os.readlink(descriptor) == str(path):
+                return True
+    return False
+
+
+def _watch_readiness(
+    supervisor: MCPHostedProcessSupervisor,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    first: Callable[[], Any] | None = None,
+) -> tuple[list[asyncio.subprocess.Process], asyncio.Event]:
+    """Record every sidecar a start launches; the first one's readiness wait runs ``first`` instead when given."""
+
+    launched: list[asyncio.subprocess.Process] = []
+    waiting = asyncio.Event()
+    original = supervisor._wait_ready
+
+    async def wait_ready(definition: MCPHostedServerDefinitionV1, process: Any, **kwargs: Any) -> None:
+        launched.append(process)
+        waiting.set()
+        if first is not None and len(launched) == 1:
+            await first()
+            return
+        await original(definition, process, **kwargs)
+
+    monkeypatch.setattr(supervisor, "_wait_ready", wait_ready)
+    return launched, waiting
+
+
+def _count_launches(supervisor: MCPHostedProcessSupervisor, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    launches: list[str] = []
+    original = supervisor._launch
+
+    async def launch(definition: MCPHostedServerDefinitionV1) -> Any:
+        launches.append(definition.hosted_server_id)
+        return await original(definition)
+
+    monkeypatch.setattr(supervisor, "_launch", launch)
+    return launches
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_that_never_says_it_listens_is_stopped_and_the_start_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Far shorter than the sidecar needs to start, so this start's real sidecar is still loading.
+    monkeypatch.setattr(hosting_runtime, "READY_TIMEOUT_SECONDS", 0.05)
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    supervisor = MCPHostedProcessSupervisor(config)
+    launched, _waiting = _watch_readiness(supervisor, monkeypatch)
+    try:
+        with pytest.raises(HostedMCPStartError) as failed:
+            await supervisor.start(definition.hosted_server_id)
+    finally:
+        await supervisor.close()
+
+    reason = str(failed.value)
+    hosted_server_id = definition.hosted_server_id
+    assert reason == (
+        f"The hosted MCP server echo did not report listening on 127.0.0.1:{definition.port} within 0.05 "
+        f"seconds, so the broker stopped it. Its log is runtime/mcp-hosting/state/logs/{hosted_server_id}.log."
+    )
+    [process] = launched
+    assert process.returncode is not None, "the sidecar was stopped and reaped"
+    assert hosted_server_id not in supervisor._processes and not supervisor._stopping
+    assert not _held_open_by_this_process(supervisor.paths.logs / f"{hosted_server_id}.log")
+    recorded = supervisor.store.start_failure(hosted_server_id)
+    assert recorded is not None and recorded.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["token", "spawn"])
+async def test_an_os_error_while_starting_is_a_start_failure_naming_the_step_not_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    supervisor = MCPHostedProcessSupervisor(config)
+    if step == "token":
+        token = supervisor.paths.tokens / f"{definition.hosted_server_id}.token"
+
+        def no_token(_hosted_server_id: str) -> Path:
+            raise PermissionError(13, "Permission denied", str(token))
+
+        monkeypatch.setattr(supervisor, "_ensure_token", no_token)
+        expected = "preparing its access token failed (Permission denied)"
+    else:
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "no-python-here"))
+        expected = "starting its process failed (No such file or directory)"
+
+    with pytest.raises(HostedMCPStartError) as failed:
+        await supervisor.start(definition.hosted_server_id)
+
+    # An OSError would reach the broker's refusal answer (PermissionError, FileNotFoundError).
+    assert not isinstance(failed.value, OSError) and isinstance(failed.value.__cause__, OSError)
+    reason = str(failed.value)
+    assert reason == f"The hosted MCP server echo could not start: {expected}. The broker's log has the details."
+    assert str(tmp_path) not in reason
+    assert definition.hosted_server_id not in supervisor._processes
+    recorded = supervisor.store.start_failure(definition.hosted_server_id)
+    assert recorded is not None and recorded.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["timeout", "spawn", "defect"])
+async def test_the_broker_answers_why_its_own_start_failed_and_keeps_a_defect_a_defect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, ending: str
+) -> None:
+    """The real supervisor behind the broker's start route: start failures are a 503 with the reason."""
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from secure_tool_broker.service import SecureToolBrokerService
+    from tests.broker_access_support import BROKER_ROOT, caller_headers
+
+    config, _path = _hosting_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    runtime = _broker_runtime(config)
+
+    async def defect() -> None:
+        raise TypeError("a defect in the broker")
+
+    launched, _waiting = _watch_readiness(runtime.hosting, monkeypatch, first=defect if ending == "defect" else None)
+    if ending == "timeout":
+        monkeypatch.setattr(hosting_runtime, "READY_TIMEOUT_SECONDS", 0.05)
+    elif ending == "spawn":
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "no-python-here"))
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
+    monkeypatch.setattr(service, "_get_mcp_runtime", lambda: runtime)
+    try:
+        async with TestClient(TestServer(service.build_app())) as client:
+            answer = await client.post(
+                f"/v1/mcp/hosted/{definition.hosted_server_id}/start",
+                headers=caller_headers(),
+                json={"definition_digest": definition.definition_digest},
+            )
+            text = await answer.text()
+    finally:
+        await runtime.close()
+
+    recorded = runtime.hosting.store.start_failure(definition.hosted_server_id)
+    if ending == "defect":
+        assert answer.status == 502, text
+        assert recorded is None, "a defect is not the server's start failure"
+        [logged] = [record for record in caplog.records if "event=mcp_host_lifecycle_failed" in record.getMessage()]
+        assert logged.exc_info is not None, "a defect keeps its traceback"
+    else:
+        assert answer.status == 503, text
+        assert recorded is not None and json.loads(text) == {
+            "error": recorded.reason,
+            "reason_code": HOSTED_MCP_START_FAILED,
+        }
+    assert all(process.returncode is not None for process in launched)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_start_stops_its_sidecar_and_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    supervisor = MCPHostedProcessSupervisor(config)
+    launched, waiting = _watch_readiness(supervisor, monkeypatch, first=asyncio.Event().wait)
+    try:
+        start = asyncio.create_task(supervisor.start(definition.hosted_server_id))
+        await waiting.wait()
+        start.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start
+    finally:
+        await supervisor.close()
+
+    [process] = launched
+    assert process.returncode is not None
+    assert definition.hosted_server_id not in supervisor._processes and not supervisor._stopping
+    assert not _held_open_by_this_process(supervisor.paths.logs / f"{definition.hosted_server_id}.log")
+    assert supervisor.store.start_failure(definition.hosted_server_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_second_cancellation_does_not_stop_the_reaping_and_the_next_start_waits_for_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    hosted_server_id = definition.hosted_server_id
+    supervisor = MCPHostedProcessSupervisor(config)
+    launched, waiting = _watch_readiness(supervisor, monkeypatch, first=asyncio.Event().wait)
+    stopping, release = asyncio.Event(), asyncio.Event()
+    real_stop = hosting_runtime._stop_process
+
+    async def held_stop(process: asyncio.subprocess.Process, *, grace_seconds: float) -> None:
+        stopping.set()
+        await release.wait()
+        await real_stop(process, grace_seconds=grace_seconds)
+
+    monkeypatch.setattr(hosting_runtime, "_stop_process", held_stop)
+    try:
+        start = asyncio.create_task(supervisor.start(hosted_server_id))
+        await waiting.wait()
+        start.cancel()
+        await stopping.wait()
+        start.cancel()  # for example a shutdown cancelling its handlers again
+        with pytest.raises(asyncio.CancelledError):
+            await start
+        first = launched[0]
+        assert first.returncode is None and hosted_server_id in supervisor._stopping, "the stop goes on"
+
+        # The next start waits until the old sidecar is gone, so it cannot launch onto its port.
+        waiting.clear()
+        restart = asyncio.create_task(supervisor.start(hosted_server_id))
+        await asyncio.sleep(0.2)
+        assert not restart.done() and len(launched) == 1
+        release.set()
+        await waiting.wait()
+        assert first.returncode is not None, "the old sidecar was reaped before the next launch"
+        assert (await restart)["already_running"] is False
+    finally:
+        release.set()
+        await supervisor.close()
+
+
+@pytest.mark.asyncio
+async def test_agents_asking_together_launch_one_sidecar_and_all_get_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    supervisor = MCPHostedProcessSupervisor(config)
+    launches = _count_launches(supervisor, monkeypatch)
+    try:
+        with _port_held_by_a_leftover() as port:
+            definition = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+            answers = await asyncio.gather(
+                supervisor.ensure_running(definition.hosted_server_id),
+                supervisor.ensure_running(definition.hosted_server_id),
+                return_exceptions=True,
+            )
+            assert len(launches) == 1
+            assert all(isinstance(answer, HostedMCPStartError) for answer in answers)
+            assert str(answers[0]) == str(answers[1]) and "is already in use" in str(answers[0])
+
+            # Once the failure is no longer recent, the next ask launches again.
+            monkeypatch.setattr(hosting_runtime, "FAILED_START_REPEAT_SECONDS", 0.0)
+            with pytest.raises(HostedMCPPortInUse):
+                await supervisor.ensure_running(definition.hosted_server_id)
+            assert len(launches) == 2
+
+            # A person's start, from stopped, always launches.
+            monkeypatch.setattr(hosting_runtime, "FAILED_START_REPEAT_SECONDS", 30.0)
+            _saved(config, _echo_definition(port))
+            for _attempt in range(2):
+                with pytest.raises(HostedMCPPortInUse):
+                    await supervisor.start(definition.hosted_server_id)
+            assert len(launches) == 4
+    finally:
+        await supervisor.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_after_the_sidecar_exited_is_still_listed_after_the_broker_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _supervisor_config(tmp_path)
+    supervisor = MCPHostedProcessSupervisor(config)
+    definition = await _start_on_a_free_port(
+        supervisor, lambda port: _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+    )
+    sidecar = supervisor._processes[definition.hosted_server_id]
+    sidecar.kill()
+    await sidecar.wait()
+
+    async def cannot_start(_definition: MCPHostedServerDefinitionV1) -> Any:
+        raise HostedMCPStartError("The hosted MCP server echo could not start again.")
+
+    monkeypatch.setattr(supervisor, "_launch", cannot_start)
+    with pytest.raises(HostedMCPStartError):
+        await supervisor.ensure_running(definition.hosted_server_id)
+    await supervisor.close()
+
+    recorded = supervisor.store.start_failure(definition.hosted_server_id)
+    assert recorded is not None and recorded.reason == "The hosted MCP server echo could not start again."
+
+
+@pytest.mark.asyncio
+async def test_a_start_failure_note_the_broker_cannot_write_or_delete_changes_no_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    config = _supervisor_config(tmp_path)
+    supervisor = MCPHostedProcessSupervisor(config)
+
+    def unwritable(*_args: Any, **_kwargs: Any) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(supervisor.store, "record_start_failure", unwritable)
+    monkeypatch.setattr(supervisor.store, "clear_start_failure", unwritable)
+    try:
+        with _port_held_by_a_leftover() as port:
+            held = _saved(config, _echo_definition(port, lifecycle=HostedMCPLifecycle.RUNNING))
+            with pytest.raises(HostedMCPPortInUse, match="is already in use"):
+                await supervisor.start(held.hosted_server_id)
+        definition = await _start_on_a_free_port(
+            supervisor, lambda free: _saved(config, _echo_definition(free, lifecycle=HostedMCPLifecycle.RUNNING))
+        )
+        assert supervisor._processes[definition.hosted_server_id].returncode is None
+    finally:
+        await supervisor.close()
+
+    logged = caplog.text
+    assert "event=mcp_host_start_failure_not_recorded" in logged
+    assert "event=mcp_host_start_failure_not_cleared" in logged
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_that_ignores_sigterm_is_killed_after_the_grace_period() -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); "
+        "time.sleep(60)",
+        stdout=asyncio.subprocess.PIPE,
+    )
+    assert process.stdout is not None and await process.stdout.readline() == b"ready\n"
+
+    await hosting_runtime._stop_process(process, grace_seconds=0.2)
+
+    assert process.returncode == -signal.SIGKILL

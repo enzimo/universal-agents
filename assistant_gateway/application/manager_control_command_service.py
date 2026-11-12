@@ -26,6 +26,7 @@ from assistant_gateway.application.website_application import (
     WebMCPLifecycleRequestV1,
     WebMCPLifecycleResultV1,
 )
+from mcp_control.hosting import start_failure_sentence
 
 LOGGER = logging.getLogger(__name__)
 STOP_USAGE = (
@@ -106,6 +107,9 @@ def _render_mcp_inventory(connections: Any, hosted: Any) -> str:
             f"- hosted {server.hosted_server_id}: "
             f"{server.server_name} ({server.lifecycle}; {actions})"
         )
+        failure = server.start_failure
+        if failure is not None:
+            lines.append(f"  {start_failure_sentence(failure.reason, failure.failed_at)}")
     if len(lines) == 1:
         lines.append("No MCP resources are registered.")
     return "\n".join(lines)
@@ -480,16 +484,23 @@ class GatewayManagerControlCommandService:
                 session_key=request.current_session_key,
                 text=target,
             )
-        result = await self._mcp_controls.control_web_chat_mcp_lifecycle(
-            WebMCPLifecycleRequestV1(
-                context=context,
-                resource_kind=target.resource_kind,
-                resource_id=target.resource_id,
-                action=target.action,
-                expected_digest=target.digest,
-                expected_lifecycle=target.lifecycle,
+        try:
+            result = await self._mcp_controls.control_web_chat_mcp_lifecycle(
+                WebMCPLifecycleRequestV1(
+                    context=context,
+                    resource_kind=target.resource_kind,
+                    resource_id=target.resource_id,
+                    action=target.action,
+                    expected_digest=target.digest,
+                    expected_lifecycle=target.lifecycle,
+                )
             )
-        )
+        except RuntimeError as exc:
+            # For example a hosted server whose sidecar could not start; Web Chat shows the same reason.
+            return ManagerControlCommandResult(
+                session_key=request.current_session_key,
+                text=f"MCP {target.resource_kind} {target.resource_id} was not changed: {exc}",
+            )
         return ManagerControlCommandResult(
             session_key=request.current_session_key,
             text=(

@@ -23,10 +23,12 @@ from custom_messages.contracts.access_v2 import ChangeApprovalRecordV1
 from custom_messages.contracts.mcp_v1 import MCPHostLifecycleRequestV1
 from mcp_control.hosting import (
     HostedMCPLifecycle,
+    HostedMCPStartError,
     HostedMCPToolDefinitionV1,
     MCPHostedServerDefinitionV1,
     MCPHostedServerStore,
     resolve_mcp_hosting_paths,
+    start_failure_sentence,
 )
 from mcp_control.registry import (
     MCPConnectionLifecycle,
@@ -40,6 +42,27 @@ from mcp_control.registry import (
 
 LOGGER = logging.getLogger(__name__)
 HOSTED_LIFECYCLE_OPERATIONS = ("start", "stop")
+_STATE_WORDS = {
+    HostedMCPLifecycle.PENDING: "Proposed; installing it needs a person's approval",
+    HostedMCPLifecycle.STOPPED: "Installed and stopped",
+    HostedMCPLifecycle.REMOVED: "Removed",
+}
+
+
+def hosted_status(server: Mapping[str, Any]) -> str:
+    """A listed server's state in plain words, from its row of ``MCPHostingAdministration.list_public``.
+
+    The row is the only source: looking the server up again by its id could
+    fail for one removed after the listing, or give a state from after it.
+    """
+
+    lifecycle = HostedMCPLifecycle(server["lifecycle"])
+    if lifecycle != HostedMCPLifecycle.RUNNING:
+        return _STATE_WORDS[lifecycle]
+    failure = server.get("start_failure")
+    if failure is None:
+        return "Running"
+    return start_failure_sentence(failure["reason"], failure["failed_at"])
 
 
 class MCPHostingAdministration:
@@ -53,20 +76,32 @@ class MCPHostingAdministration:
         )
 
     def list_public(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "hosted_server_id": item.hosted_server_id,
-                "definition_digest": item.definition_digest,
-                "server_name": item.server_name,
-                "purpose": item.purpose,
-                "lifecycle": item.lifecycle.value,
-                "target_agent_types": list(item.target_agent_types),
-                "tools": [tool.name for tool in item.tools],
-                "bind_host": item.bind_host,
-                "port": item.port,
-            }
-            for item in self.store.list_definitions()
-        ]
+        """Every hosted server: the state people chose and, for one set to run, why it could not start."""
+
+        listed = []
+        for item in self.store.list_definitions():
+            failure = (
+                self.store.start_failure(item.hosted_server_id)
+                if item.lifecycle == HostedMCPLifecycle.RUNNING
+                else None
+            )
+            listed.append(
+                {
+                    "hosted_server_id": item.hosted_server_id,
+                    "definition_digest": item.definition_digest,
+                    "server_name": item.server_name,
+                    "purpose": item.purpose,
+                    "lifecycle": item.lifecycle.value,
+                    "target_agent_types": list(item.target_agent_types),
+                    "tools": [tool.name for tool in item.tools],
+                    "bind_host": item.bind_host,
+                    "port": item.port,
+                    "start_failure": (
+                        None if failure is None else {"reason": failure.reason, "failed_at": failure.failed_at}
+                    ),
+                }
+            )
+        return listed
 
     def propose_by_agent(
         self,
@@ -219,7 +254,11 @@ class MCPHostingAdministration:
         return {"status": removed.lifecycle.value, "hosted_server_id": removed.hosted_server_id, "recoverable": True}
 
     async def change_running_state(self, hosted_server_id: str, operation: str, *, by: str) -> dict[str, Any]:
-        """Start or stop an installed server through the broker, which runs it."""
+        """Start or stop an installed server through the broker, which runs it.
+
+        A start the broker could not finish raises ``HostedMCPStartError`` (a
+        ``RuntimeError``) with the broker's reason and leaves the server stopped.
+        """
 
         if operation not in HOSTED_LIFECYCLE_OPERATIONS:
             raise ValueError("Hosted MCP servers are started or stopped here; install and remove are changes.")
@@ -238,6 +277,11 @@ class MCPHostingAdministration:
                 headers={"Authorization": f"Bearer {broker_token}"},
                 json=payload.model_dump(mode="json", by_alias=True, exclude_none=True),
             )
+        start_failure = HostedMCPStartError.from_broker_answer(response.status_code, response.text)
+        if start_failure is not None:
+            # The broker could not start the server's sidecar: it stays stopped, and
+            # the agent tool, Web Chat and /mcp show the broker's reason.
+            raise start_failure
         response.raise_for_status()
         definition = self.store.update_lifecycle(
             definition.hosted_server_id,
