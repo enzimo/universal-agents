@@ -326,6 +326,11 @@ class GatewayThreadGuidance:
             canonical_user_id=session.owner_canonical_user_id,
         )
         presentation = self._request_context.requester_presentation_for_session(session, route)
+        # A running request's active task is always its own task: the store
+        # never moves a running request to another task (update_request_coordination),
+        # so a delegated task's setup page or steering reply cannot redirect the
+        # guidance, its signed context or its files to that task, whose files the
+        # lead refuses (tests/test_guidance_files_after_setup_page.py).
         steering = TaskSteering.model_validate_json(held.steering_json).model_copy(
             update={
                 "target_task_id": target.active_task_id,
