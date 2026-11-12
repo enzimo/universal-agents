@@ -455,8 +455,8 @@ instance, run the printed commands, and start again.
 
 The upgrade to instance configuration version 13 (`config.yaml` version 11)
 removes `transport.presence_max_age_seconds`. It set how long the presence
-stream kept agents' status messages; that stream no longer exists, because
-agents now announce themselves through the team's signed agent records. The
+stream kept agents' status messages; nothing uses that stream any more,
+because agents now announce themselves through the team's signed agent records. The
 container and the desktop app upgrade `instance_config.yaml` at their first
 start and keep the old file as `instance_config.yaml.bak.v12`. Services you
 start yourself (`assistant_cli.py run-gateway` and the other `run-*`

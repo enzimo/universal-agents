@@ -4507,9 +4507,9 @@ discovery of the lead are gone ("The end of presence and fan-out" below). Upgrad
 place from 0.9: the launcher creates the trust folder and keys, and the installation
 authority creates the `UA1_*` key-value buckets, which NATS lists as streams named
 `KV_UA1_*` (the authority's list below). The contract's work and dead-letter streams come
-in phase 3. The first start also deletes the team's old presence stream when the NATS
-login may delete streams (step 7d). What an external NATS server needs is in the user
-docs: the server version and settings in the configuration guide's "Surviving a power
+in phase 3. Startup leaves the team's old presence stream alone and needs no right to
+it: nothing uses the stream any more, so it can stay ("The end of presence and fan-out"
+below). What an external NATS server needs is in the user docs: the server version and settings in the configuration guide's "Surviving a power
 loss", and what the NATS login needs in the Docker guide's "Message host trust".
 
 `custom_transport.protocol1` is what a running host needs to sign and check messages:
@@ -5230,9 +5230,10 @@ the row is the heartbeat the liveness rules read, and the check picks up a misse
 `skills.changed`. The presence stream, the broadcast subject, `TeamComms.broadcast_message`,
 the publish options for them and the JetStream push listener that only presence used are
 removed, so nothing on JetStream is pushed. Startup reconciles current streams only and
-never inspects or deletes the retired `<PREFIX>_PRESENCE` stream. Operators remove it once
-with a NATS administrator login after upgrading; its old consumer disappears with it.
-This keeps obsolete stream access out of phase 3's per-host runtime permissions.
+never inspects or deletes the retired `<PREFIX>_PRESENCE` stream, which keeps obsolete
+stream access out of phase 3's per-host runtime permissions. Nothing reads or writes the
+stream, so an upgraded installation may keep it; an operator with an administrator login
+on an external NATS server may remove it, and its old consumer, when convenient.
 `transport.presence_max_age_seconds` is retired
 through versioned upgrade steps, so the running code reads only the current format: the
 instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
