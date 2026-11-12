@@ -114,11 +114,29 @@ T = TypeVar("T")
 def turn_agent(**attributes: Any) -> TurnHost:
     """A ``TurnHost`` that can also run owned work (``pending_work_runtime.run_as_owned_task``)."""
 
-    attributes.setdefault("id", "agent-1")
-    attributes.setdefault("_logger", logging.getLogger("tests.turn_agent"))
-    attributes.setdefault("_should_exit", asyncio.Event())
-    attributes.setdefault("_owned_tasks", set())
-    return TurnHost(**attributes)
+    return with_turn_bookkeeping(TurnHost(**attributes))
+
+
+A = TypeVar("A")
+
+
+def with_turn_bookkeeping(agent: A) -> A:
+    """Give a test agent, such as a ``SimpleNamespace``, what ``run_in_turn`` and owned work need.
+
+    Keeps attributes the agent already has.
+    """
+
+    defaults = {
+        "id": "agent-1",
+        "_running_turns": {},
+        "_logger": logging.getLogger("tests.turn_agent"),
+        "_should_exit": asyncio.Event(),
+        "_owned_tasks": set(),
+    }
+    for name, value in defaults.items():
+        if not hasattr(agent, name):
+            setattr(agent, name, value)
+    return agent
 
 
 async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
@@ -140,6 +158,12 @@ async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
 
     with task_work(task_id):
         return await asyncio.create_task(turn())
+
+
+def run_tool_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
+    """``run_in_turn`` for a synchronous test: a fresh event loop runs the turn."""
+
+    return asyncio.run(run_in_turn(agent, task_id, tool))
 
 
 def register_turn(host: Any, task_id: str, owner: Any, tool_stop: Any = None) -> TaskWork:

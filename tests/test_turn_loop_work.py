@@ -21,6 +21,7 @@ import pytest
 from custom_agents import turn_registry
 from custom_agents.pending_work_runtime import AgentStopping
 from custom_agents.provider_error_runtime import ModelStreamTimeoutError
+from custom_agents.sdk.strands.turn_tool_stop import stop_tool_calls
 from custom_agents.turn_registry import TurnEnded, end_turn, run_on_turn_loop, start_turn, turn_has_ended
 from custom_tools.runtime_context import TaskWork, current_task_work, task_work
 from custom_tools.tool_stop import ToolStop
@@ -397,3 +398,68 @@ async def test_work_cancelled_before_its_first_step_still_reports_its_end():
     assert call.ended.is_set() and call.cancelled is True
     assert probe.closed_unrun()
     assert agent._owned_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_turn_waits_until_its_loop_work_was_cancelled():
+    """The waiting tool thread is one of the turn's running tool calls, so the turn's stop cleanup waits for it."""
+
+    agent = turn_agent()
+    started = asyncio.Event()
+    seen: dict[str, Any] = {}
+
+    async def slow_work() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            seen["cancelled_on_loop"] = True
+            raise
+
+    def tool() -> None:
+        with pytest.raises(TurnEnded):
+            run_on_turn_loop(agent, slow_work(), name="test-work")
+
+    async def turn() -> None:
+        tool_stop = start_turn(agent, "task-a")
+        thread = asyncio.create_task(asyncio.to_thread(tool))
+        try:
+            await started.wait()
+            seen["running"] = [call.tool_name for call in tool_stop.running()]
+            await stop_tool_calls(tool_stop, logging.getLogger("tests.turn_loop_work"), reason="stopped by the test")
+            seen["after_stop"] = (seen.get("cancelled_on_loop"), tool_stop.running(), set(agent._owned_tasks))
+        finally:
+            end_turn(agent)
+            await thread
+
+    with task_work("task-a"):
+        await asyncio.create_task(turn())
+
+    assert seen["running"] == ["test-work"]
+    assert seen["after_stop"] == (True, (), set())
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_lands_as_the_call_registers_refuses_it_unrun(monkeypatch: pytest.MonkeyPatch):
+    """The re-check under the ToolStop lock: a stop between the first check and registering refuses the work."""
+
+    agent = turn_agent()
+    probe = _Probe()
+    calls: dict[str, Any] = {}
+
+    def tool() -> None:
+        work = current_task_work()
+        assert work is not None and work.tool_stop is not None
+        work.tool_stop.request("stopped by the test")
+        # The first check ran before the stop.
+        monkeypatch.setattr(turn_registry, "turn_has_ended", lambda _agent, _work: False)
+        try:
+            run_on_turn_loop(agent, probe.coroutine, name="test-work")
+        finally:
+            calls["running_after"] = work.tool_stop.running()
+
+    with pytest.raises(TurnEnded, match="was stopped, so test-work was not started"):
+        await run_in_turn(agent, "task-a", tool)
+
+    assert probe.closed_unrun()
+    assert calls["running_after"] == ()
