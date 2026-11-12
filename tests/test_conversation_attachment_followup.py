@@ -133,11 +133,6 @@ async def _call_tool(tool: Any, tool_input: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Earlier turns' files are not kept for follow-ups yet; fixed on this branch (conversation attachments).",
-)
 async def test_a_follow_up_finds_and_opens_the_photo_sent_in_the_first_turn(tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path / "instance")
     layout.ensure_directories()

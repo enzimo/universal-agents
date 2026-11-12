@@ -75,6 +75,7 @@ from storage.conversation_repository import (
     ATTACHMENT_TASK_ID_KEY,
     ATTACHMENT_TURN_INDEX_KEY,
     CONVERSATION_ATTACHMENT_LIST_LIMIT,
+    turn_attachment_summary,
 )
 
 logger = logging.getLogger(__name__)
@@ -472,20 +473,29 @@ def _conversation_refusal(conversation_store: Any, conversation_id: str, person_
     return None if decision.allowed else decision.reason
 
 
-def upload_state(attachment: UserTaskAttachment, uploads_dir: Path) -> UploadState:
-    """Whether this runtime holds the file: ``available``, ``deleted`` or ``remote``.
+@dataclass(frozen=True)
+class UploadLocation:
+    """Whether this runtime holds a file, and its real path when it does (``locate_upload``)."""
+
+    state: UploadState
+    path: Optional[Path] = None
+
+
+def locate_upload(attachment: UserTaskAttachment, uploads_dir: Path) -> UploadLocation:
+    """Where this runtime holds the file: ``available`` with its real path, ``deleted`` or ``remote``.
 
     A local copy counts only inside this instance's ``state/uploads``
     (``InstanceLayout.uploads_dir``), compared as real paths. Inside it but
     gone means the upload was removed (its retention ended, or its person was
     removed). A path anywhere else is not a copy this runtime may open: the
     file was stored on another machine, or the record is not one the gateway
-    made.
+    made. Agents cannot write in ``state/uploads``, so the real path checked
+    here is the file that is opened.
     """
 
     path = attachment.local_path()
     if not path:
-        return UPLOAD_REMOTE
+        return UploadLocation(UPLOAD_REMOTE)
     root = os.path.realpath(uploads_dir)
     resolved = os.path.realpath(path)
     if os.path.commonpath([root, resolved]) != root or resolved == root:
@@ -494,8 +504,26 @@ def upload_state(attachment: UserTaskAttachment, uploads_dir: Path) -> UploadSta
             "event=attachment_outside_uploads attachment_id=%s",
             attachment.attachment_id,
         )
-        return UPLOAD_REMOTE
-    return UPLOAD_AVAILABLE if os.path.isfile(resolved) else UPLOAD_DELETED
+        return UploadLocation(UPLOAD_REMOTE)
+    if not os.path.isfile(resolved):
+        return UploadLocation(UPLOAD_DELETED)
+    return UploadLocation(UPLOAD_AVAILABLE, Path(resolved))
+
+
+def upload_state(attachment: UserTaskAttachment, uploads_dir: Path) -> UploadState:
+    """Whether this runtime holds the file: ``available``, ``deleted`` or ``remote`` (``locate_upload``)."""
+
+    return locate_upload(attachment, uploads_dir).state
+
+
+def attachment_summary(sent: SentFile | UserTaskAttachment) -> dict[str, Any]:
+    """A file as tool results show it: id, name, type, kind, size and its turn when known; never its storage."""
+
+    file = sent if isinstance(sent, SentFile) else SentFile(sent)
+    summary = turn_attachment_summary(file.attachment.model_dump(mode="json"))
+    if file.turn_index is not None:
+        summary[ATTACHMENT_TURN_INDEX_KEY] = file.turn_index
+    return summary
 
 
 def _shown_name(filename: str) -> str:
