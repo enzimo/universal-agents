@@ -10,7 +10,10 @@ context). Covers:
   type, and leaves out the files the current request lists itself;
 - the list comes from stored records, so files of turns the conversation
   history trimmed stay listed, and its tokens are reserved before the history
-  is sized, so the prompt stays within the soft limit;
+  is sized, so the prompt stays within the soft limit; after the runtime's
+  own end of a turn summarized the photo's turn into a context epoch, the
+  thread view shows that turn only through the summary, and the list still
+  names the photo, which opens by id;
 - the list is left out only when overflow recovery is told to drop it, which
   the default settings do not do; a task without a record gets no list and a
   warning;
@@ -38,6 +41,9 @@ import pytest
 import pytest_asyncio
 
 from custom_agents.context_engine import ContextAssemblyRequest
+from custom_agents.conversation_compaction.base import ConversationCompactionConfig
+from custom_agents.conversation_compaction.heuristic_compactor import HeuristicSlidingWindowCompactor
+from custom_agents.conversation_runtime import finalize_conversation_turn
 from custom_agents.conversation_attachments import (
     CONVERSATION_ATTACHMENTS_HEADING,
     CONVERSATION_ATTACHMENTS_SECTION,
@@ -47,7 +53,7 @@ from custom_agents.conversation_attachments import (
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import CommsMessage
 from custom_messages.contracts.task_v1 import TaskSteering
-from custom_messages.enums import TaskSteeringType
+from custom_messages.enums import ProgressState, TaskSteeringType
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from custom_tools.providers.context_memory import get_conversation_context_slice, get_conversation_turns
 from default_values import AGENT_DEFAULTS
@@ -55,7 +61,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import TURN_ATTACHMENT_SUMMARY_FIELDS
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachments import saved_before_upgrade
-from tests.test_conversation_attachments_regression import ANN, CONVERSATION, _admit, _answer, _lead
+from tests.test_conversation_attachments_regression import ANN, CONVERSATION, TEAM, _admit, _answer, _lead
 from tests.test_turn_files_recording import (  # noqa: F401  (autouse fixtures)
     _gateway_meta,
     _no_background_work,
@@ -225,6 +231,56 @@ async def test_the_list_outlasts_trimmed_history_and_its_tokens_are_reserved(lea
     left_out = [index for index in turns if f"task_id=task_turn_{index:02d}" not in thread]
     assert len(left_out) > 4 and f"task task_turn_{left_out[-1]:02d})" in listed
     assert f"Only the newest {INVENTORY_LIMIT} are listed" in listed
+
+
+@pytest.mark.asyncio
+async def test_the_list_names_a_file_whose_turn_a_context_epoch_summarized(lead: Any, layout: InstanceLayout) -> None:
+    """The real post-turn compaction summarizes the photo's turn into a context epoch first.
+
+    The thread view then shows turn 1 only through the epoch's summary, so the
+    photo is found only through the list and the by-id lookup, which read the
+    turns' stored file records whatever the epoch covers.
+    """
+
+    store = lead._conversation_store
+    # Keeps one raw turn, so the turn before the newest answered one is summarized.
+    compactor = HeuristicSlidingWindowCompactor(
+        ConversationCompactionConfig(context_window_tokens=200_000, min_recent_turns=1, max_recent_turns=1)
+    )
+    await _admit(lead, task_id="task_second", text="How often should it be watered?", attachments=[])
+    info = lead.task_manager.get_task_info("task_second")
+    info.task.answer = "Once a week."
+    # The runtime's own end of a turn, which runs the compactor.
+    await finalize_conversation_turn(
+        conversation_store=store,
+        conversation_compactor=compactor,
+        conversation_artifact_offloader=None,
+        strands_messages=[],
+        task_manager=lead.task_manager,
+        task_info=info,
+        task_status=ProgressState.COMPLETED.value,
+        logger=logging.getLogger("test.conversation_attachments"),
+        agent_id=lead.id,
+        team_id=TEAM,
+        named_agent_type="TeamArchitect",
+    )
+    epoch = store.get_latest_context_epoch(CONVERSATION)
+    assert epoch is not None and epoch["status"] == "active" and int(epoch["through_turn_index"]) == 1
+    await _admit(lead, task_id=CURRENT, text="Use the photo from before to pick a pot.", attachments=[])
+
+    assembly = _assemble(lead)
+
+    # The thread view shows turn 2 in full and turn 1 only through the epoch's summary...
+    assert assembly.context_epoch_id == epoch["context_epoch_id"]
+    thread = _section(assembly, "conversation_thread_context")
+    assert "task_id=task_second" in thread and f"task_id={FIRST}" not in thread
+    # ...and the list still names turn 1's photo by id, never where it is stored.
+    listed = _section(assembly, CONVERSATION_ATTACHMENTS_SECTION)
+    assert _listed_ids(listed) == [_photo_id(lead)]
+    assert f"; turn 1, task {FIRST})" in listed
+    assert str(layout.uploads_dir) not in assembly.prompt
+    use_agent(lead, CURRENT)
+    assert inspect_user_attachment._tool_func(attachment_id=_photo_id(lead))["status"] == "success"
 
 
 @pytest.mark.asyncio
