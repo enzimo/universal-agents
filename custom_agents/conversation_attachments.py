@@ -64,7 +64,9 @@ upload folder. A record's path is not trusted by itself (a delegated task's
 files are not vouched for by the gateway): a record pointing anywhere else
 is refused and logged. The bytes are then read from that folder without
 following links (``LocatedUpload.read_bytes``). The attachment tools open
-files by id through ``custom_tools.task_uploads``.
+files by id through ``custom_tools.task_uploads``, and a turn reads the images
+on its own message for the model's direct image input the same way
+(``custom_agents.sdk.strands.turn``).
 """
 
 from __future__ import annotations
@@ -480,7 +482,12 @@ class UploadFolders:
 
     @classmethod
     def for_agent(cls, agent: Any) -> "UploadFolders":
-        """The folders of the instance ``agent`` runs in, read from its saved settings."""
+        """The folders of the instance ``agent`` runs in, read from its saved settings.
+
+        ``agent`` is a running agent or a turn's ``TurnRuntimeSettings``: both
+        carry the ``instance_root``, ``instance_config_path`` and
+        ``workspace_dir`` this reads.
+        """
 
         from custom_agents.runtime_paths import infer_instance_root
 

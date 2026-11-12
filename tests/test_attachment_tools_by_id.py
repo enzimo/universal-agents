@@ -8,7 +8,8 @@ conversation stores and the gateway's own upload storage, for Ann's team lead
 - a follow-up turn inspects, copies and loads files from an earlier turn by
   id, and no result shows where an upload is stored;
 - the media tool uses the upload's recorded type and file name, so a file
-  whose name has no suffix still loads as an image;
+  whose name has no suffix still loads as an image, and names each document
+  after its file and id, so two uploads with one name do not repeat a name;
 - a deleted upload gives ``upload_unavailable`` asking for the file again;
 - an upload that cannot be opened safely is not read, and the error does not
   say where it is stored; a failed copy into the task's folder says why;
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -186,11 +188,38 @@ async def test_a_follow_up_loads_an_earlier_pdf_as_a_document_named_after_its_fi
 
     assert result["status"] == "success", result
     label, block = result["content"]
-    assert block == {"document": {"format": "pdf", "name": "Care_Guide", "source": {"bytes": PDF_BYTES}}}
+    pdf_id = earlier["pdf"].attachment_id
+    name = "Care Guide (" + pdf_id.replace("_", "-") + ")"
+    assert block == {"document": {"format": "pdf", "name": name, "source": {"bytes": PDF_BYTES}}}
     metadata = _payload({"content": [label]})
-    assert (metadata["attachment_id"], metadata["filename"]) == (earlier["pdf"].attachment_id, "Care Guide.pdf")
+    assert (metadata["attachment_id"], metadata["filename"]) == (pdf_id, "Care Guide.pdf")
     assert metadata["content_type"] == "application/pdf"
     _no_storage_details(result, earlier["layout"])
+
+
+@pytest.mark.asyncio
+async def test_two_uploads_with_the_same_file_name_load_as_documents_with_different_names(
+    tmp_path: Path, layout: InstanceLayout
+) -> None:
+    """Bedrock refuses a request in which two document blocks share a name, compared without regard to case."""
+
+    lead = _lead(tmp_path, layout)
+    lead.supports_file_input = True
+    first = _stored(layout, "invoice.pdf", PDF_BYTES, "application/pdf")
+    corrected = _stored(layout, "Invoice (final) v2_draft #3.PDF", PDF_BYTES + b"corrected", "application/pdf")
+    await _admit(lead, task_id=FIRST, text="Compare these invoices.", attachments=[first, corrected])
+    use_agent(lead, FIRST)
+
+    names = [_load(item.attachment_id)["content"][1]["document"]["name"] for item in (first, corrected)]
+
+    # The gateway saved the second name as "Invoice _final_ v2_draft _3.PDF" (sanitize_attachment_filename).
+    assert names == [
+        "invoice (" + first.attachment_id.replace("_", "-") + ")",
+        "Invoice final v2 draft 3 (" + corrected.attachment_id.replace("_", "-") + ")",
+    ]
+    assert len({name.casefold() for name in names}) == 2
+    # Only letters, digits, single spaces, hyphens, parentheses and square brackets.
+    assert all(re.fullmatch(r"[A-Za-z0-9()\[\]-]+( [A-Za-z0-9()\[\]-]+)*", name) for name in names)
 
 
 @pytest.mark.asyncio

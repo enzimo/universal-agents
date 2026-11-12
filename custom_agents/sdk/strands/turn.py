@@ -103,6 +103,12 @@ from custom_messages.contracts.envelope_v1 import (
 )
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
+from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_agents.conversation_attachments import (
+    UnavailableUpload,
+    UploadFolders,
+    locate_upload,
+)
 from custom_messages.enums import ObjectiveWorkSessionStatus
 from custom_messages.enums import (
     MessageMetaType,
@@ -360,6 +366,8 @@ def _turn_decision_initial_guidance(tool_name: str) -> str:
     )
 
 
+logger = logging.getLogger(__name__)
+
 DIRECT_MODEL_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 DIRECT_MODEL_IMAGE_FORMATS: dict[str, ImageFormat] = {
     "image/png": "png",
@@ -377,13 +385,22 @@ DIRECT_MODEL_IMAGE_SUFFIX_FORMATS: dict[str, ImageFormat] = {
 }
 
 
-def _attachment_image_format(attachment: Any, path: Path) -> ImageFormat | None:
-    content_type = (
+def _attachment_content_type(attachment: Any) -> str:
+    return (
         str(getattr(attachment, "content_type", "") or "")
         .split(";", 1)[0]
         .strip()
         .lower()
     )
+
+
+def _is_image_attachment(attachment: Any) -> bool:
+    kind = str(getattr(attachment, "kind", "") or "").lower()
+    return kind == "image" or _attachment_content_type(attachment).startswith("image/")
+
+
+def _attachment_image_format(attachment: Any, path: Path) -> ImageFormat | None:
+    content_type = _attachment_content_type(attachment)
     if content_type in DIRECT_MODEL_IMAGE_FORMATS:
         return DIRECT_MODEL_IMAGE_FORMATS[content_type]
     guessed_type = mimetypes.guess_type(str(path))[0]
@@ -410,6 +427,74 @@ def _attachment_local_path(attachment: Any) -> Path | None:
     if not local_path:
         return None
     return Path(str(local_path)).expanduser().resolve()
+
+
+def _direct_image_input(
+    attachment: UserTaskAttachment,
+    folders: UploadFolders,
+    *,
+    task_id: str,
+    conversation_id: Optional[str],
+) -> tuple[list[ContentBlock], dict[str, Any]]:
+    """One image upload as the turn's native input: a label and an image block, and its diagnostic.
+
+    The bytes are read the way the attachment tools read uploads
+    (``custom_agents.conversation_attachments``): only from inside this host's
+    upload folders, without following links. A delegated task's records are
+    not vouched for by the gateway, so a record pointing anywhere else is
+    skipped (``locate_upload`` logs ``event=attachment_outside_upload_folders``),
+    and the size is checked before anything is read.
+    """
+
+    attachment_id = attachment.attachment_id
+    filename = attachment.filename or attachment_id or "image"
+    content_type = _attachment_content_type(attachment)
+    noted: dict[str, Any] = {"attachment_id": attachment_id, "filename": filename}
+    located = locate_upload(attachment, folders, task_id=task_id, conversation_id=conversation_id)
+    if isinstance(located, UnavailableUpload):
+        return [], {**noted, "status": "skipped", "reason": located.reason}
+    image_format = _attachment_image_format(attachment, located.path)
+    if image_format is None:
+        return [], {**noted, "status": "skipped", "reason": "unsupported_image_format", "content_type": content_type}
+    if located.size_bytes > DIRECT_MODEL_IMAGE_MAX_BYTES:
+        return [], {
+            **noted,
+            "status": "skipped",
+            "reason": "image_too_large_for_direct_model_input",
+            "size_bytes": located.size_bytes,
+            "max_bytes": DIRECT_MODEL_IMAGE_MAX_BYTES,
+        }
+    try:
+        image_bytes = located.read_bytes(max_bytes=DIRECT_MODEL_IMAGE_MAX_BYTES)
+    except OSError as exc:
+        reason = getattr(exc, "reason", type(exc).__name__)
+        logger.warning(
+            "An image upload could not be read safely, so the model does not see it. "
+            "event=direct_image_read_refused attachment_id=%s task_id=%s conversation_id=%s reason=%s",
+            attachment_id,
+            task_id or "-",
+            conversation_id or "-",
+            reason,
+        )
+        return [], {**noted, "status": "skipped", "reason": "read_refused", "detail": reason}
+    label = (
+        f"Direct image attachment: filename={filename}; attachment_id={attachment_id}; "
+        f"content_type={content_type or 'unknown'}; size_bytes={len(image_bytes)}."
+    )
+    caption = str(attachment.caption or "").strip()
+    if caption:
+        label += f" Caption: {caption}"
+    blocks: list[ContentBlock] = [
+        {"text": label},
+        {"image": {"format": image_format, "source": {"bytes": image_bytes}}},
+    ]
+    return blocks, {
+        **noted,
+        "status": "included",
+        "format": image_format,
+        "size_bytes": len(image_bytes),
+        "sha256": hashlib.sha256(image_bytes).hexdigest(),
+    }
 
 
 def _attachment_debug_summary(
@@ -899,108 +984,47 @@ class LLMTurnExecutor:
         return diagnostics
 
     def _collect_direct_model_image_blocks(
-        self, msg_content: ContentType
+        self, msg_content: ContentType, *, conversation_id: Optional[str] = None
     ) -> tuple[list[ContentBlock], list[dict[str, Any]]]:
+        """The image uploads on the turn's message as native image blocks, and one diagnostic per image.
+
+        Only when the model takes image input. Each image is read the way the
+        attachment tools read uploads (``_direct_image_input``).
+        """
+
         if self.settings.supports_image_input is not True:
             return [], []
+        images = [
+            attachment
+            for attachment in list(getattr(msg_content, "attachments", None) or [])
+            if _is_image_attachment(attachment)
+        ]
+        if not images:
+            return [], []
+        # The turn's settings carry the instance root and config path UploadFolders reads.
+        folders = UploadFolders.for_agent(self.settings)
+        task_id = str(getattr(msg_content, "task_id", "") or "")
         blocks: list[ContentBlock] = []
         diagnostics: list[dict[str, Any]] = []
-        for attachment in list(getattr(msg_content, "attachments", None) or []):
-            attachment_id = str(getattr(attachment, "attachment_id", "") or "")
-            filename = str(
-                getattr(attachment, "filename", "") or attachment_id or "image"
+        for attachment in images:
+            image_blocks, diagnostic = _direct_image_input(
+                attachment, folders, task_id=task_id, conversation_id=conversation_id
             )
-            kind = str(getattr(attachment, "kind", "") or "").lower()
-            content_type = (
-                str(getattr(attachment, "content_type", "") or "")
-                .split(";", 1)[0]
-                .strip()
-                .lower()
-            )
-            if kind != "image" and not content_type.startswith("image/"):
-                continue
-            path = _attachment_local_path(attachment)
-            if path is None:
-                diagnostics.append(
-                    {
-                        "attachment_id": attachment_id,
-                        "filename": filename,
-                        "status": "skipped",
-                        "reason": "no_local_path",
-                    }
-                )
-                continue
-            image_format = _attachment_image_format(attachment, path)
-            if image_format is None:
-                diagnostics.append(
-                    {
-                        "attachment_id": attachment_id,
-                        "filename": filename,
-                        "status": "skipped",
-                        "reason": "unsupported_image_format",
-                        "content_type": content_type,
-                    }
-                )
-                continue
-            if not path.exists() or not path.is_file():
-                diagnostics.append(
-                    {
-                        "attachment_id": attachment_id,
-                        "filename": filename,
-                        "status": "skipped",
-                        "reason": "local_path_unavailable",
-                        "path": str(path),
-                    }
-                )
-                continue
-            size_bytes = path.stat().st_size
-            if size_bytes > DIRECT_MODEL_IMAGE_MAX_BYTES:
-                diagnostics.append(
-                    {
-                        "attachment_id": attachment_id,
-                        "filename": filename,
-                        "status": "skipped",
-                        "reason": "image_too_large_for_direct_model_input",
-                        "size_bytes": size_bytes,
-                        "max_bytes": DIRECT_MODEL_IMAGE_MAX_BYTES,
-                    }
-                )
-                continue
-            image_bytes = path.read_bytes()
-            caption = str(getattr(attachment, "caption", "") or "").strip()
-            label = (
-                f"Direct image attachment: filename={filename}; attachment_id={attachment_id}; "
-                f"content_type={content_type or 'unknown'}; size_bytes={size_bytes}."
-            )
-            if caption:
-                label += f" Caption: {caption}"
-            blocks.append({"text": label})
-            blocks.append(
-                {"image": {"format": image_format, "source": {"bytes": image_bytes}}}
-            )
-            diagnostics.append(
-                {
-                    "attachment_id": attachment_id,
-                    "filename": filename,
-                    "status": "included",
-                    "format": image_format,
-                    "size_bytes": size_bytes,
-                    "sha256": hashlib.sha256(image_bytes).hexdigest(),
-                }
-            )
+            blocks.extend(image_blocks)
+            diagnostics.append(diagnostic)
         return blocks, diagnostics
 
     def _build_strands_prompt_input(
-        self, full_prompt: str, msg_content: ContentType
+        self,
+        full_prompt: str,
+        msg_content: ContentType,
+        *,
+        conversation_id: Optional[str] = None,
     ) -> str | list[ContentBlock]:
         attachments = list(getattr(msg_content, "attachments", None) or [])
         if attachments:
             has_image_attachment = any(
-                str(getattr(attachment, "kind", "") or "").lower() == "image"
-                or str(getattr(attachment, "content_type", "") or "")
-                .lower()
-                .startswith("image/")
-                for attachment in attachments
+                _is_image_attachment(attachment) for attachment in attachments
             )
             self.logger.info(
                 "[%s] Model input attachment bridge: supports_image_input=%s attachment_count=%d attachment_summary=%s",
@@ -1019,7 +1043,9 @@ class LLMTurnExecutor:
                     self.settings.model_provider,
                     self.settings.model_id,
                 )
-        image_blocks, diagnostics = self._collect_direct_model_image_blocks(msg_content)
+        image_blocks, diagnostics = self._collect_direct_model_image_blocks(
+            msg_content, conversation_id=conversation_id
+        )
         included_count = sum(
             1 for item in diagnostics if item.get("status") == "included"
         )
@@ -2484,7 +2510,9 @@ class LLMTurnExecutor:
             while True:
                 try:
                     strands_prompt_input = self._build_strands_prompt_input(
-                        turn.full_prompt, turn.prompt_content
+                        turn.full_prompt,
+                        turn.prompt_content,
+                        conversation_id=getattr(turn.msg_meta, "conversation_id", None),
                     )
                     prompt_input_summary = _strands_prompt_input_summary(
                         strands_prompt_input

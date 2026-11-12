@@ -115,10 +115,29 @@ def _media_kind(path: Path, content_type: str) -> str:
     return "unsupported"
 
 
-def _document_name(path: Path) -> str:
-    stem = path.stem or "document"
-    sanitized = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_")
-    return (sanitized or "document")[:80]
+# Document block names. Bedrock's Converse API (provider "bedrock") accepts only
+# letters, digits, single spaces, hyphens, parentheses and square brackets, at
+# most 200 characters, and refuses a whole request in which two document blocks
+# share a name, compared without regard to case, tool results and history included.
+_DOCUMENT_NAME_DISALLOWED = re.compile(r"[^A-Za-z0-9()\[\]-]+")
+DOCUMENT_NAME_STEM_MAX_CHARS = 80
+DOCUMENT_NAME_MAX_CHARS = 200
+
+
+def _document_name(name: Path, attachment_id: str = "") -> str:
+    """The document block's name: the file name's stem, in characters every provider accepts.
+
+    Other characters become single spaces. An upload's name ends with its
+    attachment id in parentheses, so two uploads with the same file name (an
+    invoice sent twice) load as different documents in one request. The same
+    file loaded twice in one task still repeats its name.
+    """
+
+    stem = " ".join(_DOCUMENT_NAME_DISALLOWED.sub(" ", name.stem).split())
+    stem = stem[:DOCUMENT_NAME_STEM_MAX_CHARS].rstrip() or "document"
+    if not attachment_id:
+        return stem
+    return f"{stem} ({_DOCUMENT_NAME_DISALLOWED.sub('-', attachment_id)})"[:DOCUMENT_NAME_MAX_CHARS]
 
 
 @dataclass(frozen=True)
@@ -386,5 +405,7 @@ def _content_block(media: _Media, content_type: str, data: bytes) -> Optional[di
         return {"image": {"format": image_format, "source": {"bytes": data}}}
     document_format = _document_format(media.path, content_type)
     if document_format:
-        return {"document": {"format": document_format, "name": _document_name(media.name), "source": {"bytes": data}}}
+        attachment_id = media.upload.attachment.attachment_id if media.upload is not None else ""
+        name = _document_name(media.name, attachment_id)
+        return {"document": {"format": document_format, "name": name, "source": {"bytes": data}}}
     return None

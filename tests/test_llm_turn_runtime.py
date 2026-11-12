@@ -250,21 +250,37 @@ async def test_provider_context_retry_is_suppressed_after_tool_activity() -> Non
     assert details["suppression_reason"] == "tool_activity_started"
 
 
+def _write(path, data: bytes):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _vision_agent(instance_root) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="agent_vision",
+        supports_image_input=True,
+        instance_root=str(instance_root),
+        _logger=_quiet_logger(),
+    )
+
+
 def test_build_strands_prompt_input_includes_image_blocks_when_supported(
     tmp_path,
 ) -> None:
-    image_path = tmp_path / "mystery.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\nimage-bytes")
+    image_path = _write(
+        tmp_path / "state" / "uploads" / "conv_1" / "mystery.png",
+        b"\x89PNG\r\n\x1a\nimage-bytes",
+    )
     task = Task(
         task_type=MessageMetaType.REQUEST,
         problem_statement="Can you see this?",
         attachments=[_image_attachment(image_path)],
     )
-    agent = SimpleNamespace(
-        id="agent_vision", supports_image_input=True, _logger=_quiet_logger()
-    )
 
-    prompt = turn_executor_for(agent)._build_strands_prompt_input("full prompt", task)
+    prompt = turn_executor_for(_vision_agent(tmp_path))._build_strands_prompt_input(
+        "full prompt", task, conversation_id="conv_1"
+    )
 
     assert isinstance(prompt, list)
     assert prompt[0]["text"].startswith("full prompt")
@@ -272,6 +288,115 @@ def test_build_strands_prompt_input_includes_image_blocks_when_supported(
     assert prompt[1]["text"].startswith("Direct image attachment:")
     assert prompt[2]["image"]["format"] == "png"
     assert prompt[2]["image"]["source"]["bytes"] == image_path.read_bytes()
+
+
+def test_direct_image_input_reads_a_delegated_tasks_images_only_from_the_upload_folders(
+    tmp_path, caplog
+) -> None:
+    """A delegated task's file records are not vouched for by the gateway.
+
+    Records pointing at the instance's own state, at another person's folder,
+    or at a link in the upload folder that leads outside it give the model no
+    image; the upload inside ``state/uploads`` still does.
+    """
+
+    upload = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    state_file = _write(tmp_path / "state" / "secret.png", b"\x89PNG state")
+    private = _write(tmp_path / "workspaces" / "users" / "usr_bob" / "private.png", b"\x89PNG bob")
+    link = tmp_path / "state" / "uploads" / "conv_1" / "link.png"
+    link.symlink_to(state_file)
+    records = [
+        _image_attachment(path).model_copy(update={"attachment_id": f"att_{name}"})
+        for name, path in (("state", state_file), ("bob", private), ("link", link), ("upload", upload))
+    ]
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photos.",
+        parent_task_id="task_parent",
+        attachments=records,
+    )
+
+    with caplog.at_level("WARNING"):
+        blocks, diagnostics = turn_executor_for(
+            _vision_agent(tmp_path)
+        )._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+
+    images = [block["image"]["source"]["bytes"] for block in blocks if "image" in block]
+    assert images == [b"\x89PNG upload"]
+    assert {item["attachment_id"]: (item["status"], item.get("reason")) for item in diagnostics} == {
+        "att_state": ("skipped", "outside_upload_folders"),
+        "att_bob": ("skipped", "outside_upload_folders"),
+        "att_link": ("skipped", "outside_upload_folders"),
+        "att_upload": ("included", None),
+    }
+    refused = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=attachment_outside_upload_folders" in record.getMessage()
+    ]
+    assert len(refused) == 3
+    assert all(f"task_id={task.task_id}" in message for message in refused)
+    assert not any(str(tmp_path) in str(item) for item in diagnostics)
+
+
+def test_direct_image_input_skips_an_upload_over_the_size_limit_before_reading_it(
+    tmp_path, monkeypatch
+) -> None:
+    from custom_agents.conversation_attachments import LocatedUpload
+
+    upload = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG" + bytes(60))
+    monkeypatch.setattr("custom_agents.sdk.strands.turn.DIRECT_MODEL_IMAGE_MAX_BYTES", 16)
+
+    def no_read(*_args, **_kwargs):
+        raise AssertionError("an image over the limit was read")
+
+    monkeypatch.setattr(LocatedUpload, "read_bytes", no_read)
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(upload)],
+    )
+
+    blocks, diagnostics = turn_executor_for(
+        _vision_agent(tmp_path)
+    )._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+
+    assert blocks == []
+    assert diagnostics[0]["reason"] == "image_too_large_for_direct_model_input"
+    assert (diagnostics[0]["size_bytes"], diagnostics[0]["max_bytes"]) == (64, 16)
+
+
+def test_direct_image_input_refuses_an_upload_swapped_for_a_link_after_the_check(
+    tmp_path, monkeypatch
+) -> None:
+    """The bytes are read from the upload folder without following links, so a swap is not followed."""
+
+    from custom_agents import conversation_attachments
+
+    upload = _write(tmp_path / "state" / "uploads" / "conv_1" / "photo.png", b"\x89PNG upload")
+    secret = _write(tmp_path / "state" / "secret.png", b"\x89PNG secret")
+    located = conversation_attachments.locate_upload
+
+    def swap_after_check(*args, **kwargs):
+        result = located(*args, **kwargs)
+        upload.unlink()
+        upload.symlink_to(secret)
+        return result
+
+    monkeypatch.setattr("custom_agents.sdk.strands.turn.locate_upload", swap_after_check)
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe the photo.",
+        attachments=[_image_attachment(upload)],
+    )
+
+    blocks, diagnostics = turn_executor_for(
+        _vision_agent(tmp_path)
+    )._collect_direct_model_image_blocks(task, conversation_id="conv_1")
+
+    assert blocks == []
+    assert diagnostics[0]["status"] == "skipped"
+    assert diagnostics[0]["reason"] == "read_refused"
 
 
 def test_litellm_formatter_preserves_direct_image_block_as_image_url() -> None:
