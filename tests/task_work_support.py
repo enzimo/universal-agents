@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, TypeVar
@@ -139,12 +139,12 @@ def with_turn_bookkeeping(agent: A) -> A:
     return agent
 
 
-async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
-    """Run ``tool`` as a sync tool call of a real model turn of ``task_id`` on ``agent``.
+async def run_turn(agent: Any, task_id: str, body: Callable[[], Awaitable[T]]) -> T:
+    """Await ``body`` as a real model turn of ``task_id`` on ``agent``, such as a Strands agent's ``invoke_async``.
 
     Binds the task's work record, starts the turn in its own asyncio task with
-    the real ``turn_registry.start_turn``, runs ``tool`` in a worker thread as
-    Strands runs a sync tool, and ends the turn with ``end_turn``.
+    the real ``turn_registry.start_turn``, awaits ``body`` there, and ends the
+    turn with ``end_turn``.
     """
 
     from custom_agents.turn_registry import end_turn, start_turn
@@ -152,12 +152,21 @@ async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
     async def turn() -> T:
         start_turn(agent, task_id)
         try:
-            return await asyncio.to_thread(tool)
+            return await body()
         finally:
             end_turn(agent)
 
     with task_work(task_id):
         return await asyncio.create_task(turn())
+
+
+async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
+    """Run ``tool`` as a sync tool call of a real model turn of ``task_id`` on ``agent`` (``run_turn``).
+
+    The tool runs in a worker thread, as Strands runs a sync tool.
+    """
+
+    return await run_turn(agent, task_id, lambda: asyncio.to_thread(tool))
 
 
 def run_tool_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:

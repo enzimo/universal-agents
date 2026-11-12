@@ -178,6 +178,7 @@ jobs:
             tests/test_shell_execution.py \
             tests/test_skill_installation.py \
             tests/test_skill_semantic_review.py \
+            tests/test_skill_semantic_review_runtime.py \
             tests/test_live_skill_semantic_review.py \
             tests/test_skill_repository.py \
             tests/test_strands_team_skills.py \
@@ -360,6 +361,7 @@ jobs:
             tests/test_shell_execution.py \
             tests/test_skill_installation.py \
             tests/test_skill_semantic_review.py \
+            tests/test_skill_semantic_review_runtime.py \
             tests/test_skill_repository.py \
             tests/test_strands_team_skills.py \
             tests/test_runtime_restart_service.py \
