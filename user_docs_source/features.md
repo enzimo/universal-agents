@@ -487,6 +487,10 @@ ended; check the task history for its actual progress.
 | It is waiting for an access decision in the Inbox | 1 day (a reminder) | Administrators |
 | It asked you a question that is still unanswered | 1 day (a reminder) | — |
 | It is in progress but has shown no progress at all | 2 hours | — |
+| It uses files you sent through a chat app the adapter host runs before the team was upgraded from 0.9 | At once | — |
+
+That last notice asks you to send the files again. It gets no "cleared"
+message: it ends when the request ends.
 
 Some of these are repaired automatically before you would be told: when the
 agent holding your request stops, the team lead starts another agent of the same

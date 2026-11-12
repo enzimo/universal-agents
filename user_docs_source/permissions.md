@@ -369,7 +369,9 @@ much is older than 30, 90, 180 and 365 days.
 - **What is kept.** The conversation you are asking in, conversations with
   work still running, and everything newer than the date you name. A
   conversation that is only partly deleted keeps its newer messages, and in
-  Web Chat it is then named after its earliest remaining message. A Web Chat
+  Web Chat it is then named after its earliest remaining message. A file sent
+  with that earliest remaining message can be deleted with the older ones; if
+  the team says it is no longer stored, send it again. A Web Chat
   thread left empty disappears from the list; another chat continues, and its
   next message starts a new conversation.
 - **Who decides.** Only you. Each clean-up waits for you in the Inbox, where

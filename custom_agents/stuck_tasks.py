@@ -29,7 +29,8 @@ request produces one message however many agents work on it. Conditions:
   places the file outside this instance's ``state/uploads``
   (``conversation_attachments.locate_upload`` answers ``remote``, the rule by
   which both file tools answer ``remote_copy_required``). Reported at once, to
-  the person only, and closed with no message.
+  the person only, and closed with no message. Only a request is reported: a
+  subtask still held after its request ended is not.
 
 Files sent before the upgrade. Up to 0.9 the adapter host recorded the files of
 chat apps it runs (``execution: "adapter_host"``) in its own transfer folder,

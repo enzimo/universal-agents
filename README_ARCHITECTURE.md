@@ -698,7 +698,9 @@ lead reads every agent's saved work in its team (read-only) and reports one
 incident per request and condition: the agent holding the work stopped reporting
 in, a handed-back task nobody picked up, an access decision or a question to the
 person still waiting (reminders after a day), or no progress while in progress.
-Thresholds live in `agent.schedule_maintenance.stuck_tasks`. The person comes
+Thresholds live in `agent.schedule_maintenance.stuck_tasks`. One more
+condition, `task_files_sent_before_upgrade`, is an upgrade step told at once
+and closed with no message ("Upgrading an instance in place"). The person comes
 from the root task's signed context (read, never used to authorize); without one
 only administrators are told, and their notices never quote the request. The
 task monitor also observes its own scheduler cadence
@@ -3849,7 +3851,11 @@ files become part of the person's conversation. Turn records that the
 conversation tools show carry no storage location (`turn_attachment_summary`:
 id, name, type, kind, size); only the lookup below reads whole records. One
 column on the existing turn row, not a new table: departure and history
-clean-up already move or delete whole turns, so the file lists go with them.
+clean-up move or delete whole turn rows, so a turn's file list goes with its
+turn. The files themselves are deleted separately, by the gateway from its own
+upload records (`storage/gateway_state_repository.py`): by age for retention
+and, in a clean-up, by time, not by turn. So a partial clean-up can delete a
+kept turn's file while its list still names it (Limitations below).
 
 What a task may open (`custom_agents/conversation_attachments.py`,
 `AttachmentScope`). A task serves a request: itself, or for a plan step or an
@@ -3906,6 +3912,30 @@ Limitations:
 - A file past the upload retention period cannot be opened; the person sends
   it again. "No longer stored" means gone from this runtime's `state/uploads`,
   which holds while the gateway and the team lead run on one machine.
+- A partial history clean-up (one that keeps a conversation's newer turns)
+  deletes the uploads older than the first kept turn's earliest transcript or
+  request row (`_history_cut_end`). The gateway stores a message's files a
+  moment before it writes that message's rows, so the first kept turn's own
+  file is deleted while its file list still names it: the file stays listed,
+  and opening or delegating it answers that it is no longer stored. This is
+  older gateway behavior that the file lists make visible. It is not fixed
+  here; the follow-up deletes uploads by the turns a clean-up deletes, not by
+  time.
+- Files a chat app run by the adapter host sent before 0.10 are recorded in
+  the adapter host's transfer folder, and the tools open only `state/uploads`:
+  for a request still running or queued at the upgrade they answer
+  `remote_copy_required`, although the file is still on disk (an image already
+  in the model's context still reaches it). There is no fallback and no
+  migration; the person is told which files to send again ("Upgrading an
+  instance in place").
+- Copies in that transfer folder made before this release, and copies of a
+  message the gateway never handled, stay there: retention, history clean-up
+  and person removal cover only `state/uploads`, and the adapter host's own
+  prune deletes its rows, not their files. Follow-up: delete each expired
+  row's transfer file.
+- Protocol 1's `task.answer` message has no files field. Answers still travel
+  in the older message, which carries `TaskQuery.attachments`; moving answers
+  to protocol 1 needs that field.
 - A reply to a specialist's escalation carries no files, so the specialist
   that escalated does not get the files the person sends with the answer. The
   team lead hands them on by delegating the work that needs them from the
@@ -4391,6 +4421,25 @@ the desktop app never offers an older version.
   reach anyone, because the gateway that waited for it restarted with the
   upgrade. The model, its handler and the list go with the other upgrade steps
   from 0.9.
+- **Hosted-chat files in unfinished work.** Up to 0.9 the adapter host
+  recorded the files of the chat apps it runs in its own transfer folder; from
+  0.10 the file tools open only `state/uploads` ("Files a person sent in a
+  conversation"), with no fallback and no migration of the old files. A request
+  still running or queued at the upgrade cannot open such a file with its
+  tools, so its pull request carries `breaking-change` and says to finish that
+  work before upgrading. Work that was not finished is reported by the team
+  lead's stuck-task check (`custom_agents.stuck_tasks`, condition
+  `task_files_sent_before_upgrade`): on each pass it reads every agent's saved
+  work, finds file records outside `state/uploads` (the rule by which the tools
+  answer `remote_copy_required`) and tells the person in the request's signed
+  context, once and at once, in the Inbox and the request's chat, which files
+  to send again. Without a verified person only administrators are told, with
+  the number of files and no names. It reads saved records only: it opens,
+  moves and copies no file and scans no folder. Limits: it runs only while the
+  stuck-task check is on (`agent.schedule_maintenance.stuck_tasks.enabled`, on
+  by default); work still queued when the team lead starts is reported on the
+  first pass after an agent takes it; a subtask whose request has ended is not
+  reported. The condition goes with the other upgrade steps from 0.9.
 - **Configuration files** carry a `schema_version` and are upgraded one version
   at a time (`assistant_gateway.config.migrate_instance_config_file`,
   `config_loader.migrate_config_file`); startup offers the upgrade or names the
