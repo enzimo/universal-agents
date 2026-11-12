@@ -21,9 +21,6 @@ Sources, each producing ``StatusFindingV1`` items:
   session, processes that run another message contract, and whether the gateway can see
   the team at all (its join refused, or the records not read). A gateway without a team
   view (command-line runs) does not judge the team;
-- the agents' own findings (``custom_agents.status_findings``), which the view asks them
-  for when the page is checked (``GatewayTeamView.agent_findings``). They come last, so an
-  agent's finding never hides or stands in for the gateway's own with the same id;
 - people's model settings in the access store (``access_control.person_settings``):
   active people whose work may not use the team's model keys and who have no
   model of their own yet (a warning: their requests do not run), and the
@@ -41,7 +38,11 @@ Sources, each producing ``StatusFindingV1`` items:
   storage notices meanwhile;
 - hosted MCP servers set to run whose sidecar the broker could not start
   (``mcp_control.hosting``, the failure the broker keeps beside each server's
-  running state), a problem: agents cannot use their tools.
+  running state), a problem: agents cannot use their tools;
+- the agents' own findings (``custom_agents.status_findings``), which the view asks them
+  for when the page is checked (``GatewayTeamView.agent_findings``). They come last, after
+  every source above, so an agent's finding never hides or stands in for the gateway's own
+  with the same id. Add a new source above this one.
 
 A source that cannot be asked is listed in ``unavailable_sources`` and, for
 the broker, shown as a problem: silence must not look like health.

@@ -53,7 +53,9 @@ from custom_messages.contracts.mcp_v1 import (
 from custom_tools.providers.capabilities import hosted_mcp_servers
 from tests.task_work_support import set_agent_ref
 from mcp_control.hosting import (
+    HOSTED_MCP_START_FAILED,
     HostedMCPLifecycle,
+    HostedMCPStartError,
     MCPHostedServerDefinitionV1,
     MCPHostedServerStore,
     resolve_mcp_hosting_paths,
@@ -178,9 +180,17 @@ def _hosted_connection(config: GatewayInstanceConfig, hosted_server_id: str):
 class _Broker:
     """The secure broker's hosted-server route, reached over HTTP by the runtime."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, status_code: int = 200, text: str = "") -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        status_code: int = 200,
+        text: str = "",
+        answer: dict[str, Any] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.text = text
+        self.answer = answer
         self.requests: list[dict[str, Any]] = []
         monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", "http://broker.test")
         monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", caller_token(CALLER_MANAGER))
@@ -196,6 +206,8 @@ class _Broker:
             )
             operation = request.url.path.rsplit("/", 1)[-1]
             status = "running" if operation == "start" else "stopped"
+            if self.answer is not None:
+                return httpx.Response(self.status_code, json=self.answer)
             if self.status_code != 200:
                 return httpx.Response(self.status_code, text=self.text)
             return httpx.Response(self.status_code, json={"status": status})
@@ -304,18 +316,25 @@ def test_starting_stopping_and_removing_a_hosted_server(tmp_path: Path, monkeypa
     assert connection.lifecycle == MCPConnectionLifecycle.DISABLED, "a removed server leaves the catalog"
 
 
-def test_a_refused_broker_call_leaves_the_hosted_server_as_it_was(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("status_code", "text"),
+    [(403, ""), (503, '{"error": "The broker is busy."}')],
+    ids=["refused", "unavailable-without-the-start-failure-code"],
+)
+def test_a_broker_answer_that_is_not_a_start_failure_leaves_the_hosted_server_as_it_was(
+    tmp_path: Path, monkeypatch, status_code: int, text: str
+) -> None:
     config, path = _hosting_config(tmp_path)
     agent = change_agent(config, path, authorization_enabled=False)
     definition = _propose(agent, config)
     MCPHostingAdministration(config).install(
         definition.hosted_server_id, approval=MCPConnectionAdministration.person_approval("admin-1")
     )
-    _Broker(monkeypatch, status_code=403)
+    _Broker(monkeypatch, status_code=status_code, text=text)
 
     result = _call_tool(agent, hosted_mcp_servers, action="start", hosted_server_id=definition.hosted_server_id)
 
-    assert "403" in result["error"]
+    assert str(status_code) in result["error"], "an ordinary HTTP error, not a start failure"
     assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
         HostedMCPLifecycle.STOPPED
     )
@@ -325,6 +344,8 @@ PORT_TAKEN = (
     "The hosted MCP server echo cannot start: 127.0.0.1:41000 is already in use, most likely by its "
     "sidecar left over from an earlier broker run."
 )
+# What the broker answers when it could not start a sidecar (HostedMCPStartError).
+START_FAILED = {"error": PORT_TAKEN, "reason_code": HOSTED_MCP_START_FAILED}
 
 
 def test_a_start_the_broker_could_not_finish_tells_the_agent_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -334,7 +355,7 @@ def test_a_start_the_broker_could_not_finish_tells_the_agent_why(tmp_path: Path,
     MCPHostingAdministration(config).install(
         definition.hosted_server_id, approval=MCPConnectionAdministration.person_approval("admin-1")
     )
-    _Broker(monkeypatch, status_code=409, text=PORT_TAKEN)
+    _Broker(monkeypatch, status_code=503, answer=START_FAILED)
 
     result = _call_tool(agent, hosted_mcp_servers, action="start", hosted_server_id=definition.hosted_server_id)
 
@@ -342,6 +363,30 @@ def test_a_start_the_broker_could_not_finish_tells_the_agent_why(tmp_path: Path,
     assert MCPHostingAdministration(config).store.require(definition.hosted_server_id).lifecycle == (
         HostedMCPLifecycle.STOPPED
     )
+
+
+@pytest.mark.asyncio
+async def test_a_person_whose_start_the_broker_could_not_finish_sees_why(tmp_path: Path, monkeypatch) -> None:
+    """The gateway's MCP controls (Web Chat, /mcp) start a server through ``perform_by_person``."""
+
+    config, path = _hosting_config(tmp_path)
+    definition = _propose(change_agent(config, path, authorization_enabled=False), config)
+    administration = MCPHostingAdministration(config)
+    administration.install(definition.hosted_server_id, approval=MCPConnectionAdministration.person_approval(ADMIN))
+    _Broker(monkeypatch, status_code=503, answer=START_FAILED)
+
+    with pytest.raises(HostedMCPStartError) as failed:
+        await administration.perform_by_person(
+            hosted_server_id=definition.hosted_server_id,
+            action="start",
+            expected_definition_digest=definition.definition_digest,
+            expected_lifecycle="stopped",
+            person_id=ADMIN,
+        )
+
+    assert str(failed.value) == PORT_TAKEN
+    assert isinstance(failed.value, RuntimeError), "Web Chat answers it with 409 and its text, /mcp says it"
+    assert administration.store.require(definition.hosted_server_id).lifecycle == HostedMCPLifecycle.STOPPED
 
 
 def test_publishing_a_hosted_server_is_not_an_operation(tmp_path: Path, monkeypatch) -> None:
@@ -851,35 +896,63 @@ async def test_an_earlier_starts_ready_line_in_the_sidecar_log_does_not_count(tm
 
 
 @pytest.mark.asyncio
-async def test_the_broker_answers_a_start_it_could_not_finish_with_the_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        HostedMCPPortInUse(PORT_TAKEN),
+        HostedMCPStartError("The hosted MCP server echo stopped while starting, with status 1."),
+    ],
+    ids=["port-taken", "stopped-while-starting"],
+)
+async def test_the_broker_answers_a_start_it_could_not_finish_with_the_reason_never_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
     from aiohttp.test_utils import TestClient, TestServer
 
     from secure_tool_broker.service import SecureToolBrokerService
     from tests.broker_access_support import BROKER_ROOT, caller_headers
 
     class Runtime:
+        """A person's start, and an agent's listing or call, which start a server set to run."""
+
+        raised: Exception = error
+
         async def change_host_lifecycle(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
-            raise HostedMCPPortInUse(PORT_TAKEN)
+            raise self.raised
 
         async def discover_tools(self, *_args: object, **_kwargs: object) -> Any:
-            # A call to a running server's tools starts its sidecar when it is not running.
-            raise HostedMCPPortInUse(PORT_TAKEN)
+            raise self.raised
 
+        async def invoke(self, *_args: object, **_kwargs: object) -> Any:
+            raise self.raised
+
+    runtime = Runtime()
     service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
-    monkeypatch.setattr(service, "_get_mcp_runtime", lambda: Runtime())
+    monkeypatch.setattr(service, "_get_mcp_runtime", lambda: runtime)
+    principal = PrincipalDescriptorV1(
+        principal_type=PrincipalType.AGENT, principal_id="agent_1", team_id=TEAM, roles=("worker",),
+        named_agent_type="TeamArchitect",
+    )
+    invocation = MCPInvocationRequestV1(
+        record_digest="0" * 64, operation_name="echo", tool_use_id="call-1", principal=principal
+    ).model_dump(mode="json", by_alias=True, exclude_none=True)
+    discovery = {"record_digest": "0" * 64, "named_agent_type": "TeamArchitect"}
     async with TestClient(TestServer(service.build_app())) as client:
-        answer = await client.post(
-            "/v1/mcp/hosted/h1/start", headers=caller_headers(), json={"definition_digest": "0" * 64}
-        )
-        text = await answer.text()
-        discovery = await client.post(
-            "/v1/mcp/connections/mcp_conn_x/tools", headers=caller_headers(),
-            json={"record_digest": "0" * 64, "named_agent_type": "TeamArchitect"},
-        )
-        refusal = await discovery.json()
+        answers = [
+            await client.post(path, headers=caller_headers(), json=body)
+            for path, body in (
+                ("/v1/mcp/hosted/h1/start", {"definition_digest": "0" * 64}),
+                ("/v1/mcp/connections/mcp_conn_x/tools", discovery),
+                ("/v1/mcp/connections/mcp_conn_x/invoke", invocation),
+            )
+        ]
+        bodies = [await answer.json() for answer in answers]
+        runtime.raised = PermissionError("The MCP connection record changed before discovery.")
+        refused = await client.post("/v1/mcp/connections/mcp_conn_x/tools", headers=caller_headers(), json=discovery)
 
-    assert (answer.status, text) == (409, PORT_TAKEN)
-    assert discovery.status == 403 and refusal["error"] == PORT_TAKEN
+    assert [answer.status for answer in answers] == [503, 503, 503]
+    assert bodies == [{"error": str(error), "reason_code": HOSTED_MCP_START_FAILED}] * 3
+    assert refused.status == 403, "a refusal is still a refusal"
 
 
 @pytest.mark.asyncio
@@ -901,7 +974,7 @@ async def test_the_mcp_chat_command_shows_why_a_start_failed() -> None:
             return SimpleNamespace(servers=[hosted])
 
         async def control_web_chat_mcp_lifecycle(self, _request: object) -> SimpleNamespace:
-            raise RuntimeError(PORT_TAKEN)
+            raise HostedMCPStartError(PORT_TAKEN)
 
     service = GatewayManagerControlCommandService(SimpleNamespace(), mcp_controls=Controls())  # type: ignore[arg-type]
     result = await service.execute(
@@ -912,7 +985,7 @@ async def test_the_mcp_chat_command_shows_why_a_start_failed() -> None:
         )
     )
 
-    assert PORT_TAKEN in result.text
+    assert result.text == f"MCP hosted_server h1 was not changed: {PORT_TAKEN}"
 
 
 # -- a server set to run whose sidecar cannot start says so wherever it is listed ----------

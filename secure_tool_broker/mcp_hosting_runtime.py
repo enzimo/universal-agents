@@ -14,6 +14,7 @@ from typing import Any, BinaryIO
 
 from mcp_control.hosting import (
     HostedMCPLifecycle,
+    HostedMCPStartError,
     MCPHostedServerDefinitionV1,
     MCPHostedServerStore,
     resolve_mcp_hosting_paths,
@@ -26,10 +27,6 @@ LOGGER = logging.getLogger(__name__)
 # error it prints when the port is taken.
 _LISTENING = re.compile(r"Uvicorn running on \S+:(\d+)")
 _PORT_TAKEN = "address already in use"
-
-
-class HostedMCPStartError(RuntimeError):
-    """A hosted MCP server's sidecar did not start; the message says why and what to do."""
 
 
 class HostedMCPPortInUse(HostedMCPStartError):

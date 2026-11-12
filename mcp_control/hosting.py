@@ -31,6 +31,10 @@ from runtime_settings.instance_layout import InstanceLayout
 
 LOGGER = logging.getLogger(__name__)
 HOSTED_MCP_SCHEMA_VERSION = 1
+# The broker's answer when a hosted server's sidecar could not start
+# (``HostedMCPStartError``): "temporarily unavailable", with this reason code.
+HOSTED_MCP_START_FAILED = "hosted_mcp_start_failed"
+HOSTED_MCP_START_FAILED_STATUS = 503
 _NAME = re.compile(r"[a-z][a-z0-9_.-]{0,119}\Z")
 _TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,127}\Z")
 
@@ -204,6 +208,47 @@ class HostedMCPStartFailureV1(BaseModel):
     hosted_server_id: str = Field(min_length=1, max_length=240)
     reason: str = Field(min_length=1, max_length=4000)
     failed_at: datetime
+
+
+class HostedMCPStartError(RuntimeError):
+    """A hosted MCP server's sidecar did not start; the message says why and what to do.
+
+    A start failure is not a refusal: what failed is the server's process, for
+    example on a port another process holds, not anyone's access. Nothing about
+    access or the connection changes when someone frees that port, so a caller
+    that waits for such a change would wait forever.
+    The broker therefore answers it with ``HOSTED_MCP_START_FAILED_STATUS``
+    (503) and ``HOSTED_MCP_START_FAILED``, never with a refusal's 403, and the
+    agents' loader (``custom_agents.mcp_server_tools``) tries the server again
+    on its schedule, as it does a server that does not answer. Both clients of
+    the broker (the agent's ``BrokeredMCPClient`` and the manager's
+    ``MCPHostingAdministration``) raise this error again from that answer, so
+    agents, Web Chat and ``/mcp`` all show the same reason. It is a
+    ``RuntimeError`` so those callers' existing handling shows its text.
+    """
+
+    def broker_answer(self) -> dict[str, str]:
+        """The JSON body of the broker's answer: the reason, and the code that marks a start failure."""
+
+        return {"error": str(self), "reason_code": HOSTED_MCP_START_FAILED}
+
+    @classmethod
+    def from_broker_answer(cls, status_code: int, body: str) -> "HostedMCPStartError | None":
+        """The error again from the broker's answer, or ``None`` when the answer is not a start failure.
+
+        Only the 503 that carries ``HOSTED_MCP_START_FAILED`` counts: any other
+        503 (for example from a proxy) stays an ordinary HTTP error.
+        """
+
+        if status_code != HOSTED_MCP_START_FAILED_STATUS:
+            return None
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return None
+        if not isinstance(payload, dict) or payload.get("reason_code") != HOSTED_MCP_START_FAILED:
+            return None
+        return cls(str(payload.get("error") or "").strip() or "The hosted MCP server could not start.")
 
 
 def start_failure_sentence(failure: HostedMCPStartFailureV1) -> str:
@@ -409,8 +454,11 @@ def resolve_hosted_broker_config(config: Any, hosted_server_id: str) -> dict[str
 
 __all__ = [
     "HOSTED_MCP_SCHEMA_VERSION",
+    "HOSTED_MCP_START_FAILED",
+    "HOSTED_MCP_START_FAILED_STATUS",
     "HostedMCPBehavior",
     "HostedMCPLifecycle",
+    "HostedMCPStartError",
     "HostedMCPStartFailureV1",
     "HostedMCPToolDefinitionV1",
     "MCPHostedServerDefinitionV1",

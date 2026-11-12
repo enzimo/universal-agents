@@ -23,6 +23,7 @@ from custom_messages.contracts.access_v2 import ChangeApprovalRecordV1
 from custom_messages.contracts.mcp_v1 import MCPHostLifecycleRequestV1
 from mcp_control.hosting import (
     HostedMCPLifecycle,
+    HostedMCPStartError,
     HostedMCPToolDefinitionV1,
     MCPHostedServerDefinitionV1,
     MCPHostedServerStore,
@@ -246,7 +247,11 @@ class MCPHostingAdministration:
         return {"status": removed.lifecycle.value, "hosted_server_id": removed.hosted_server_id, "recoverable": True}
 
     async def change_running_state(self, hosted_server_id: str, operation: str, *, by: str) -> dict[str, Any]:
-        """Start or stop an installed server through the broker, which runs it."""
+        """Start or stop an installed server through the broker, which runs it.
+
+        A start the broker could not finish raises ``HostedMCPStartError`` (a
+        ``RuntimeError``) with the broker's reason and leaves the server stopped.
+        """
 
         if operation not in HOSTED_LIFECYCLE_OPERATIONS:
             raise ValueError("Hosted MCP servers are started or stopped here; install and remove are changes.")
@@ -265,9 +270,11 @@ class MCPHostingAdministration:
                 headers={"Authorization": f"Bearer {broker_token}"},
                 json=payload.model_dump(mode="json", by_alias=True, exclude_none=True),
             )
-        if response.status_code == 409:
-            # The broker could not start the server's sidecar; its answer says why.
-            raise RuntimeError(response.text.strip())
+        start_failure = HostedMCPStartError.from_broker_answer(response.status_code, response.text)
+        if start_failure is not None:
+            # The broker could not start the server's sidecar: it stays stopped, and
+            # the agent tool, Web Chat and /mcp show the broker's reason.
+            raise start_failure
         response.raise_for_status()
         definition = self.store.update_lifecycle(
             definition.hosted_server_id,

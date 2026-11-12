@@ -6,7 +6,10 @@ Strands MCP clients for Universal Agents.
   forwards each call with the agent and its signed task context; the broker
   decides the call. A refused call returns the broker's reason, tool,
   operation, level and next step to the model (``BrokerRefusal``), so the
-  agent can ask for exactly the access it lacks.
+  agent can ask for exactly the access it lacks. A hosted server whose sidecar
+  could not start is not a refusal: the broker's 503 becomes
+  ``mcp_control.hosting.HostedMCPStartError`` again, so the loader tries the
+  server again later and a call gives the model the reason.
 - ``brokered_mcp_client`` builds the client of one installed server from its
   secret-free proxy configuration; ``custom_agents.mcp_server_tools`` loads
   its tools before model calls in both authorization modes and decides when a
@@ -46,6 +49,7 @@ from custom_messages.contracts.mcp_v1 import (
     MCP_TOOL_USE_ID_MAX_LENGTH,
 )
 from custom_tools.runtime_context import active_schedule_run, active_signed_task_context, get_agent_ref
+from mcp_control.hosting import HostedMCPStartError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -201,6 +205,9 @@ class BrokeredMCPClient(MCPClient):
             )
         if response.status_code == httpx.codes.FORBIDDEN:
             raise _broker_refusal(response)
+        start_failure = HostedMCPStartError.from_broker_answer(response.status_code, response.text)
+        if start_failure is not None:
+            raise start_failure
         response.raise_for_status()
         body = response.json()
         if not isinstance(body, dict):
@@ -212,7 +219,8 @@ class BrokeredMCPClient(MCPClient):
 
         The loader (``custom_agents.mcp_server_tools``) decides what happens
         next: a refusal (``BrokerRefusal``) waits for access or the server to
-        change, anything else is tried again on a schedule.
+        change, anything else is tried again on a schedule, including a hosted
+        server whose sidecar could not start (``HostedMCPStartError``).
         """
 
         if self._loaded_tools is not None:
@@ -319,6 +327,16 @@ class BrokeredMCPClient(MCPClient):
                 toolUseId=tool_use_id,
                 content=[{"text": refusal.model_text()}],
             )
+        except HostedMCPStartError as exc:
+            # Expected while a hosted server cannot start: no traceback; the model reads the reason.
+            LOGGER.warning(
+                "A hosted MCP server could not start for a call. event=mcp_broker_hosted_start_failed "
+                "connection_id=%s operation=%s reason=%s",
+                self._ua_connection_id,
+                name,
+                str(exc),
+            )
+            return self._handle_tool_execution_error(tool_use_id, exc)
         except Exception as exc:
             LOGGER.exception(
                 "Brokered MCP invocation failed. event=mcp_broker_invocation_client_failed "
