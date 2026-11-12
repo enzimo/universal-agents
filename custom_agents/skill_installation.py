@@ -57,7 +57,12 @@ from custom_agents.skill_repository import (
 from id_generation import new_id, new_id_suffix
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.skill_assessment import SkillSemanticReviewSettings
-from custom_agents.skill_semantic_review import assess_skill, configuration_digest, validate_report
+from custom_agents.skill_semantic_review import (
+    assess_skill,
+    configuration_digest,
+    refusal_message,
+    validate_report,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -72,6 +77,12 @@ TEAM_SKILL_INSTALL_CHANGE_KIND = "team_skill_install"
 DEFAULT_SKILLSPECTOR_EXECUTABLE = "skillspector"
 _CHANGE_ID_PATTERN = re.compile(r"skill_install_[0-9a-f]{12}\Z")
 _COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+# The staging gate's log line (_require_assessment_passed): identifiers and the
+# report's codes only, never file names, details or provider text.
+_REVIEW_LOG_FIELDS = (
+    "change_id=%s skill_name=%s artifact_tree_sha256=%s task_id=%s agent_id=%s mode=%s "
+    "status=%s reason=%s error_type=%s provider=%s model_id=%s"
+)
 
 
 @dataclass(frozen=True)
@@ -518,7 +529,15 @@ class SkillInstallationService:
                 scan_report=dict(scan.report),
                 semantic_report=semantic,
             )
-            self._require_assessment_passed(semantic, public_report_path)
+            self._require_assessment_passed(
+                semantic,
+                change_id=change_id,
+                skill_name=selected.name,
+                task_id=task_id,
+                manifest=manifest,
+                settings=settings.semantic_review,
+                public_report=public_report_path,
+            )
             now = utc_now()
             authority_mode = self._authority_mode()
             plan = SkillInstallPlan(
@@ -624,7 +643,15 @@ class SkillInstallationService:
                 scan_report=dict(scan.report),
                 semantic_report=semantic,
             )
-            self._require_assessment_passed(semantic, public_report_path)
+            self._require_assessment_passed(
+                semantic,
+                change_id=change_id,
+                skill_name=name,
+                task_id=task_id,
+                manifest=manifest,
+                settings=settings.semantic_review,
+                public_report=public_report_path,
+            )
             now = utc_now()
             authority_mode = self._authority_mode()
             plan = SkillInstallPlan(
@@ -673,17 +700,58 @@ class SkillInstallationService:
             immutable=True,
         )
         if build_skill_tree_manifest(artifact) != manifest:
+            logger.warning(
+                "A quarantined skill changed during its review; nothing was proposed. "
+                "event=skill_quarantine_changed_during_review change_id=%s artifact_tree_sha256=%s",
+                change_id,
+                manifest.tree_sha256,
+            )
             raise PermissionError("Quarantined skill changed during security assessment.")
         return report
 
-    @staticmethod
-    def _require_assessment_passed(report: dict[str, Any], public_report: Optional[Path]) -> None:
-        if report["status"] not in {"not_configured", "completed"}:
-            raise PermissionError(
-                "Skill semantic assessment is blocked or incomplete. Static checks passed, "
-                "but installation was not proposed. Repair the selected review and stage again. "
-                f"Report: {public_report or 'protected runtime reports'}"
+    def _require_assessment_passed(
+        self,
+        report: dict[str, Any],
+        *,
+        change_id: str,
+        skill_name: str,
+        task_id: str,
+        manifest: SkillTreeManifest,
+        settings: SkillSemanticReviewSettings,
+        public_report: Optional[Path],
+    ) -> None:
+        """The staging gate: apply's own check (``validate_report``), with one log line for the outcome.
+
+        Runs after the public report is written, so the person can read why a
+        refused skill was not proposed; a refusal saves no plan.
+        """
+
+        fields = (
+            change_id,
+            skill_name,  # validated by the skill repository's name pattern
+            manifest.tree_sha256,
+            task_id,
+            getattr(self.agent, "id", None),
+            settings.mode,
+            report.get("status"),
+            report.get("reason"),
+            report.get("error_type") or "-",
+            report.get("provider") or "-",
+            report.get("model_id") or "-",
+        )
+        try:
+            validate_report(report, manifest.tree_sha256, {entry.path for entry in manifest.entries}, settings)
+        except ValueError as exc:
+            logger.warning(
+                "A skill was not proposed: its review did not pass the staging gate. "
+                "event=skill_semantic_review_refused " + _REVIEW_LOG_FIELDS,
+                *fields,
             )
+            raise PermissionError(refusal_message(report, public_report)) from exc
+        logger.info(
+            "A skill's review passed the staging gate. event=skill_semantic_review_finished " + _REVIEW_LOG_FIELDS,
+            *fields,
+        )
 
     @staticmethod
     def _assessment_evidence(
@@ -789,7 +857,10 @@ class SkillInstallationService:
             "semantic_review_configuration": {
                 "setting": "workspace.skill_installation.semantic_review.mode",
                 "choices": ["off", "task_model"],
-                "notice": "Local checks finish without a model. Select task_model to use existing task-scoped provider authentication.",
+                "notice": (
+                    "off: only the local checks run. task_model: the task's own model also reviews the skill, "
+                    "and a review that does not finish refuses the plan."
+                ),
             },
             "next_step": (
                 "Present the scan result and findings to the person, then call apply_change(change_id, reason). "
@@ -828,9 +899,10 @@ class SkillInstallationService:
 
         if (paths.receipts / f"{plan.change_id}.json").exists():
             raise FileExistsError(f"Skill installation plan {plan.change_id} was already applied.")
-        self._verify_artifact_and_report(plan)
-        if plan.semantic_review.configuration_sha256 != configuration_digest(self._settings().semantic_review):
+        review_settings = self._settings().semantic_review
+        if plan.semantic_review.configuration_sha256 != configuration_digest(review_settings):
             raise PermissionError("Semantic review settings changed after scanning; stage a fresh plan.")
+        self._verify_artifact_and_report(plan, review_settings)
         destination = Path(plan.destination_path).resolve()
         if destination != (paths.installed / plan.skill_name).resolve():
             raise PermissionError("Skill installation destination no longer matches the runtime-owned path.")
@@ -856,9 +928,9 @@ class SkillInstallationService:
                 f"{plan.artifact_file_count} files, {plan.artifact_total_bytes} bytes; security scan: "
                 f"{issues.get('verdict') or 'passed'} (score {issues.get('score', 'n/a')}).",
                 "Skills give agents instructions, not access; running their scripts still needs code access.",
-                "Semantic assessment completed."
+                "The task's model reviewed the skill and found nothing above LOW."
                 if plan.semantic_review.status == "completed"
-                else "LLM assessment did not run; only local scanner checks completed. Model setup is optional.",
+                else "Model review is turned off (semantic_review.mode: off); only the local scanner checks ran.",
             ),
         )
 
@@ -1046,7 +1118,9 @@ class SkillInstallationService:
             raise PermissionError("Skill installation plan belongs to another task.")
 
     @staticmethod
-    def _verify_artifact_and_report(plan: SkillInstallPlan) -> None:
+    def _verify_artifact_and_report(plan: SkillInstallPlan, review_settings: SkillSemanticReviewSettings) -> None:
+        """The quarantined files and both reports are still the planned ones, and the review passes ``review_settings``."""
+
         artifact = Path(plan.artifact_path).resolve()
         if not artifact.is_dir():
             raise PermissionError("Quarantined skill artifact is missing.")
@@ -1084,7 +1158,9 @@ class SkillInstallationService:
                     or semantic.get("status") != plan.semantic_review.status
                     or semantic.get("configuration_sha256") != plan.semantic_review.configuration_sha256):
                 raise ValueError("Semantic report changed")
-            validate_report(semantic, plan.artifact_tree_sha256, {entry.path for entry in manifest.entries})
+            validate_report(
+                semantic, plan.artifact_tree_sha256, {entry.path for entry in manifest.entries}, review_settings
+            )
         except (OSError, ValueError, TypeError) as exc:
             raise PermissionError("Semantic review evidence changed or is incomplete; stage a fresh plan.") from exc
 

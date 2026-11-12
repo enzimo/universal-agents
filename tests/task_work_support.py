@@ -161,7 +161,12 @@ async def run_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
 
 
 def run_tool_in_turn(agent: Any, task_id: str, tool: Callable[[], T]) -> T:
-    """``run_in_turn`` for a synchronous test: a fresh event loop runs the turn."""
+    """``run_in_turn`` for a synchronous test: a fresh event loop runs the turn.
+
+    Each call uses a new loop. An agent's turns all share its one runtime
+    loop, so a test of several turns with one model object whose client keeps
+    loop-bound connections runs them inside one loop (``run_in_turn``).
+    """
 
     return asyncio.run(run_in_turn(agent, task_id, tool))
 

@@ -17,6 +17,9 @@ With ``semantic_review.mode: task_model`` the review fails closed:
   with one ``AssessmentReason`` (``_classify_failure``). Only ``mode: off``
   gives ``not_configured``, which lets staging finish on the local checks
   alone.
+- Staging and apply check a report with the same ``validate_report``, bound
+  to the review settings in force; a refusal names the reason and its fix
+  (``refusal_message``, ``REASON_HINTS``).
 
 Reports and logs keep the reason code, a detail written by this code (or a
 model-key error's text, which is written for the person and holds no key) and
@@ -27,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import re
 from collections.abc import Callable
 from enum import StrEnum
@@ -55,17 +57,21 @@ from custom_agents.provider_error_runtime import (
 from custom_agents.skill_repository import SkillTreeManifest, build_skill_tree_manifest
 from custom_agents.turn_registry import TurnEnded, run_on_turn_loop, turn_has_ended
 from custom_tools.runtime_context import current_task_work
-from runtime_settings.skill_assessment import SkillSemanticReviewSettings
+from runtime_settings.skill_assessment import MAX_INPUT_BYTES_CEILING, SkillSemanticReviewSettings
 
-logger = logging.getLogger(__name__)
 SEMANTIC_POLICY_VERSION = "skill-semantic-review-v1"
 CONFIGURATION_PATH = "workspace.skill_installation.semantic_review"
 # The name of the review's call on the turn's loop, in the turn's running tool calls and log lines.
 REVIEW_WORK_NAME = "skill_semantic_review"
 # Strands ends a structured-output call with end_turn, or with tool_use when
-# the formatting-only SemanticDecision tool was the last step. Any other stop
-# reason (limit_turns, cancelled, ...) means the review did not finish.
+# the formatting-only SemanticDecision tool was the last step.
 FINISHED_STOP_REASONS = frozenset({"end_turn", "tool_use"})
+# The reviewer has no tools and offers only SemanticDecision, so it reaches its
+# turn limit only when every attempt sent an invalid decision or called a tool
+# it does not have: model_output_invalid, not model_did_not_finish. Any other
+# non-final stop (content_filtered, guardrail_intervened, ...) did not finish.
+REVIEW_TURN_LIMIT = 3
+TURN_LIMIT_STOP_REASON = "limit_turns"
 # A model-key error's text is shown to the person; keep a bounded copy.
 _DETAIL_LIMIT = 500
 _STOP_REASON_PATTERN = re.compile(r"[a-z_]{1,40}")
@@ -99,12 +105,86 @@ class AssessmentReason(StrEnum):
     MODEL_TIMED_OUT = "model_timed_out"
     MODEL_UNREACHABLE = "model_unreachable"
     MODEL_BUSY = "model_busy"  # overloaded or throttled
-    MODEL_DID_NOT_FINISH = "model_did_not_finish"  # a token or turn limit ended it
-    MODEL_OUTPUT_INVALID = "model_output_invalid"  # no valid SemanticDecision
+    MODEL_DID_NOT_FINISH = "model_did_not_finish"  # stopped early: max_tokens, a provider filter, ...
+    MODEL_OUTPUT_INVALID = "model_output_invalid"  # no valid SemanticDecision, at once or by the turn limit
     INCOMPLETE_FILE_COVERAGE = "incomplete_file_coverage"
     FINDING_OUTSIDE_REVIEWED_FILES = "finding_outside_reviewed_files"
     ARTIFACT_CHANGED = "artifact_changed"  # the quarantined files changed during the review
     MODEL_CALL_FAILED = "model_call_failed"  # any other failure
+
+
+# What happened and who fixes it, for each reason a review can refuse with
+# (``refusal_message``). Fixed text only: never provider output or file contents.
+REASON_HINTS: dict[AssessmentReason, str] = {
+    AssessmentReason.FINDINGS: (
+        "The model review found a MEDIUM or higher risk. Read its findings in the report; "
+        "this skill cannot be installed as it is."
+    ),
+    AssessmentReason.TURN_FINISHED: (
+        "The task stopped or finished before the review ended. Stage the skill again from a running task."
+    ),
+    AssessmentReason.TASK_MODEL_UNAVAILABLE: (
+        "The review found no model for this task. Stage the skill again from a running task; "
+        "if it keeps happening, an administrator checks this agent's model settings."
+    ),
+    AssessmentReason.INPUT_TOO_LARGE: (
+        "The skill's files are larger than semantic_review.max_input_bytes. "
+        f"An administrator may raise that limit (up to {MAX_INPUT_BYTES_CEILING} bytes), "
+        "or the skill must get smaller."
+    ),
+    AssessmentReason.INPUT_TOO_LARGE_FOR_MODEL: (
+        "The skill's files do not fit the model's context window. Use a model with a larger context window "
+        "for this agent; an administrator may also lower semantic_review.max_input_bytes so such skills "
+        "are refused before any model call."
+    ),
+    AssessmentReason.INPUT_CHANGED: "A quarantined file changed or disappeared while it was read. Stage the skill again.",
+    AssessmentReason.NON_TEXT_CONTENT: (
+        "A file is not UTF-8 text or contains NUL bytes, so the model cannot read it. "
+        "Remove binary files from the skill and stage it again."
+    ),
+    AssessmentReason.MODEL_KEY_REFUSED: "This task may not use a model key for the review.",
+    AssessmentReason.MODEL_KEY_REJECTED: (
+        "The model provider refused the stored key. An administrator replaces it with /auth model, "
+        "or the person replaces their own key with /auth model me."
+    ),
+    AssessmentReason.MODEL_TIMED_OUT: (
+        "The model did not answer in time. Stage the skill again; if it keeps happening, "
+        "an administrator checks the provider and the model's timeout settings."
+    ),
+    AssessmentReason.MODEL_UNREACHABLE: (
+        "The model provider could not be reached. Stage the skill again once it is reachable; "
+        "if it stays unreachable, an administrator checks the endpoint."
+    ),
+    AssessmentReason.MODEL_BUSY: "The model provider is overloaded or limiting requests. Stage the skill again later.",
+    AssessmentReason.MODEL_DID_NOT_FINISH: (
+        "The model stopped before it finished its answer. With max_tokens, an administrator may raise "
+        "the model's output token limit, or the skill must get smaller; content_filtered or "
+        "guardrail_intervened means the provider's filter stopped it."
+    ),
+    AssessmentReason.MODEL_OUTPUT_INVALID: (
+        "The model did not return a valid review decision (limit_turns: not within "
+        f"{REVIEW_TURN_LIMIT} attempts). Use a model for this agent that follows structured output, "
+        "then stage the skill again."
+    ),
+    AssessmentReason.INCOMPLETE_FILE_COVERAGE: (
+        "The model did not report reviewing every file exactly once. Stage the skill again; "
+        "if it keeps happening, use a stronger model for this agent."
+    ),
+    AssessmentReason.FINDING_OUTSIDE_REVIEWED_FILES: (
+        "The model cited a file that is not in the skill. Stage the skill again; "
+        "if it keeps happening, use a stronger model for this agent."
+    ),
+    AssessmentReason.ARTIFACT_CHANGED: "The quarantined files changed during the review. Stage the skill again.",
+    AssessmentReason.MODEL_CALL_FAILED: (
+        "The model call failed; the runtime log names the error type. Stage the skill again; "
+        "if it keeps happening, an administrator checks the logs."
+    ),
+}
+# For a report whose own reason is not a refusal (disabled, assessed) or unknown:
+# only a report that does not fit the plan or the settings in force gets here.
+_MISMATCH_HINT = "The review report does not match this skill or the review settings in force; stage it again."
+# Reasons whose detail is a model-key error's own text, written for the person.
+_KEY_REASONS = frozenset({AssessmentReason.MODEL_KEY_REFUSED, AssessmentReason.MODEL_KEY_REJECTED})
 
 
 class AssessmentIncomplete(ValueError):
@@ -222,10 +302,14 @@ def _invoke_model(agent: Any, model: Any, prompt: str) -> SemanticDecision:
     # thread, where a client bound to the turn's loop fails (module docstring).
     result = run_on_turn_loop(
         agent,
-        reviewer.invoke_async(prompt, structured_output_model=SemanticDecision, limits={"turns": 3}),
+        reviewer.invoke_async(
+            prompt, structured_output_model=SemanticDecision, limits={"turns": REVIEW_TURN_LIMIT}
+        ),
         name=REVIEW_WORK_NAME,
     )
     stop_reason = str(result.stop_reason)
+    if stop_reason == TURN_LIMIT_STOP_REASON:
+        raise AssessmentIncomplete(AssessmentReason.MODEL_OUTPUT_INVALID, TURN_LIMIT_STOP_REASON)
     if stop_reason not in FINISHED_STOP_REASONS:
         detail = stop_reason if _STOP_REASON_PATTERN.fullmatch(stop_reason) else "other"
         raise AssessmentIncomplete(AssessmentReason.MODEL_DID_NOT_FINISH, detail)
@@ -320,7 +404,8 @@ def assess_skill(
     for. ``mode: off`` returns ``not_configured``/``disabled`` without a
     model. ``mode: task_model`` returns ``completed`` (``assessed``),
     ``blocked`` (``findings``) or ``incomplete`` with its reason, never
-    ``not_configured``.
+    ``not_configured``. The staging gate logs the outcome with the change
+    and skill it is for (``skill_installation``).
     """
 
     report: dict[str, Any] = {
@@ -352,35 +437,57 @@ def assess_skill(
     except Exception as exc:  # a selected review that did not finish must never pass
         reason, detail, error_type = _classify_failure(exc)
         report.update(status="incomplete", reason=reason.value, detail=detail, error_type=error_type)
-        work = current_task_work()
-        logger.warning(
-            "A selected skill review did not finish, so it cannot pass. event=skill_semantic_review_incomplete "
-            "agent_id=%s task_id=%s artifact_tree_sha256=%s reason=%s error_type=%s provider=%s model_id=%s",
-            getattr(agent, "id", None),
-            getattr(work, "task_id", None),
-            manifest.tree_sha256,
-            reason.value,
-            error_type or "-",
-            report["provider"] or "-",
-            report["model_id"] or "-",
-        )
         return report
     reason = AssessmentReason.FINDINGS if status == "blocked" else AssessmentReason.ASSESSED
     report.update(status=status, reason=reason.value, decision=decision.model_dump(mode="json"))
     return report
 
 
-def validate_report(report: dict[str, Any], artifact_digest: str, paths: set[str]) -> None:
+def validate_report(
+    report: dict[str, Any], artifact_digest: str, paths: set[str], settings: SkillSemanticReviewSettings
+) -> None:
+    """The one check a report must pass, at staging and again at apply; ``ValueError`` otherwise.
+
+    The report must be for these files, this policy and exactly ``settings``
+    (the settings in force when it is checked). Under ``mode: off`` only the
+    model-free ``not_configured``/``disabled`` report passes; under
+    ``task_model`` only a ``completed`` review whose decision covers exactly
+    ``paths`` with nothing above LOW.
+    """
+
     if (report.get("schema_version") != 1 or report.get("policy") != SEMANTIC_POLICY_VERSION
             or report.get("artifact_tree_sha256") != artifact_digest):
         raise ValueError("Semantic review does not match the artifact and policy")
+    if report.get("configuration_sha256") != configuration_digest(settings):
+        raise ValueError("Semantic review was made under other review settings")
     status = report.get("status")
-    if status == "not_configured" and report.get("reason") in {"disabled", "task_model_unavailable"}:
-        if report.get("decision") is not None:
-            raise ValueError("Unexpected decision for an unconfigured model")
+    if settings.mode == "off":
+        if (status != "not_configured" or report.get("reason") != AssessmentReason.DISABLED.value
+                or report.get("decision") is not None):
+            raise ValueError("Semantic review is off, but the report is not the model-free one")
         return
     if status != "completed":
         raise ValueError("Semantic assessment is blocked or incomplete")
     decision = SemanticDecision.model_validate(report["decision"])
     if validate_decision(decision, paths) != "completed":
         raise ValueError("Semantic assessment does not pass")
+
+
+def refusal_message(report: dict[str, Any], report_path: Path | None) -> str:
+    """The staging refusal for a report ``validate_report`` refused: its reason, what to do, and where to read it."""
+
+    try:
+        reason: AssessmentReason | None = AssessmentReason(str(report.get("reason") or ""))
+    except ValueError:
+        reason = None
+    detail = str(report.get("detail") or "")
+    label = reason.value if reason is not None else "unknown"
+    if reason in _KEY_REASONS and detail:
+        hint = detail  # the key error's own text names who fixes it
+    else:
+        hint = REASON_HINTS.get(reason, _MISMATCH_HINT) if reason is not None else _MISMATCH_HINT
+        label = f"{label}, {detail}" if detail else label
+    return (
+        f"The model review of this skill did not pass ({label}), so no installation was proposed. "
+        f"{hint} The local static checks passed. Report: {report_path or 'protected runtime reports'}"
+    )

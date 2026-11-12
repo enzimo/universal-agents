@@ -3,7 +3,9 @@
 Every review here runs as a sync tool call of a real model turn
 (``tests.task_work_support.run_in_turn``), as staging does, with the real
 Strands agent and inert model responses. Failures are the real Strands and
-SDK exceptions a provider or the per-call key binding raises.
+SDK exceptions a provider or the per-call key binding raises. Staging and
+apply share one check (``validate_report``) bound to the review settings in
+force; a staging refusal names its reason and fix, and saves no plan.
 """
 
 import asyncio
@@ -31,7 +33,9 @@ from custom_agents.model_keys import (
 )
 from custom_agents.provider_error_runtime import ModelStreamTimeoutError
 from custom_agents.sdk.strands.turn_tool_stop import stop_tool_calls
-from custom_agents.skill_installation import SkillInstallationService
+from custom_agents import skill_installation
+from custom_agents.governance.authorized_operations import canonical_json_sha256, model_digest
+from custom_agents.skill_installation import SkillInstallationService, resolve_skill_installation_paths
 from custom_agents.skill_repository import build_skill_tree_manifest
 from custom_agents.turn_registry import end_turn, start_turn
 from custom_messages.contracts.model_keys_v1 import KeySource
@@ -40,7 +44,14 @@ from model_providers.endpoints import EndpointKind, ModelEndpoint
 from runtime_settings.skill_assessment import SkillSemanticReviewSettings
 from tests.change_approval_support import TASK_ID, agreement, use_signed_contexts
 from tests.task_work_support import run_tool_in_turn, turn_agent, with_turn_bookkeeping
-from tests.test_skill_installation import _agent, _patch_acquisition, _repository, _write_config, REPOSITORY_URL
+from tests.test_skill_installation import (
+    REPOSITORY_URL,
+    _agent,
+    _patch_acquisition,
+    _repository,
+    _safe_scan_result,
+    _write_config,
+)
 
 SECRET = "sk-ant-review-secret-must-not-be-recorded"
 ENDPOINT = ModelEndpoint(address="https://models.example.invalid", kind=EndpointKind.ANTHROPIC, env_vars=("ANTHROPIC_API_KEY",))
@@ -293,7 +304,10 @@ def _failures():
     return {
         "token limit": (ReviewModel(stop_reason="max_tokens"), "model_did_not_finish", "max_tokens",
                         "MaxTokensReachedException"),
-        "turn limit": (ReviewModel(output=invalid_output), "model_did_not_finish", "limit_turns", ""),
+        # Three invalid decisions reach the reviewer's turn limit: the same cause and fix as no decision.
+        "turn limit": (ReviewModel(output=invalid_output), "model_output_invalid", "limit_turns", ""),
+        "provider filter": (ReviewModel(stop_reason="content_filtered"), "model_did_not_finish", "content_filtered",
+                            ""),
         "no decision": (ReviewModel(stop_reason="end_turn"), "model_output_invalid", "", "StructuredOutputException"),
         "context window": (ReviewModel(error=ContextWindowOverflowException("prompt is too long")),
                            "input_too_large_for_model", "", "ContextWindowOverflowException"),
@@ -331,8 +345,6 @@ def test_each_failure_is_incomplete_with_its_reason_and_no_provider_text(artifac
     for text in (json.dumps(report), caplog.text):
         assert SECRET not in text
         assert "provider said" not in text and "x-api-key" not in text
-    warning = next(r.getMessage() for r in caplog.records if "event=skill_semantic_review_incomplete" in r.getMessage())
-    assert f"reason={reason}" in warning and "task_id=review-task" in warning
 
 
 def test_a_throttled_model_wrapped_by_strands_is_busy():
@@ -443,15 +455,193 @@ def test_changed_review_configuration_requires_a_new_plan(installation):
         service.apply(plan["change_id"], agreement())
 
 
-def test_failed_selected_review_never_creates_an_installable_plan(installation):
+def _refused_log_line(caplog) -> str:
+    return next(r.getMessage() for r in caplog.records if "event=skill_semantic_review_refused" in r.getMessage())
+
+
+def _protected_review(agent) -> tuple[str, dict]:
+    """The change id and protected report of the one review staging wrote."""
+
+    (report,) = resolve_skill_installation_paths(agent).reports.glob("*.semantic.json")
+    return report.name.removesuffix(".semantic.json"), json.loads(report.read_text())
+
+
+def _nothing_proposed(agent) -> bool:
+    paths = resolve_skill_installation_paths(agent)
+    return not list(paths.plans.glob("*.json")) and not list(paths.installed.iterdir())
+
+
+def test_failed_selected_review_never_creates_an_installable_plan(installation, caplog):
     agent, service = installation
-    agent._strands_model = ReviewModel(error=RuntimeError("synthetic provider failure"))
-    with pytest.raises(PermissionError, match="blocked or incomplete"):
+    agent._strands_model = ReviewModel(error=RuntimeError(f"synthetic provider failure {SECRET}"))
+    caplog.set_level(logging.INFO)
+
+    with pytest.raises(PermissionError) as refused:
         stage_in_turn(agent, service)
-    paths = __import__("custom_agents.skill_installation", fromlist=["resolve_skill_installation_paths"]).resolve_skill_installation_paths(agent)
-    assert not list(paths.plans.glob("*.json"))
-    assert not list(paths.installed.iterdir())
-    assert list(paths.reports.glob("*.semantic.json"))
+
+    assert "did not pass (model_call_failed)" in str(refused.value)
+    assert "runtime log names the error type" in str(refused.value)
+    assert "skill_scans" in str(refused.value)  # the person's readable copy of the report
+    assert _nothing_proposed(agent)
+    change_id, review = _protected_review(agent)
+    line = _refused_log_line(caplog)
+    for field in (
+        f"change_id={change_id}", "skill_name=reviewed-skill",
+        f"artifact_tree_sha256={review['artifact_tree_sha256']}", f"task_id={TASK_ID}", "mode=task_model",
+        "status=incomplete", "reason=model_call_failed", "error_type=RuntimeError", "model_id=offline-review",
+    ):
+        assert field in line, (field, line)
+    assert SECRET not in caplog.text and SECRET not in str(refused.value)
+
+
+def test_staging_without_a_model_refuses_with_its_reason(installation, caplog):
+    agent, service = installation
+    agent._strands_model = None
+    caplog.set_level(logging.INFO)
+
+    with pytest.raises(PermissionError, match=r"did not pass \(task_model_unavailable\)"):
+        stage_in_turn(agent, service)
+
+    assert _nothing_proposed(agent)
+    assert "reason=task_model_unavailable" in _refused_log_line(caplog)
+
+
+def test_off_stages_and_applies_on_the_local_checks_and_logs_the_outcome(tmp_path, monkeypatch, caplog):
+    use_signed_contexts(monkeypatch)
+    config, path = _write_config(tmp_path)
+    agent = _agent(config, path)
+    agent._strands_model = ReviewModel()
+    _patch_acquisition(monkeypatch, _repository(tmp_path))
+    service = SkillInstallationService(agent)
+    caplog.set_level(logging.INFO)
+    try:
+        plan = service.stage(repository_url=REPOSITORY_URL)
+        installed = service.apply(plan["change_id"], agreement())
+    finally:
+        access_runtime._runtime_access.cache_clear()
+
+    assert plan["semantic_review"]["status"] == "not_configured"
+    assert installed["status"] == "installed"
+    assert not agent._strands_model.calls
+    line = next(r.getMessage() for r in caplog.records if "event=skill_semantic_review_finished" in r.getMessage())
+    assert "mode=off status=not_configured reason=disabled" in line and f"change_id={plan['change_id']}" in line
+
+
+@pytest.mark.parametrize("old_reason", ["task_model_unavailable", "disabled"])
+def test_apply_refuses_a_model_free_report_while_the_review_is_selected(installation, old_reason):
+    """Finding F1, apply side: a plan whose report says no model ran never installs under task_model."""
+
+    agent, service = installation
+    plan = stage_in_turn(agent, service)
+    paths = resolve_skill_installation_paths(agent)
+    report_path = Path(plan["semantic_review"]["report_path"])
+    report = json.loads(report_path.read_text())
+    # The PR head's shape: bound to task_model, but no model ran.
+    report.update(status="not_configured", reason=old_reason, decision=None, model_id="", provider="")
+    report_path.chmod(0o600)  # Simulate operator-level damage to protected evidence.
+    report_path.write_text(json.dumps(report))
+    store = service._plan_store(paths)
+    stored = store.load(plan["change_id"])
+    evidence = stored.semantic_review.model_copy(
+        update={"status": "not_configured", "report_sha256": canonical_json_sha256(report)}
+    )
+    forged = stored.model_copy(update={"semantic_review": evidence})
+    store.save(forged.model_copy(update={"plan_digest": model_digest(forged)}))
+
+    with pytest.raises(PermissionError, match="Semantic review evidence"):
+        service.apply(plan["change_id"], agreement())
+    assert not Path(plan["destination_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_staging_that_outlives_its_stopped_turn_proposes_nothing(installation, monkeypatch):
+    """Finding F1's trigger through stage(): the turn stopped during the scan, which then finished."""
+
+    agent, service = installation
+    scanning, resume = threading.Event(), threading.Event()
+    outcome = {}
+
+    def slow_scan(*args, **kwargs):
+        scanning.set()
+        resume.wait(5)
+        return _safe_scan_result()
+
+    monkeypatch.setattr(skill_installation, "scan_skill_with_skillspector", slow_scan)
+
+    def staging_tool():
+        try:
+            service.stage(repository_url=REPOSITORY_URL)
+        except PermissionError as exc:
+            outcome["refusal"] = str(exc)
+
+    async def turn():
+        start_turn(agent, TASK_ID)
+        try:
+            await asyncio.to_thread(staging_tool)
+        finally:
+            end_turn(agent)
+
+    with task_work(TASK_ID):
+        owner = asyncio.create_task(turn())
+        await asyncio.wait_for(asyncio.to_thread(scanning.wait, 5), 6)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        resume.set()
+        for _ in range(500):
+            if "refusal" in outcome:
+                break
+            await asyncio.sleep(0.01)
+
+    assert "did not pass (turn_finished)" in outcome["refusal"]
+    assert not agent._strands_model.calls
+    assert _nothing_proposed(agent)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_the_review_through_stage_proposes_nothing(installation, monkeypatch):
+    """C04(b): the turn's own stop cleanup cancels the review's model call; staging refuses and saves no plan."""
+
+    from custom_agents import turn_registry
+
+    monkeypatch.setattr(turn_registry, "TURN_POLL_SECONDS", 0.01)
+    agent, service = installation
+    streaming = asyncio.Event()
+    seen = {}
+
+    async def wait_until_cancelled():
+        streaming.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            seen["stream_cancelled"] = True
+            raise
+
+    agent._strands_model = ReviewModel(before_answer=wait_until_cancelled)
+
+    def staging_tool():
+        try:
+            service.stage(repository_url=REPOSITORY_URL)
+        except PermissionError as exc:
+            seen["refusal"] = str(exc)
+
+    async def turn():
+        tool_stop = start_turn(agent, TASK_ID)
+        thread = asyncio.create_task(asyncio.to_thread(staging_tool))
+        try:
+            await asyncio.wait_for(streaming.wait(), 10)
+            await stop_tool_calls(tool_stop, logging.getLogger("tests.review_stop"), reason="stopped by the test")
+            seen["after_stop"] = (seen.get("stream_cancelled"), tool_stop.running(), set(agent._owned_tasks))
+        finally:
+            end_turn(agent)
+            await thread
+
+    with task_work(TASK_ID):
+        await asyncio.create_task(turn())
+
+    assert seen["after_stop"] == (True, (), set())
+    assert "did not pass (turn_finished)" in seen["refusal"]
+    assert _nothing_proposed(agent)
 
 
 def test_static_rejection_never_sends_skill_contents_to_the_model(installation, monkeypatch):
@@ -477,3 +667,54 @@ def test_settings_transfer_preserves_old_choices_and_defaults_to_non_llm():
     assert SECTION_UPGRADES[("settings", 8, SettingsSection.schema_version)](records) == records
     config = GatewayInstanceConfig.create(instance_name="example", instance_root="/example", team_id="example", timezone="UTC")
     assert config.workspace.skill_installation.semantic_review.mode == "off"
+
+
+def test_one_gate_binds_the_settings_and_passes_a_model_free_report_only_when_off(artifact):
+    manifest = build_skill_tree_manifest(artifact)
+    paths = {entry.path for entry in manifest.entries}
+    off, on = SkillSemanticReviewSettings(), selected()
+
+    model_free = semantic.assess_skill(SimpleNamespace(), artifact, manifest, off)
+    completed = review(artifact, ReviewModel())
+    semantic.validate_report(model_free, manifest.tree_sha256, paths, off)
+    semantic.validate_report(completed, manifest.tree_sha256, paths, on)
+
+    # A review made under one setting never passes under another.
+    for report, settings in ((model_free, on), (completed, off), (completed, selected(max_input_bytes=2048))):
+        with pytest.raises(ValueError, match="other review settings"):
+            semantic.validate_report(report, manifest.tree_sha256, paths, settings)
+    # Under task_model only a completed review passes; the PR head accepted these model-free reports.
+    bound = semantic.configuration_digest(on)
+    for reason in ("task_model_unavailable", "disabled"):
+        with pytest.raises(ValueError, match="blocked or incomplete"):
+            semantic.validate_report(
+                {**model_free, "configuration_sha256": bound, "reason": reason}, manifest.tree_sha256, paths, on
+            )
+    with pytest.raises(ValueError, match="blocked or incomplete"):
+        semantic.validate_report(review(artifact, None), manifest.tree_sha256, paths, on)
+    # Under off only the model-free report itself passes.
+    with pytest.raises(ValueError, match="model-free"):
+        semantic.validate_report(
+            {**model_free, "decision": completed["decision"]}, manifest.tree_sha256, paths, off
+        )
+
+
+def test_a_refusal_names_its_reason_detail_fix_and_report():
+    passing = {semantic.AssessmentReason.DISABLED, semantic.AssessmentReason.ASSESSED}
+    assert set(semantic.REASON_HINTS) == set(semantic.AssessmentReason) - passing
+    path = Path("/workspace/skill_scans/skill_install_0123456789ab.json")
+
+    too_large = semantic.refusal_message({"reason": "input_too_large", "detail": "max_input_bytes=1024"}, path)
+    invalid = semantic.refusal_message({"reason": "model_output_invalid", "detail": "limit_turns"}, path)
+    key = semantic.refusal_message({"reason": "model_key_refused", "detail": own_model_needed_message()}, None)
+    unknown = semantic.refusal_message({"reason": "not-a-reason"}, path)
+    mismatched = semantic.refusal_message({"reason": "assessed"}, path)
+
+    assert "(input_too_large, max_input_bytes=1024)" in too_large and "raise that limit" in too_large
+    assert "(model_output_invalid, limit_turns)" in invalid and "follows structured output" in invalid
+    assert "(model_key_refused)" in key and own_model_needed_message() in key
+    assert "protected runtime reports" in key
+    assert "(unknown)" in unknown and "does not match" in unknown
+    assert "(assessed)" in mismatched and "does not match" in mismatched
+    for message in (too_large, invalid, unknown, mismatched):
+        assert str(path) in message and "local static checks passed" in message
