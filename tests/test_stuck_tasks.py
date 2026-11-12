@@ -486,51 +486,76 @@ def step_link(step_id, request_id="root"):
 
 
 def lead_step(step_id):
-    """A plan step: a task of the lead with no parent and no files (``_enqueue_plan_step_task``)."""
+    """A plan step or recovery task: a task of the lead with no parent and no files of its own."""
     step = record(step_id, state=ProgressState.IN_PROGRESS)
     step.task.problem_statement = f"Step {step_id} of the plan: fetch daily candles"
     return step
 
 
+def lead_task_delegates(lead, request, task_id, child_files, **links):
+    """The lead holds ``request`` and its step ``task_id``; worker-1 holds the step's subtask."""
+    for owner in ("lead", "worker-1"):
+        lead.task_manager.runtime_state_store.clear_task_runtime(owner)
+    save(lead, "lead", "TeamArchitect", [request, lead_step(task_id)], **links)
+    # Delegated from the step: the subtask's parent is the step, not the request.
+    save(lead, "worker-1", "WebResearchAgent", [record(f"child-{task_id}", parent=task_id, route="lead", files=child_files)])
+    seen(lead, "worker-1")
+
+
 @pytest.mark.asyncio
-async def test_plan_steps_and_recovery_tasks_count_as_their_request_for_one_notice(lead, caplog):
-    caplog.set_level(logging.INFO)
+async def test_the_subtasks_of_each_plan_step_go_into_their_requests_one_notice(lead):
     old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
     other = stored_file(lead, "att_other", "chart.png", folder=ADAPTER_HOST_FOLDER)
     request = record("root", state=ProgressState.WAITING, files=[old])
-    store = lead.task_manager.runtime_state_store
     now = datetime.now(timezone.utc)
 
-    def step_running(minute, task_id, child_files, **links):
-        for owner in ("lead", "worker-1"):
-            store.clear_task_runtime(owner)
-        save(lead, "lead", "TeamArchitect", [request, lead_step(task_id)], **links)
-        # Delegated from the step: the subtask's parent is the step, not the request.
-        save(lead, "worker-1", "WebResearchAgent", [record(f"child-{task_id}", parent=task_id, route="lead", files=child_files)])
-        seen(lead, "worker-1")
-        return report_stuck_tasks(lead, now=now + timedelta(minutes=minute))
-
-    await step_running(0, "step-1", [old, other], plan_step_task_links={"step-1": step_link("step-1")})
+    lead_task_delegates(lead, request, "step-1", [old, other], plan_step_task_links={"step-1": step_link("step-1")})
+    await report_stuck_tasks(lead, now=now)
     (notice,) = notices(lead)
     assert notice.title == f'Your request "{REQUEST}" needs files sent again'
     assert "photo.png" in notice.summary and "chart.png" in notice.summary
-    (incident,) = open_incidents(lead)
-    assert incident.subject_id == "root"
+    assert [incident.subject_id for incident in open_incidents(lead)] == ["root"]
 
     # Step 1 ended and step 2 runs with its own subtask: still the request's one notice.
-    await step_running(1, "step-2", [old], plan_step_task_links={"step-1": step_link("step-1"), "step-2": step_link("step-2")})
-    # A recovery task for step 2, which has ended, runs with its own subtask.
+    links = {"step-1": step_link("step-1"), "step-2": step_link("step-2")}
+    lead_task_delegates(lead, request, "step-2", [old], plan_step_task_links=links)
+    await report_stuck_tasks(lead, now=now + timedelta(minutes=1))
+    assert len(notices(lead)) == 1 and len(chats(lead)) == 1
+    assert [incident.subject_id for incident in open_incidents(lead)] == ["root"]
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_task_for_an_ended_step_counts_as_its_request(lead, caplog):
+    caplog.set_level(logging.INFO)
+    old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
+    request = record("root", state=ProgressState.WAITING)  # only the recovery's subtask holds an old file
     recovery = RecoveryTaskLink(
         original_task_id="step-2", original_plan_id="plan-1", recovery_task_id="recovery-1",
         branch_id="branch-1", failure_type="tool_failure", failure_summary="The exchange did not answer.",
     )
-    await step_running(
-        2, "recovery-1", [old],
+    # Step 2 has ended; its link to the request stays in the lead's saved work.
+    lead_task_delegates(
+        lead, request, "recovery-1", [old],
         plan_step_task_links={"step-2": step_link("step-2")}, recovery_links={"recovery-1": recovery},
     )
-    assert len(notices(lead)) == 1 and len(chats(lead)) == 1
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+    (notice,) = notices(lead)
+    assert notice.title == f'Your request "{REQUEST}" needs files sent again'
+    assert "photo.png" in notice.summary
     assert [incident.subject_id for incident in open_incidents(lead)] == ["root"]
     assert "event=stuck_task_request_links_loop" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_plan_links_that_loop_are_logged_and_send_no_notice(lead, caplog):
+    old = stored_file(lead, "att_old", "photo.png", folder=ADAPTER_HOST_FOLDER)
+    lead_task_delegates(
+        lead, record("root", state=ProgressState.WAITING), "step-1", [old],
+        plan_step_task_links={"step-1": step_link("step-1", "step-2"), "step-2": step_link("step-2", "step-1")},
+    )
+    await report_stuck_tasks(lead, now=datetime.now(timezone.utc))
+    assert not notices(lead) and not admin_notices(lead) and not open_incidents(lead)
+    assert "event=stuck_task_request_links_loop task_id=child-step-1" in caplog.text
 
 
 @pytest.mark.asyncio

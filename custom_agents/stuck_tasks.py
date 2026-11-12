@@ -450,13 +450,6 @@ class StuckTasks:
         uploads_dir = agent_layout(self.agent).uploads_dir
         files_by_request: dict[str, dict[str, str]] = {}  # request task id -> attachment id -> file name
         for task in held.values():
-            request = self.request_of(held, made_for, task)
-            if request is None:
-                # No agent holds this task's request any more: the request
-                # ended, and a stop may not have reached the task yet. The
-                # person has nothing left to send files again for, so nothing
-                # is reported (an open incident for the request closes silently).
-                continue
             try:
                 old = [
                     attachment
@@ -472,10 +465,18 @@ class StuckTasks:
                     type(exc).__name__,
                 )
                 continue
-            if old:
-                files = files_by_request.setdefault(request.record.task_id, {})
-                for attachment in old:
-                    files.setdefault(attachment.attachment_id, attachment.filename)
+            if not old:
+                continue
+            request = self.request_of(held, made_for, task)
+            if request is None:
+                # No agent holds this task's request any more: the request
+                # ended, and a stop may not have reached the task yet. The
+                # person has nothing left to send files again for, so nothing
+                # is reported (an open incident for the request closes silently).
+                continue
+            files = files_by_request.setdefault(request.record.task_id, {})
+            for attachment in old:
+                files.setdefault(attachment.attachment_id, attachment.filename)
         for request_id, files in files_by_request.items():
             request = held[request_id]
             found.setdefault(
