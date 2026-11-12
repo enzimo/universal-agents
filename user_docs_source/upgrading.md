@@ -21,11 +21,13 @@ supported, because it may not read what a newer one saved.
   chat. A restart planned by those releases cannot be approved after the
   upgrade: approving it then only says it was planned by another version, and
   Team Architect has to plan it again and ask you again.
-- **From 0.9 with a chat app the adapter host runs** (`execution:
-  adapter_host`): first let requests that use files sent through that chat app
-  finish. After the upgrade the team can no longer open those files with its
-  tools. The person each such request works for is told in the Inbox and in
-  the chat which files to send again.
+- **From 0.9 with a chat app the adapter host runs:** this applies only to
+  chat apps set to `execution: "adapter_host"` under `interactive_apps`. Chat
+  apps the gateway runs itself (`execution: "in_process"`, the default) and
+  Web Chat need nothing. For a chat app in the adapter host, first let
+  requests that use files sent through it finish. After the upgrade the team
+  can no longer open those files with its tools; the person each such request
+  works for is told in the Inbox and in the chat which files to send again.
 - **From 0.9 with an external NATS server:** prepare the server first. 0.10
   needs NATS Server 2.15.1 or later with two server settings
   ([Surviving a power loss](configuration.md#surviving-a-power-loss)), and more

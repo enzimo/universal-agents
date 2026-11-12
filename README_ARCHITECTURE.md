@@ -4422,9 +4422,12 @@ the desktop app never offers an older version.
   upgrade. The model, its handler and the list go with the other upgrade steps
   from 0.9.
 - **Hosted-chat files in unfinished work.** Up to 0.9 the adapter host
-  recorded the files of the chat apps it runs in its own transfer folder; from
-  0.10 the file tools open only `state/uploads` ("Files a person sent in a
-  conversation"), with no fallback and no migration of the old files. A request
+  recorded the files of the chat apps it runs (`execution: "adapter_host"`) in
+  its own transfer folder; from 0.10 the file tools open only `state/uploads`
+  ("Files a person sent in a conversation"), with no fallback and no migration
+  of the old files. Chat apps the gateway runs (`execution: "in_process"`, the
+  default) and Web Chat already stored their files in `state/uploads`, so
+  they are not affected. A request
   still running or queued at the upgrade cannot open such a file with its
   tools, so its pull request carries `breaking-change` and says to finish that
   work before upgrading. Work that was not finished is reported by the team
