@@ -1,3 +1,6 @@
 # Isolated scanner environment used only for untrusted skill inspection.
 # Pinned to NVIDIA SkillSpector v2.5.1's immutable release commit and archive digest.
 skillspector @ https://github.com/NVIDIA/skillspector/archive/3f11bfa4117ed8beff02d45f660f557489f6bbe5.tar.gz#sha256=f8f625d5294b29a8ee9dfdfdf4082eb8b5a14e0556db223b1c6ec499ccba3143
+
+# Keep the scanner's transitive server dependency beyond its cross-user Store fix.
+langgraph-api>=0.15.0

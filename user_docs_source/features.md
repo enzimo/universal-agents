@@ -948,6 +948,18 @@ claim semantic/LLM analysis; it fails closed on partial files, unexpected
 disabled analyzers, failures, exclusions, malformed output, timeout, or a
 score outside the safe band.
 
+Optional built-in semantic assessment uses the task's already configured model
+with no executable tools. The report says whether it ran, names the model, and
+shows its findings separately from the required SkillSpector scan. If no model
+assessment is configured, local checks still finish and the lead offers setup.
+A selected model's failed or incomplete assessment does not count as a pass:
+no installation is proposed, and the lead tells you the reason and how to fix
+it. A selected review runs only inside the task that staged the skill, with
+that task's model.
+The exact input, both reports and semantic settings stay bound to the install
+plan, and a change requires a new plan. See the
+[skill-installation configuration](configuration.md).
+
 Team skills belong to the team. You approve each install, replacement or
 removal in the Inbox, unless an administrator let Team Architect manage team
 skills (full access to `fn:team_skills`); then it applies them itself and
@@ -1089,7 +1101,29 @@ approved changes (`hosted_mcp_servers` with `plan_install` or `plan_remove`, or 
 installing also lets the agent types it names use its tools. Starting and
 stopping it are ordinary tool calls. The broker owns the bearer-protected
 sidecar and its private logs. Publishing it outside the instance is not
-available.
+available. A server counts as running only when its own sidecar says, within
+20 seconds, that it is listening; otherwise the broker stops that sidecar and
+the start fails with the reason. If another program already uses the server's
+port, the start fails and says so. That program is most likely a sidecar left
+over from a broker process that crashed or was killed while its container or
+host kept running; restarting the whole container ends every process in it,
+leftovers included. Stop that process
+(`ps -ef | grep mcp_control.managed_server` shows it). If you were starting a
+stopped server, start it again.
+
+A server set to run stays set to run when its sidecar could not start. The
+broker tries again whenever it starts, and agents keep trying to load the
+server's tools on their usual schedule, for `mcp.load_retry_window_minutes`
+(see [MCP](configuration.md#mcp)): the first try after the cause is fixed
+starts the sidecar and loads its tools. Leave the server set to run while you
+fix it. The broker refuses an agent that tries while the server is stopped,
+and that agent, like one that stopped trying after the retry window, loads the
+server's tools only when it restarts; restart the container if agents still
+lack them. Meanwhile Settings → Runtime, Settings → Team, the `/mcp` list and
+the agents' list of hosted servers say "Set to run, but it could not start",
+with the reason and when the broker last tried, and the Status page lists it
+as a problem. That clears as soon as the server starts, or when someone stops
+it.
 
 Open **Settings → Runtime** to review MCP connections and hosted
 servers alongside Objectives and schedules. Only administrators see the
@@ -1125,10 +1159,11 @@ transport, and credential guard remain enforced.
 
 For content that benefits from a browser layout, ask the agent to create a
 generated site. Sites can be articles, comparisons, procedural how-tos, or
-interactive apps with browser-local progress tracking. Every type can include
-an embedded chat panel that continues the task from the browser for the person
-the page was made for, signed in to Web Chat. Pages are kept in `sites/` of that
-person's folder.
+interactive apps with browser-local progress tracking. Each of these can
+include an embedded chat panel that continues the task from the browser for the
+person the page was made for, signed in to Web Chat. A coder-critic-team run
+can also publish its work report, which keeps its own design and has no chat.
+Pages are kept in `sites/` of that person's folder.
 
 Good requests include:
 
@@ -1233,7 +1268,8 @@ disappears once it is fixed:
 
 - **Problem**: something does not work now, for example a model provider
   rejected a key, an endpoint in the configuration has no key, an MCP server
-  is not answering, the secure tool broker does not answer, the team's records
+  is not answering, a hosted MCP server set to run could not start, the
+  secure tool broker does not answer, the team's records
   show no running TeamLead, the gateway cannot see the team (the installation
   refused its join, or it has not read the team's records), an agent cannot run its work because the team gave it
   no session (the finding says why, for example the worker limit is reached,

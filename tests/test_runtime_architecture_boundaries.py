@@ -969,10 +969,13 @@ def test_only_the_objective_coordinator_writes_objective_records() -> None:
 
 
 # Strands invocations that may skip invoke_with_tool_stop: the helper itself,
-# and the model-switch check, whose agent has no tools.
+# the model-switch check, whose agent has no tools, and the skill review, whose
+# agent has no tools either and which runs inside its staging tool call as a
+# counted call of the turn's ToolStop (turn_registry.run_on_turn_loop).
 _INVOCATIONS_WITHOUT_TOOL_STOP = {
     "custom_agents/sdk/strands/turn_tool_stop.py",
     "custom_agents/runtime_model_switch.py",
+    "custom_agents/skill_semantic_review.py",
 }
 
 

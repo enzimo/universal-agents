@@ -5,8 +5,8 @@
 For a first installation, use the bundled image installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.10/install.sh -o ua-install.sh
-bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.10
+curl -fsSL https://raw.githubusercontent.com/enzimo/universal-agents/v0.9.11/install.sh -o ua-install.sh
+bash ua-install.sh --image ghcr.io/enzimo/universal-agents:0.9.11
 ```
 
 It publishes host port `18090` to container port `18090`, keeps
@@ -337,20 +337,17 @@ is still attempted and the original preparation error is preserved.
 When NATS cannot be reached, that refusal comes after the NATS client's own
 retries, about two minutes.
 
-An upgrade from 0.9 also removes the team's old presence stream
-(`<TEAM>_PRESENCE`, for example `TEAM_303_PRESENCE`) at the first start
-(`event=nats_retired_stream_deleted`); agents now announce themselves through
-the team's signed agent records, so nothing uses it. A new installation never
-had it, and nothing is deleted. With an external NATS server whose login may
-create and update streams but not delete them, the start goes on and the old
-stream stays. Each process that sets up the streams (the container's
-preparation step, the gateway, and a team lead started without an instance
-configuration) then waits about 5 seconds for the refused request and logs two
-lines on every start: the NATS client's
-`NATS client error: nats: permissions violation for publish to "$js.api.stream.delete.<team>_presence"`
-and the warning `event=nats_retired_stream_not_deleted stream=<TEAM>_PRESENCE`.
-To end both, delete the stream once with a login that may, for example
-`nats stream rm TEAM_303_PRESENCE`.
+An installation upgraded from 0.9 keeps the team's old presence stream,
+`<TEAM>_PRESENCE` with the uppercase subject prefix, for example
+`TEAM_303_PRESENCE`. Agents now announce themselves through signed agent
+records, so nothing reads or writes this stream, and it holds only old status
+messages. It can stay; nothing needs to be done. Runtime startup reconciles
+current streams only. It never inspects or deletes retired streams and needs
+no permissions for them, including with phase 3's separate host credentials.
+With an external NATS server you may remove the stream when convenient with an
+administrator login, for example `nats stream rm TEAM_303_PRESENCE`; that also
+removes the gateway's retired presence consumer. A fresh installation has no
+such stream.
 
 When Kubernetes profiles are enabled, the execution artifact directory must be
 backed by the same PVC that the profile names. Mount it at
@@ -402,14 +399,12 @@ the setup the runtime is tested with. Compared with 0.9, the login also needs:
   the authority cannot store its records, and without those subjects the other
   processes cannot join; either way the start stops with
   `event=message_services_start_failed`.
-- To delete the team's old presence stream once, after an upgrade from 0.9.
-  Without that right the start goes on, but each start waits about 5 seconds and
-  logs a warning until someone deletes the stream, as the paragraph about the old
-  presence stream above describes.
 
-This list names what changed since 0.9. It is not a tested set of NATS
-permissions: apart from a login that may not delete streams, the runtime's
-tests use only logins with every right in their account.
+The login needs no right to the team's old presence stream: startup never looks
+at it. This list names what changed since 0.9. It is not a tested set of NATS
+permissions: apart from a login that may neither delete streams nor look up the old
+presence stream, the runtime's tests use only logins with every right in their
+account.
 
 The trust records live in the instance's `trust/` folder, readable only by their
 owner:
@@ -439,6 +434,14 @@ is stopped, and restore them together. To recover:
   revocations.<installation id>` (the `nats` command-line tool is not included in
   the container). The authority then starts a new, empty list, which forgets every
   revocation.
+- **The team lead gets no session, and the log names a session record that does
+  not verify** (`event=lead_session_record_unreadable`). Something other than the
+  team services wrote that record, or it is damaged. The team services cannot tell
+  whether it was a lead's, so no lead starts while it is there; other agents still
+  start. Make sure no second container or host runs this team's lead, then delete
+  each key the log names (one line per record), for example with `nats kv del
+  UA1_CERTS session.<installation id>.<team>.<session>`. The lead starts within
+  about five minutes.
 - **The authority refuses to start because a record is dated later than the
   machine's clock** (`AuthorityClockBehind`). Correct the clock; nothing needs to
   be deleted.

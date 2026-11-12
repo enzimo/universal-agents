@@ -146,9 +146,32 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
             unknown = await lead_host.ask("task.probe", {"task_id": "sub_1"}, "worker_1", sender_agent="lead_1")
             assert (unknown["known"], unknown["current"]) == (False, False)
             # Any agent may delegate, so a worker in its own process probes too (plan decision 70).
-            lead.tasks["delegated_1"] = SimpleNamespace(state="in_progress", task=SimpleNamespace(task_state=[]))
+            lead.tasks["delegated_1"] = SimpleNamespace(
+                state="in_progress", task=SimpleNamespace(parent_task_id="requester_parent", task_state=[]))
+            lead.task_manager.runtime_state_store = SimpleNamespace(get_task_custody=lambda *_: {
+                "requester_parent": SimpleNamespace(holder_agent_id="worker_1")})
             held = await worker_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1", sender_agent="worker_1")
             assert (held["known"], held["state"]) == (True, "in_progress")
+
+            stranger = stand_in("another_worker", "Researcher-2", "Researcher", is_lead=False)
+            lead_host.attach(stranger, agent_type="Researcher", definition=DEFINITION,
+                             nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
+            await _until(lambda: lead_host.agents.get(stranger.id) is not None
+                         and lead_host.agents[stranger.id].session is not None)
+            with pytest.raises(RequestRefused) as denied:
+                await lead_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1", sender_agent=stranger.id)
+            assert denied.value.code == "wrong_sender"
+            # Custody moves on requester recovery; the old signed identity loses
+            # access and the new one gains it without rewriting delegation metadata.
+            lead.task_manager.runtime_state_store = SimpleNamespace(get_task_custody=lambda *_: {
+                "requester_parent": SimpleNamespace(holder_agent_id=stranger.id)})
+            with pytest.raises(RequestRefused) as denied:
+                await worker_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1", sender_agent="worker_1")
+            assert denied.value.code == "wrong_sender"
+            assert (await lead_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1",
+                                       sender_agent=stranger.id))["known"] is True
+            await asyncio.wrap_future(lead_host.detach(stranger.id))
+            await _until(lambda: stranger.id not in lead.known_agents.agent_map)
 
             # An 'all' restart's capture asks the worker what it runs, from a tool's worker thread as the
             # restart tools run, and names its task; the lead itself is not asked.

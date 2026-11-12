@@ -17,7 +17,7 @@ from custom_agents.turn_failure_runtime import settle_failed_turn
 from custom_agents.conversation_runtime import finalize_conversation_turn
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_manager import TaskInfo
-from storage.delegated_task_repository import DELEGATED_QUEUED
+from storage.delegated_task_repository import DELEGATED_QUEUED, DELEGATED_RUNNING
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskStatus
 from id_generation import new_id
 from custom_messages.enums import (
@@ -820,14 +820,28 @@ async def _subtask_probe_cycle_start(
 
 
 async def _delegated_holders(agent: Any) -> dict[str, Any]:
-    """This agent's open delegated-task records by task id (empty if unreadable)."""
+    """Open delegated records of this runtime's parents, including those recovered under a new agent id."""
 
-    from custom_agents.delegated_work_runtime import delegated_tasks
+    from custom_agents.delegated_work_runtime import open_delegations_for_owned_parents
+
+    def read() -> dict[str, Any]:
+        records = open_delegations_for_owned_parents(agent)
+        custody = agent.task_manager.runtime_state_store.get_task_custody(
+            str(agent.team_id), [record.task_id for record in records])
+        result: dict[str, Any] = {}
+        for record in records:
+            held = custody.get(record.task_id)
+            # Custody can precede a worker's claim reply. It proves admission,
+            # including its time: do not leave taken work looking queued or use
+            # an earlier worker's claim time after a takeover.
+            result[record.task_id] = record if held is None else record.model_copy(update={
+                "holder_agent_id": held.holder_agent_id, "status": DELEGATED_RUNNING,
+                "claimed_at_utc": datetime.fromisoformat(held.claimed_at),
+            })
+        return result
 
     try:
-        records = await agent.task_manager.operations_runtime.run(
-            delegated_tasks(agent).list_open, str(agent.team_id), str(agent.id)
-        )
+        holders: dict[str, Any] = await agent.task_manager.operations_runtime.run(read)
     except Exception:
         agent._logger.exception(
             "Could not read delegated-task records; probing delegated tasks by type. "
@@ -835,7 +849,7 @@ async def _delegated_holders(agent: Any) -> dict[str, Any]:
             agent.id,
         )
         return {}
-    return {record.task_id: record for record in records}
+    return holders
 
 
 def _holder(holders: dict[str, Any], subtask_info: TaskInfo) -> Optional[str]:

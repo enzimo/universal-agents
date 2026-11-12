@@ -7,6 +7,31 @@ person comes only from the task's signed context), with a trusted record in
 host serves a page only through that record and only while the digests match
 (``user_docs.published_sites``), so agents' code cannot change what the Web
 Chat origin serves.
+
+Every kind but ``report`` renders here with the runtime theme and an embedded
+chat. ``report`` publishes the coder-critic work report from the statistics
+``cct.py stats`` wrote, with the report's own design and no chat; its renderer
+is a checked copy of the canonical skill's (``custom_tools.work_report``), so
+the page matches the report every other runtime shows.
+
+A real run's statistics are about 170 KB, too large for a model to repeat as a
+tool argument, so an agent names the file in ``site_spec_path`` instead. The
+tool reads it through ``custom_tools.file_access``, under the folder rules and
+access decision of every agent file read, up to ``REPORT_STATS_MAX_BYTES``,
+and then treats its text exactly as ``site_spec_json``. Only the
+``update_site_id`` parameter names the page to publish again, so the file stays
+as ``cct.py stats`` wrote it; a file that names a page itself is refused,
+because nobody sees what a 170 KB file says and a file someone else can write
+must not choose which of the person's pages is replaced.
+
+Statistics are refused before rendering when they use a round key, or mention
+a critique, a lead intervention or a review stage, more than once, or name
+rounds so often that
+the page would repeat more than ``_REPORT_LABEL_REPEAT_MAX`` characters of
+their labels, which ``cct.py`` never does: the renderer draws each mention in
+full, so repeats would multiply the page (a 1 MB file could ask for hundreds
+of MB). Any page larger than the website
+serves (``MAX_SITE_FILE_BYTES``) is refused before anything is written.
 """
 
 from __future__ import annotations
@@ -18,17 +43,23 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone
+from collections.abc import Iterable
 from typing import Any, Literal
 from urllib.parse import urlparse
 
 from strands import tool
 
 from access_control.safe_open import UnsafePath
+from custom_tools import file_access
+from custom_tools.path_policy import PathPolicyError
 from custom_tools.runtime_context import bound_task_id, get_agent_ref
+from custom_tools.work_report import render_work_report_page, validate_stats
+from custom_tools.work_report.render_report import upgrade as upgrade_report_stats
 from custom_tools.workspace_scope import current_workspace_scope, runtime_layout
 from runtime_settings.network import compose_public_base_url
 from default_values import INTERACTIVE_APP_DEFAULTS, NETWORK_DEFAULTS
 from user_docs.published_sites import (
+    MAX_SITE_FILE_BYTES,
     SITE_CHAT_SIGN_IN_PATH,
     SITE_ID_PATTERN,
     SITE_ID_RANDOM_HEX_CHARS,
@@ -44,8 +75,32 @@ _SLUG_PATTERN = re.compile(r"[^a-zA-Z0-9._-]+")
 # Room left in a site id for the stamp and the random part (SITE_ID_PATTERN allows 128).
 _TRACKING_SLUG_MAX = 40
 _PAGE_SLUG_MAX = 48
-SiteKind = Literal["article", "comparison", "how_to", "app"]
-_SITE_KINDS: tuple[str, ...] = ("article", "comparison", "how_to", "app")
+SiteKind = Literal["article", "comparison", "how_to", "app", "report"]
+# The coder-critic work report: the spec is the stats.json cct.py wrote.
+_REPORT_SITE_KIND = "report"
+_SITE_KINDS: tuple[str, ...] = ("article", "comparison", "how_to", "app", _REPORT_SITE_KIND)
+# The largest stats.json read from site_spec_path. A real run's is about 170 KB,
+# too large for a model to pass as text. Statistics in the shape cct.py writes
+# render in time and size proportional to the file (about 30 ms at this cap);
+# repeated mentions, which would multiply the page, are refused before
+# rendering (_repeated_report_mention). The tool description states it in MB.
+REPORT_STATS_MAX_BYTES = 2 * 1024 * 1024
+_REPORT_STATS_MAX_MB = REPORT_STATS_MAX_BYTES // (1024 * 1024)
+# What to do about a refused statistics file, beyond the folder rules' own reason.
+_SPEC_FILE_HINTS = {
+    file_access.NOT_A_REGULAR_FILE: "Name the stats.json file itself, not its folder.",
+    file_access.FILE_TOO_LARGE: f"Statistics files can be up to {_REPORT_STATS_MAX_MB} MB.",
+}
+# Characters of round labels the report page may repeat: the renderer writes a
+# round's label again for each critique in that round and for each round a
+# finding was addressed in. cct.py's labels ("Checkpoint 3", "Fix round 1")
+# keep a real run to a few thousand.
+_REPORT_LABEL_REPEAT_MAX = 64 * 1024
+_UNREADABLE_SPEC_FILE = (
+    "The path cannot be read as a file. Pass the path of the stats.json that cct.py stats wrote."
+)
+_SPEC_JSON_LABEL = "site_spec_json"
+_SPEC_PATH_LABEL = "The file at site_spec_path"
 _SITE_KIND_PRESENTATION: dict[str, dict[str, str]] = {
     "article": {
         "default_title": "Generated Article",
@@ -66,6 +121,10 @@ _SITE_KIND_PRESENTATION: dict[str, dict[str, str]] = {
         "default_title": "Interactive App",
         "eyebrow": "Interactive app",
         "chat_copy": "Continue the conversation about this app.",
+    },
+    # Only the title: the report's own renderer draws the page, without chat.
+    _REPORT_SITE_KIND: {
+        "default_title": "Work Report",
     },
 }
 
@@ -135,6 +194,27 @@ def _requested_update_site_id(spec: dict[str, Any]) -> str:
     if bool(spec.get("update_existing") or spec.get("regenerate_existing")):
         return _text(spec.get("site_id")) or _site_id_from_url(spec.get("site_url"))
     return ""
+
+
+def _update_target(spec: dict[str, Any], update_site_id: str) -> str | dict[str, Any]:
+    """The id of the page to publish again, "" for a new page, or the failure to return.
+
+    The ``update_site_id`` parameter is the way to name it, by id or by the
+    page's URL; a report read from its file cannot carry the spec's update
+    keys without editing that file. The spec keys still work, and naming two
+    different pages is refused.
+    """
+
+    from_parameter = _site_id_from_url(update_site_id) or _text(update_site_id)
+    from_spec = _requested_update_site_id(spec)
+    if from_parameter and from_spec and from_parameter != from_spec:
+        return _failure(
+            "input_validation",
+            "conflicting_update_site_id",
+            f"update_site_id names {from_parameter!r} but the spec names {from_spec!r}. "
+            "Pass the page to publish again only in update_site_id.",
+        )
+    return from_parameter or from_spec
 
 
 def _site_store(agent: Any) -> PublishedSiteStore:
@@ -1489,26 +1569,238 @@ def _render_html(
 """
 
 
+def _spec_file_refused(site_spec_path: str, reason: str, message: str, detail: str = "") -> dict[str, Any]:
+    LOGGER.warning(
+        "A statistics file was not read for a page. event=generated_site_spec_file_refused "
+        "reason_code=%s path=%s detail=%s",
+        reason,
+        site_spec_path,
+        detail or "-",
+    )
+    return _failure("read_spec_file", reason, message)
+
+
+def _read_spec_file(site_spec_path: str) -> str | dict[str, Any]:
+    """The text of the statistics file at ``site_spec_path``, or the failure to return.
+
+    The file is read through ``custom_tools.file_access`` like every file an
+    agent names: the task's folders for the person it works for, the access
+    service with authorization on, no link followed at the open, and one
+    regular file of at most ``REPORT_STATS_MAX_BYTES``. A refusal keeps the
+    reason code the file tools report.
+    """
+
+    try:
+        return file_access.read_text(site_spec_path, max_bytes=REPORT_STATS_MAX_BYTES)[1]
+    except PathPolicyError as exc:
+        hint = _SPEC_FILE_HINTS.get(exc.reason_code, "")
+        return _spec_file_refused(
+            site_spec_path,
+            exc.reason_code,
+            f"The statistics file cannot be read: {str(exc).rstrip('.')}. {hint}".strip(),
+        )
+    except FileNotFoundError as exc:
+        return _spec_file_refused(
+            site_spec_path,
+            "file_not_found",
+            f"No statistics file is at that path ({exc}). Pass the path of the stats.json that cct.py stats wrote.",
+        )
+    except UnicodeDecodeError:
+        return _spec_file_refused(
+            site_spec_path,
+            "invalid_json",
+            "The statistics file is not UTF-8 text. Pass the path of the stats.json that cct.py stats wrote.",
+        )
+    except (OSError, ValueError) as exc:
+        # For example a NUL character in the path, or a disk error while reading.
+        return _spec_file_refused(site_spec_path, "unreadable_spec_file", _UNREADABLE_SPEC_FILE, detail=str(exc))
+
+
+def _report_only(detail: str = "") -> dict[str, Any]:
+    return _failure(
+        "input_validation",
+        "site_spec_path_report_only",
+        f"{detail}site_spec_path is only for site_kind=\"report\", the coder-critic work report. "
+        "Pass every other kind of page as a JSON object in site_spec_json.",
+    )
+
+
+def _is_report_kind(site_kind: Any) -> bool:
+    try:
+        return _normalize_site_kind(site_kind) == _REPORT_SITE_KIND
+    except ValueError:
+        return False
+
+
+def _spec_text(site_spec_json: str, site_spec_path: str, site_kind: str) -> tuple[str, str] | dict[str, Any]:
+    """The spec's JSON text and a label naming where it came from, or the failure to return.
+
+    Exactly one of the two is used. A file is read only for a report, so the
+    other kinds never take file input.
+    """
+
+    has_json, path = bool(_text(site_spec_json)), _text(site_spec_path)
+    if has_json and path:
+        return _failure(
+            "input_validation",
+            "site_spec_conflict",
+            "Pass site_spec_json or site_spec_path, not both. For a work report, pass only site_spec_path, "
+            "the path of the stats.json that cct.py stats wrote.",
+        )
+    if not has_json and not path:
+        return _failure(
+            "input_validation",
+            "site_spec_missing",
+            "Pass the page as a JSON object in site_spec_json, or for site_kind=\"report\" the path of the "
+            "stats.json that cct.py stats wrote in site_spec_path.",
+        )
+    if not path:
+        return site_spec_json, _SPEC_JSON_LABEL
+    if not _is_report_kind(site_kind):
+        return _report_only()
+    text = _read_spec_file(path)
+    return text if isinstance(text, dict) else (text, _SPEC_PATH_LABEL)
+
+
+def _first_repeat(values: Iterable[Any]) -> Any:
+    """The first value seen a second time, or None."""
+
+    seen: set[Any] = set()
+    for value in values:
+        if value in seen:
+            return value
+        seen.add(value)
+    return None
+
+
+def _repeated_report_mention(stats: dict[str, Any]) -> str:
+    """What already-validated statistics mention twice that cct.py mentions once, or "".
+
+    The renderer draws a round's critiques and lead notes once per mention, a
+    review stage's findings once per review of that stage, a round's label
+    once per critique in it and per finding addressed in it, and a lens-grid
+    cell, with the ids of its critiques, once per round with that key. cct.py
+    gives each round its own key, lists each critique in one round, each
+    intervention in one round, at most one review per stage, and short round
+    labels, so anything more is not its output and would only multiply the
+    page.
+    """
+
+    upgraded = upgrade_report_stats(stats)  # the schema the renderer reads
+    rounds = upgraded["rounds"]
+    key = _first_repeat(rnd["key"] for rnd in rounds)
+    if key is not None:
+        return f"Two rounds have the key {key}; each round has its own key"
+    item = _first_repeat(i for rnd in rounds for i in (rnd.get("critic") or {}).get("items") or [])
+    if item is not None:
+        return f"The rounds name the critique {item} more than once; each critique belongs to one round"
+    seq = _first_repeat(q for rnd in rounds for q in rnd.get("interventions") or [])
+    if seq is not None:
+        return f"The rounds name the intervention {seq} more than once; each intervention belongs to one round"
+    stage = _first_repeat(review["stage"] for review in upgraded["reviews"])
+    if stage is not None:
+        return f"Two reviews have the stage {stage}; there is one review per stage"
+    label_characters = _repeated_label_characters(upgraded)
+    if label_characters > _REPORT_LABEL_REPEAT_MAX:
+        return (
+            f"The critiques and findings repeat {label_characters} characters of round labels, more than "
+            f"{_REPORT_LABEL_REPEAT_MAX}; cct.py writes short labels such as 'Checkpoint 3'"
+        )
+    return ""
+
+
+def _repeated_label_characters(upgraded: dict[str, Any]) -> int:
+    """How many characters of round labels the page writes for the rounds critiques and findings name."""
+
+    labels = {rnd["key"]: len(rnd["label"]) for rnd in upgraded["rounds"]}  # keys are unique by now
+    named = [item["round"] for item in upgraded["item_list"]]
+    named += [key for finding in upgraded["findings"] for key in finding.get("addressed_in") or []]
+    return sum(labels.get(key, 0) for key in named)
+
+
+def _report_stats_refusal(spec: dict[str, Any]) -> dict[str, Any] | None:
+    """Why the statistics cannot be rendered as a work report, or None; checked before anything is written."""
+
+    try:
+        # validate_stats ignores top-level keys it does not read, so update
+        # keys can sit beside statistics passed as text.
+        validate_stats(spec)
+    except ValueError as exc:
+        # StatsError (a ValueError) names the malformed field; validate_stats
+        # also lets datetime's own ValueError through for a run.started_at
+        # that is not an ISO 8601 time.
+        problem = str(exc)
+    else:
+        problem = _repeated_report_mention(spec)
+    if not problem:
+        return None
+    return _failure(
+        "input_validation",
+        "invalid_report_stats",
+        f"{problem}. Pass the stats.json that cct.py stats wrote, unchanged.",
+    )
+
+
+def _spec_file_refusal(spec: dict[str, Any], site_kind: str) -> dict[str, Any] | None:
+    """Why a spec read from site_spec_path cannot be published, or None.
+
+    Only a report is read from a file, and only the update_site_id parameter
+    names the page to update: nobody sees what the file says, and someone
+    who can write the file (a shared folder) must not choose the page.
+    """
+
+    if site_kind != _REPORT_SITE_KIND:
+        return _report_only(f"The file sets site_kind to {site_kind!r}. ")
+    named = _requested_update_site_id(spec)
+    if named:
+        return _failure(
+            "input_validation",
+            "update_key_in_spec_file",
+            f"The statistics file names a page to update ({named}), but a file cannot choose the page. "
+            "Pass the stats.json that cct.py stats wrote, unchanged, and name the page in the "
+            "update_site_id parameter.",
+        )
+    return None
+
+
 @tool
 def publish_single_page_site(
-    site_spec_json: str,
+    site_spec_json: str = "",
     site_slug: str = "",
     site_kind: SiteKind = "article",
+    site_spec_path: str = "",
+    update_site_id: str = "",
 ) -> dict[str, Any]:
     """
-    Publish a structured single-page website with embedded chat.
+    Publish a structured single-page website.
 
-    Choose site_kind from article, comparison, how_to, or app before composing
-    the JSON spec. article is the default for explanations, reports, reference
-    pages, collections, and other content whose sections can be read
+    Choose site_kind from article, comparison, how_to, app, or report before
+    composing the JSON spec. article is the default for explanations, reports,
+    reference pages, collections, and other content whose sections can be read
     independently. comparison is for evaluating alternatives. how_to is only
     for explicitly requested instructions/checklists or genuinely ordered user
     actions where sequence affects success. app is for interactive pages whose
     browser-local state, progress, counters, tasks, or habits are part of the
-    experience.
+    experience. report is only for the coder-critic-team work report; any other
+    report is an article.
 
-    The site_spec_json argument must be a JSON object. All kinds may use title,
-    summary, sections, and resources. Optional useful elements include:
+    article, comparison, how_to, and app pages use the runtime theme and have
+    an embedded chat. report publishes the stats.json that `cct.py stats`
+    wrote: pass site_kind="report" and the file's path in site_spec_path, and
+    leave site_spec_json empty. Relative paths start in the person's folder
+    (agents/ for work for no person), for example
+    coder-critic/<run name>/stats.json; the file is read under the same folder
+    rules as your other file reads and may be up to 2 MB. Passing the
+    statistics as text in site_spec_json works only for small statistics.
+    The page uses the work report's own design (inline CSS, no scripts), takes
+    its title from run.title, and has no embedded chat and no runtime theme.
+    Statistics not in the shape cct.py writes are refused (failure_reason
+    invalid_report_stats) and nothing is written. site_spec_path is refused
+    for every other kind.
+
+    Pass exactly one of site_spec_json and site_spec_path. For every kind but
+    report, site_spec_json is a JSON object. All other kinds may use
+    title, summary, sections, and resources. Optional useful elements include:
     article: highlights, key_points, and callouts; comparison: options with
     pros/cons/best_for, comparison_rows with criterion and values, and a
     recommendation; how_to: safety_notes, materials or supplies, tools, plans,
@@ -1519,11 +1811,15 @@ def publish_single_page_site(
     not rendered.
 
     Optional section headings can be passed with section_headings or top-level
-    fields such as materials_heading. To regenerate an existing page in place,
-    pass update_site_id, existing_site_id, regenerate_site_id, or
-    update_existing=true with site_id or site_url set to the prior returned
-    page. update_site_url, existing_site_url, and regenerate_site_url are also
-    accepted; only pages made for the same person can be updated. The tool
+    fields such as materials_heading. To publish an existing page again in
+    place, keeping its URL, pass the site_id it returned (or its site_url) in
+    the update_site_id parameter, with the new spec. For a report, pass the same site_spec_path
+    again (after `cct.py stats` has rewritten the file) with update_site_id; do
+    not edit the statistics file. In a site_spec_json spec, the keys
+    update_site_id, existing_site_id, regenerate_site_id, update_site_url,
+    existing_site_url, regenerate_site_url, or update_existing=true with
+    site_id or site_url also name the page; a statistics file that carries
+    them is refused. Only pages made for the same person can be updated. The tool
     writes index.html into sites/<site_id>/ of the person's folder (agents/
     for work for no person) and returns the browser URL. Editing that file
     afterwards does not change the page; it stops the page from being served,
@@ -1532,52 +1828,45 @@ def publish_single_page_site(
     returned site_url to the user; do not invent or shorten generated-site
     URLs, and do not wrap bare URLs in Markdown emphasis.
     """
+    source = _spec_text(site_spec_json, site_spec_path, site_kind)
+    if isinstance(source, dict):
+        return source
+    spec_text, source_label = source
     try:
-        spec = json.loads(site_spec_json)
+        spec = json.loads(spec_text)
     except json.JSONDecodeError as exc:
-        return _json_result(
-            "error",
-            {
-                "status": "failed",
-                "failure_stage": "input_validation",
-                "failure_reason": "invalid_json",
-                "message": str(exc),
-                "retryable": False,
-            },
-        )
+        message = str(exc) if source_label == _SPEC_JSON_LABEL else f"{source_label} is not valid JSON: {exc}"
+        return _failure("input_validation", "invalid_json", message)
+    except RecursionError:
+        # Arrays or objects nested tens of thousands deep exhaust the decoder's stack.
+        return _failure("input_validation", "invalid_json", f"{source_label} is nested too deeply to read as JSON.")
     if not isinstance(spec, dict):
-        return _json_result(
-            "error",
-            {
-                "status": "failed",
-                "failure_stage": "input_validation",
-                "failure_reason": "json_not_object",
-                "message": "site_spec_json must decode to a JSON object.",
-                "retryable": False,
-            },
-        )
+        return _failure("input_validation", "json_not_object", f"{source_label} must decode to a JSON object.")
     try:
         resolved_site_kind = _normalize_site_kind(spec.get("site_kind") or site_kind)
     except ValueError as exc:
-        return _json_result(
-            "error",
-            {
-                "status": "failed",
-                "failure_stage": "input_validation",
-                "failure_reason": "invalid_site_kind",
-                "message": str(exc),
-                "retryable": False,
-            },
-        )
+        return _failure("input_validation", "invalid_site_kind", str(exc))
+    refusal = _spec_file_refusal(spec, resolved_site_kind) if source_label == _SPEC_PATH_LABEL else None
+    if refusal is None and resolved_site_kind == _REPORT_SITE_KIND:
+        refusal = _report_stats_refusal(spec)
+    if refusal is not None:
+        return refusal
 
-    return _publish(spec, site_slug=site_slug, site_kind=resolved_site_kind)
+    return _publish(spec, site_slug=site_slug, site_kind=resolved_site_kind, update_site_id=update_site_id)
 
 
 def _optional_text(value: Any) -> str | None:
     return _text(value) or None
 
 
-def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[str, Any]:
+def _page_title(spec: dict[str, Any], site_kind: str) -> str:
+    """The page's title: ``run.title`` of a work report (already validated), else ``title``."""
+
+    raw_title = spec["run"]["title"] if site_kind == _REPORT_SITE_KIND else spec.get("title")
+    return _text(raw_title) or _SITE_KIND_PRESENTATION[site_kind]["default_title"]
+
+
+def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str, update_site_id: str) -> dict[str, Any]:
     """Render the page, write it into the person's folder, then record its digests.
 
     The files are written first and the record last, so the host never
@@ -1588,13 +1877,15 @@ def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[st
     context = _current_task_context()
     store = _site_store(agent)
     person_id = current_workspace_scope(agent).person_id
-    title = _text(spec.get("title")) or _SITE_KIND_PRESENTATION[site_kind]["default_title"]
+    title = _page_title(spec, site_kind)
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
     previous: PublishedSiteRecordV1 | None = None
-    update_site_id = _requested_update_site_id(spec)
-    if update_site_id:
-        found = _record_to_update(store, update_site_id, person_id)
+    target = _update_target(spec, update_site_id)
+    if isinstance(target, dict):
+        return target
+    if target:
+        found = _record_to_update(store, target, person_id)
         if not isinstance(found, PublishedSiteRecordV1):
             return found
         previous = found
@@ -1607,10 +1898,35 @@ def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[st
             now=now,
         )
     site_url = f"{website_base_url()}/docs/sites/{site_id}/"
-    html_text = _render_html(spec, site_kind=site_kind, site_id=site_id, site_url=site_url, context=context)
+    is_work_report = site_kind == _REPORT_SITE_KIND
+    # Rendered before anything is written, so a renderer error leaves no file.
+    html_text = (
+        render_work_report_page(spec)
+        if is_work_report
+        else _render_html(spec, site_kind=site_kind, site_id=site_id, site_url=site_url, context=context)
+    )
+    page = html_text.encode("utf-8")
+    if len(page) > MAX_SITE_FILE_BYTES:
+        # The site host would refuse to serve it; an update leaves the page it replaces as it was.
+        LOGGER.warning(
+            "A page larger than the website serves was not written. event=generated_site_too_large "
+            "site_id=%s person_id=%s page_bytes=%s limit_bytes=%s",
+            site_id,
+            person_id or "-",
+            len(page),
+            MAX_SITE_FILE_BYTES,
+        )
+        return _failure(
+            "render",
+            "page_too_large",
+            f"The page would be {len(page) / (1024 * 1024):.1f} MB, more than the "
+            f"{MAX_SITE_FILE_BYTES // (1024 * 1024)} MB the website serves, so nothing was written"
+            + (" and the published page stays as it was" if previous else "")
+            + ". Publish less content.",
+        )
     folder_parts = site_folder_parts(person_id, site_id)
     try:
-        digests = store.write_files(folder_parts, {SITE_INDEX_FILENAME: html_text.encode("utf-8")})
+        digests = store.write_files(folder_parts, {SITE_INDEX_FILENAME: page})
     except UnsafePath as exc:
         LOGGER.warning(
             "A page could not be written into the person's folder. event=generated_site_write_refused "
@@ -1659,7 +1975,7 @@ def _publish(spec: dict[str, Any], *, site_slug: str, site_kind: str) -> dict[st
             "site_url": site_url,
             "site_dir": str(site_dir),
             "index_path": str(site_dir / SITE_INDEX_FILENAME),
-            "chat_enabled": True,
+            "chat_enabled": not is_work_report,
             "next_step_hint": (
                 "Return the exact site_url to the user. "
                 + (

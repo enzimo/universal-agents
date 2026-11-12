@@ -1,2 +1,2 @@
 self-hosted-runner:
-  labels: [ua-build, ua-linux, ua-windows, ua-macos]
+  labels: [ua-build, ua-linux, ua-windows, ua-macos, ua-heavy, ua-test, ua-light]

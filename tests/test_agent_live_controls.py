@@ -24,6 +24,7 @@ from custom_messages.contracts.control_v1 import AgentStatus
 from custom_messages.contracts.status_v1 import StatusFindingV1, StatusSeverity
 from custom_messages.enums import ControlType, MessageMetaType, ProgressState
 from custom_messages.wire.frame import body_model
+from custom_messages.wire.refusals import FrameRefused
 from custom_tools.providers._runtime import _send_control_instruction_payload
 from custom_transport.protocol1.live import ServiceUnavailable
 from tests.team_services_support import checked_reply
@@ -167,6 +168,28 @@ async def test_a_task_probe_says_whether_the_agent_holds_the_task(monkeypatch) -
     assert held == {"outcome": "ok", "known": True, "current": True, "executing": True, "exiting": False,
                     "state": "in_progress", "last_update_at": "2026-11-04T09:00:00.000Z"}
     assert unknown == {"outcome": "ok", "known": False, "current": False, "executing": True, "exiting": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender,allowed", [("old_requester", False), ("new_requester", True), ("stranger", False)])
+async def test_a_probe_follows_current_parent_custody_not_the_original_requester(sender, allowed, caplog, monkeypatch):
+    monkeypatch.setattr("custom_agents.turn_registry.executing_task_ids", lambda _: set())
+    task = SimpleNamespace(task=SimpleNamespace(parent_task_id="parent", task_state=[]), state="waiting")
+    record = SimpleNamespace(parent_task_id="parent", requester_agent_id="old_requester")
+    operations = SimpleNamespace(run=AsyncMock(side_effect=lambda function, *args: function(*args)))
+    agent = stand_in_agent(
+        team_id="team", _delegated_task_repository=SimpleNamespace(get=lambda *_: record),
+        task_manager=SimpleNamespace(current_task_id=None, operations_runtime=operations, get_task_info=lambda _: task,
+            runtime_state_store=SimpleNamespace(get_task_custody=lambda *_: {
+                "parent": SimpleNamespace(holder_agent_id="new_requester")})),
+    )
+    request = frame({"task_id": "child"}, role="worker", agent=sender)
+    if allowed:
+        assert checked_reply("task.probe", await live_controls.task_probe(agent, request))["known"] is True
+    else:
+        with caplog.at_level(logging.WARNING), pytest.raises(FrameRefused, match="wrong_sender"):
+            await live_controls.task_probe(agent, request)
+        assert "event=task_probe_refused" in caplog.text
 
 
 # -- the team lead's side ---------------------------------------------------------------

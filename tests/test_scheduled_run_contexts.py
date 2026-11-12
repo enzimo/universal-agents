@@ -457,14 +457,21 @@ def test_each_heartbeat_item_is_signed_by_the_manager_for_that_item(world) -> No
 
 @pytest.mark.live
 @pytest.mark.nats
-def test_over_live_nats_the_manager_signs_and_the_worker_starts_the_run(world) -> None:
+@pytest.mark.parametrize("exact_agent_final", [False, True])
+def test_over_live_nats_the_manager_signs_and_the_worker_starts_the_run(world, exact_agent_final) -> None:
     from live_nats_client import nats_transport_config_from_env
 
     from custom_transport.nats_adapter import NatsTransportAdapter
     from id_generation import new_id
 
     record_ann(world, PersonStanding.ACTIVE, ("member",))
-    save_schedule(world)
+    schedule = save_schedule(world)
+    if exact_agent_final:
+        world.store.remove(SCHEDULE_ID)
+        world.store.add(schedule.model_copy(update={
+            "claim_named_agent_type": None, "claim_agent_id": WORKER_ID,
+            "interval_ms": None, "repeat_count": 1,
+        }))
     # A fresh subject prefix per run keeps this team's subjects apart from others on the server.
     mapper = NatsSubjectMapper(team_id=TEAM, subject_prefix=new_id("runctx_live"))
     config = nats_transport_config_from_env()
@@ -492,3 +499,7 @@ def test_over_live_nats_the_manager_signs_and_the_worker_starts_the_run(world) -
         ("member",),
         SCHEDULE_ID,
     )
+    if exact_agent_final:
+        assert world.store.get_row(SCHEDULE_ID)["remaining_count"] == 0
+        assert world.store.prune_expired() == 0
+        assert world.store.worker_records.for_task(queued_run(world).task.task_id, TEAM).state == "admitted"

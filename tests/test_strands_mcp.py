@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from custom_agents import access_runtime
 from custom_agents.sdk.strands import mcp as strands_mcp
 from mcp_control import sdk_compat
 from mcp_control import transports as mcp_transports
+from mcp_control.hosting import HostedMCPStartError
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_verify_keys
 from tests.change_approval_support import SignedTaskManager, use_signed_contexts
@@ -544,6 +546,80 @@ async def test_a_failed_brokered_discovery_raises_for_the_loader_to_classify(mon
     with pytest.raises(httpx.HTTPStatusError):
         await client.load_tools()
     assert client._loaded_tools is None, "no empty list is cached, so the next try asks the broker again"
+
+
+HOSTED_START_FAILED = (
+    "The hosted MCP server echo cannot start: 127.0.0.1:41000 is already in use, most likely by its "
+    "sidecar left over from an earlier broker run."
+)
+
+
+def _broker_answers(monkeypatch, status_code: int, text: str) -> None:
+    """The secure broker's MCP routes, reached over HTTP by the agent's client."""
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", "http://broker.test")
+    monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", "test-token")
+    real_client = httpx.AsyncClient
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, text=text, headers={"Content-Type": "application/json"})
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs)
+    )
+
+
+def _start_failed_answer() -> str:
+    return json.dumps({"error": HOSTED_START_FAILED, "reason_code": "hosted_mcp_start_failed"})
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_server_that_could_not_start_is_not_a_refusal(monkeypatch) -> None:
+    """The loader tries it again on its schedule; a refusal would wait for an access change that never comes."""
+
+    client = _brokered_client()
+    _broker_answers(monkeypatch, 503, _start_failed_answer())
+
+    with pytest.raises(HostedMCPStartError) as failed:
+        await client.load_tools()
+
+    assert str(failed.value) == HOSTED_START_FAILED
+    assert not isinstance(failed.value, PermissionError), "BrokerRefusal is a PermissionError"
+    assert client._loaded_tools is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_forget_cached_access")
+async def test_a_call_to_a_hosted_server_that_could_not_start_tells_the_model_why(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    client = _brokered_client()
+    agent = _web_research_agent(tmp_path, monkeypatch)
+    monkeypatch.setattr(strands_mcp, "get_agent_ref", lambda: agent)
+    _broker_answers(monkeypatch, 503, _start_failed_answer())
+
+    with caplog.at_level(logging.WARNING, logger=strands_mcp.LOGGER.name):
+        result = await client.call_tool_async("call-1", "echo", {})
+
+    assert result["status"] == "error"
+    assert result["content"] == [{"text": f"Tool execution failed: {HOSTED_START_FAILED}"}]
+    [record] = [item for item in caplog.records if item.name == strands_mcp.LOGGER.name]
+    assert record.levelno == logging.WARNING and "event=mcp_broker_hosted_start_failed" in record.getMessage()
+    assert record.exc_info is None, "expected while the server cannot start: no traceback"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    ['{"error": "The broker is busy."}', "Service Unavailable"],
+    ids=["json-without-the-start-failure-code", "not-json"],
+)
+async def test_another_unavailable_answer_stays_an_http_error(monkeypatch, text: str) -> None:
+    client = _brokered_client()
+    _broker_answers(monkeypatch, 503, text)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.load_tools()
 
 
 def test_websocket_transport_uses_environment_url_and_auth_headers(monkeypatch):

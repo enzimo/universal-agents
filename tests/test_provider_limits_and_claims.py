@@ -146,6 +146,7 @@ def _requester(tmp_path, monkeypatch, *, retries: int = 1):
         runtime_state_store=lifecycle.runtime_state_store,
         get_task_from_db=lifecycle.get_task_from_db,
         get_task_info=lambda task_id: subtask if task_id == "sub_1" else None,
+        get_pending_subtasks=lambda: [subtask],
         get_parent_task_id=lambda task_id: "parent_1" if task_id == "sub_1" else None,
         is_terminal_state=lambda state: state in {ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED},
         is_execution_cancelled=lambda task_id: False,

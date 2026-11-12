@@ -120,6 +120,40 @@ and the broadcast subject were removed in step 7d.
 
 ## Work, scheduling, and recovery
 
+### When the lead delegates
+
+TeamArchitect delegates substantive questions and execution by default,
+including research, comparisons, explanations, investigation, and code work.
+One focused question normally needs one suitable specialist, without a formal
+plan just to delegate. Independent work is dispatched together; dependent work
+waits for its inputs. Concurrent tasks have distinct ownership of edits.
+The lead handles clarification, coordination, protected lead-only controls,
+brief replies supported by current context, and final synthesis. It respects
+requests to answer directly or limit agents, and explains when no suitable
+specialist can take the work.
+
+This policy lives in `ua_definitions/agent_definitions/prompts/team_architect.md`.
+The shared action instructions in `custom_agents/agent_instructions.py` allow
+several independent delegation actions in one turn. The action outbox publishes
+them sequentially, while workers can run them in parallel. Delegation keeps the
+lead focused on coordination; it does not require duplicating specialists'
+work for validation. The lead checks returned evidence, follows up on specific
+gaps, and waits for required results before answering. More delegation can use
+more model calls and add latency to a focused request. Existing access checks,
+pool limits, and provider-limit handling still decide what can run.
+
+Verify policy changes with real-model decision scenarios covering a substantive
+question, independent questions dispatched together, and direct-reply exceptions.
+Catalog and context tests verify instruction loading; real NATS tests verify
+dispatch, waiting, results, and worker startup. Fake model outputs in transport
+tests cannot prove that a model chooses to delegate more often.
+The decision scenarios are in `tests/test_live_litellm_provider_smoke.py`, selected
+with `-k manager_chooses_delegation` and enabled by
+`RUN_LIVE_LITELLM_PROVIDER_SMOKE=1`. They use the existing live-provider config
+and model-key lookup, with harmless research, shell, and notification tools;
+they never dispatch the proposed tasks. A rejected key or unavailable endpoint
+leaves model behavior unverified even when the transport tests pass.
+
 ### Worker pools and parallel work
 
 TeamArchitect can hand out dozens of tasks at once, one `delegate_task` action
@@ -518,6 +552,12 @@ move the saved policy along (`follow_authorized_change`). See
 [Scheduled workers](user_docs_source/scheduled-workers.md).
 
 A schedule change never overwrites a newer one (`custom_agents.schedule_store`).
+Exact-agent targets keep the same durable run receipts as agent-type targets:
+admission checks the configured target and the worker's actual task custody.
+Superseding a run closes its receipt and any same-worker occurrences merged
+into it in one transaction, so those occurrences cannot keep an exhausted
+schedule after its work stops. Merged occurrences retain their coalesced state
+to record that they never ran separately.
 Admitting a job's last run does not remove the schedule's identity or access
 (2026-10-30). A worker's run proves whom it works for with the schedule's
 permit, checked live against the row (`access_control.task_identity`), and its
@@ -897,14 +937,18 @@ delivered (a crashed process loses nothing either way). So:
 A store whose writes read before they write takes turns between writers on
 both backends. In SQLite every write starts with `BEGIN IMMEDIATE`. In
 PostgreSQL the default READ COMMITTED isolation lets two transactions read the
-same rows before either writes, so the access store and the knowledge store
-take their own transaction-level advisory lock in `begin_write`
-(`storage/postgres_connection.py`, one key per store, so unrelated stores never
-wait for each other); other stores lock the rows they change (`SELECT ... FOR
-UPDATE`). An advisory lock key covers the whole PostgreSQL database, so
-instances or teams that share one database in different schemas also wait for
-each other's writes to that store. Reads and writes a thread makes while it
-holds an open write transaction of the access store (a grant plan, a whole
+same rows before either writes, so the access store, the knowledge store,
+pinned memory, the conversation store's thread tags and stored command
+refusals, and the delegated-task store take their own transaction-level
+advisory lock in `begin_write` (`storage/postgres_connection.py`, one key per
+store, so unrelated stores never wait for each other); other stores lock the
+rows they change (`SELECT ... FOR UPDATE`). A row lock cannot cover a row
+that does not exist yet, so the delegated-task store, whose first check-back
+time and first progress note for a parent both create the parent's wait, uses
+the advisory lock. An advisory lock key covers the whole PostgreSQL database,
+so instances or teams that share one database in different schemas also wait
+for each other's writes to that store. Reads and writes a thread makes while
+it holds an open write transaction of the access store (a grant plan, a whole
 decision) join that transaction, so no second connection is opened while the
 lock is held. Moving rows between tables uses `DELETE ... RETURNING` so exactly the
 rows deleted are the rows kept elsewhere (a removed person's held records,
@@ -912,6 +956,11 @@ rows deleted are the rows kept elsewhere (a removed person's held records,
 concurrency audit found that on PostgreSQL an approved change could be claimed
 twice, two edits to one person's model settings lost one, and holding a
 person's records could delete a row written meanwhile without holding it.
+The delegated-task store takes its lock because a later review of recovered
+requesters found that, on PostgreSQL, an earlier requester runtime still
+running beside its recovered replacement could erase a later check-back time,
+take one due check-back twice, or reopen a closed task
+(`tests/test_delegated_task_store_postgres.py`).
 
 Opening a store takes turns too. Each store creates its tables and indexes
 and adds missing columns when it opens, and the launcher starts the manager,
@@ -1531,6 +1580,29 @@ change control files only through typed services (settings, roster,
 provisioning, reviewed skill installation). Team skills are the one readable
 exception, because agents must read a skill's files and run its scripts; they
 are never writable, and new or changed skills go through reviewed installation.
+The required SkillSpector scan stays local and credential-free. Optional
+`workspace.skill_installation.semantic_review` (`mode: "task_model"`) adds a
+tool-free Strands assessment with the model of the running turn that staged
+the skill: the person's own model when the turn uses one, else the turn's
+model (`custom_agents.skill_semantic_review`). The review runs on that turn's
+own event loop (`custom_agents.turn_registry.run_on_turn_loop`) as owned work
+that the turn's stop cancels. Why: a sync tool's worker thread would otherwise
+start a new event loop for each model call, while a provider client that keeps
+pooled connections (the native Anthropic client) is bound to the loop that
+opened them; on the turn's loop the review keeps the turn's exact model
+object, provider settings and per-call key binding, with no second client and
+no key handling of its own. A selected review fails closed: without a running
+turn or a model, after a stop, and for every incomplete answer it writes an
+`incomplete` report with one reason code (`AssessmentReason`); only
+`mode: "off"` lets the local checks decide alone. Staging and apply check the
+report with the same `validate_report`, bound to the review settings in force,
+so a settings change invalidates a pending plan. The staging refusal names the
+reason and who fixes it, and the staging log line
+(`event=skill_semantic_review_refused` or `event=skill_semantic_review_finished`)
+carries the change id, skill name, artifact digest, reason and model, never
+file contents, provider error text or keys. Complete file coverage and both
+reports bind to the installation plan. This is part of trusted installation
+code, not another agent-writable installer.
 Startup refuses an instance still in the old single-`workspace/` layout and
 prints the move commands rather than moving files itself.
 
@@ -1555,11 +1627,16 @@ never control files, runtime records, another person's unshared folder or a
 sensitive name), asks the access service for a folder
 decision when authorization is on, and then opens that real location through
 `access_control/safe_open.py`. `safe_open` walks from a trusted root one
-component at a time with `O_NOFOLLOW`, accepts only regular files with one
-link, and creates files with `O_EXCL`, so a link planted beforehand or swapped
+component at a time with `O_NOFOLLOW`, refuses multiply linked regular files,
+and creates files with `O_EXCL`, so a link planted beforehand or swapped
 in after the check makes the open fail. A write that replaces a file writes a
 new temporary file in the same folder and renames it over the old one, keeping
-its mode and owner. A person's parallel threads can write one file at the same
+its mode and owner. If restoring the owner or group is denied, replacement
+fails and leaves the original file and its metadata intact. An already-open
+regular-file descriptor may have zero links after a concurrent atomic
+replacement; it still reads the complete old file and is allowed to finish.
+This exception applies only to opened read descriptors, never to pathname
+checks for replacement. A person's parallel threads can write one file at the same
 time, and the rename is atomic: readers see the old content or the new, never a
 half-written file, the last writer to finish wins with its whole content, and a
 write that fails part way leaves the file unchanged. Writes that only ever
@@ -1589,8 +1666,9 @@ available"), so the file delivered is the file that was checked. The Photon
 sidecar reads a path, so it gets a private 0600 copy under `state/` that is
 removed after the call.
 
-Published pages (how-tos, articles, apps from `publish_single_page_site`) are
-deliverables too, so they are written into the person's folder
+Published pages (how-tos, articles, apps and work reports from
+`publish_single_page_site`) are deliverables too, so they are written into the
+person's folder
 (`users/<person>/sites/<site_id>/`) rather than `state/`. The tool also writes a
 trusted record, `state/published_sites/<site_id>.json`, naming the page's
 folder, the person it was made for, and the SHA-256 of each file
@@ -1600,6 +1678,59 @@ what the Web Chat origin serves. Anyone with a page link can open it, which is
 why site ids end with a random part; the `/docs/sites/` index lists only the
 signed-in person's pages, and a page's chat works only in the page owner's
 signed-in Web Chat session and sends each message as that person.
+
+The `report` kind publishes the work report of a coder-critic-team run. Its
+spec is the `stats.json` the skill's `cct.py stats` wrote, and the page keeps
+the report's own design instead of the runtime theme, with no embedded chat.
+That design lives once, in the canonical skill in `../ua-skills`
+(`skills/coder-critic-team/references/report-design.md`), so every runtime
+shows the same report. `custom_tools/work_report/` therefore holds
+byte-identical copies of the skill's `scripts/render_report.py` and
+`assets/report.css`, and the tool passes the stylesheet in explicitly.
+`scripts/sync_work_report_renderer.py` copies them; with `--check` it fails on
+a stale copy or a missing canonical skill. A test runs that check when
+`../ua-skills` is checked out beside this repository and is skipped otherwise,
+because CI checks out only this repository; another test checks the script's
+own refusals without the sibling. The copied renderer validates every field it
+reads, so the tool refuses malformed statistics (`invalid_report_stats`)
+before writing anything; publishing, the record and updates are the same as
+for the other kinds. The site host adds no Content-Security-Policy to
+`/docs/sites/<site_id>/`, so the report's inline stylesheet applies; a CSP
+added there later must allow inline styles (`style-src 'unsafe-inline'`) or the
+report loses its design.
+
+A real run's `stats.json` is about 170 KB, too large for a model to repeat as
+a tool argument, so an agent passes `site_kind="report"` with the file's path
+in `site_spec_path` instead of its text in `site_spec_json`; the text form
+remains for small statistics, and the tool takes exactly one of the two. The
+tool reads the file through `custom_tools.file_access`, so the task's folders,
+the person from the signed context, the access service, link handling and a
+2 MB cap (`REPORT_STATS_MAX_BYTES`) apply as for `file_read` and `notify_user`
+attachments, and every refusal keeps the file tools' reason code
+(`failure_stage` `read_spec_file`). The file's text then takes the same path
+as `site_spec_json`, so both give the same page. `site_spec_path` is refused
+for the other kinds before anything is read. To publish any page again in
+place, the agent names it in the `update_site_id` parameter (its id or URL).
+The spec's update keys still work for `site_spec_json`, and a parameter and a
+spec key that name different pages are refused. A statistics file that carries
+them is refused (`update_key_in_spec_file`): nobody sees what a 170 KB file
+says, editing it would be undone by the next `cct.py stats` run, and a file in
+a shared folder must not choose which of the person's pages is replaced.
+
+The renderer draws a round's critiques and lead notes once per mention, a
+review stage's findings once per review of that stage, a round's label once
+per critique in that round and per finding addressed in it, and a lens-grid
+cell once per round with its key, so statistics that repeated a mention could
+multiply the page: a 1 MB file could ask for hundreds of MB of HTML. `cct.py`
+gives each round its own key, names each critique and intervention in one
+round, writes one review per stage and short round labels, so the tool
+refuses statistics that repeat one, or whose critiques and findings would
+repeat more than 64 Ki characters of round labels (`invalid_report_stats`),
+before rendering. The renderer is a
+checked copy, so this check lives in the tool. Any page larger than the site
+host serves (`MAX_SITE_FILE_BYTES`, 16 MB) is refused (`page_too_large`)
+before anything is written, so neither a new page nor the page being updated
+is replaced by one the host would not serve.
 
 Agents keep temporary files in `scratch/` of their task folder. When the
 internal-improvement maintenance schedule fires, trusted code in the manager
@@ -3185,8 +3316,19 @@ of response waits. A timeout, gateway restart or credential form therefore
 does not make a later message new work. The later message is saved as guidance
 for that request before publication. A final reply ends the running state,
 including when quiet hours delay showing the reply. A stopped request gets one
-too: its stopped turn sends it, or, when no turn of it was running (it still
-waited its turn), the stop itself does (`custom_agents.control_runtime.stop_task_execution`).
+too: the explicit stop owns the reply for both running and queued
+requests (`custom_agents.control_runtime.stop_task_execution`). It marks that
+ownership with the task's stop reason before cancelling its turn; the interrupted
+handler consumes the reason and cleans up without sending its own reply. Prompt
+handler cleanup keeps the queue from treating the task as orphaned when its turn
+ends. A temporary per-agent, per-root asyncio lock serializes local cleanup;
+the second caller checks the live task again and skips cleanup already done.
+These locks are weakly held in the control runtime, outside detached task records
+and persisted snapshots. The stop retains the root task's routing before
+interruption. Its reply is sent even if child cleanup exceeds the stop grace
+period or the handler resumes
+after the task was archived, without a second reply from that handler.
+An interruption without an explicit stop still uses the handler's cancellation path.
 Before, a stop that found no running turn sent none, so its thread stayed
 busy and every later message there was held as guidance for the cancelled
 request. Held guidance that its
@@ -3568,7 +3710,15 @@ writing, because the only reliable way to learn a provider's limit is to send
 that many. No MCP server loads at startup in either mode, so a server that does
 not answer never stops an agent from starting: the loader retries it within
 `mcp.load_retry_window_minutes`, then tells administrators, and does not retry a
-broker refusal until access or the server changes. Fixed tool groups,
+broker refusal until access or the server's connection record changes. The
+broker answers a hosted server whose sidecar could not start with 503 and the
+reason (`mcp_control.hosting.HostedMCPStartError`), never as a refusal (403):
+freeing its port changes nothing the loader watches, so only the retry schedule
+brings its tools back. For the same reason a hosted server's start does not
+bring back agents that gave up on it; they load it when they restart. An agent
+that tries while a server set to run is stopped is refused (403) and waits the
+same way, so the Status page and the docs say to leave the server set to run
+while its port is freed. Fixed tool groups,
 capability attachments and restart-to-attach were removed for this. Skills provide reusable instructions without loading every
 procedure into the base prompt. A reviewed managed-skill change commits an
 immutable local receipt before TeamArchitect sends an authority-free team
@@ -4245,7 +4395,15 @@ finish-import`; guide: `user_docs_source/team-transfer.md`).
   identifies persisted payload models and their owning sections. Frozen
   fingerprints in `data/schemas/team-transfer/section-contracts.json` detect
   payload changes even after schema regeneration: append a new version and
-  converter rather than replacing an existing fingerprint. A version
+  converter rather than replacing an existing fingerprint. When `main` and the
+  development branch (such as `release/0.10`) both change one section, the
+  number `main` gave it keeps `main`'s meaning, because `main` ships first:
+  each merge of `main` into the development branch keeps `main`'s fingerprint
+  for that number (the development branch's own fingerprint for it is
+  replaced), gives the development branch's section the next number above it,
+  and reads `main`'s version through one conversion step. That merge also tests
+  the development branch's own earlier shape of the number with a real import,
+  since its pre-release exports may still exist. A version
   imports its own section versions and the ones the previous release exported,
   through one conversion step per section that changed since
   (`team_transfer.sections.SECTION_UPGRADES`). Steps are pruned by release:
@@ -4378,9 +4536,9 @@ discovery of the lead are gone ("The end of presence and fan-out" below). Upgrad
 place from 0.9: the launcher creates the trust folder and keys, and the installation
 authority creates the `UA1_*` key-value buckets, which NATS lists as streams named
 `KV_UA1_*` (the authority's list below). The contract's work and dead-letter streams come
-in phase 3. The first start also deletes the team's old presence stream when the NATS
-login may delete streams (step 7d). What an external NATS server needs is in the user
-docs: the server version and settings in the configuration guide's "Surviving a power
+in phase 3. Startup leaves the team's old presence stream alone and needs no right to
+it: nothing uses the stream any more, so it can stay ("The end of presence and fan-out"
+below). What an external NATS server needs is in the user docs: the server version and settings in the configuration guide's "Surviving a power
 loss", and what the NATS login needs in the Docker guide's "Message host trust".
 
 `custom_transport.protocol1` is what a running host needs to sign and check messages:
@@ -5059,6 +5217,15 @@ several agents at once under one deadline and keeps each answer or error apart.
   the sender it claims (`event=agent_control_instruction_dropped`). Nor can the lead start
   another TeamArchitect (`manager_launch_forbidden`, for every kind of start): on the lead's
   host its session would carry the lead role, and it could pause or stop the real lead.
+  The team services enforce this too: only one unended lead session per team, read from
+  signed retained records under the session mutation lock, including after a service
+  restart. Reopening the same lead ends its previous sessions before signing a replacement.
+  A restarting lead host closes its earlier sessions before asking for its new lead's session;
+  an unavailable host alone never authorizes a second lead. Nor does a stored session record
+  that does not verify: a lead's open is answered `runtime_error` naming the first such key
+  and how many more, within the reply's 500 characters, and the team services log each key
+  (`event=lead_session_record_unreadable`) until it verifies or an operator deletes it
+  (user docs, Docker, "Message host trust"); other agents still open.
   It waits the request's whole lifetime (30 s), says nothing changed only when nothing can
   have run, and says the outcome is unknown after a lost reply, `handler_failed` or an
   unreadable answer.
@@ -5071,7 +5238,12 @@ several agents at once under one deadline and keeps each answer or error apart.
   task's type, and only a worker that knows the task counts. One target's error counts as no
   answer from it and never ends the probe or the scheduler pass. Any agent may delegate, so
   worker hosts may send `task.probe` too, and every topology lets a task's requester ask its
-  holder (`requester_kinds` in `team-topologies.yaml`, plan decision 70). When this process
+  holder (`requester_kinds` in `team-topologies.yaml`, plan decision 70). Receivers enforce
+  that rule: only the signed lead session, the team services without an agent session,
+  or the current holder of the parent task may probe. Parent ownership comes from durable
+  task custody, not the agent id recorded when work was delegated, so a recovered requester
+  keeps access while its previous identity and unrelated workers receive `wrong_sender`.
+  No task state is included in that refusal. When this process
   cannot ask yet for a reason that clears, the watchdog waits, up to one more timeout past a
   subtask's deadline, rather than fail work that still runs.
 - The managed skill hint is the `skills.changed` team event, which every agent process
@@ -5090,23 +5262,40 @@ agent refreshes its own `agent_states` row and checks its skill catalog every 20
 the row is the heartbeat the liveness rules read, and the check picks up a missed
 `skills.changed`. The presence stream, the broadcast subject, `TeamComms.broadcast_message`,
 the publish options for them and the JetStream push listener that only presence used are
-removed, so nothing on JetStream is pushed. The topology owner looks for an existing
-`<PREFIX>_PRESENCE` stream at start and deletes it (`event=nats_retired_stream_deleted`),
-which also removes the gateway's old durable consumer on it; a fresh install sends no delete
-(`NatsStreamTopology._delete_retired_streams`). Deleting is a one-time clean-up, not a
-condition for starting: a NATS login without the right to delete streams (an external
-server's login may only create and update them) logs `event=nats_retired_stream_not_deleted`
-with the stream and the manual step, and the start goes on. When per-host permissions apply
-(phase 3) the topology owner needs INFO and DELETE on retired stream names, or the clean-up
-goes. `transport.presence_max_age_seconds` is retired
+removed, so nothing on JetStream is pushed. Startup reconciles current streams only and
+never inspects or deletes the retired `<PREFIX>_PRESENCE` stream, which keeps obsolete
+stream access out of phase 3's per-host runtime permissions. Nothing reads or writes the
+stream, so an upgraded installation may keep it; an operator with an administrator login
+on an external NATS server may remove it, and its old consumer, when convenient.
+`transport.presence_max_age_seconds` is retired
 through versioned upgrade steps, so the running code reads only the current format: the
 instance configuration's step 12 -> 13 and `config.yaml`'s step 10 -> 11 remove it
 (`runtime_settings.transport.drop_retired_presence_setting`, with the usual backup of the
 old file), a current file that still names it is refused by name like other removed
-settings, and the team transfer's settings section (version 9) drops it from older exports
-(`RETIRED_PRESENCE_SETTING`, the one name for the path). The settings export reads the file
+settings, and the team transfer's settings section (version 10) drops it from older
+exports, main's version 9 included (`RETIRED_PRESENCE_SETTING`, the one name for the
+path). The settings export reads the file
 through the upgrade steps (`read_upgraded_instance_config`), so an export taken after the
 code upgrade but before the launcher rewrote the file carries only what this version reads.
+The same rule now removes the ignored `agent.max_concurrent_top_level_tasks` setting:
+instance configuration 13 -> 14 and `config.yaml` 11 -> 12 drop it before validation or
+export, current-format files refuse it by name, and settings section version 11 removes it
+from older transfers (`RETIRED_CONCURRENCY_SETTING`). Worker pools control concurrency; the
+obsolete value had no effect.
+
+The watchdog, delegated-work progress notes and check-back timers find records by parents
+in the recovered task tree, rather than by the requester's earlier agent id. The check-back
+pass reads those waits once, but each wake runs its request's turn before the next, so it
+clears a time only if the time is still due when the pass reaches that request
+(`DelegatedTaskRepository.take_due_check_back`); a later time the request's own turn set
+meanwhile is kept. The read and the clear run under the store's write lock on both
+backends, so a time set by another runtime after the read is kept too, and of two passes
+taking the same due time only one wakes the request. The watchdog prefers current task custody over an older worker claim. During a mixed-contract upgrade,
+the gateway tracks retained waiting replies separately for each draining lead, and every
+unavailable transition except a refused join leaves them out
+(`GatewayManagerTransition.kept_replies`), so a lead that leaves, whether it drained or left
+normally, fails only its own replies. A refused join fails every waiting reply while a lead
+is routed, because the gateway can then hear no lead at all.
 The operational subject now carries only
 the gateway's task progress, parent-task probe and thread guidance, with their replies
 (plan decision 68). Every agent receives it, so an agent acts only on a command that names
@@ -5169,7 +5358,8 @@ the gateway acts on that view in four places.
   otherwise takes the one whose record changed last (a crashed run's lead has not changed
   since the crash); it never flips between them (`event=gateway_multiple_leads`). A lead
   whose process runs another contract takes no new chats but finishes the tasks it holds,
-  so the replies people wait for are kept, and failed only if that lead then leaves. A join
+  so the replies people wait for are kept as that lead's, and failed only if that lead then
+  leaves; a later lead that leaves fails only the replies that were waiting for it. A join
   the installation refused for good clears the route whenever it comes. The lead saying it
   leaves makes it unavailable at once; a lead whose host stopped reporting is unavailable
   at most 35 seconds after the host's last liveness write (its record's 30 seconds plus the

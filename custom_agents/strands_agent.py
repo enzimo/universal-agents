@@ -2400,12 +2400,16 @@ class UniversalAgent(BaseModel):
         task_info: TaskInfo,
         reason: str,
         signal_pending_subtasks: bool,
+        send_response: bool = True,
     ) -> Dict[str, Any]:
+        # send_response=False when an explicit stop already owns the final
+        # reply (control_runtime.handle_interrupted_turn).
         return await cancel_task_tree_locally(
             self,
             task_info=task_info,
             reason=reason,
             signal_pending_subtasks=signal_pending_subtasks,
+            send_response=send_response,
         )
 
     async def _stop_task_execution(

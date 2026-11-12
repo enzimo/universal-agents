@@ -23,7 +23,7 @@ defaults:
 jobs:
   nightly:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: [self-hosted, Linux, X64, ua-build, ua-linux]
+    runs-on: [self-hosted, Linux, X64, ua-light, ua-linux]
     timeout-minutes: 15
     permissions:
       # Create and delete nightly releases and tags.

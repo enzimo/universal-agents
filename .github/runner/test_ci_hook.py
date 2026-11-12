@@ -91,7 +91,7 @@ class LifecycleTests(unittest.TestCase):
     def test_interrupted_compiler_cache_is_stopped_before_reuse(self):
         self.config["build_cache"] = {
             "sccache": "/tools/sccache", "max_bytes": 1024**2,
-            "max_age_days": 7, "server_port": 48227,
+            "max_age_days": 7, "server_port": 48227, "compiler_gib": 3,
         }
         with (patch.object(ci_hook.build_cache, "listening", return_value=False),
               patch.object(ci_hook.build_cache, "start") as start,
@@ -309,6 +309,24 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.begin()
         self.assertFalse((self.state / "job.json").exists())
+
+    def test_full_disk_metrics_failure_does_not_block_completion_or_recovery(self):
+        import errno
+
+        for recovered in (False, True):
+            self.begin()
+            self.config["metrics"] = {"interval_seconds": 5, "keep_days": 7}
+            try:
+                with (patch.object(ci_hook.runner_metrics, "finish",
+                                   side_effect=OSError(errno.ENOSPC, "Disk full")),
+                      self.assertLogs("ua.ci", "WARNING") as logs):
+                    ci_hook.cleanup(self.config, before_job=recovered)
+                self.assertIn("reclaiming job resources", logs.output[0])
+                self.assertFalse(self.workspace.exists())
+                self.assertFalse((self.state / "cache").exists())
+                self.assertFalse((self.state / "job.json").exists())
+            finally:
+                del self.config["metrics"]
 
     def test_windows_backing_drive_reserve_blocks_wsl_work(self):
         backing_drive = self.root / "windows-drive"

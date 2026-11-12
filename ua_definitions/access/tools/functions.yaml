@@ -140,7 +140,7 @@ tools:
   - tool_id: fn:publishing
     provider: publishing
     display_name: Published pages
-    description: Publish a single-page website with embedded chat.
+    description: Publish a single-page website (with embedded chat, except for a coder-critic work report).
     tool_sets: [standard]
     functions:
       publish_single_page_site: write

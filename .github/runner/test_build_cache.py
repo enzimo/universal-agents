@@ -21,7 +21,7 @@ class CacheTests(unittest.TestCase):
             "state": str(state), "work": str(self.work), "min_free_gib": 0,
             "repositories": ["owner/desktop", "owner/runtime"],
             "build_cache": {"max_bytes": 10000, "max_age_days": 7,
-                            "sccache": "/tools/sccache", "server_port": 48227},
+                            "sccache": "/tools/sccache", "server_port": 48227, "compiler_gib": 3},
         }
         self.env = patch.dict(os.environ, {
             "GITHUB_REPOSITORY": "owner/desktop", "GITHUB_REF": "refs/heads/main",
@@ -87,6 +87,15 @@ class CacheTests(unittest.TestCase):
         _, path = self.prepare()
         with patch.object(build_cache, "low_disk", return_value=True):
             build_cache.prune(self.config, ci_hook.remove)
+        self.assertFalse(path.exists())
+
+    def test_image_blobs_share_the_retention_budget_and_compiler_limit_is_configured(self):
+        self.config["build_cache"]["compiler_gib"] = 8
+        env, path = self.prepare()
+        self.assertEqual(env["SCCACHE_CACHE_SIZE"], "8G")
+        self.assertEqual(Path(env["UA_CI_IMAGE_CACHE"]), path / "buildkit")
+        (path / "buildkit" / "large-layer").write_bytes(b"x" * 11000)
+        build_cache.prune(self.config, ci_hook.remove)
         self.assertFalse(path.exists())
 
     def test_long_paths_are_counted_in_the_budget(self):

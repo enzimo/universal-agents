@@ -334,8 +334,19 @@ class WebMCPConnectionListV1(WebsiteContractV1):
     connections: tuple[WebMCPConnectionV1, ...]
 
 
+class WebHostedMCPStartFailureV1(WebsiteContractV1):
+    """Why the broker could not start a server set to run, and when it last tried."""
+
+    reason: str = Field(min_length=1, max_length=4000)
+    failed_at: datetime
+
+
 class WebHostedMCPServerV1(WebsiteContractV1):
-    """Secret-free hosted MCP server projection."""
+    """Secret-free hosted MCP server projection.
+
+    ``lifecycle`` is the state people chose; ``start_failure`` is set while a
+    server set to run could not start.
+    """
 
     hosted_server_id: str = Field(min_length=1, max_length=240)
     definition_digest: str = Field(min_length=64, max_length=64)
@@ -347,6 +358,7 @@ class WebHostedMCPServerV1(WebsiteContractV1):
     bind_host: str = Field(min_length=1, max_length=240)
     port: int = Field(ge=1, le=65535)
     available_actions: tuple[Literal["install", "start", "stop", "remove"], ...] = ()
+    start_failure: WebHostedMCPStartFailureV1 | None = None
 
 
 class WebHostedMCPServerListV1(WebsiteContractV1):

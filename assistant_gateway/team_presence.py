@@ -78,7 +78,7 @@ class GatewayTeamPresence:
         self._logger = logger or logging.getLogger(__name__)
 
     def _members(self) -> list[dict[str, Any]]:
-        members = [
+        members: list[dict[str, Any]] = [
             {
                 "agent_id": status.self_id,
                 "name": str(status.name or status.self_id),

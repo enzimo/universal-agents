@@ -51,6 +51,9 @@ from runtime_settings.model_request_options import (
 from runtime_settings.environment import _apply_env_overrides
 from runtime_settings.governance import refuse_removed_access_settings
 from runtime_settings.worker_pools import move_worker_capacity_settings
+from runtime_settings.retired_concurrency import (
+    drop_retired_concurrency_setting, refuse_retired_concurrency_setting,
+)
 from runtime_settings.transport import drop_retired_presence_setting, refuse_retired_presence_setting
 from runtime_settings.values import (
     DEFAULT_AUTHORIZATION_CONFIG,
@@ -72,7 +75,7 @@ from runtime_settings.projection import (
 logger = logging.getLogger(__name__)
 
 
-CONFIG_SCHEMA_VERSION = 11
+CONFIG_SCHEMA_VERSION = 12
 
 
 DIRECTLY_COMPATIBLE_CONFIG_VERSIONS = {CONFIG_SCHEMA_VERSION}
@@ -396,8 +399,18 @@ def _migrate_config_dict(
         )
         version = 11
 
+    if version == 11:
+        removed = drop_retired_concurrency_setting(migrated)
+        migrated["schema_version"] = 12
+        applied_steps.append(
+            "11 -> 12: remove the obsolete per-agent concurrency setting"
+            + ("; agent.max_concurrent_top_level_tasks removed" if removed else "")
+        )
+        version = 12
+
     refuse_removed_access_settings(migrated)
     refuse_retired_presence_setting(migrated)
+    refuse_retired_concurrency_setting(migrated)
     agent_cfg = _mapping_or_empty(migrated.get("agent"))
     removed_agent_workspace_keys = {
         "skills_dir",

@@ -92,6 +92,7 @@ from secure_tool_broker.google_workspace import (
 )
 from access_control.people import is_administrator
 from runtime_settings.security import reject_removed_tool_credential_env_vars
+from mcp_control.hosting import HOSTED_MCP_START_FAILED_STATUS, HostedMCPStartError
 from secure_tool_broker.mcp_config import BrokerMCPConfig
 from secure_tool_broker.tool_setup_recheck import run_rechecks
 from secure_tool_broker.tool_setup_status import TOOL_SETUP_PROVIDER, tool_setup_status
@@ -473,6 +474,30 @@ def _mcp_refusal_response(exc: Exception) -> web.Response:
     else:
         payload = {"error": str(exc), "reason_code": MCP_CALL_REFUSED}
     return web.json_response(payload, status=403)
+
+
+def _hosted_start_failed(
+    logger: logging.Logger,
+    exc: HostedMCPStartError,
+    *,
+    connection_id: str = "",
+    hosted_server_id: str = "",
+) -> web.Response:
+    """A hosted server whose sidecar could not start: a 503 with the reason, never a refusal.
+
+    Tool listings, tool calls and a person's start all answer this way, and
+    both clients raise ``HostedMCPStartError`` again from it; its docstring
+    says why a start failure is tried again rather than refused.
+    """
+
+    logger.warning(
+        "Hosted MCP server did not start. event=mcp_host_sidecar_start_failed "
+        "connection_id=%s hosted_server_id=%s reason=%s",
+        connection_id,
+        hosted_server_id,
+        str(exc),
+    )
+    return web.json_response(exc.broker_answer(), status=HOSTED_MCP_START_FAILED_STATUS)
 
 
 def _auth_session_team(context_payload: dict[str, Any], team_id: str) -> str:
@@ -1084,6 +1109,8 @@ class SecureToolBrokerService:
                 str(exc),
             )
             return _mcp_refusal_response(exc)
+        except HostedMCPStartError as exc:
+            return _hosted_start_failed(self._logger, exc, connection_id=connection_id)
         except Exception as exc:
             self._logger.exception(
                 "Brokered MCP discovery failed. event=mcp_broker_discovery_failed"
@@ -1110,6 +1137,8 @@ class SecureToolBrokerService:
                 str(exc),
             )
             return _mcp_refusal_response(exc)
+        except HostedMCPStartError as exc:
+            return _hosted_start_failed(self._logger, exc, connection_id=connection_id)
         except Exception as exc:
             self._logger.exception(
                 "Brokered MCP invocation failed. event=mcp_broker_invocation_failed"
@@ -1135,6 +1164,10 @@ class SecureToolBrokerService:
             )
         except (PermissionError, FileNotFoundError, ValueError) as exc:
             raise web.HTTPForbidden(text=str(exc)) from exc
+        except HostedMCPStartError as exc:
+            return _hosted_start_failed(
+                self._logger, exc, hosted_server_id=str(request.match_info.get("hosted_server_id") or "")
+            )
         except Exception as exc:
             self._logger.exception(
                 "Hosted MCP lifecycle failed. event=mcp_host_lifecycle_failed "

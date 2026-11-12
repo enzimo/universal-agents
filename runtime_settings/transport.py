@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 # contract step 7d (who is live comes from the team's signed agent records), so the setting
 # is gone: the configuration upgrade steps drop it (instance_config.yaml 12 -> 13,
 # config.yaml 10 -> 11), and the team transfer drops it from settings exported by versions
-# 5 to 8. This is the one name for that path.
+# 5 to 9, main's version 9 included (team_transfer.settings). This is the one name for that
+# path.
 RETIRED_PRESENCE_SETTING: Final = ("transport", "presence_max_age_seconds")
 
 

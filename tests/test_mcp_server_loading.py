@@ -16,14 +16,20 @@ The story:
 2. A refusal from the broker (no account linked) is not retried on a timer;
    an access change (an account link) tries again at once, as does a change
    to the server's record after giving up.
-3. With authorization off, a server that is down when the agent starts loads
+3. A hosted server whose sidecar could not start (``HostedMCPStartError``,
+   which the broker answers 503, not 403) is a server that does not answer,
+   not a refusal: freeing its port changes nothing the loader watches, so
+   only the schedule brings its tools back.
+4. With authorization off, a server that is down when the agent starts loads
    when it answers again within the window, and ``mcp_connections(action="list")``
-   tells the agent why it is missing meanwhile.
+   tells the agent why it is missing meanwhile; so does a hosted server once
+   the process that held its port is gone.
 """
 
 from __future__ import annotations
 
 import json
+import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +42,7 @@ from strands.tools.registry import ToolRegistry
 
 from access_control.caller_tokens import CALLER_MANAGER
 from custom_agents import access_runtime
+from custom_agents.providers.mcp_hosting import MCPHostingAdministration
 from custom_agents.mcp_server_tools import (
     LATER_RETRY_GAP,
     RETRY_GAPS,
@@ -58,6 +65,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from custom_tools.providers.capabilities import mcp_connections
 from tests.task_work_support import install_test_tool_sync, set_agent_ref, strands_parts
+from mcp_control.hosting import HostedMCPLifecycle, HostedMCPStartError, MCPHostedServerDefinitionV1
 from mcp_control.registry import (
     MCPConnectionLifecycle,
     MCPConnectionRecordV1,
@@ -67,6 +75,7 @@ from mcp_control.registry import (
     descriptor_from_server_config,
     resolve_mcp_connection_paths,
 )
+from secure_tool_broker import mcp_hosting_runtime
 from secure_tool_broker.mcp_runtime import BrokerMCPRuntime
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import caller_token
@@ -81,7 +90,12 @@ START = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
 ADMINISTRATOR = ("admin",)
 NOT_ANSWERING = "not_answering"
 REFUSED = "refused"
+START_FAILED = "start_failed"
 TOOLS = "tools"
+PORT_TAKEN = (
+    "The hosted MCP server tickets cannot start: 127.0.0.1:41000 is already in use, most likely by its "
+    "sidecar left over from an earlier broker run."
+)
 
 
 class Clock:
@@ -108,6 +122,9 @@ class Broker:
         self.asked.append((self.clock.now - START).total_seconds() / 60)
         if self.answer == NOT_ANSWERING:
             raise httpx.ConnectError("All connection attempts failed")
+        if self.answer == START_FAILED:
+            # What BrokeredMCPClient raises for the broker's 503 start-failure answer.
+            raise HostedMCPStartError(PORT_TAKEN)
         if self.answer == REFUSED:
             raise strands_mcp.BrokerRefusal(
                 403,
@@ -366,6 +383,34 @@ async def test_after_giving_up_a_reinstalled_server_is_tried_again_at_once(stora
     assert broker.asked[-1] == 90 and agent.status() is None
 
 
+@pytest.mark.asyncio
+async def test_a_hosted_server_that_could_not_start_is_retried_then_given_up_and_reported(
+    storage, tmp_path, store, clock, broker
+) -> None:
+    """Regression (PR #110 review F1): the broker answered a hosted start failure as a refusal (403),
+    so agents never tried again after someone freed the port, and administrators were never told."""
+
+    install(store)
+    broker.answer = START_FAILED
+    agent = Agent(storage, tmp_path, clock)
+
+    assert await agent.next_model_call() == set()
+    assert agent.failure().kind is LoadFailure.NOT_ANSWERING
+    assert agent.status() == (
+        f"Not loaded: the server has not answered since 2026-09-25 10:00 UTC ({PORT_TAKEN}); "
+        "trying again at 2026-09-25 10:01 UTC."
+    )
+    for minute in (1, 3, 7, 15, 31, 60):
+        clock.at(minute)
+        await agent.next_model_call()
+
+    assert broker.asked == [0, 1, 3, 7, 15, 31, 60], "the schedule of a server that does not answer"
+    assert agent.failure().kind is LoadFailure.GAVE_UP
+    [notice] = administrator_notices(storage)
+    assert notice.title == "The MCP server tickets is not answering"
+    assert f"Last error: {PORT_TAKEN}." in notice.summary
+
+
 # -- end to end with the real broker, authorization off ------------------------------
 
 
@@ -414,6 +459,113 @@ async def test_with_authorization_off_a_server_down_at_start_loads_when_it_answe
             result = await registry.dynamic_tools["tickets_search"].mcp_client.call_tool_async("tu", "search", {})
             assert result["status"] == "success" and FakeServer.calls == [("search", None)]
     finally:
+        world.service.cedar.close()
+        access_runtime._runtime_access.cache_clear()
+        set_agent_ref(None)
+
+
+def install_hosted(world: World, port: int) -> MCPHostedServerDefinitionV1:
+    """A hosted server for the world's worker type, installed and started before the broker restarted."""
+
+    hosting = MCPHostingAdministration(world.config)
+    definition = hosting.store.save(
+        MCPHostedServerDefinitionV1.build(
+            server_name="tickets",
+            purpose="Return an attested copy of reviewed arguments.",
+            owner_canonical_user_id=OWNER.person_id,
+            team_id=TEAM,
+            target_agent_types=("WebResearchAgent",),
+            tools=({"name": "search", "description": "Echo the query.", "behavior": "echo_arguments",
+                    "input_schema": {"type": "object"}},),
+            bind_host="127.0.0.1",
+            port=port,
+            lifecycle=HostedMCPLifecycle.PENDING,
+        )
+    )
+    approval = ChangeApprovalRecordV1(mode=ChangeApprovalMode.AGREEMENT, approved_by="agreement", approved_at_utc=START)
+    hosting.install(definition.hosted_server_id, approval=approval)
+    return hosting.store.update_lifecycle(
+        definition.hosted_server_id, HostedMCPLifecycle.RUNNING, principal_id=OWNER.person_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_server_whose_port_was_taken_loads_on_the_next_retry_once_the_port_is_free(
+    storage, tmp_path, monkeypatch
+) -> None:
+    """F1 end to end: the real broker, its sidecar supervisor and sidecar, the agent's client and loader.
+
+    The broker restarts while a leftover process holds the port of a hosted server set to run.
+    The agent's retry schedule, not a change to access or the server's record, brings the
+    tools back once the port is free.
+    """
+
+    clock = Clock()
+    # The broker's "failed moments ago" window (FAILED_START_REPEAT_SECONDS) follows the test's clock too.
+    monkeypatch.setattr(
+        mcp_hosting_runtime, "time", SimpleNamespace(monotonic=lambda: (clock.now - START).total_seconds())
+    )
+    monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", caller_token(CALLER_MANAGER))
+    world = World(storage, tmp_path, enabled=False)
+    leftover = socket.socket()
+    leftover.bind(("127.0.0.1", 0))
+    leftover.listen()
+    port = leftover.getsockname()[1]
+    definition = install_hosted(world, port)
+    hosting = MCPHostingAdministration(world.config)
+    service = world.broker()
+    launches: list[str] = []
+    supervisor = service._get_mcp_runtime().hosting
+    launch = supervisor._launch
+
+    async def counted_launch(hosted: MCPHostedServerDefinitionV1) -> Any:
+        launches.append(hosted.hosted_server_id)
+        return await launch(hosted)
+
+    monkeypatch.setattr(supervisor, "_launch", counted_launch)
+    agent = world.worker  # a WebResearchAgent, the type the hosted server names
+    registry = ToolRegistry()
+    hook = install_test_tool_sync(agent, [])
+    hook.servers.clock = clock
+    set_agent_ref(agent)
+    event = SimpleNamespace(agent=SimpleNamespace(tool_registry=registry))
+    access_version = AccessRepository(storage).version(TEAM)
+    try:
+        async with TestServer(service.build_app()) as server:  # the broker's start tries the server once
+            monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", str(server.make_url("")).rstrip("/"))
+            assert launches == [definition.hosted_server_id]
+
+            await hook.before_model_call(event)
+            assert set(registry.dynamic_tools) == set()
+            failure = hook.servers._failures[TOOL_ID]
+            assert failure.kind is LoadFailure.NOT_ANSWERING, "a start failure is not a refusal"
+            assert failure.next_try_at == START + timedelta(minutes=1)
+            [listed] = json.loads(await mcp_connections(action="list", tool_context=None))["connections"]
+            assert f"127.0.0.1:{port} is already in use" in listed["load_status"]
+            assert listed["load_status"].endswith("trying again at 2026-09-25 10:01 UTC.")
+            [hosted] = hosting.list_public()
+            assert f"127.0.0.1:{port} is already in use" in hosted["start_failure"]["reason"]
+            assert launches == [definition.hosted_server_id], "it failed moments ago: answered without a launch"
+
+            clock.at(0.5)
+            await hook.before_model_call(event)
+            assert launches == [definition.hosted_server_id], "not before the next try is due"
+
+            leftover.close()  # someone stops the leftover; nothing about access or the server changes
+            record = world.mcp_store().require(failure.connection_id)
+            assert record.record_digest == failure.record_digest
+            clock.at(1)
+            await hook.before_model_call(event)
+
+            assert set(registry.dynamic_tools) == {"tickets_search"}
+            assert len(launches) == 2 and TOOL_ID not in hook.servers._failures
+            assert "load_status" not in json.loads(await mcp_connections(action="list", tool_context=None))["connections"][0]
+            assert hosting.list_public()[0]["start_failure"] is None
+            assert AccessRepository(storage).version(TEAM) == access_version
+            result = await registry.dynamic_tools["tickets_search"].mcp_client.call_tool_async("tu", "search", {"q": "x"})
+            assert result["status"] == "success", result
+    finally:
+        leftover.close()
         world.service.cedar.close()
         access_runtime._runtime_access.cache_clear()
         set_agent_ref(None)

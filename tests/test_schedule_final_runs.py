@@ -86,6 +86,72 @@ def resolve(world, run):
     )
 
 
+@pytest.mark.parametrize("with_type", [False, True])
+def test_exact_agent_final_run_keeps_authority_until_completion(world, with_type):
+    record_ann(world, PersonStanding.ACTIVE)
+    base = save_schedule(world)
+    world.store.remove(SCHEDULE_ID)
+    schedule = base.model_copy(deep=True, update={
+        "interval_ms": None, "repeat_count": 1,
+        "claim_agent_id": world.worker.id,
+        "claim_named_agent_type": world.worker.named_agent_type if with_type else None,
+    })
+    world.store.add(schedule, claim_team_id=TEAM, claim_agent_id=world.worker.id)
+    renew_schedule_permits(world.manager, signer=world.signer)
+
+    async def scenario():
+        await subscribe(world)
+        await fire(world, claim(world))
+
+    asyncio.run(scenario())
+    run = queued_run(world)
+    assert resolve(world, run).person_id == ANN
+    restarted = ScheduleStore(storage_settings=world.tasks.storage_settings)
+    assert restarted.prune_expired() == 0
+    assert restarted.get_row(SCHEDULE_ID)["remaining_count"] == 0
+    assert restarted.claim_next_due(
+        claimer_agent_id=world.worker.id, claimer_named_agent_type=world.worker.named_agent_type,
+        claimer_team_id=TEAM,
+    ) is None
+    assert world.tasks.update_main_task_state(
+        run.task.task_id, ProgressState.COMPLETED, datetime.now(timezone.utc).isoformat(),
+    )
+    assert restarted.prune_expired() == 1
+    with pytest.raises(IdentityRejected):
+        resolve(world, run)
+
+
+def test_superseding_a_run_closes_its_same_worker_coalesced_fire(world):
+    primary = start_final_run(world, interval=86_400_000, count=2)
+    current = world.store.get_scheduled_message(SCHEDULE_ID)
+    due = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    world.store.update(current.model_copy(update={"next_fire_at": due}), base=current)
+    renew_schedule_permits(world.manager, signer=world.signer)
+    asyncio.run(fire(world, claim(world)))
+    records = world.store.worker_records
+    before = records.occurrences_for_schedule(SCHEDULE_ID, TEAM)
+    assert len(before) == 2
+    assert {r.state for r in before} == {"admitted", "coalesced"}
+    assert next(r for r in before if r.state == "coalesced").coalesced_into_task_id == primary.task.task_id
+    save_schedule(world, schedule_id="sched_other")
+    renew_schedule_permits(world.manager, signer=world.signer)
+    asyncio.run(fire(world, claim(world, schedule_id="sched_other")))
+    unrelated = records.occurrences_for_schedule("sched_other", TEAM)
+    assert len(unrelated) == 1 and unrelated[0].finished_at_utc is None
+    assert not records.supersede_run(primary.task.task_id, "another_team", reason="schedule_inactive")
+    assert records.occurrences_for_schedule(SCHEDULE_ID, TEAM) == before
+    assert records.supersede_run(primary.task.task_id, TEAM, reason="schedule_inactive")
+    after = records.occurrences_for_schedule(SCHEDULE_ID, TEAM)
+    assert all(r.finished_at_utc is not None and r.outcome == "superseded" for r in after)
+    assert {r.state for r in after} == {"superseded", "coalesced"}
+    assert all(r.reason == "schedule_inactive" for r in after)
+    assert not records.supersede_run(primary.task.task_id, TEAM, reason="another_reason")
+    assert records.occurrences_for_schedule(SCHEDULE_ID, TEAM) == after
+    assert records.occurrences_for_schedule("sched_other", TEAM) == unrelated
+    assert world.store.prune_expired() == 1
+    assert world.store.get_row(SCHEDULE_ID) is None
+
+
 @pytest.mark.parametrize("interval,count", [(None, 1), (60_000, 1), (None, None), (None, 5)])
 @pytest.mark.parametrize("kind", [USER, MEMORY_REVIEW])
 def test_final_run_keeps_identity_and_cannot_fire_again_after_restart(world, monkeypatch, interval, count, kind):

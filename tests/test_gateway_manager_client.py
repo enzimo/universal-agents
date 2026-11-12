@@ -271,8 +271,8 @@ async def test_an_unavailable_lead_that_finishes_its_tasks_keeps_the_waiting_rep
     unavailable: list = []
     client = _client(_FakeManagerRuntime(), settings=_settings(manager_id="lead_1"), unavailable=unavailable)
     await client.mark_manager_unavailable(expected_manager_id="lead_1", reason="another contract",
-                                          source="agent_records", keep_waiting=True)
-    assert client.manager_id is None and [item.keep_waiting for item in unavailable] == [True]
+                                          source="agent_records", kept_replies=frozenset({"corr_1"}))
+    assert client.manager_id is None and [item.kept_replies for item in unavailable] == [frozenset({"corr_1"})]
 
 
 @pytest.mark.asyncio
@@ -460,10 +460,11 @@ async def test_a_lead_whose_host_runs_another_contract_takes_no_chats() -> None:
     await follower._check(at_start=False)
     assert client.manager_id == "lead_1" and unavailable == []
 
+    client.register_response_channel("corr_1")
     agents._hosts[LEAD_HOST] = host_record("2" * 64)
     agents._rebuild()
     await follower._check(at_start=False)
-    assert [(item.manager_id, item.keep_waiting) for item in unavailable] == [("lead_1", True)]
+    assert [(item.manager_id, item.kept_replies) for item in unavailable] == [("lead_1", frozenset({"corr_1"}))]
     assert client.manager_id is None and agents.agent("lead_1").other_contract == "2" * 64
 
 

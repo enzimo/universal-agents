@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 class InstallationTests(unittest.TestCase):
-    def install(self, public_repository):
+    def install(self, public_repository, *extra):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -23,7 +23,7 @@ class InstallationTests(unittest.TestCase):
             ["rtk", "proxy", sys.executable, str(Path(__file__).with_name("install_hooks.py")),
              "--runner", str(runner), "--destination", str(destination),
              "--sccache", str(sccache), "--reserve-path", str(root),
-             "--repository", "example/approved", "--public-repository", public_repository],
+             "--repository", "example/approved", "--public-repository", public_repository, *extra],
             check=False, capture_output=True, text=True,
         )
         return result, destination
@@ -40,6 +40,19 @@ class InstallationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Every public repository", result.stderr)
         self.assertFalse((destination / "config.json").exists())
+
+    def test_host_cache_and_worker_limits_are_written_and_invalid_limits_are_rejected(self):
+        result, destination = self.install(
+            "example/approved", "--cache-gib", "128", "--compiler-cache-gib", "8", "--build-jobs", "1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((destination / "config.json").read_text())
+        self.assertEqual(config["build_cache"]["max_bytes"], 128 * 1024**3)
+        self.assertEqual(config["build_cache"]["compiler_gib"], 8)
+        self.assertEqual(config["build_jobs"], 1)
+        result, destination = self.install("example/approved", "--cache-gib", "2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":

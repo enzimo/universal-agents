@@ -3991,6 +3991,29 @@
       "title": "SecurityLayerSettings",
       "type": "object"
     },
+    "SkillSemanticReviewSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "max_input_bytes": {
+          "default": 262144,
+          "maximum": 1048576,
+          "minimum": 1024,
+          "title": "Max Input Bytes",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "off",
+          "enum": [
+            "off",
+            "task_model"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "SkillSemanticReviewSettings",
+      "type": "object"
+    },
     "SqliteVectorStorageSettings": {
       "properties": {
         "enabled": {
@@ -4566,6 +4589,9 @@
           "default": 180,
           "title": "Scanner Timeout Seconds",
           "type": "integer"
+        },
+        "semantic_review": {
+          "$ref": "#/$defs/SkillSemanticReviewSettings"
         }
       },
       "title": "WorkspaceSkillInstallationSettings",
@@ -4677,7 +4703,7 @@
       "$ref": "#/$defs/OTelSettings"
     },
     "schema_version": {
-      "default": 13,
+      "default": 14,
       "title": "Schema Version",
       "type": "integer"
     },

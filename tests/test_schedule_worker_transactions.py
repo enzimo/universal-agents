@@ -240,6 +240,29 @@ def test_stale_claim_rolls_back_new_runtime_custody(stores):
     assert store.worker_records.for_task(occurrence.task_id, "team") is None
 
 
+@pytest.mark.parametrize("agent_type,agent_id", [
+    ("OtherWorker", None), (None, "other_worker"),
+    ("OtherWorker", "worker"), (None, None),
+])
+def test_admission_rejects_changed_or_missing_targets(stores, agent_type, agent_id):
+    store, runtime, _ = stores
+    schedule = seed_schedule(store)
+    occurrence = claim_occurrence(store, schedule)
+    # Keep the original claim to exercise the admission target guard itself.
+    repository = store._repository
+    p = repository._dialect.bind
+    with repository._connect() as conn:
+        conn.execute(
+            f"UPDATE scheduled_messages SET claim_named_agent_type={p},claim_agent_id={p} WHERE schedule_id={p}",
+            (agent_type, agent_id, schedule.schedule_id),
+        )
+        conn.commit()
+    with pytest.raises(ScheduleWorkerConflict, match="schedule_admission_target_mismatch"):
+        admit(runtime, occurrence)
+    assert runtime.load_task_runtime_by_owner("worker") == []
+    assert store.worker_records.for_task(occurrence.task_id, "team") is None
+
+
 def test_a_retained_claim_cannot_admit_a_future_occurrence(stores):
     store, runtime, _ = stores
     schedule = seed_schedule(store)
