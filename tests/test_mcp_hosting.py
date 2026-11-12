@@ -41,6 +41,7 @@ from assistant_gateway.application.website_application import (
     WebMCPLifecycleResultV1,
 )
 from assistant_gateway.config import GatewayInstanceConfig
+from assistant_gateway.status_page import HOSTED_MCP_SOURCE
 from custom_agents import access_runtime
 from custom_agents.access_runtime import runtime_requests
 from custom_agents.mcp_hosting_changes import HOSTED_MCP_SERVER_CHANGE_KIND, HostedMCPServerChangeService
@@ -838,9 +839,11 @@ def _saved(config: Any, definition: MCPHostedServerDefinitionV1) -> MCPHostedSer
     return definition
 
 
-def _echo_definition(port: int, *, lifecycle: HostedMCPLifecycle = HostedMCPLifecycle.STOPPED) -> MCPHostedServerDefinitionV1:
+def _echo_definition(
+    port: int, *, lifecycle: HostedMCPLifecycle = HostedMCPLifecycle.STOPPED, server_name: str = "echo"
+) -> MCPHostedServerDefinitionV1:
     return MCPHostedServerDefinitionV1.build(
-        server_name="echo",
+        server_name=server_name,
         purpose="Return an attested copy of reviewed arguments.",
         owner_canonical_user_id="usr_owner",
         team_id=TEAM,
@@ -871,7 +874,7 @@ async def test_a_sidecar_left_over_from_an_earlier_broker_stops_the_start_and_sa
         assert f"127.0.0.1:{port} is already in use" in message, message
         assert "Stop that process" in message, message
         # Review C08: the reason never says to stop and start a server set to run.
-        assert "A server set to run then starts on an agent's next try; start a stopped one again." in message
+        assert message.endswith(PORT_IN_USE_ADVICE), message
         assert earlier_broker._processes[definition.hosted_server_id].returncode is None
         assert definition.hosted_server_id not in restarted_broker._processes
         # Not set to run: the person who started it got the reason in the answer.
@@ -879,6 +882,22 @@ async def test_a_sidecar_left_over_from_an_earlier_broker_stops_the_start_and_sa
     finally:
         await restarted_broker.close()
         await earlier_broker.close()
+
+
+PORT_IN_USE_ADVICE = "A server set to run then starts on an agent's next try; start a stopped one again."
+
+
+def test_agents_see_the_whole_port_in_use_advice_for_a_server_name_of_typical_length() -> None:
+    """Agents read a start failure in ``load_status`` cut to 300 characters; the advice ends the reason."""
+
+    from custom_agents.mcp_server_tools import MAX_ERROR_TEXT, error_text
+
+    name = "customer_support_ticket_lookups"  # 31 characters; the reason allows 32 on a loopback port
+    reason = hosting_runtime._port_in_use_reason(name, "127.0.0.1:65535")
+
+    assert error_text(HostedMCPPortInUse(reason)) == reason
+    assert reason.endswith(PORT_IN_USE_ADVICE)
+    assert len(hosting_runtime._port_in_use_reason("n" * 32, "127.0.0.1:65535")) <= MAX_ERROR_TEXT
 
 
 class _Running:
@@ -1145,6 +1164,97 @@ async def test_every_list_of_hosted_servers_says_why_a_server_set_to_run_is_not_
     finally:
         await broker.close()
     assert not [item for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")]
+
+
+# -- lists read each server once, and a note or server removed meanwhile is no error ----
+
+
+def _gone_when_read(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """``target`` disappears just as it is read, as when the broker clears or removes it during a list."""
+
+    read_text = Path.read_text
+
+    def read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == target:
+            target.unlink(missing_ok=True)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+
+
+def test_a_start_failure_cleared_while_it_is_read_means_no_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _path = _hosting_config(tmp_path)
+    definition = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    store = MCPHostedServerStore(resolve_mcp_hosting_paths(config))
+    store.record_start_failure(definition.hosted_server_id, "127.0.0.1:1 is already in use.", at=datetime.now(timezone.utc))
+    _gone_when_read(monkeypatch, store._start_failure_path(definition.hosted_server_id))
+
+    assert store.start_failure(definition.hosted_server_id) is None
+    assert MCPHostingAdministration(config).list_public()[0]["start_failure"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_server_removed_while_a_list_is_read_is_left_out_of_every_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_status_page import _page
+
+    config, path = _hosting_config(tmp_path)
+    paths = resolve_mcp_hosting_paths(config)
+    store = MCPHostedServerStore(paths)
+    kept = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    removed = _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING, server_name="tickets")
+    agent = change_agent(config, path, authorization_enabled=False)
+    for definition in (kept, removed):
+        store.record_start_failure(definition.hosted_server_id, "127.0.0.1:1 is already in use.", at=datetime.now(timezone.utc))
+
+    @contextlib.contextmanager
+    def removed_once_listed() -> Iterator[None]:
+        # The folder lists it, then the broker removes it before its file is read.
+        _saved(config, removed)
+        with monkeypatch.context() as patch:
+            _gone_when_read(patch, paths.definitions / f"{removed.hosted_server_id}.json")
+            yield
+
+    with removed_once_listed():
+        public = MCPHostingAdministration(config).list_public()
+    assert [item["hosted_server_id"] for item in public] == [kept.hosted_server_id]
+
+    with removed_once_listed():
+        listing = await asyncio.to_thread(_call_tool, agent, hosted_mcp_servers, action="list")
+    assert [item["hosted_server_id"] for item in listing["hosted_servers"]] == [kept.hosted_server_id]
+
+    with removed_once_listed():
+        report = await _page(config).report()
+    assert HOSTED_MCP_SOURCE not in report.unavailable_sources
+    assert [item.finding_id for item in report.findings if item.finding_id.startswith("hosted_mcp_server_not_started:")] == [
+        f"hosted_mcp_server_not_started:{kept.hosted_server_id}"
+    ]
+
+
+def test_the_agents_list_says_each_servers_state_from_its_own_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, path = _hosting_config(tmp_path)
+    store = MCPHostedServerStore(resolve_mcp_hosting_paths(config))
+    failing = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING))
+    running = _saved(config, _echo_definition(_free_port(), lifecycle=HostedMCPLifecycle.RUNNING, server_name="files"))
+    stopped = _saved(config, _echo_definition(_free_port(), server_name="tickets"))
+    store.record_start_failure(failing.hosted_server_id, "127.0.0.1:1 is already in use.", at=datetime.now(timezone.utc))
+    agent = change_agent(config, path, authorization_enabled=False)
+
+    def looked_up_again(self: Any, hosted_server_id: str) -> Any:
+        raise AssertionError(f"the list looked {hosted_server_id} up again")
+
+    monkeypatch.setattr(MCPHostedServerStore, "require", looked_up_again)
+    listing = _call_tool(agent, hosted_mcp_servers, action="list")
+
+    status = {item["hosted_server_id"]: item["status"] for item in listing["hosted_servers"]}
+    assert status[failing.hosted_server_id].startswith("Set to run, but it could not start: 127.0.0.1:1 is already")
+    assert status[running.hosted_server_id] == "Running"
+    assert status[stopped.hosted_server_id] == "Installed and stopped"
 
 
 # -- a start that does not finish leaves nothing running and says why --------------------

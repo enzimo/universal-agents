@@ -16,7 +16,7 @@ import logging
 import os
 from pathlib import Path
 import re
-from typing import Any, Iterator
+from typing import Any, Iterator, TypeVar
 
 from jsonschema.validators import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -251,13 +251,14 @@ class HostedMCPStartError(RuntimeError):
         return cls(str(payload.get("error") or "").strip() or "The hosted MCP server could not start.")
 
 
-def start_failure_sentence(failure: HostedMCPStartFailureV1) -> str:
-    """The plain words lists of hosted servers use for a server set to run whose sidecar did not start."""
+def start_failure_sentence(reason: str, failed_at: datetime) -> str:
+    """The plain words lists of hosted servers use for a server set to run whose sidecar did not start.
 
-    return (
-        f"Set to run, but it could not start: {failure.reason} "
-        f"(last tried {failure.failed_at:%Y-%m-%d %H:%M} UTC)"
-    )
+    It takes plain values so the agents' list, which has a listed row, and
+    ``/mcp``, which has the gateway's copy of that row, say the same thing.
+    """
+
+    return f"Set to run, but it could not start: {reason} (last tried {failed_at:%Y-%m-%d %H:%M} UTC)"
 
 
 class MCPHostingPaths(BaseModel):
@@ -347,22 +348,45 @@ def _atomic_json(path: Path, value: BaseModel) -> None:
         temporary.unlink(missing_ok=True)
 
 
+_Record = TypeVar("_Record", bound=BaseModel)
+
+
+def _read_if_present(path: Path, model: type[_Record]) -> _Record | None:
+    """The record stored in ``path``, or ``None`` when there is none.
+
+    The broker removes start failures and definitions while lists are being
+    read, without the readers taking the hosting lock, so a file can go away
+    after a check for it or after the folder was listed. Opening it is the only
+    check: a file that is gone means no record, never an error.
+    """
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return model.model_validate_json(text)
+
+
 class MCPHostedServerStore:
     def __init__(self, paths: MCPHostingPaths) -> None:
         self.paths = paths
         paths.ensure()
 
     def list_definitions(self) -> tuple[MCPHostedServerDefinitionV1, ...]:
-        return tuple(
-            MCPHostedServerDefinitionV1.model_validate_json(path.read_text(encoding="utf-8"))
+        """Every installed definition; one removed after the folder was listed is left out."""
+
+        found = (
+            _read_if_present(path, MCPHostedServerDefinitionV1)
             for path in sorted(self.paths.definitions.glob("mcp_host_*.json"))
         )
+        return tuple(definition for definition in found if definition is not None)
 
     def require(self, hosted_server_id: str) -> MCPHostedServerDefinitionV1:
         path = self.paths.definitions / f"{str(hosted_server_id or '').strip()}.json"
-        if not path.is_file():
+        definition = _read_if_present(path, MCPHostedServerDefinitionV1)
+        if definition is None:
             raise FileNotFoundError(f"Hosted MCP definition not found: {hosted_server_id}")
-        return MCPHostedServerDefinitionV1.model_validate_json(path.read_text(encoding="utf-8"))
+        return definition
 
     def save(self, definition: MCPHostedServerDefinitionV1) -> MCPHostedServerDefinitionV1:
         validated = MCPHostedServerDefinitionV1.model_validate(definition)
@@ -436,10 +460,9 @@ class MCPHostedServerStore:
             self._start_failure_path(hosted_server_id).unlink(missing_ok=True)
 
     def start_failure(self, hosted_server_id: str) -> HostedMCPStartFailureV1 | None:
-        path = self._start_failure_path(hosted_server_id)
-        if not path.is_file():
-            return None
-        return HostedMCPStartFailureV1.model_validate_json(path.read_text(encoding="utf-8"))
+        """Why the server's sidecar last could not start, or ``None`` after a start or a stop cleared it."""
+
+        return _read_if_present(self._start_failure_path(hosted_server_id), HostedMCPStartFailureV1)
 
 
 

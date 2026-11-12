@@ -26,6 +26,7 @@ from assistant_gateway.application.website_application import (
     WebMCPLifecycleRequestV1,
     WebMCPLifecycleResultV1,
 )
+from mcp_control.hosting import start_failure_sentence
 
 LOGGER = logging.getLogger(__name__)
 STOP_USAGE = (
@@ -108,11 +109,7 @@ def _render_mcp_inventory(connections: Any, hosted: Any) -> str:
         )
         failure = server.start_failure
         if failure is not None:
-            # The same words as the agents' list (mcp_control.hosting.start_failure_sentence).
-            lines.append(
-                f"  Set to run, but it could not start: {failure.reason} "
-                f"(last tried {failure.failed_at:%Y-%m-%d %H:%M} UTC)"
-            )
+            lines.append(f"  {start_failure_sentence(failure.reason, failure.failed_at)}")
     if len(lines) == 1:
         lines.append("No MCP resources are registered.")
     return "\n".join(lines)

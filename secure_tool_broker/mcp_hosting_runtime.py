@@ -65,6 +65,24 @@ class _FailedStart:
     at: float  # time.monotonic()
 
 
+def _port_in_use_reason(server_name: str, address: str) -> str:
+    """Why a start failed on a port another process holds, and what to do about it.
+
+    Agents read it in ``load_status`` cut to ``custom_agents.mcp_server_tools.MAX_ERROR_TEXT``
+    (300) characters, so it is short enough that its advice, at the end, stays
+    whole for server names up to 32 characters on a loopback address. The advice
+    never says to stop and start a server set to run: the broker refuses an agent
+    that tries while it is stopped, and that agent then waits for its own
+    restart. A person whose start of a stopped server failed starts it again.
+    """
+
+    return (
+        f"The hosted MCP server {server_name} cannot start: {address} is already in use, likely by its "
+        "sidecar from an earlier broker run. Stop that process (`ps -ef | grep mcp_control.managed_server`). "
+        "A server set to run then starts on an agent's next try; start a stopped one again."
+    )
+
+
 def _sidecar_output(log_path: Path, offset: int) -> str:
     """What the sidecar of this start wrote: its log is appended to on every start."""
 
@@ -185,12 +203,7 @@ class MCPHostedProcessSupervisor:
             output = _sidecar_output(log_path, offset)
             if returncode is not None:
                 if _PORT_TAKEN in output:
-                    raise HostedMCPPortInUse(
-                        f"The hosted MCP server {definition.server_name} cannot start: {address} is already "
-                        "in use, most likely by its sidecar from an earlier broker run. Stop that process "
-                        "(`ps -ef | grep mcp_control.managed_server` shows it). A server set to run then "
-                        "starts on an agent's next try; start a stopped one again."
-                    )
+                    raise HostedMCPPortInUse(_port_in_use_reason(definition.server_name, address))
                 raise HostedMCPStartError(
                     f"The hosted MCP server {definition.server_name} stopped while starting, with status "
                     f"{returncode}. Its log is {shown_log}."

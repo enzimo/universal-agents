@@ -49,6 +49,22 @@ _STATE_WORDS = {
 }
 
 
+def hosted_status(server: Mapping[str, Any]) -> str:
+    """A listed server's state in plain words, from its row of ``MCPHostingAdministration.list_public``.
+
+    The row is the only source: looking the server up again by its id could
+    fail for one removed after the listing, or give a state from after it.
+    """
+
+    lifecycle = HostedMCPLifecycle(server["lifecycle"])
+    if lifecycle != HostedMCPLifecycle.RUNNING:
+        return _STATE_WORDS[lifecycle]
+    failure = server.get("start_failure")
+    if failure is None:
+        return "Running"
+    return start_failure_sentence(failure["reason"], failure["failed_at"])
+
+
 class MCPHostingAdministration:
     """Trusted lifecycle operations; callers have already been authorized."""
 
@@ -86,15 +102,6 @@ class MCPHostingAdministration:
                 }
             )
         return listed
-
-    def describe_state(self, hosted_server_id: str) -> str:
-        """The server's state in plain words, as the agents' list gives it."""
-
-        definition = self.store.require(hosted_server_id)
-        if definition.lifecycle == HostedMCPLifecycle.RUNNING:
-            failure = self.store.start_failure(hosted_server_id)
-            return "Running" if failure is None else start_failure_sentence(failure)
-        return _STATE_WORDS[definition.lifecycle]
 
     def propose_by_agent(
         self,
