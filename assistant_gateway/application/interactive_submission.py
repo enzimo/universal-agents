@@ -541,6 +541,9 @@ class GatewayInteractiveSubmissionService:
                         # concurrently may run beside the lead's other work
                         # (custom_agents.execution_lanes).
                         parallel_thread=parallel_thread,
+                        # Vouches for the request's files (sent_files_access).
+                        root_task_id=task.task_id,
+                        conversation_id=thread.conversation_id,
                     ),
                 ),
                 msg_header=MessageHeader(

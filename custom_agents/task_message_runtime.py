@@ -29,7 +29,7 @@ from custom_agents.task_custody import (
 from custom_agents.task_custody import check_admission as check_task_custody
 from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyFinished, TaskCustodyReleased
 from custom_agents.worker_handback_runtime import apply_redispatch_notice
-from custom_agents.conversation_attachments import UploadFolders
+from custom_agents.conversation_attachments import UploadFolders, request_files_kept, without_incoming_files_entries
 from custom_agents.conversation_delivery_runtime import handle_delivery_receipt
 from custom_agents.conversation_runtime import (
     ensure_task_conversation_context,
@@ -1302,6 +1302,8 @@ async def _handle_task_request(
             f"Invalid task request content type: {type(task_request)}. Discarding."
         )
         return
+    # Files entries are this runtime's own records (conversation_attachments).
+    task_request = without_incoming_files_entries(task_request)
 
     if (
         await self.task_manager.operations_runtime.run(
@@ -1337,6 +1339,10 @@ async def _handle_task_request(
     # may read storage (schedule run identities), so it runs in a thread.
     owner_person_id = await asyncio.to_thread(verified_meta_person_id, self, normalized_meta)
     if task_request.parent_task_id is None:
+        # Only files the gateway sent for this request stay on it (conversation_attachments).
+        task_request = request_files_kept(
+            task_request, normalized_meta, team_id=str(self.team_id or ""), person_id=owner_person_id
+        )
         # The turn keeps the request's files; reading the upload folders reads settings.
         upload_folders = (
             await asyncio.to_thread(UploadFolders.for_agent, self) if task_request.attachments else None

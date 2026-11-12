@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from access_control.ownership import (
@@ -20,7 +22,9 @@ from access_control.ownership import (
     named_task_access,
     objective_access,
     private_access,
+    sent_files_access,
 )
+from custom_messages.contracts.access_v2 import TaskContextV1
 
 
 @pytest.mark.parametrize("action", [PRIVATE_READ, PRIVATE_UPDATE, PRIVATE_DELETE])
@@ -204,3 +208,53 @@ def test_a_conversations_files_follow_the_same_rule_as_continuing_it(person, own
     continuation = conversation_continuation(person_id=person, owner_id=owner, conversation_id="c1")
     assert (files.allowed, files.reason) == (continuation.allowed, continuation.reason)
     assert files.allowed is allowed
+
+
+def _sent(**changes) -> TaskContextV1:
+    """A context the gateway signed for a guidance to task_1 in c1, for usr_a."""
+
+    now = datetime.now(timezone.utc)
+    fields = {
+        "context_id": "task_context_guidance",
+        "issuer": "gateway",
+        "team_id": "team",
+        "person_id": "usr_a",
+        "root_task_id": "task_1",
+        "conversation_id": "c1",
+        "issued_at_utc": now,
+        "expires_at_utc": now + timedelta(days=1),
+    }
+    return TaskContextV1(**{**fields, **changes})
+
+
+@pytest.mark.parametrize(
+    ("sender", "reason"),
+    [
+        (_sent(), "sent_by_gateway_for_task"),
+        (None, "gateway_context_required"),
+        (_sent(issuer="scheduler"), "sender_not_gateway"),
+        (_sent(person_id="usr_b"), "another_person"),
+        (_sent(root_task_id=None), "another_task"),
+        (_sent(root_task_id="task_2"), "another_task"),
+        (_sent(conversation_id=None), "another_conversation"),
+        (_sent(conversation_id="c2"), "another_conversation"),
+        # The task's own context: every worker of the task holds a copy.
+        (_sent(context_id="task_context_admitted"), "copied_task_context"),
+    ],
+)
+def test_a_messages_files_are_kept_only_when_the_gateway_sent_them_for_the_task(sender, reason) -> None:
+    decision = sent_files_access(
+        sender=sender,
+        task_id="task_1",
+        conversation_id="c1",
+        person_id="usr_a",
+        task_context_id="task_context_admitted",
+    )
+    assert (decision.allowed, decision.reason) == (reason == "sent_by_gateway_for_task", reason)
+
+
+def test_a_requests_own_context_vouches_for_its_files_and_work_for_no_person_matches_no_person() -> None:
+    # At admission the sender is the task's own context, so no context is excluded.
+    own = sent_files_access(sender=_sent(), task_id="task_1", conversation_id="c1", person_id="usr_a")
+    nobody = sent_files_access(sender=_sent(person_id=None), task_id="task_1", conversation_id="c1", person_id=" ")
+    assert own.allowed and nobody.allowed

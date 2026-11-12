@@ -37,6 +37,11 @@ task's prompt. The files earlier turns received follow the same rule
 (``conversation_files_access``): a task lists and opens them only while it
 works for the conversation's person.
 
+Which files become a task's and its conversation's in the first place is
+decided by ``sent_files_access``: only files the gateway vouches it sent for
+that task, in that conversation, for that person (see its docstring for why
+a worker holding a copy of the task's signed context cannot pass).
+
 Objectives are the team lead's records, all kept in its one durable scope, so
 its Objective tools ask ``objective_access`` which ones a task may reach: the
 Objectives of the person the task works for, and the team's Objectives (those
@@ -55,7 +60,9 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from access_control.entities import AGENT_ROLE_SYSTEM
+from access_control.identity import ISSUER_GATEWAY
 from access_control.people import is_administrator, normalized_roles
+from custom_messages.contracts.access_v2 import TaskContextV1
 
 logger = logging.getLogger(__name__)
 
@@ -192,11 +199,63 @@ def conversation_files_access(
     return _conversation_person(person_id, owner_id, conversation_id, PRIVATE_READ)
 
 
+def sent_files_access(
+    *,
+    sender: TaskContextV1 | None,
+    task_id: str,
+    conversation_id: str | None,
+    person_id: str | None,
+    task_context_id: str | None = None,
+) -> OwnershipDecision:
+    """Whether files on a message to a top-level task may become that task's and its conversation's.
+
+    Uploads are the person's private records, and the agent side cannot read
+    the gateway's upload records, so it keeps a message's files only when the
+    gateway vouches that it sent them for this task: ``sender`` is the
+    message's own signed context, already verified by the caller (None when
+    missing, forged or expired). It must be the gateway's, name the person
+    the task verifiably works for (``person_id``, decided at admission), name
+    the task as ``root_task_id`` and name its conversation. The gateway signs
+    those two fields only on a new request's context and on the context of
+    each guidance or answer it sends to that request
+    (``assistant_gateway.application.request_context``).
+
+    ``task_context_id`` is the id of the task's own admitted context; pass it
+    for guidance and answers. Delegation copies that context into every
+    subtask, so each worker of the task holds a valid copy naming the task,
+    its conversation and its person. A guidance or an answer must carry a
+    context the gateway issued for that message, never the task's own. The
+    gateway's guidance contexts are never passed on (guidance forwarded to
+    workers carries none), and a context issued for another request names
+    another task.
+    """
+
+    if sender is None:
+        reason = "gateway_context_required"
+    elif sender.issuer != ISSUER_GATEWAY:
+        reason = "sender_not_gateway"
+    elif _person(sender.person_id) != _person(person_id):
+        reason = "another_person"
+    elif not task_id or sender.root_task_id != task_id:
+        reason = "another_task"
+    elif not conversation_id or sender.conversation_id != conversation_id:
+        reason = "another_conversation"
+    elif task_context_id is not None and sender.context_id == task_context_id:
+        reason = "copied_task_context"
+    else:
+        return OwnershipDecision(True, "sent_by_gateway_for_task")
+    return _denied(reason, person_id, RESOURCE_CONVERSATION, conversation_id or "", PRIVATE_UPDATE)
+
+
+def _person(person_id: str | None) -> str | None:
+    return str(person_id or "").strip() or None
+
+
 def _conversation_person(
     person_id: str | None, owner_id: str | None, conversation_id: str, action: str
 ) -> OwnershipDecision:
-    person = str(person_id or "").strip() or None
-    owner = str(owner_id or "").strip() or None
+    person = _person(person_id)
+    owner = _person(owner_id)
     if person == owner:
         return OwnershipDecision(True, "conversation_owner" if person else "no_person_conversation")
     return _denied("conversation_owner_required", person, RESOURCE_CONVERSATION, conversation_id, action)
@@ -351,5 +410,6 @@ __all__ = [
     "named_task_access",
     "objective_access",
     "private_access",
+    "sent_files_access",
     "system_work_schedule_access",
 ]

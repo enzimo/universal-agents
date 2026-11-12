@@ -8,10 +8,30 @@ runtime code keeps those records in two places: the task's own history (one
 ``TASK_FILES_EVENT`` entry per accepted guidance or answer with files, written
 by ``custom_agents.task_steering_runtime``) and the conversation turn the task
 belongs to (``attachments_json`` in ``storage.conversation_repository``,
-written by ``custom_agents.conversation_runtime``). Both writers first drop
-records that point outside this host's upload folders (``keep_upload_files``).
-This module is the one place that decides which of them a task may use; the
-attachment tools, the prompt's file list and delegation all ask it.
+written by ``custom_agents.conversation_runtime``). This module is the one
+place that decides which of them a task may use; the attachment tools, the
+prompt's file list and delegation all ask it.
+
+Which files are kept at all, before anything is saved:
+
+- A top-level task keeps the files on its request, guidance and answers only
+  when the gateway vouches that it sent them for this task, in this
+  conversation, for this person: the message's own signed context names all
+  three (``access_control.ownership.sent_files_access``, checked by
+  ``request_files_kept`` at admission and ``steering_files_check`` for
+  guidance and answers). Other agent processes also send tasks and steering
+  messages, and every worker of a request holds a copy of its signed
+  context; the rule's docstring explains why such a copy does not pass.
+  Refused files are dropped from the message itself and logged one by one.
+- A delegated task keeps no files from guidance or answers; its files are the
+  ones its delegation named (``Task.attachments``). The lead sends guidance on
+  to its workers without files.
+- Files history entries are written only by this runtime after admission, so
+  any a task message arrives with are dropped (``without_incoming_files_entries``).
+- Both writers then drop records that point outside this host's upload
+  folders (``keep_upload_files``).
+
+So every source ``TaskAttachments`` reads was written only after these checks.
 
 What a task may use (``TaskAttachments``):
 
@@ -35,9 +55,9 @@ storage references or paths.
 
 Where bytes are read from (``UploadFolders``, ``locate_upload``): only from
 inside this host's upload folders, ``state/uploads`` and the adapter host's
-upload folder. Guidance and answers arrive on unsigned steering messages that
-other agent processes also send, so a record's path is not trusted by
-itself: a record pointing anywhere else is refused and logged.
+upload folder. A record's path is not trusted by itself (a delegated task's
+files are not vouched for by the gateway): a record pointing anywhere else
+is refused and logged.
 """
 
 from __future__ import annotations
@@ -51,8 +71,12 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
-from access_control.ownership import conversation_files_access
+from access_control.identity import IdentityRejected
+from access_control.ownership import OwnershipDecision, conversation_files_access, sent_files_access
+from custom_agents.task_context_runtime import context_verifier
+from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
+from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import TurnAttachment, attachment_summary
@@ -455,6 +479,107 @@ def locate_upload(
     return UnavailableUpload(UPLOAD_NOT_ON_THIS_HOST, "This file is stored on another host, not where this agent runs.")
 
 
+def request_files_kept(task: Task, meta: Any, *, team_id: str, person_id: Optional[str]) -> Task:
+    """A top-level request as admitted: with its files only when the gateway vouches for them.
+
+    ``meta`` is the request's message meta; ``person_id`` is whom the task
+    verifiably works for. Refused files are dropped from the task, so they
+    are neither on its turn nor among its own files (module docstring).
+    """
+
+    if not task.attachments:
+        return task
+    conversation_id = _text(getattr(meta, "conversation_id", None))
+    decision = sent_files_access(
+        sender=_verified_sender(meta, team_id),
+        task_id=task.task_id,
+        conversation_id=conversation_id,
+        person_id=person_id,
+    )
+    if decision.allowed:
+        return task
+    log_refused_files(task.attachments, decision.reason, task_id=task.task_id, conversation_id=conversation_id)
+    return task.model_copy(update={"attachments": []})
+
+
+def steering_files_check(task_info: Any, meta: Any, *, team_id: str) -> OwnershipDecision:
+    """Whether the files on a guidance or an answer (message meta ``meta``) may become the task's.
+
+    A delegated task keeps none (module docstring). For a top-level task the
+    message must carry a context the gateway signed for it, other than the
+    task's own context that its workers hold copies of.
+    """
+
+    task = task_info.task
+    if task.parent_task_id is not None:
+        return OwnershipDecision(False, "delegated_task")
+    return sent_files_access(
+        sender=_verified_sender(meta, team_id),
+        task_id=task.task_id,
+        conversation_id=_text(getattr(task_info.meta, "conversation_id", None)),
+        person_id=getattr(task_info, "owner_person_id", None),
+        task_context_id=_context_id(task_info.meta),
+    )
+
+
+def log_refused_files(
+    attachments: Iterable[UserTaskAttachment], reason: str, *, task_id: str, conversation_id: Optional[str]
+) -> None:
+    """One warning per file a message brought that is not kept (``sent_files_access``)."""
+
+    for attachment in attachments:
+        logger.warning(
+            "A file on a message was not kept: the gateway does not vouch that it sent it for this task. "
+            "event=sent_file_refused reason=%s attachment_id=%s task_id=%s conversation_id=%s",
+            reason,
+            attachment.attachment_id,
+            task_id,
+            conversation_id or "-",
+        )
+
+
+def without_incoming_files_entries(task: Task) -> Task:
+    """``task`` without the files entries its message arrived with (module docstring).
+
+    Only this runtime writes them, after admission; requests and delegated
+    tasks arrive with none, so any found are dropped and logged.
+    """
+
+    history = list(task.execution_history or [])
+    kept = [entry for entry in history if (getattr(entry, "details", None) or {}).get("event") != TASK_FILES_EVENT]
+    if len(kept) == len(history):
+        return task
+    logger.warning(
+        "A task arrived with files entries in its history; they were dropped. "
+        "event=incoming_task_files_entries_dropped task_id=%s count=%d",
+        task.task_id,
+        len(history) - len(kept),
+    )
+    return task.model_copy(update={"execution_history": kept})
+
+
+def _verified_sender(meta: Any, team_id: str) -> Optional[TaskContextV1]:
+    """The message's own signed context, verified with this process's keys; None when missing or invalid."""
+
+    signed = getattr(getattr(meta, "gateway_context", None), "task_context", None)
+    if signed is None:
+        return None
+    try:
+        return context_verifier().verify(signed, team_id=team_id or None)
+    except (IdentityRejected, ValueError) as exc:
+        logger.info("A message's signed context was not accepted. event=sent_files_context_rejected error=%s", exc)
+        return None
+
+
+def _context_id(meta: Any) -> Optional[str]:
+    signed = getattr(getattr(meta, "gateway_context", None), "task_context", None)
+    return getattr(getattr(signed, "context", None), "context_id", None)
+
+
+def _text(value: Any) -> Optional[str]:
+    return str(value or "").strip() or None
+
+
 def keep_upload_files(
     attachments: Iterable[UserTaskAttachment],
     folders: Optional[UploadFolders],
@@ -510,6 +635,10 @@ __all__ = [
     "describe_file",
     "keep_upload_files",
     "locate_upload",
+    "log_refused_files",
+    "request_files_kept",
     "sent_file_lines",
+    "steering_files_check",
     "task_files_details",
+    "without_incoming_files_entries",
 ]

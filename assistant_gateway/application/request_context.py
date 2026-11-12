@@ -312,7 +312,18 @@ class GatewayRequestContextService:
         manager_agent_id: str | None,
         scheduled_job_id: str | None = None,
         parallel_thread: bool = False,
+        root_task_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> GatewayContext:
+        """The gateway context for one message to the team.
+
+        ``root_task_id`` and ``conversation_id`` go into the signed context
+        only for a message that brings a person's files to a request: the new
+        request itself and each guidance or answer sent to it. The lead keeps
+        those files only when the context names that request and its
+        conversation (``access_control.ownership.sent_files_access``).
+        """
+
         canonical_user_id = self.canonical_user_id(route)
         # The signed context is what enforcement points trust: the person and
         # their current team roles, vouched for by the gateway.
@@ -321,6 +332,8 @@ class GatewayRequestContextService:
                 team_id=self.settings.team_id,
                 person_id=canonical_user_id,
                 person_roles=self.team_roles(canonical_user_id),
+                root_task_id=root_task_id,
+                conversation_id=conversation_id,
                 schedule_id=scheduled_job_id,
             )
             if self._context_signer is not None

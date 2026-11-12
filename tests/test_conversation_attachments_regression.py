@@ -107,7 +107,10 @@ def _lead(tmp_path: Path, layout: InstanceLayout):
 
 
 async def _admit(agent, *, task_id: str, text: str, attachments: list[UserTaskAttachment]) -> None:
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    # As the gateway signs a new request: naming its task and conversation vouches for its files.
+    signed = context_signer().issue(
+        team_id=TEAM, person_id=ANN, person_roles=("member",), root_task_id=task_id, conversation_id=CONVERSATION
+    )
     await task_message_runtime._handle_task_request(
         agent,
         Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=text, attachments=attachments),

@@ -1,12 +1,18 @@
 """Mid-turn steering helpers for UniversalAgent.
 
 Files sent with a guidance or an answer (``TaskSteering.attachments``) are
-accepted before the message is acknowledged (``_accept_sent_files``): records
-outside this host's upload folders are dropped, the rest are added to the
-task's conversation turn and recorded in its history, and the model sees them
-by name and id with the guidance or answer text. They then stay usable by id
-after the guidance is read and after a restart
-(``custom_agents.conversation_attachments``).
+accepted before the message is acknowledged (``_accept_sent_files``), and
+only after the handler decided to take the message. They are kept only when
+the gateway vouches that it sent them for this task (``steering_files_check``:
+the message's own signed context names the task, its conversation and its
+person, and is not the task's own context its workers hold copies of); a
+delegated task keeps none. Records outside this host's upload folders are
+dropped too. The rest are added to the task's conversation turn and recorded
+in its history, and the model sees them by name and id with the guidance or
+answer text. They then stay usable by id after the guidance is read and after
+a restart (``custom_agents.conversation_attachments``). Guidance sent on to
+the task's workers carries no files: a worker's files are the ones its
+delegation named.
 """
 
 from __future__ import annotations
@@ -23,7 +29,9 @@ from strands.hooks import BeforeToolCallEvent, HookRegistry
 from custom_agents.conversation_attachments import (
     UploadFolders,
     keep_upload_files,
+    log_refused_files,
     sent_file_lines,
+    steering_files_check,
     task_files_details,
 )
 from custom_agents.conversation_runtime import record_turn_attachments
@@ -439,20 +447,28 @@ async def _record_guidance_history(
     return entry is not None
 
 
-async def _accept_sent_files(agent: Any, task_info: Any, steering: TaskSteering) -> Optional[TaskSteering]:
+async def _accept_sent_files(
+    agent: Any, task_info: Any, steering: TaskSteering, msg_meta: MessageMeta
+) -> Optional[TaskSteering]:
     """``steering`` with only the files that were kept, after recording them; None when the task is gone.
 
-    Runs before the guidance or answer is acknowledged (module docstring).
-    Records outside this host's upload folders are dropped (logged). The rest
-    are added to the task's conversation turn and written to its history as
-    one files entry. A store error propagates: nothing is acknowledged, so
-    the sender sends the message again, and recording again adds no file twice.
+    Runs once the handler takes the guidance or answer, before it is
+    acknowledged (module docstring). Files the gateway does not vouch for
+    (``steering_files_check`` on ``msg_meta``) are all dropped, and so are
+    records outside this host's upload folders (each logged). The rest are
+    added to the task's conversation turn and written to its history as one
+    files entry. A store error propagates: nothing is acknowledged, so the
+    sender sends the message again, and recording again adds no file twice.
     """
 
     if not steering.attachments:
         return steering
     task_id = task_info.task.task_id
     conversation_id = getattr(task_info.meta, "conversation_id", None)
+    decision = steering_files_check(task_info, msg_meta, team_id=str(getattr(agent, "team_id", "") or ""))
+    if not decision.allowed:
+        log_refused_files(steering.attachments, decision.reason, task_id=task_id, conversation_id=conversation_id)
+        return steering.model_copy(update={"attachments": []})
     folders = await asyncio.to_thread(UploadFolders.for_agent, agent)
     kept = keep_upload_files(steering.attachments, folders, task_id=task_id, conversation_id=conversation_id)
     accepted = steering.model_copy(update={"attachments": kept})
@@ -517,10 +533,9 @@ async def _forward_proactive_guidance_to_pending_subtasks(
             or getattr(msg_meta, "conversation_id", None),
             target_named_agent_type=target_named_agent_type,
             guidance_text=steering.guidance_text,
-            attachments=[
-                attachment.model_copy(deep=True)
-                for attachment in list(steering.attachments or [])
-            ],
+            # A worker keeps no files from guidance (module docstring); the
+            # lead's model sees them and names them in a new delegation.
+            attachments=[],
             replied_message=(
                 steering.replied_message.model_copy(deep=True)
                 if steering.replied_message is not None
@@ -720,7 +735,7 @@ async def handle_task_steering_message(
             return
         # Acknowledge only after the complete guidance is in the task's durable
         # history. Restart reconstructs pending guidance and deduplication there.
-        accepted = await _accept_sent_files(agent, task_info, steering)
+        accepted = await _accept_sent_files(agent, task_info, steering, msg_meta)
         if accepted is None or not await _record_guidance_history(agent, task_id, accepted, applied=False):
             await _send_steering_status_response(
                 agent, steering, msg_header, msg_meta,
@@ -753,92 +768,7 @@ async def handle_task_steering_message(
         return
 
     if steering.steering_type == TaskSteeringType.INTERRUPT_RESPONSE:
-        answer = await _accept_sent_files(agent, task_info, steering)
-        if answer is None:
-            await _send_steering_status_response(
-                agent, steering, msg_header, msg_meta,
-                status=TaskSteeringStatus.STALE,
-                reason="This agent no longer holds the target task.",
-                status_code=TaskSteeringStatusCode.TARGET_TASK_NOT_FOUND,
-            )
-            return
-        steering = answer
-        seen.add(dedupe_key)
-        response_text = _format_interrupt_responses(steering)
-        session = agent._interrupted_turn_sessions.get(task_id)
-        if session is not None:
-            agent._pending_interrupt_responses[task_id] = steering
-            await _send_steering_status_response(
-                agent,
-                steering,
-                msg_header,
-                msg_meta,
-                status=TaskSteeringStatus.ACCEPTED,
-                reason="Interrupt response accepted for live Strands resume.",
-            )
-            # The Core NATS subscription must remain free to answer status and
-            # stop requests while the resumed SDK turn runs.
-            schedule_pending_work(agent)
-            return
-
-        if not bool(
-            mid_turn_steering_config(agent).get("allow_restart_fallback", True)
-        ):
-            await _send_steering_status_response(
-                agent,
-                steering,
-                msg_header,
-                msg_meta,
-                status=TaskSteeringStatus.STALE,
-                reason="Live Strands interrupt session is no longer available.",
-            )
-            return
-
-        # Distinct replies can contain the same paragraphs. Keep the event
-        # identity in the note so text deduplication cannot erase a correction.
-        directive = (
-            "Runtime mid-turn interrupt response received "
-            f"for steering event {dedupe_key} after the live Strands session was unavailable. "
-            "Continue the original task using this requester input as authoritative steering:\n"
-            f"{response_text}"
-        )
-        await agent.task_manager.operations_runtime.run(
-            partial(clear_answered_access_blocker, agent.task_manager),
-            task_id,
-            _answered_access_ids(steering),
-        )
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager.append_runtime_resume_directive, task_id, directive
-        )
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager.append_history_entry,
-            task_id,
-            "Mid-turn interrupt response recorded for restart-safe recovery.",
-            entry_type=TaskHistoryType.TASK_EVENT,
-            importance=TaskHistoryImportance.HIGH,
-            details={
-                "event": "task_steering_interrupt_response_recovery",
-                "steering_id": steering.steering_id,
-            },
-        )
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager.update_main_task_state,
-            task_id,
-            ProgressState.ACCEPTED,
-            datetime.now(timezone.utc).isoformat(),
-        )
-        await agent.task_manager.operations_runtime.run(
-            agent.task_manager.enqueue_task, task_id, front=True
-        )
-        await _send_steering_status_response(
-            agent,
-            steering,
-            msg_header,
-            msg_meta,
-            status=TaskSteeringStatus.ACCEPTED,
-            reason="Interrupt response accepted as durable recovery guidance.",
-        )
-        schedule_pending_work(agent)
+        await _take_interrupt_response(agent, task_info, steering, msg_header, msg_meta, dedupe_key)
         return
 
     await _send_steering_status_response(
@@ -849,6 +779,121 @@ async def handle_task_steering_message(
         status=TaskSteeringStatus.REJECTED,
         reason=f"Unsupported steering type: {steering.steering_type}",
     )
+
+
+async def _take_interrupt_response(
+    agent: Any,
+    task_info: Any,
+    steering: TaskSteering,
+    msg_header: MessageHeader,
+    msg_meta: MessageMeta,
+    dedupe_key: str,
+) -> None:
+    """Resume the task's live turn with an answer, or record it for a restarted turn.
+
+    The answer is refused as stale before its files are kept when neither
+    path can take it: no live session and the restart fallback turned off.
+    """
+
+    task_id = task_info.task.task_id
+    restart_allowed = bool(mid_turn_steering_config(agent).get("allow_restart_fallback", True))
+    if agent._interrupted_turn_sessions.get(task_id) is None and not restart_allowed:
+        # Refused before its files are kept: a refused answer adds nothing.
+        await _send_steering_status_response(
+            agent,
+            steering,
+            msg_header,
+            msg_meta,
+            status=TaskSteeringStatus.STALE,
+            reason="Live Strands interrupt session is no longer available.",
+        )
+        return
+    answer = await _accept_sent_files(agent, task_info, steering, msg_meta)
+    if answer is None:
+        await _send_steering_status_response(
+            agent, steering, msg_header, msg_meta,
+            status=TaskSteeringStatus.STALE,
+            reason="This agent no longer holds the target task.",
+            status_code=TaskSteeringStatusCode.TARGET_TASK_NOT_FOUND,
+        )
+        return
+    steering = answer
+    agent._processed_task_steering_ids.add(dedupe_key)
+    response_text = _format_interrupt_responses(steering)
+    # Read again: the live session may have ended while the files were recorded.
+    session = agent._interrupted_turn_sessions.get(task_id)
+    if session is not None:
+        agent._pending_interrupt_responses[task_id] = steering
+        await _send_steering_status_response(
+            agent,
+            steering,
+            msg_header,
+            msg_meta,
+            status=TaskSteeringStatus.ACCEPTED,
+            reason="Interrupt response accepted for live Strands resume.",
+        )
+        # The Core NATS subscription must remain free to answer status and
+        # stop requests while the resumed SDK turn runs.
+        schedule_pending_work(agent)
+        return
+
+    if not restart_allowed:
+        # Only when the live session ended while the files were recorded.
+        await _send_steering_status_response(
+            agent,
+            steering,
+            msg_header,
+            msg_meta,
+            status=TaskSteeringStatus.STALE,
+            reason="Live Strands interrupt session is no longer available.",
+        )
+        return
+
+    # Distinct replies can contain the same paragraphs. Keep the event
+    # identity in the note so text deduplication cannot erase a correction.
+    directive = (
+        "Runtime mid-turn interrupt response received "
+        f"for steering event {dedupe_key} after the live Strands session was unavailable. "
+        "Continue the original task using this requester input as authoritative steering:\n"
+        f"{response_text}"
+    )
+    await agent.task_manager.operations_runtime.run(
+        partial(clear_answered_access_blocker, agent.task_manager),
+        task_id,
+        _answered_access_ids(steering),
+    )
+    await agent.task_manager.operations_runtime.run(
+        agent.task_manager.append_runtime_resume_directive, task_id, directive
+    )
+    await agent.task_manager.operations_runtime.run(
+        agent.task_manager.append_history_entry,
+        task_id,
+        "Mid-turn interrupt response recorded for restart-safe recovery.",
+        entry_type=TaskHistoryType.TASK_EVENT,
+        importance=TaskHistoryImportance.HIGH,
+        details={
+            "event": "task_steering_interrupt_response_recovery",
+            "steering_id": steering.steering_id,
+        },
+    )
+    await agent.task_manager.operations_runtime.run(
+        agent.task_manager.update_main_task_state,
+        task_id,
+        ProgressState.ACCEPTED,
+        datetime.now(timezone.utc).isoformat(),
+    )
+    await agent.task_manager.operations_runtime.run(
+        agent.task_manager.enqueue_task, task_id, front=True
+    )
+    await _send_steering_status_response(
+        agent,
+        steering,
+        msg_header,
+        msg_meta,
+        status=TaskSteeringStatus.ACCEPTED,
+        reason="Interrupt response accepted as durable recovery guidance.",
+    )
+    schedule_pending_work(agent)
 
 
 def _format_interrupt_responses(steering: TaskSteering) -> str:

@@ -12,7 +12,13 @@ working for Ann (signed task context). Covers:
 - records pointing outside this host's upload folders are never saved;
 - a store error leaves the message unacknowledged, and the resend records
   each file once;
-- a delegated task records its files in its history only.
+- only files the gateway sent for this task are kept: a faulty agent process
+  holding a worker's copy of the task's signed context, or a context signed
+  for another request, gets none of its files onto the task, its turn or the
+  model's text, at admission and on guidance and answers;
+- a delegated task keeps no files from guidance, and the lead sends guidance
+  on without files;
+- an answer refused as stale keeps none of its files.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from assistant_gateway.inbound_attachments import (
     store_inbound_attachment_bytes_with_policy,
 )
 from custom_agents import task_message_runtime, task_steering_runtime
-from custom_agents.conversation_attachments import TASK_FILES_EVENT, TaskAttachments
+from custom_agents.conversation_attachments import TASK_FILES_EVENT, TaskAttachments, task_files_details
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import (
@@ -40,11 +46,11 @@ from custom_agents.task_steering_runtime import (
     handle_task_steering_message,
 )
 from custom_messages.contracts.attachments_v1 import AttachmentStorageRef, UserTaskAttachment
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.task_v1 import Task, TaskSteering
-from custom_messages.enums import MessageMetaType, TaskSteeringStatus, TaskSteeringType
+from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
+from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskSteering
+from custom_messages.enums import MessageMetaType, RequesterType, TaskSteeringStatus, TaskSteeringType
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, SESSION, TEAM, _admit, _lead
 
 pytestmark = pytest.mark.integration
@@ -91,16 +97,18 @@ def layout(tmp_path: Path) -> InstanceLayout:
     return layout
 
 
-def _upload(layout: InstanceLayout, name: str) -> UserTaskAttachment:
-    """A file the gateway stored for Ann's session, with its record."""
+def _upload(
+    layout: InstanceLayout, name: str, *, session_key: str = SESSION, conversation_id: str = CONVERSATION
+) -> UserTaskAttachment:
+    """A file the gateway stored for a session (Ann's unless named), with its record."""
 
     return store_inbound_attachment_bytes_with_policy(
         data=b"\x89PNG\r\n\x1a\n" + name.encode(),
         filename=name,
         content_type="image/png",
         policy=InboundAttachmentStoragePolicy(cache_dir=layout.uploads_dir),
-        session_key=SESSION,
-        conversation_id=CONVERSATION,
+        session_key=session_key,
+        conversation_id=conversation_id,
         origin="web_chat",
     ).attachment
 
@@ -139,13 +147,25 @@ def _steering(kind: TaskSteeringType, attachments: list[UserTaskAttachment], key
     )
 
 
-async def _send(agent, steering: TaskSteering) -> None:
-    await handle_task_steering_message(
-        agent,
-        steering,
-        MessageHeader(from_agent_id="gateway"),
-        MessageMeta(conversation_id=CONVERSATION, is_response_requested=True),
+def _gateway_meta(
+    *, task_id: str = TASK, conversation_id: str | None = CONVERSATION, person: str = ANN
+) -> MessageMeta:
+    """Message meta as the gateway sends a guidance or an answer: a fresh context naming the task and conversation."""
+
+    signed = context_signer().issue(
+        team_id=TEAM, person_id=person, person_roles=("member",), root_task_id=task_id, conversation_id=conversation_id
     )
+    return MessageMeta(
+        conversation_id=conversation_id,
+        is_response_requested=True,
+        gateway_context=GatewayContext(canonical_user_id=person, session_key=SESSION, task_context=signed),
+    )
+
+
+async def _send(agent, steering: TaskSteering, meta: MessageMeta | None = None) -> None:
+    """Deliver ``steering`` as the gateway would, or with ``meta`` as another sender would."""
+
+    await handle_task_steering_message(agent, steering, MessageHeader(from_agent_id="gateway"), meta or _gateway_meta())
 
 
 def _turn_files(agent) -> list[str]:
@@ -272,8 +292,8 @@ async def test_a_store_error_leaves_the_guidance_unacknowledged_and_the_resend_r
 
 
 @pytest.mark.asyncio
-async def test_a_delegated_task_records_forwarded_guidance_files_in_its_history_only(
-    tmp_path: Path, layout: InstanceLayout, statuses
+async def test_a_delegated_task_keeps_no_files_from_guidance(
+    tmp_path: Path, layout: InstanceLayout, statuses, caplog: pytest.LogCaptureFixture
 ) -> None:
     worker = _lead(tmp_path, layout)
     worker.task_manager.add_task(
@@ -288,11 +308,42 @@ async def test_a_delegated_task_records_forwarded_guidance_files_in_its_history_
     forwarded = _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [page_two], "guide_fwd", "Use page two too.")
     forwarded.target_task_id = "task_child"
 
-    await _send(worker, forwarded)
+    # Forwarded guidance carries no gateway context; even the task's own copied one would not do.
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        await _send(worker, forwarded, MessageMeta(conversation_id=CONVERSATION, is_response_requested=True))
 
     assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.ACCEPTED]
     assert merges == []
-    assert _own(worker.task_manager, None, "task_child") == [page_two.attachment_id]
+    assert _files_entries(worker.task_manager, "task_child") == []
+    assert _own(worker.task_manager, None, "task_child") == []
+    assert worker._pending_proactive_task_steering["task_child"][0].attachments == []
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=delegated_task attachment_id={page_two.attachment_id} task_id=task_child" in refused
+
+
+@pytest.mark.asyncio
+async def test_the_lead_sends_guidance_on_to_its_workers_without_files(lead, layout: InstanceLayout, monkeypatch) -> None:
+    child = SimpleNamespace(
+        task=SimpleNamespace(task_id="task_child"),
+        meta=SimpleNamespace(to_named_agent_type="RecipeParser", to_agent_name=None, msg_correlation_id="corr_child"),
+    )
+    monkeypatch.setattr(lead.task_manager, "get_pending_subtasks", lambda _task_id: [child])
+    sent: list[Any] = []
+
+    async def capture(envelope):
+        sent.append(envelope)
+
+    monkeypatch.setattr(lead, "_send_operational_message", capture)
+    page_two = _upload(layout, "page two.png")
+
+    await _send(lead, _steering(TaskSteeringType.PROACTIVE_GUIDANCE, [page_two], "guide_on", "Use page two too."))
+
+    [envelope] = sent
+    assert envelope.msg_content.target_task_id == "task_child"
+    assert envelope.msg_content.guidance_text == "Use page two too."
+    assert envelope.msg_content.attachments == []
+    # The lead itself keeps the file; it can name it in a new delegation.
+    assert page_two.attachment_id in _own(lead.task_manager, lead._conversation_store)
 
 
 # --- Answers -----------------------------------------------------------------------------------
@@ -339,3 +390,152 @@ async def test_a_live_answer_names_its_files_and_adds_them_to_the_turn(lead, lay
     response = block["interruptResponse"]["response"]
     assert response.startswith("This pan.")
     assert f"`{photo.attachment_id}` pan.png" in response and "attachment_id" in response
+
+
+# --- Only files the gateway sent for the task are kept ------------------------------------------
+
+BOB = "usr_bob"
+OTHER_CONVERSATION = "conv_other"
+
+
+def _copied_task_context(agent) -> MessageMeta:
+    """What every worker of TASK holds: delegation deep-copies the task's admitted gateway context
+    into each subtask's meta (``delegation_runtime._create_subtask_request``). Its signature is valid
+    for Ann and it names TASK and CONVERSATION."""
+
+    admitted = agent.task_manager.get_task_info(TASK).meta.gateway_context
+    assert admitted.task_context.context.root_task_id == TASK
+    return MessageMeta(
+        conversation_id=CONVERSATION, is_response_requested=True, gateway_context=admitted.model_copy(deep=True)
+    )
+
+
+# Senders a faulty agent process could use, and why each is refused.
+_FORGED_SENDERS = {
+    "worker_copy_of_task_context": ("copied_task_context", _copied_task_context),
+    "context_of_anns_other_request": (
+        "another_task",
+        lambda _agent: _gateway_meta(task_id="task_other", conversation_id=OTHER_CONVERSATION),
+    ),
+    "no_context": (
+        "gateway_context_required",
+        lambda _agent: MessageMeta(conversation_id=CONVERSATION, is_response_requested=True),
+    ),
+}
+
+
+def _foreign_files(layout: InstanceLayout) -> list[UserTaskAttachment]:
+    """(i) Bob's upload in Bob's session folder; (ii) Ann's upload from another conversation of the same session."""
+
+    return [
+        _upload(layout, "bobs scan.png", session_key="web:bob-session", conversation_id="conv_bob"),
+        _upload(layout, "anns other.png", conversation_id=OTHER_CONVERSATION),
+    ]
+
+
+async def _model_text(agent, kind: TaskSteeringType) -> str:
+    if kind == TaskSteeringType.PROACTIVE_GUIDANCE:
+        return await consume_pending_proactive_guidance_message(agent, TASK)
+    return agent.task_manager.read_runtime_resume_directive(TASK)
+
+
+@pytest.mark.parametrize("sender", sorted(_FORGED_SENDERS))
+@pytest.mark.parametrize("kind", [TaskSteeringType.PROACTIVE_GUIDANCE, TaskSteeringType.INTERRUPT_RESPONSE])
+@pytest.mark.asyncio
+async def test_guidance_and_answers_keep_no_files_the_gateway_did_not_send_for_the_task(
+    lead, layout: InstanceLayout, statuses, caplog: pytest.LogCaptureFixture, sender: str, kind: TaskSteeringType
+) -> None:
+    reason, meta_for = _FORGED_SENDERS[sender]
+    foreign = _foreign_files(layout)
+    before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
+
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        await _send(lead, _steering(kind, foreign, f"forged_{kind.value}", "Look at these."), meta_for(lead))
+
+    # The text is still taken (as before this change); none of the files are.
+    assert [status for _id, status, _reason in statuses] == [TaskSteeringStatus.ACCEPTED]
+    assert _turn_files(lead) == before_turn
+    assert _files_entries(lead.task_manager) == []
+    assert _own(lead.task_manager, lead._conversation_store) == before_own
+    ids = [attachment.attachment_id for attachment in foreign]
+    found, unknown = TaskAttachments.load(lead.task_manager.get_task_info(TASK), lead._conversation_store).find(ids)
+    assert (found, unknown) == ([], ids)
+    text = await _model_text(lead, kind)
+    assert "Look at these." in text
+    assert not any(attachment_id in text for attachment_id in ids)
+    refused = _messages(caplog, "sent_file_refused")
+    assert len(refused) == len(ids)
+    for line, attachment_id in zip(refused, ids):
+        assert f"reason={reason} attachment_id={attachment_id} task_id={TASK}" in line
+
+
+@pytest.mark.parametrize("kind", [TaskSteeringType.PROACTIVE_GUIDANCE, TaskSteeringType.INTERRUPT_RESPONSE])
+@pytest.mark.asyncio
+async def test_files_the_gateway_sent_for_the_task_are_kept(lead, layout: InstanceLayout, statuses, kind) -> None:
+    page = _upload(layout, "page two.png")
+
+    await _send(lead, _steering(kind, [page], f"gateway_{kind.value}", "Here it is."), _gateway_meta())
+
+    assert page.attachment_id in _turn_files(lead)
+    assert page.attachment_id in _own(lead.task_manager, lead._conversation_store)
+    assert f"`{page.attachment_id}` page two.png" in await _model_text(lead, kind)
+
+
+@pytest.mark.asyncio
+async def test_a_request_keeps_only_files_the_gateway_sent_for_it(
+    lead, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A faulty agent process starts a new request for Ann with a worker's copy of TASK's context."""
+
+    bobs = _foreign_files(layout)[0]
+    forged = Task(
+        task_id="task_forged",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Describe this.",
+        attachments=[bobs],
+        # A files entry naming Bob's scan, shaped as if this runtime had written it.
+        execution_history=[
+            TaskHistoryEntry(
+                summary="Files sent with a guidance accepted: bobs scan.png",
+                details=task_files_details([bobs], steering_id="s", steering_type="proactive_guidance"),
+            )
+        ],
+    )
+    meta = _copied_task_context(lead).model_copy(
+        update={"msg_correlation_id": "corr_forged", "requester_type": RequesterType.USER_REQUESTER}
+    )
+
+    with caplog.at_level(logging.WARNING, logger=ATTACHMENTS_LOGGER):
+        await task_message_runtime._handle_task_request(
+            lead, forged, MessageHeader(from_agent_id="worker", response_routing_key="worker_route"), meta
+        )
+
+    info = lead.task_manager.get_task_info("task_forged")
+    assert info.owner_person_id == ANN  # the copied signature is valid for Ann
+    assert info.task.attachments == []
+    assert _files_entries(lead.task_manager, "task_forged") == []
+    assert lead._conversation_store.get_turn_by_task_id("task_forged")["attachments"] == []
+    listed = lead._conversation_store.list_turn_attachments(CONVERSATION)
+    assert bobs.attachment_id not in [entry.attachment.attachment_id for entry in listed]
+    found, unknown = TaskAttachments.load(info, lead._conversation_store).find([bobs.attachment_id])
+    assert (found, unknown) == ([], [bobs.attachment_id])
+    [refused] = _messages(caplog, "sent_file_refused")
+    assert f"reason=another_task attachment_id={bobs.attachment_id} task_id=task_forged" in refused
+    assert _messages(caplog, "incoming_task_files_entries_dropped")
+
+
+# --- A refused answer ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_answer_refused_as_stale_keeps_none_of_its_files(lead, layout: InstanceLayout, statuses, monkeypatch) -> None:
+    monkeypatch.setattr(task_steering_runtime, "mid_turn_steering_config", lambda _agent: {"allow_restart_fallback": False})
+    before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
+    photo = _upload(layout, "pan.png")
+
+    await _send(lead, _steering(TaskSteeringType.INTERRUPT_RESPONSE, [photo], "answer_late", "This pan."))
+
+    assert statuses[0][1:] == (TaskSteeringStatus.STALE, "Live Strands interrupt session is no longer available.")
+    assert _turn_files(lead) == before_turn
+    assert _files_entries(lead.task_manager) == []
+    assert _own(lead.task_manager, lead._conversation_store) == before_own

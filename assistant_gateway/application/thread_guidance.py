@@ -346,6 +346,12 @@ class GatewayThreadGuidance:
                     delivery_mode=DELIVERY_MODE_INTERACTIVE,
                     route=route,
                     manager_agent_id=manager_id,
+                    # A fresh context naming the request's task and
+                    # conversation vouches for this message's files; the
+                    # lead refuses them under the task's own (copied)
+                    # context (access_control.ownership.sent_files_access).
+                    root_task_id=target.active_task_id,
+                    conversation_id=held.conversation_id,
                 ),
             ),
             msg_header=MessageHeader(
